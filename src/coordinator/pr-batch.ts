@@ -11,13 +11,14 @@
 // back in the queue), and nothing is merged twice.
 import { TestRunHeld } from '../testrun/gate.js';
 import { GPU_NO_REPEAT, gpuRunsNotToRepeat } from '../testrun/gpu.js';
-import { spawnSync } from '../os/child-process.js';
+import { gitSpawnSync } from '../os/git.js';
 import { BRAND } from '../brand.js';
 import type { CommitCheck, PullRequest } from '../backlog/types.js';
 import type { JudgedChecks } from '../check-source.js';
 import type { EventLog } from '../events/log.js';
 import type { EventPayload, StoredEvent } from '../events/types.js';
 import { requiredOutcomes } from '../pr-watch.js';
+import { gitRemote } from '../git-remote.js';
 
 // ---------------------------------------------------------------- the test-run contract
 
@@ -459,7 +460,9 @@ export class PrBatcher {
   /** The batch whose run is in flight: what drops it, and the signal that cancels its run. */
   private current: { id: string; prs: BatchEntry[]; base: string; controller: AbortController; why: string | null } | null = null;
 
-  constructor(private readonly d: PrBatchDeps) {}
+  constructor(private readonly d: PrBatchDeps) {
+    gitRemote(d.remote);
+  }
 
   /** Cancel the in-flight run: its batch is abandoned and batched again. */
   private cancel(why: string) {
@@ -623,7 +626,7 @@ export class PrBatcher {
   }
 
   private git(...args: string[]) {
-    return spawnSync('git', args, { cwd: this.d.repo, encoding: 'utf8' });
+    return gitSpawnSync(args, { cwd: this.d.repo, encoding: 'utf8' });
   }
 
   private gitOk(...args: string[]): string {

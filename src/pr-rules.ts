@@ -4,7 +4,7 @@
 // coordinator/change-files.ts with every other read of what a change touches), shared by the
 // coordinator, the merge flow and the tests. Part of the merge policy (a self-modification path, src/review.ts),
 // so a change here waits for the owner.
-import { globToRegExp } from './guardrails/glob.js';
+import { globRegExp } from './guardrails/glob.js';
 import { whyHighRisk, type WaitWhy } from './merge-policy.js';
 import type { RequiredCheck } from './pr-watch.js';
 import type { LevelResult } from './review.js';
@@ -20,7 +20,7 @@ const rank = (c: RiskClass) => RISK_CLASSES.indexOf(c);
 
 /** The owner's definition of documentation for the fast path: narrower than review.ts's `docs` category. */
 export const DOCS_ONLY_GLOBS = ['**/*.md', 'docs/**'];
-const DOCS_RES = DOCS_ONLY_GLOBS.map((g) => globToRegExp(g));
+const DOCS_RES = DOCS_ONLY_GLOBS.map((g) => globRegExp(g, 'allow'));
 export const isDocPath = (p: string) => DOCS_RES.some((re) => re.test(p));
 
 export interface ClassResult {
@@ -117,7 +117,7 @@ function nonMechanical(files: SizeFile[]): number {
  * its removed lines (renames, moves, reindents, formatting). A pure rename counts 0 lines (rename detection).
  */
 export function sizeVerdict(files: SizeFile[], o: { maxLines: number; generated: string[] }): SizeVerdict {
-  const skip = [...LOCKFILE_GLOBS, ...o.generated].map((g) => globToRegExp(g));
+  const skip = [...LOCKFILE_GLOBS, ...o.generated].map((g) => globRegExp(g, 'allow'));
   // A rename is left out only when both its paths are: an edit moved into a generated path still counts (#683).
   const counted = files.filter((f) => ![f.path, ...(f.from === undefined ? [] : [f.from])].every((p) => skip.some((re) => re.test(p))));
   const lines = counted.reduce((s, f) => s + f.added.length + f.removed.length, 0);

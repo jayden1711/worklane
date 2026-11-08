@@ -4,6 +4,7 @@
 // closed (deny or block with a reason); the generated settings also append
 // `|| exit 2`, so a missing or crashing engine blocks instead of allowing.
 import { spawnSync } from './os/child-process.js';
+import { gitSpawnSync } from './os/git.js';
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { childEnv, shellCommand } from './os/index.js';
@@ -16,6 +17,7 @@ import { INTAKE_ROLE, INTAKE_TOOLS } from './guard/intake.js';
 import { CHAT_ROLE, CHAT_ROOT_ENV, chatModeRefusal } from './guard/chat.js';
 import { evaluate } from './guardrails/engine.js';
 import { liveContext, projectStateDir } from './guardrails/context.js';
+import { otherCheckouts } from './guardrails/checkouts.js';
 import { TaskFile } from './contract.js';
 import { HELD_OUT_ENV, HELD_OUT_GLOB } from './held-out-paths.js';
 import { DASHBOARD_KEY_GLOB } from './dashboard-key-paths.js';
@@ -68,7 +70,8 @@ export const REASON_END_CHARS = 300;
 /**
  * A deny or ask reason as the guard sends it. WHY (#894 review): a reason quotes the word it matched (a path, a
  * pattern, a host), and the agent picks the word: padded (`./` 40,000 times before `.env`), it made an 80 KB deny.
- * Every reason the guard sends goes through here, so a deny stays about 1 KB whatever the call: a reason over twice
+ * Every reason the guard sends goes through here, so a deny stays under 4 KiB whatever the call (#930 measured 3,527
+ * bytes; test/hook-deadline-delivery.test.ts asserts the bound, control characters included): a reason over twice
  * REASON_END_CHARS keeps its start (the word's) and its end (why it was refused), with the cut named.
  */
 export function shownReason(reason: string): string {
@@ -155,7 +158,10 @@ function preToolUse(input: HookInput, env: NodeJS.ProcessEnv): HookOutput {
     const host = env[`${BRAND.envPrefix}_ROLE`] === 'researcher' && input.tool_name === 'WebFetch' ? hostOf(String(input.tool_input?.url ?? '')) : null;
     if (host) guardrails = { ...guardrails, network: { ...guardrails.network, allow: [...guardrails.network.allow, host] } };
   }
-  const v = evaluate({ tool: input.tool_name ?? '', input: input.tool_input ?? {}, cwd }, guardrails, liveContext(root, env));
+  // An agent's secret and hidden patterns hold in the repository's other checkouts too, a worktree made after the run
+  // started among them (#939), each with its exceptions relative to its own root.
+  const ctx = { ...liveContext(root, env), ...(isAgent(env) ? { checkouts: otherCheckouts(root, cfg.tests.worktree.root) } : {}) };
+  const v = evaluate({ tool: input.tool_name ?? '', input: input.tool_input ?? {}, cwd }, guardrails, ctx);
   if (v.decision === 'none') {
     // Agents: every commit is secret-scanned first. Humans opt in with a git pre-commit hook.
     // INVARIANT (#971): what is scanned is what the commit records, in every checkout it can land in; a command line
@@ -190,7 +196,7 @@ function preToolUse(input: HookInput, env: NodeJS.ProcessEnv): HookOutput {
 
 /** A read-only git query for the commit model: its exit status and output, never an exception. */
 function gitQuery(dir: string, args: string[]): { status: number | null; stdout: string } {
-  const r = spawnSync('git', args, { cwd: dir, encoding: 'utf8', timeout: 5_000 });
+  const r = gitSpawnSync(args, { cwd: dir, encoding: 'utf8', timeout: 5_000 });
   return { status: r.error ? null : r.status, stdout: r.stdout ?? '' };
 }
 

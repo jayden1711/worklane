@@ -12,7 +12,8 @@
 //           agent's Claude token and the checkout). Init never installs tools there: that stays the owner's step.
 //
 // What local mode can't do is listed plainly (unavailableIn), in doctor and on the dashboard, never left to fail.
-import { spawn, spawnSync } from './os/child-process.js';
+import { spawn } from './os/child-process.js';
+import { commandSpawnSync } from './os/git.js';
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { delimiter, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -26,7 +27,7 @@ import { gitRemoteRepo, install } from './install.js';
 import { readWatchState } from './main-watch.js';
 import { handOffFromNpx, type HandOff } from './npx-engine.js';
 import { findTool, withToolPath } from './tool-path.js';
-import { detectOs, fileAccess, isRoot, serviceManagerEnv, shareReadWithGroup, stateDir, which, writeOwnerOnly } from './os/index.js';
+import { detectOs, fileAccess, isRoot, serviceManagerEnv, stateDir, which, writeGroupReadable, writeOwnerOnly } from './os/index.js';
 import { coordinatorUser } from './setup/app-manifest.js';
 import { instanceNameProblem } from './instance-name.js';
 import { agentRuntimeOf, checkSetup, checkSetupOffThread, detectClaudeLogin, detectGithubLogin, detectRepoConfig, detectTailscale, detectTools, GROUPS, MAIN_WATCH_GUARDS, MANAGER_LOGIN_VARS, MODES, probeEnv, protectionAnswer, RUNTIME_CHOICE_LABEL, type DetectCache, type Detected, type ManagerEnv, type Mode, type ProbeRunOptions, type RunResult, type RuntimeChoice, type SetupContext, type SetupProbe, type SetupView } from './setup-steps.js';
@@ -126,11 +127,10 @@ export function writeInitState(file: string, s: InitState): void {
   writeOwnerOnly(file, JSON.stringify(s, null, 2) + '\n');
 }
 
-/** Server mode: write the state, then open it to the instance's coordinator group (read only). */
+/** Server mode: write the state, opened to the instance's coordinator group (read only) before it is published. */
 export function writeServerInitState(file: string, s: InitState, instance: string): void {
   mkdirSync(dirname(file), { recursive: true, mode: 0o755 });
-  writeOwnerOnly(file, JSON.stringify(s, null, 2) + '\n');
-  shareReadWithGroup(file, coordinatorUser(instance));
+  writeGroupReadable(file, JSON.stringify(s, null, 2) + '\n', coordinatorUser(instance));
 }
 
 export interface Unavailable {
@@ -653,7 +653,8 @@ export function systemIo(o: { interactive: boolean }): InitIo {
   return {
     which: (cmd) => findTool(cmd),
     run: (cmd, args, opt = {}) => {
-      const r = spawnSync(cmd, args, { encoding: 'utf8', timeout: 60_000, env: probeEnv(opt), ...(opt.cwd ? { cwd: opt.cwd } : {}) });
+      // A caller's git (the command named git) through the git runner (#807).
+      const r = commandSpawnSync(cmd, args, { encoding: 'utf8', timeout: 60_000, env: probeEnv(opt), ...(opt.cwd ? { cwd: opt.cwd } : {}) });
       return { status: r.error ? null : r.status, stdout: r.stdout ?? '', stderr: r.error ? r.error.message : (r.stderr ?? '') };
     },
     serviceManagerEnv: () => serviceManagerEnv(MANAGER_LOGIN_VARS),

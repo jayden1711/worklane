@@ -90,6 +90,9 @@ test('the content: working-tree forms, staging in the line and amends widen the 
   }
   assert.deepEqual(scope('git add -A && git commit -m x'), { unstaged: true, untracked: true, head: false });
   assert.deepEqual(scope('git status && git rm -q old && git commit -m x'), { unstaged: true, untracked: true, head: false });
+  assert.deepEqual(scope('git mv a b && git commit -m x'), { unstaged: true, untracked: true, head: false });
+  assert.deepEqual(scope('git mv attrs.txt sub/.GitAttributes && git commit -m x'), { unstaged: true, untracked: true, head: false, moves: true });
+  assert.deepEqual(scope('git mv docs/gitattributes-notes.md docs/notes.md && git commit -m x'), { unstaged: true, untracked: true, head: false });
   assert.deepEqual(scope('git commit --amend --no-edit'), { unstaged: false, untracked: false, head: true });
   assert.deepEqual(scope('git commit --amen -a --no-edit'), { unstaged: true, untracked: false, head: true });
 });

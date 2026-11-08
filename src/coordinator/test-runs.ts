@@ -3,7 +3,7 @@
 // new run, and the superseded one is cancelled. Full tiers run per batch of approved PRs (PR mode, Track PB): the
 // harness's, and people's PRs from this listing (merge-flow.ts batchPeoplesPrs): a mapped admin's or writer's once its
 // fast checks pass; a bot's or an unmapped author's only once an admin approved it.
-import { execFileSync } from '../os/child-process.js';
+import { gitExecFileSync } from '../os/git.js';
 import { BRAND } from '../brand.js';
 import { changedNames } from './change-files.js';
 import type { EventLog } from '../events/log.js';
@@ -13,6 +13,7 @@ import { ChecksPermissionMissing, type TestRunRequest, type TestRunResult } from
 import { SANDBOX_STEP } from '../testrun/run.js';
 import { startRefusal, TestRunHeld } from '../testrun/gate.js';
 import { GPU_NO_REPEAT, GPU_STEP, gpuCutOffLine, gpuRunsNotToRepeat } from '../testrun/gpu.js';
+import { gitRemote } from '../git-remote.js';
 
 /** A PR as the test runs need it. */
 export interface OpenPr {
@@ -100,6 +101,7 @@ export class PrTestRuns {
   readonly stopped = new AbortController();
 
   constructor(private d: PrTestRunDeps) {
+    gitRemote(d.remote);
     const queued = new Map<string, EventPayload<'testrun.queued'>>();
     const events = d.log.read(0, ['testrun.queued', 'testrun.started', 'testrun.finished']);
     // INVARIANT: a GPU run cut off (the coordinator or the machine stopped) or stopped at its cap is never run again by
@@ -154,7 +156,7 @@ export class PrTestRuns {
   private fetchPr(pr: OpenPr): string {
     if (this.d.fetchPr) return this.d.fetchPr(pr);
     const ref = `refs/${BRAND.cli}/test-run/${pr.number}`;
-    const git = (...a: string[]) => execFileSync('git', ['-C', this.d.repo, ...a], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 180_000 }).trim();
+    const git = (...a: string[]) => gitExecFileSync(['-C', this.d.repo, ...a], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 180_000 }).trim();
     git('fetch', '-q', this.d.remote, `+refs/pull/${pr.number}/head:${ref}`, `+refs/heads/${pr.base}:refs/remotes/${this.d.remote}/${pr.base}`);
     return git('rev-parse', `${ref}^{commit}`);
   }

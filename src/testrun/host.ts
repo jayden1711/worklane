@@ -13,6 +13,7 @@ import type { Readable } from 'node:stream';
 import { BRAND } from '../brand.js';
 import { killTree, shellCommand, spawnDetached } from '../os/index.js';
 import { ownEnv } from '../os/own-env.js';
+import { gitArgs, gitEnv } from '../os/git.js';
 import { SPARSE_MAX, sparseDirProblem } from '../checkout.js';
 import { MAX_CONNECTIONS, PINNED_IMAGE } from './config.js';
 import { HELPER_PROTOCOL } from './helper.js';
@@ -543,7 +544,8 @@ export function localHost(base: string, o: { docker?: string; path?: string } = 
       const w = await run('sh', ['-c', 'cat > "$1"', '_', file], { stdin: bundle, timeoutMs: 600_000 });
       if (w.code !== 0) throw fail('create', `receiving run ${id}'s bundle`, w);
       const [bash, args] = shellCommand(cloneScript());
-      const env = { PATH: o.path ?? ownEnv().get('PATH') ?? '/usr/bin:/bin', HOME: join(dir, 'home'), LANG: 'C.UTF-8' };
+      // The clone script runs git: with the git runner's settings, as every engine git does (#807).
+      const env = gitEnv({ PATH: o.path ?? ownEnv().get('PATH') ?? '/usr/bin:/bin', HOME: join(dir, 'home'), LANG: 'C.UTF-8' });
       mkdirSync(join(base, 'store'), { recursive: true, mode: 0o700 });
       const r = await run(bash, [...args, '_', file, join(dir, 'work'), refs.branch, refs.head, refs.base, refs.headSha, refs.baseSha, join(base, 'store'), ...refs.exclude], { env, cwd: dir, timeoutMs: 600_000 });
       if (r.code !== 0) throw fail('create', `creating run ${id}'s workspace`, r);
@@ -551,7 +553,7 @@ export function localHost(base: string, o: { docker?: string; path?: string } = 
     },
     async storeTips() {
       if (!existsSync(join(base, 'store', 'HEAD'))) return [];
-      const r = await run('git', [`--git-dir=${join(base, 'store')}`, 'for-each-ref', '--format=%(objectname)', 'refs/keep/'], { env: { PATH: o.path ?? ownEnv().get('PATH') ?? '/usr/bin:/bin', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' }, timeoutMs: 60_000 });
+      const r = await run('git', gitArgs([`--git-dir=${join(base, 'store')}`, 'for-each-ref', '--format=%(objectname)', 'refs/keep/']), { env: gitEnv({ PATH: o.path ?? ownEnv().get('PATH') ?? '/usr/bin:/bin', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' }), timeoutMs: 60_000 });
       if (r.code !== 0) throw fail('store-tips', 'reading the object store', r);
       return parseTips(r.stdout);
     },

@@ -26,7 +26,7 @@
 // for a name that can't be handed back to git, from its blobs). review.ts flags a change that adds such a mark, since
 // GitHub and a checkout still honour it.
 import { Buffer, isUtf8 } from 'node:buffer';
-import { spawnSync } from '../os/child-process.js';
+import { gitSpawnSync } from '../os/git.js';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { attributeTransitionHides, isGitattributesPath, isGitmodulesPath, macrosDefined, OUTCOME_ATTRIBUTES, type ChangeFile } from '../review.js';
@@ -56,16 +56,16 @@ function withGit(args: string[]): string[] {
 }
 
 /** Run git; its stdout, untrimmed (a path may start or end with a space), or an Error saying why it failed. */
-function run(cwd: string, args: string[], timeout?: number): string | Error {
-  const r = spawnSync('git', withGit(args), { cwd, encoding: 'utf8', maxBuffer: MAX_BUFFER, ...(timeout ? { timeout } : {}) });
+function run(cwd: string, args: string[], timeout?: number, env?: NodeJS.ProcessEnv): string | Error {
+  const r = gitSpawnSync(withGit(args), { cwd, encoding: 'utf8', maxBuffer: MAX_BUFFER, ...(timeout ? { timeout } : {}), ...(env ? { env } : {}) });
   if (r.error) return r.error;
   if (r.status !== 0) return new Error(`git ${args.join(' ').slice(0, 200)} failed: ${(r.stderr || `exit ${r.status}`).trim().slice(0, 500)}`);
   return r.stdout;
 }
 
 /** run, with stdout as bytes: for output that holds paths. */
-function runBytes(cwd: string, args: string[], timeout?: number): Buffer | Error {
-  const r = spawnSync('git', withGit(args), { cwd, encoding: 'buffer', maxBuffer: MAX_BUFFER, ...(timeout ? { timeout } : {}) });
+function runBytes(cwd: string, args: string[], timeout?: number, env?: NodeJS.ProcessEnv): Buffer | Error {
+  const r = gitSpawnSync(withGit(args), { cwd, encoding: 'buffer', maxBuffer: MAX_BUFFER, ...(timeout ? { timeout } : {}), ...(env ? { env } : {}) });
   if (r.error) return r.error;
   if (r.status !== 0) return new Error(`git ${args.join(' ').slice(0, 200)} failed: ${(r.stderr.toString('utf8') || `exit ${r.status}`).trim().slice(0, 500)}`);
   return r.stdout;
@@ -134,22 +134,23 @@ export function changedNames(cwd: string, args: string[], o: NameListOptions = {
 /**
  * The paths any commit in `range` (base..head) touches, not just its net diff: a file added and removed again still
  * counts. A merge is read against its first parent; every submodule link is seen. Each path read by nameOf, once, so a
- * name git would C-quote (a non-ASCII byte, a newline, a quote) is itself (#724). Throws when git fails.
+ * name git would C-quote (a non-ASCII byte, a newline, a quote) is itself (#724). Throws when git fails. `env`: a
+ * gitSnapshot's, so the walk reads the push limits' one checked view of the history (#807).
  */
-export function rangeNames(cwd: string, range: string): string[] {
+export function rangeNames(cwd: string, range: string, env?: NodeJS.ProcessEnv): string[] {
   if (range.startsWith('-')) throw new Error(`rangeNames: ${range} is not a range`);
   // Plumbing only (#724, round 4): `git log` is porcelain and reads log.* config. log.showSignature glued a signature
   // check's text to the first name ("No signature\nsecrets/k.key", so 1 problem became 0, measured) and
   // log.showRoot=false hid a root commit's files. rev-list and diff-tree read none of it: each commit of the range
   // against its first parent, a root against the empty tree.
-  const commits = must(run(cwd, ['rev-list', range]));
+  const commits = must(run(cwd, ['rev-list', range], undefined, env));
   if (!commits.trim()) return [];
-  return [...new Set(names(must(plumbingBytes(cwd, ['diff-tree', '--stdin', '-r', '--root', '-m', '--first-parent', '--no-renames', '--name-only', '--no-commit-id', '-z'], commits))))];
+  return [...new Set(names(must(plumbingBytes(cwd, ['diff-tree', '--stdin', '-r', '--root', '-m', '--first-parent', '--no-renames', '--name-only', '--no-commit-id', '-z'], commits, env))))];
 }
 
 /** runBytes with `input` on git's stdin. */
-function plumbingBytes(cwd: string, args: string[], input: string): Buffer | Error {
-  const r = spawnSync('git', withGit(args), { cwd, input: Buffer.from(input, 'utf8'), encoding: 'buffer', maxBuffer: MAX_BUFFER });
+function plumbingBytes(cwd: string, args: string[], input: string, env?: NodeJS.ProcessEnv): Buffer | Error {
+  const r = gitSpawnSync(withGit(args), { cwd, input: Buffer.from(input, 'utf8'), encoding: 'buffer', maxBuffer: MAX_BUFFER, ...(env ? { env } : {}) });
   if (r.error) return r.error;
   if (r.status !== 0) return new Error(`git ${args.join(' ').slice(0, 200)} failed: ${(r.stderr.toString('utf8') || `exit ${r.status}`).trim().slice(0, 500)}`);
   return r.stdout;
@@ -167,15 +168,15 @@ const REGULAR_FILE = new Set(['100644', '100755']);
  * still read (#724). Only a regular file of at most `maxBytes` is read; anything else says why it wasn't: a symlink
  * (its blob is its target's path, not the file a checkout opens), a submodule link, a blob over the size, or one git
  * can't give. A name with no entry at `rev` isn't in the map: that is the only "not there". Throws when the tree
- * can't be listed.
+ * can't be listed. `env`: a gitSnapshot's, as for rangeNames (`rev` must then be a commit id: a snapshot has no refs).
  */
-export function blobsByName(cwd: string, rev: string, names: string[], maxBytes = Infinity): Map<string, TreeFile[]> {
+export function blobsByName(cwd: string, rev: string, names: string[], maxBytes = Infinity, env?: NodeJS.ProcessEnv): Map<string, TreeFile[]> {
   const out = new Map<string, TreeFile[]>();
   const wanted = new Set(names);
   if (!wanted.size) return out;
   if (rev.startsWith('-')) throw new Error(`blobsByName: ${rev} is not a revision`);
   // -r -z -l: "mode SP type SP object SP+ size TAB path NUL" for every file of the tree.
-  for (const rec of fields(must(runBytes(cwd, ['ls-tree', '-r', '-z', '-l', '--full-tree', rev])))) {
+  for (const rec of fields(must(runBytes(cwd, ['ls-tree', '-r', '-z', '-l', '--full-tree', rev], undefined, env)))) {
     const tab = rec.indexOf(9);
     if (tab === -1) continue;
     const name = nameOf(rec.subarray(tab + 1));
@@ -185,13 +186,37 @@ export function blobsByName(cwd: string, rev: string, names: string[], maxBytes 
       if (mode === '120000') return { unread: 'a symbolic link, not a file' };
       if (type !== 'blob' || !sha || !REGULAR_FILE.has(mode ?? '')) return { unread: `not a regular file (mode ${mode})` };
       if (!(Number(size) <= maxBytes)) return { unread: `${size} bytes, over the ${maxBytes}-byte limit for it` };
-      const text = run(cwd, ['cat-file', 'blob', sha]);
+      const text = run(cwd, ['cat-file', 'blob', sha], undefined, env);
       return text instanceof Error ? { unread: 'git can\'t give its blob' } : { text };
     })();
     out.set(name, [...(out.get(name) ?? []), file]);
   }
   return out;
 }
+
+/**
+ * The tree mode of each entry of `rev`'s tree whose name, as nameOf reads it, is one of `names` (#951): `120000` a
+ * symlink, `160000` a submodule link, `100644`/`100755` a regular file. Nothing is read but the tree. A name with no
+ * entry at `rev` isn't in the map. Throws when the tree can't be listed. `env`: a gitSnapshot's, as for blobsByName.
+ */
+export function treeModes(cwd: string, rev: string, names: string[], env?: NodeJS.ProcessEnv): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  const wanted = new Set(names);
+  if (!wanted.size) return out;
+  if (rev.startsWith('-')) throw new Error(`treeModes: ${rev} is not a revision`);
+  // -r -t -z: every file, and every tree on the way to one, as "mode SP type SP object TAB path NUL".
+  for (const rec of fields(must(runBytes(cwd, ['ls-tree', '-r', '-t', '-z', '--full-tree', rev], undefined, env)))) {
+    const tab = rec.indexOf(9);
+    if (tab === -1) continue;
+    const name = nameOf(rec.subarray(tab + 1));
+    if (!wanted.has(name)) continue;
+    out.set(name, [...(out.get(name) ?? []), rec.subarray(0, tab).toString('latin1').split(' ')[0]!]);
+  }
+  return out;
+}
+
+/** True for a tree mode that is a regular file. */
+export const isRegularFileMode = (mode: string): boolean => REGULAR_FILE.has(mode);
 
 /** changedNames, or null when git fails (an unknown commit, no repo). */
 export function changedNamesOrNull(cwd: string, args: string[], o: NameListOptions = {}): string[] | null {
@@ -202,6 +227,11 @@ export function changedNamesOrNull(cwd: string, args: string[], o: NameListOptio
 /** The untracked files of a worktree (`ls-files --others --exclude-standard -z`), each read by nameOf. */
 export function untrackedNames(cwd: string): string[] {
   return names(must(runBytes(cwd, ['ls-files', '--others', '--exclude-standard', '-z'])));
+}
+
+/** The ignored untracked files of a worktree (`ls-files --others --ignored --exclude-standard -z`), each read by nameOf. */
+export function ignoredNames(cwd: string): string[] {
+  return names(must(runBytes(cwd, ['ls-files', '--others', '--ignored', '--exclude-standard', '-z'])));
 }
 
 /**
@@ -228,6 +258,16 @@ export function rawChanges(cwd: string, args: string[]): string {
 /** `git diff --stat` against `rev`, as text for a person or a prompt (a rename as both its paths). Never parsed. */
 export function diffStatText(cwd: string, rev: string): string {
   return must(run(cwd, ['diff', '--stat', '--no-renames', '--no-color', ...nameArgs([rev])])).trim();
+}
+
+/**
+ * `git diff <args>` as a patch, for a hash only, never shown (#807): every file's lines whatever the attributes say
+ * (a `-diff` or `binary` mark, a textconv or an external diff), and every submodule link, a binary file's bytes
+ * included. `args` as changedNames takes them. Never parsed, and never put on a page, in a prompt or in an issue: the
+ * owner cut `--text` from every diff a person reads (#927).
+ */
+export function patchText(cwd: string, args: string[]): string {
+  return must(run(cwd, ['diff', '--no-color', ...AS_TEXT, ...nameArgs(args)]));
 }
 
 /** `git show --stat --patch` of one commit, as text for a person. Never parsed. */
@@ -313,10 +353,38 @@ function attributeMacros(cwd: string, rev: string): string[] {
  */
 const MIN_GIT_FOR_ATTRIBUTE_SOURCE: readonly [number, number] = [2, 40];
 
-/** The running git's major and minor version (`git version 2.43.0`), or null when it can't be read. Asked each time: it's one spawn, only when a .gitattributes changes. */
-function gitVersion(cwd: string): [number, number] | null {
-  const m = /git version (\d+)\.(\d+)/.exec(runStatus(cwd, ['version']).stdout);
+/** `git merge-tree --write-tree` came in git 2.38: an older git can't measure a merge (mergedTree), so every PR waits. */
+const MIN_GIT_FOR_MERGE_TREE: readonly [number, number] = [2, 38];
+
+/** A `git version` line's major and minor version (`git version 2.43.0`), or null when it holds none. */
+const versionOf = (text: string): [number, number] | null => {
+  const m = /git version (\d+)\.(\d+)/.exec(text);
   return m ? [Number(m[1]), Number(m[2])] : null;
+};
+
+/** The running git's major and minor version, or null when it can't be read. Asked each time: it's one spawn, only when a .gitattributes changes. */
+function gitVersion(cwd: string): [number, number] | null {
+  return versionOf(runStatus(cwd, ['version']).stdout);
+}
+
+/**
+ * Why `git version`'s output (`text`) names a git too old for the merge decision's checks, or null when it is new
+ * enough. They need MIN_GIT_FOR_MERGE_TREE for every PR (mergedTree) and MIN_GIT_FOR_ATTRIBUTE_SOURCE for a PR that
+ * changes a `.gitattributes` (attributeOutcome); a PR whose check can't run waits for the owner. For the setup checks
+ * (doctor), which say so up front.
+ */
+export function gitTooOld(text: string): string | null {
+  const below = (v: readonly [number, number], m: readonly [number, number]) => v[0] < m[0] || (v[0] === m[0] && v[1] < m[1]);
+  const need = [MIN_GIT_FOR_MERGE_TREE, MIN_GIT_FOR_ATTRIBUTE_SOURCE].reduce((a, b) => (below(a, b) ? b : a));
+  const v = versionOf(text);
+  if (v !== null && !below(v, need)) return null;
+  const tree = `${MIN_GIT_FOR_MERGE_TREE[0]}.${MIN_GIT_FOR_MERGE_TREE[1]}`;
+  const attributes = `${MIN_GIT_FOR_ATTRIBUTE_SOURCE[0]}.${MIN_GIT_FOR_ATTRIBUTE_SOURCE[1]}`;
+  const waits = v === null ? `with a git older than ${tree} every PR waits for the owner, and with an older one than ${attributes} every PR that changes a .gitattributes does`
+    : below(v, MIN_GIT_FOR_MERGE_TREE) ? 'with this git every PR waits for the owner'
+    : 'with this git every PR that changes a .gitattributes waits for the owner';
+  const said = v === null ? `can't read git's version (${text.trim().slice(0, 80) || 'no output'})` : `git ${v[0]}.${v[1]}`;
+  return `${said}: the merge decision needs git ${need[0]}.${need[1]} or later (merge-tree --write-tree from ${tree}, check-attr --source from ${attributes}); ${waits}`;
 }
 
 /**
@@ -350,7 +418,7 @@ function treePaths(cwd: string, rev: string): Map<string, Buffer> {
  */
 function attributeStates(cwd: string, rev: string, paths: Buffer[]): Map<string, Map<string, string>> | null {
   const input = Buffer.concat(paths.flatMap((p) => [p, Buffer.from([0])]));
-  const r = spawnSync('git', withGit(['check-attr', `--source=${rev}`, '-z', '--stdin', ...OUTCOME_ATTRIBUTES]), { cwd, input, encoding: 'buffer', maxBuffer: MAX_BUFFER, env: { ...process.env, GIT_ATTR_NOSYSTEM: '1' } });
+  const r = gitSpawnSync(withGit(['check-attr', `--source=${rev}`, '-z', '--stdin', ...OUTCOME_ATTRIBUTES]), { cwd, input, encoding: 'buffer', maxBuffer: MAX_BUFFER, env: { ...process.env, GIT_ATTR_NOSYSTEM: '1' } });
   if (r.error || r.status !== 0) return null;
   const out = new Map<string, Map<string, string>>();
   // -z: "path NUL attribute NUL state NUL" for each path and attribute.
@@ -406,7 +474,7 @@ const OUTCOME_SHOWN = 10;
 
 /** git's exit status and stdout, for the calls whose status is an answer (`cat-file -e`, `config --get-regexp`). */
 function runStatus(cwd: string, args: string[]): { status: number | null; stdout: string } {
-  const r = spawnSync('git', withGit(args), { cwd, encoding: 'utf8', maxBuffer: MAX_BUFFER });
+  const r = gitSpawnSync(withGit(args), { cwd, encoding: 'utf8', maxBuffer: MAX_BUFFER });
   return { status: r.error ? null : r.status, stdout: r.stdout ?? '' };
 }
 
@@ -609,7 +677,7 @@ export function exactMoves(cwd: string, base: string, head: string): Map<string,
  */
 export function filesWithText(cwd: string, rev: string, needles: string[]): string[] {
   const top = must(run(cwd, ['rev-parse', '--show-toplevel'])).replace(/\n$/, '');
-  const r = spawnSync('git', withGit(['grep', '-l', '-z', '-a', '-F', '--no-color', '--no-textconv', ...needles.flatMap((n) => ['-e', n]), rev, '--']), {
+  const r = gitSpawnSync(withGit(['grep', '-l', '-z', '-a', '-F', '--no-color', '--no-textconv', ...needles.flatMap((n) => ['-e', n]), rev, '--']), {
     cwd: top,
     encoding: 'buffer',
     maxBuffer: MAX_BUFFER,
@@ -638,18 +706,42 @@ export function mergeBaseOf(cwd: string, a: string, b: string): string {
 
 /**
  * The tree merging `a` and `b` makes (git merge-tree --write-tree, git 2.38 or later: no worktree, no index, no ref
- * moved; only the merged objects are written to the object store), or null when the merge conflicts. For the merge
- * decision's check for a weakened test, lint or guard: what merging a PR would make of the default branch (#1069).
- * Throws when git fails (an older git, no merge base).
+ * moved; only the merged objects are written to the object store), `a`'s side first in a conflict's markers,
+ * and the paths the merge conflicts on (none: it merges cleanly). A merge that conflicts still writes a tree: its
+ * conflicted files hold conflict markers and both sides' lines. Git merges by the attributes of the checkout at `cwd`.
+ * `contentOnly`: the conflicted paths whose every conflict is on their lines (`CONFLICT (contents)`: both sides
+ * changed the same lines, or both added the file), not on where a file goes or whether it stays. A merge that
+ * conflicts only on a directory (the tip split it in two) names no conflicted path.
+ * For the merge decision's check for a weakened test, lint or guard: what merging a PR would make of the default
+ * branch (#1069, #1077). Throws when git fails (an older git, no merge base, output it can't read).
  */
-export function mergedTree(cwd: string, a: string, b: string): string | null {
+export function mergedTree(cwd: string, a: string, b: string): { tree: string; conflicts: string[]; contentOnly: Set<string> } {
   if (a.startsWith('-') || b.startsWith('-')) throw new Error(`mergedTree: ${a} or ${b} is not a revision`);
-  const r = spawnSync('git', withGit(['merge-tree', '--write-tree', '--no-messages', a, b]), { cwd, encoding: 'utf8', maxBuffer: MAX_BUFFER });
+  // -z --name-only: the tree, then each conflicted path once, then an empty field, then each message as its count of
+  // paths, those paths, its type and its text; each field ended by a NUL.
+  const r = gitSpawnSync(withGit(['merge-tree', '--write-tree', '--name-only', '-z', a, b]), { cwd, encoding: 'buffer', maxBuffer: MAX_BUFFER });
   if (r.error) throw r.error;
-  if (r.status === 1) return null;
-  const tree = (r.stdout ?? '').split('\n')[0]!.trim();
-  if (r.status !== 0 || !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(tree)) throw new Error(`git merge-tree ${a.slice(0, 40)} ${b.slice(0, 40)} failed: ${(r.stderr || `exit ${r.status}`).trim().slice(0, 500)}`);
-  return tree;
+  const failed = () => new Error(`git merge-tree ${a.slice(0, 40)} ${b.slice(0, 40)} failed: ${((r.stderr ?? Buffer.alloc(0)).toString('utf8') || `exit ${r.status}`).trim().slice(0, 500)}`);
+  const [tree, ...rest] = fields(r.stdout ?? Buffer.alloc(0));
+  const id = tree?.toString('latin1') ?? '';
+  const end = rest.findIndex((p) => !p.length);
+  const conflicts = (end === -1 ? rest : rest.slice(0, end)).map(nameOf);
+  const kinds = new Map<string, Set<string>>();
+  let conflicted = false;
+  for (let k = end === -1 ? rest.length : end + 1; k < rest.length; ) {
+    const count = rest[k]!.toString('latin1');
+    if (!/^[1-9][0-9]{0,5}$/.test(count) || k + Number(count) + 3 > rest.length) throw failed();
+    const paths = rest.slice(k + 1, k + 1 + Number(count)).map(nameOf);
+    const type = rest[k + 1 + Number(count)]!.toString('utf8');
+    k += Number(count) + 3;
+    if (!type.startsWith('CONFLICT')) continue;
+    conflicted = true;
+    for (const p of paths) kinds.set(p, (kinds.get(p) ?? new Set()).add(type));
+  }
+  // A conflict (exit 1) names what conflicts, a path or a message; a clean merge (exit 0) names nothing.
+  if ((r.status !== 0 && r.status !== 1) || !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(id) || (r.status === 1) !== (conflicts.length > 0 || conflicted)) throw failed();
+  const contentOnly = new Set(conflicts.filter((p) => [...(kinds.get(p) ?? [])].length > 0 && [...kinds.get(p)!].every((t) => t === 'CONFLICT (contents)')));
+  return { tree: id, conflicts, contentOnly };
 }
 
 /**

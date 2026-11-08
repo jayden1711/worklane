@@ -1,0 +1,3 @@
+### Guardrail changes: what each one does
+
+- **The real-systemd job's Discord seam finds the engine's own line in the dashboard's log, not its answer (#1112).** Since #1064 a failed channel listing answers only "the bot's channel listing failed; the detail is in the dashboard's log on the machine", so the add-project job now checks that exact answer and finds the engine CLI's own line for the unreadable token file in the seam unit's journal, which still proves the engine's own CLI ran and no decoy did. `test/discord-seam-ci.test.ts` runs the same seam script with the same decoys in the ordinary suite and runs the workflow's own checks of that case against what came back, so a stale expectation fails there too. Nothing changes for an install: only CI changed.

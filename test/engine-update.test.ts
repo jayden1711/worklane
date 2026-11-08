@@ -521,7 +521,8 @@ test('the dashboard\'s reader: settings and the log, torn lines skipped', () => 
 // The real build and install, on a disposable Linux CI runner with systemd and passwordless sudo: the machine's own
 // sudo on purpose (#991, machineTool); elsewhere its stand-in answers, and these skip.
 const SUDO = machineTool('sudo');
-const systemCi = process.platform === 'linux' && process.env.GITHUB_ACTIONS === 'true' && spawnSync(SUDO, ['-n', 'systemctl', '--version']).status === 0;
+// A booted systemd (sd_booted: /run/systemd/system), not only its programs: a container has systemctl and no systemd.
+const systemCi = process.platform === 'linux' && process.env.GITHUB_ACTIONS === 'true' && existsSync('/run/systemd/system') && spawnSync(SUDO, ['-n', 'systemctl', '--version']).status === 0;
 const sudo = (args: string[], timeout = 120_000) => spawnSync(SUDO, ['-n', ...args], { encoding: 'utf8', timeout });
 
 test('acceptance: built as a DynamicUser and installed, the engine is readable by and starts as other users, exec\'d through a symlink like the services do', { skip: !systemCi && 'needs a disposable Linux CI runner with systemd', timeout: 30 * 60_000 }, (t) => {

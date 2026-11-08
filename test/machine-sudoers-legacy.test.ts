@@ -230,7 +230,7 @@ test('#902 round 9: a removal decided on a rule another writer changes before it
   assert.equal(read(join(m.T, 'host-calls')), '');
   // And the step is decided under add-project's lock, before anything changes.
   const src = readFileSync(join(setupDir, 'instance-remove.sh'), 'utf8');
-  const lock = src.indexOf('flock -n 9');
+  const lock = src.indexOf('machine_lock 9 "$ADD_PROJECT_LOCK" 0 ');
   assert.ok(lock > 0 && lock < src.indexOf('helper_step="$(helper_mode)"') && src.indexOf('helper_step="$(helper_mode)"') < src.indexOf('records hold-slot'));
 });
 

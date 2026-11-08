@@ -9,7 +9,7 @@ import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'n
 import { basename, dirname, isAbsolute, join, posix, relative, sep } from 'node:path';
 import { redactString } from './events/redact.js';
 import type { EventPayload, StoredEvent } from './events/types.js';
-import { spawnSync } from './os/child-process.js';
+import { gitSpawnSync } from './os/git.js';
 import { DECISION_DIRS, DECISION_FILES } from './review.js';
 
 /** The whole section when nothing recorded bears on the plan. Never beside citations. */
@@ -128,8 +128,9 @@ function verifiedObjects(cwd: string, wanted: { oid: string; type: 'commit' | 't
   const out = new Map<string, Buffer>();
   if (!wanted.length) return out;
   if (!wanted.every((w) => OBJECT_ID.test(w.oid))) return null;
-  // Replace refs (refs/replace) could stand another object in for the one asked for: never read through them.
-  const r = spawnSync('git', ['--no-replace-objects', 'cat-file', '--batch'], { cwd, input: `${wanted.map((w) => w.oid).join('\n')}\n`, ...GIT_LIMITS });
+  // Replace refs (refs/replace) could stand another object in for the one asked for: never read through them. Through
+  // the git runner (#807), which also sets grafts and the commit-graph off.
+  const r = gitSpawnSync(['--no-replace-objects', 'cat-file', '--batch'], { cwd, input: `${wanted.map((w) => w.oid).join('\n')}\n`, ...GIT_LIMITS });
   if (r.error || r.status !== 0) return null;
   const buf = r.stdout as Buffer;
   let at = 0;
@@ -183,7 +184,7 @@ const REGULAR = new Set(['100644', '100755']);
 function committedRecords(checkout: string, rev: string, objects: string): Map<string, string> | null {
   let base = rev;
   if (rev === 'HEAD') {
-    const git = (args: string[]) => spawnSync('git', ['--no-replace-objects', ...args], { cwd: checkout, encoding: 'utf8', ...GIT_LIMITS });
+    const git = (args: string[]) => gitSpawnSync(['--no-replace-objects', ...args], { cwd: checkout, encoding: 'utf8', ...GIT_LIMITS });
     const top = git(['rev-parse', '--show-cdup']);
     if (top.error || top.status !== 0 || top.stdout.trim() !== '') return null;
     const head = git(['rev-parse', '--verify', '--quiet', 'HEAD^{commit}']);
@@ -318,11 +319,39 @@ export function resolveRef(index: readonly DecisionEntry[], ref: string): Decisi
   return index.find((e) => e.aliases.includes(n)) ?? null;
 }
 
+/**
+ * The most of the records' committed text one brief carries (#970). Past it, an entry is listed without its text,
+ * and the brief says so: the agent is never sent to the checkout copy, which setup steps may have changed.
+ */
+export const RECORD_TEXT_BUDGET = 60_000;
+
+/**
+ * Each decision record's text as committed at the plan's base (#970), the newest first within RECORD_TEXT_BUDGET:
+ * what the planner and plan reviewer read, instead of the record files in their checkout, where setup steps have run.
+ */
+export function recordTexts(records: readonly DecisionEntry[], budget = RECORD_TEXT_BUDGET): string[] {
+  if (!records.length) return [];
+  const out = ['', "The decision records' text, as committed at the plan's base (read these, never the record files in the checkout: setup steps run there, so that copy may differ):"];
+  let left = budget;
+  const omitted: string[] = [];
+  for (const e of records) {
+    const text = e.text || e.title;
+    if (text.length > left) {
+      omitted.push(e.ref);
+      continue;
+    }
+    left -= text.length;
+    out.push(`### [${e.ref}]`, text);
+  }
+  if (omitted.length) out.push('', `Not included, past this brief's size (${omitted.length}): ${omitted.map((r) => `[${r}]`).join(', ')}. Their committed text isn't in this brief; rely on nothing in them but their headings, and say so as a risk if one bears on the plan.`);
+  return out;
+}
+
 /** The index as the planner and the plan reviewer see it: one line per entry, each with the exact way to cite it. */
 export function indexLines(index: readonly DecisionEntry[], max = 200): string[] {
-  if (!index.length) return ['Decisions index: nothing is recorded (no decisions made yet, and no decision records or docs/design.md in this checkout).'];
+  if (!index.length) return ['Decisions index: nothing is recorded (no decisions made yet, and no decision records or docs/design.md committed at the plan\'s base).'];
   const lines = index.slice(0, max).map((e) => (e.ref.startsWith('decision ') ? `- [${e.ref}] ${e.title}` : e.ref.endsWith(` § ${e.title}`) ? `- [${e.ref}]` : `- [${e.ref}] ${e.title}`));
-  return ['Decisions index (cite an entry exactly as it appears in brackets; the files are in this checkout):', ...lines, ...(index.length > max ? [`- … and ${index.length - max} more sections in the same files`] : [])];
+  return ['Decisions index (cite an entry exactly as it appears in brackets):', ...lines, ...(index.length > max ? [`- … and ${index.length - max} more sections in the same files`] : [])];
 }
 
 export interface Citation {

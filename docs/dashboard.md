@@ -738,6 +738,30 @@ In PR mode, the **Pull requests** page (`g p`) shows every PR the harness opened
 
 The sidebar counts the PRs that need you. Through the hub, this is per instance.
 
+## The operator inbox, first in every digest
+
+The daily "waiting on you" digest (the comment on the `digest` issue, and the Markdown on the Waiting page) starts
+with one table of what is the operator's (#1032): `PR | why it's yours | labels | merge command`, one row per PR or
+hold. It is read off the event log as it stands when the digest is made, the same read as the rest of the digest, so
+an answer about what needs you comes from it, not from an agent's memory. `src/inbox.ts` builds it; it makes no
+network call of its own.
+
+- **A PR is a row** when its head's review level is L3, the merge policy left it to you (its recorded verdict,
+  `merge.decided`), a check failed or was cancelled at its latest status, a CI fix gave up, a required check holds it,
+  or it has been a draft for more than 2 hours (with why: why it was turned back into a draft, else its latest status's
+  reasons, else "no status recorded").
+- **Other rows:** decisions and held plans (with the `decide` command), blocked tasks and failed landings, and the
+  stops: emergency stop, auto-merge stopped, unreported checks on the default branch, a failed deploy, a held engine
+  update.
+- **The merge command** (`gh pr merge <n> --merge --match-head-commit <head>`) is shown only for a PR that is ready,
+  green, not a draft, and held by nothing but your say (L3 or left to you).
+- **A task that waits only on another** (a "Depends on" or a hotspot hold) folds into one line, followed down to its
+  root with the root's reason: `#4 -> #3 -> #2: root #2: <why #2 waits>`. A cycle says so.
+- **UNREADABLE:** when a source can't be read (an event the inbox couldn't read, say), the table says UNREADABLE for
+  it, and never says nothing waits.
+- **Not yet:** labels are the issue's labels as last seen, not the PR's live ones; a stacked PR's base chain on GitHub
+  isn't followed (the chain above is the tasks' dependencies); there's no command of its own yet.
+
 ## Look and feel
 
 Light mode uses the warm light palette: every text colour in it reaches WCAG AA (4.5:1) on every light background it can sit on, tints over hover backgrounds and placeholder text included, and a control's edge and the focus ring reach 3:1 on every light background, hover ones included (`test/theme-contrast.test.ts`, which reads the text colours the pages use). The accent is never a text colour (accent-coloured text is `text-blue-ink`), a field or button draws its own edge with `border-line-strong` (`border-line` is for dividers), a focus or selection ring uses the ring token (`var(--ring)`, `ring-ring`), never the accent, and a progress bar or chart mark draws in the ring token too (`bg-ring`), so it reaches 3:1 on its track; the same test refuses each, and any colour class that names no theme colour (a typo draws nothing). Dark mode uses [Beautiful UI](https://www.beautifului.dev/)'s palette. The pages use Beautiful UI's patterns (MIT; see `THIRD_PARTY_NOTICES.md`), adapted to the dashboard's data:

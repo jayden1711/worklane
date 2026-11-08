@@ -1,10 +1,10 @@
 // Risk-based review levels, computed by code from what a change touches.
 // The highest matching level wins; a failed or low-confidence evaluator
 // verdict bumps it up one; an agent can raise its own level, never lower it.
-import { spawnSync } from './os/child-process.js';
+import { gitSpawnSync } from './os/git.js';
 import { posix } from 'node:path';
 import type { ReviewConfig } from './config/schema.js';
-import { globToRegExp } from './guardrails/glob.js';
+import { globRegExp, globToRegExp } from './guardrails/glob.js';
 import { BRAND } from './brand.js';
 import { HOOK_IMPORTS } from './hook-imports.js';
 import { escapedPath, hasControlCharacter, hasInvisibleCharacter, hasNonAsciiTopLevel, isNonUtf8Path, shownPath, shownPaths } from './path-text.js';
@@ -386,6 +386,9 @@ export const SELF_MODIFICATION_PARTS: { what: string; globs: string[] }[] = oneP
   { what: 'the merge policy', globs: ['src/merge-policy*', 'src/coordinator/merge-flow*', 'src/pr-rules*', 'src/vacuity.ts', 'src/vacuity-read.ts'] },
   { what: 'the main watch', globs: ['src/main-watch*', 'src/github/main-watch-api*'] },
   { what: 'the push guard', globs: ['src/push-guard*', 'src/push-check*'] },
+  // The one way the engine and its scripts run git, with replace refs and grafts off (#807): every reader above reads
+  // through it.
+  { what: 'the git runner', globs: ['src/os/git.ts', 'scripts/lib/git.cjs'] },
   { what: 'the updater', globs: ['src/updates*', `scripts/machine/${BRAND.cli}-update*`] },
   // src/path-text.ts holds the odd-name tests computeLevel raises on (moved out of src/review.ts, #683), so it stays locked with it.
   // src/confusables*: the look-alike check and its Unicode table (#763).
@@ -477,6 +480,8 @@ export const SELF_MODIFICATION_PARTS: { what: string; globs: string[] }[] = oneP
       'test/engine-guard-locks.test.ts',
       // The test that keeps each lock glob that matches no file yet paired with its lock (#885).
       'test/not-yet-files-locks.test.ts',
+      // The replace-ref and graft routes, and the scan that every git call goes through the git runner (#807).
+      'test/git-runner.test.ts',
       // The test that keeps the engine repo's merge process (docs/process.md) out of the planners' decisions index.
       'test/plan-decisions.test.ts',
     ],
@@ -556,7 +561,8 @@ const ALWAYS_L3 = [SELF_MODIFICATION, HARNESS_CONFIG];
 /** What a change to this path changes, in plain words (the self-modification part it falls in, in this scope), or null. */
 export function selfModificationPart(path: string, scope?: LockScope): string | null {
   const holds = (g: string) => scope !== 'managed-app' || !engineSourceGlob(g);
-  return SELF_MODIFICATION_PARTS.find((p) => p.globs.some((g) => holds(g) && globToRegExp(g).test(path)))?.what ?? null;
+  // Case folded, as computeLevel's locked categories are (#953).
+  return SELF_MODIFICATION_PARTS.find((p) => p.globs.some((g) => holds(g) && (globRegExp(g, 'deny').test(path) || globRegExp(g.toLowerCase(), 'deny').test(path.toLowerCase()))))?.what ?? null;
 }
 
 /** Built-in categories; review.yaml `categories` adds to them or replaces one by name. */
@@ -639,7 +645,7 @@ export interface LevelResult {
 export function loadMoneyPaths(repo: string, src: ReviewConfig['money_path_source'], rev: string): RegExp[] {
   if (!src) return [];
   const file = posix.normalize(src.file).replace(/^\.\//, '');
-  const shown = spawnSync('git', ['show', `${rev}:${file}`], { cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 16 * 1024 * 1024 });
+  const shown = gitSpawnSync(['show',`${rev}:${file}`], { cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 16 * 1024 * 1024 });
   if (shown.status !== 0) throw new Error(`money_path_source: ${file} isn't readable at ${rev}: ${(shown.stderr || shown.error?.message || '').trim().split('\n')[0]}`);
   let text = shown.stdout;
   if (src.pattern) {
@@ -765,7 +771,7 @@ export function moneyListLines(text: string): MoneyLine[] {
     const entry = !valid
       ? new RefusedMoneyLine(token, "it isn't a valid regex (the list failed to load before this version)", writableGlob('glob' in r ? r.glob : r.suggestion))
       : 'glob' in r
-        ? new MoneyGlob(globToRegExp(r.glob), r.glob)
+        ? new MoneyGlob(globRegExp(r.glob, 'deny'), r.glob)
         : new RefusedMoneyLine(token, r.why, r.suggestion);
     entry.before = mainHad(body, flags);
     regexes.set(key, entry);
@@ -782,10 +788,14 @@ export function moneyListLines(text: string): MoneyLine[] {
   };
   const glob = (g: string, line: string): MoneyGlob => {
     let entry = globs.get(g);
-    if (!entry) globs.set(g, (entry = new MoneyGlob(globToRegExp(g), g)));
+    if (!entry) globs.set(g, (entry = new MoneyGlob(globRegExp(g, 'deny'), g)));
     // Main read this very glob when the text held no /.../: it counted these paths too. Set for each line, not only
-    // the glob's first (round 9: `billing/** # card data` then `billing/**` lost the second line's reading).
-    if (!fragments.length && g === line) entry.before = entry;
+    // the glob's first (round 9: `billing/** # card data` then `billing/**` lost the second line's reading). What main
+    // counted is its own reading, `?` one UTF-16 unit (#966), never this version's wider one.
+    if (!fragments.length && g === line) {
+      const main = globToRegExp(g);
+      entry.before = main.source === entry.source ? entry : main;
+    }
     return entry;
   };
   /** One line's outcome. INVARIANT (round 11): every branch returns one; none skips a line. */
@@ -829,7 +839,7 @@ export function moneyListLines(text: string): MoneyLine[] {
     // covers both readings; if it isn't (`docs/x # [legacy]`, any `<glob> // note`), the line is refused, as the cut
     // can't be checked. "Covers" reads the line as a path, so a comment that itself holds `*` or `?`
     // (`billing* # card**`) can read narrower than the line as written read as a glob (a follow-up).
-    if (rest !== line && unquoted(rest) === rest && !globToRegExp(g.glob).test(line)) {
+    if (rest !== line && unquoted(rest) === rest && !globRegExp(g.glob, 'allow').test(line)) {
       if (globLineProblem(line)) return refuse(line, 'its # or // may be part of the name, and the line as written isn\'t a valid glob: quote the glob before the comment', writableGlob(`${g.glob}**`));
       return { kind: 'read', line, entries: [glob(`${g.glob}**`.replace(/\*{3,}$/, '**'), line)] };
     }
@@ -1186,12 +1196,24 @@ export function moneyListCheck(repo: string, src: ReviewConfig['money_path_sourc
   };
 }
 
+/** The categories whose paths are left out of the app code: a match there lowers a level. */
+const EXEMPTING_CATEGORIES = ['docs', 'tests', HARNESS_CONFIG] as const;
+
 export function computeLevel(input: LevelInput, cfg: ReviewConfig, extraCategories: Record<string, string[]> = {}): LevelResult {
   const own = { ...DEFAULT_CATEGORIES, ...cfg.categories, ...extraCategories };
   const locked = lockedCategories(input.scope);
   // harness-config's built-in globs always hold, beside whatever a repo adds to it (#798): never fewer.
   const defs = { ...own, ...locked, [HARNESS_CONFIG]: [...new Set([...(locked[HARNESS_CONFIG] ?? HARNESS_CONFIG_GLOBS), ...(own[HARNESS_CONFIG] ?? [])])] };
-  const res = Object.fromEntries(Object.entries(defs).map(([k, globs]) => [k, globs.map((g) => globToRegExp(g))]));
+  const res = Object.fromEntries(Object.entries(defs).map(([k, globs]) => [k, globs.map((g) => globRegExp(g, 'deny'))]));
+  // A locked category's membership is case folded too (#953): on a case-insensitive checkout `Docs/adr/x.md` or
+  // `Decisions.md` is the record the planners read, and the config folder in another case is the config. Raising only: a folded
+  // match never lowers a level (exempting stays as written).
+  const folded = Object.fromEntries(Object.keys(locked).map((k) => [k, (defs as Record<string, string[]>)[k]!.map((g) => globRegExp(g.toLowerCase(), 'deny'))]));
+  const inCategory = (cat: string, path: string) => res[cat]!.some((re) => re.test(path)) || (folded[cat]?.some((re) => re.test(path.toLowerCase())) ?? false);
+  // A path in docs, tests or harness-config is left out of the app code (docs and tests alone can be L0): that lowers,
+  // so it reads the globs as `allow` (#966), while membership, which raises, reads them as `deny`.
+  const exempting = new Map(EXEMPTING_CATEGORIES.map((k) => [k, ((defs as Record<string, string[]>)[k] ?? []).map((g) => globRegExp(g, 'allow'))]));
+  const exempt = (cat: (typeof EXEMPTING_CATEGORIES)[number], path: string) => exempting.get(cat)!.some((re) => re.test(path));
   const categories: Record<string, string[]> = {};
   const add = (cat: string, path: string) => (categories[cat] ??= []).push(path);
 
@@ -1201,7 +1223,7 @@ export function computeLevel(input: LevelInput, cfg: ReviewConfig, extraCategori
   const beforeOf = (re: RegExp): RegExp | null => (re instanceof MoneyGlob || re instanceof RefusedMoneyLine ? re.before : re);
   const countedBefore = new Set<string>();
   for (const f of input.files) {
-    for (const [cat, list] of Object.entries(res)) if (list.some((re) => re.test(f.path))) add(cat, f.path);
+    for (const cat of Object.keys(res)) if (inCategory(cat, f.path)) add(cat, f.path);
     let money = false;
     let was = false;
     for (const re of input.moneyPaths) {
@@ -1241,7 +1263,7 @@ export function computeLevel(input: LevelInput, cfg: ReviewConfig, extraCategori
     ...input.moneyPaths
       .filter((re) => !(re instanceof KeptMoneyReading))
       .map((re): Protected =>
-        re instanceof RefusedMoneyLine ? { refused: re.reason, what: 'a money path' } : re instanceof MoneyGlob ? { glob: re.glob, ...(re.source === globToRegExp(re.glob).source ? {} : { own: re }), what: 'a money path' } : { re, what: 'a money path' },
+        re instanceof RefusedMoneyLine ? { refused: re.reason, what: 'a money path' } : re instanceof MoneyGlob ? { glob: re.glob, ...(re.source === globRegExp(re.glob, 'deny').source ? {} : { own: re }), what: 'a money path' } : { re, what: 'a money path' },
       ),
   ];
   // A path another odd-path category holds already (an invisible character, a top-level name outside ASCII, ...) waits
@@ -1259,8 +1281,8 @@ export function computeLevel(input: LevelInput, cfg: ReviewConfig, extraCategori
     }
   }
   const lines = input.files.reduce((n, f) => n + f.added + f.removed, 0);
-  const isDocOrTest = (p: string) => (categories.docs ?? []).includes(p) || (categories.tests ?? []).includes(p);
-  const app = input.files.filter((f) => !isDocOrTest(f.path) && !(categories['harness-config'] ?? []).includes(f.path));
+  const isDocOrTest = (p: string) => exempt('docs', p) || exempt('tests', p);
+  const app = input.files.filter((f) => !isDocOrTest(f.path) && !exempt(HARNESS_CONFIG, f.path));
   // INVARIANT (no level below main, #763 round 8): app-non-money, and so the large-change L2, reads what earlier
   // versions counted as money (moneyBefore), not this version's wider reading: a path only this version counts as
   // money gets money-path, which only raises, and stays app-non-money. Measured by the round-7 delta check: a glob line

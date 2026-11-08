@@ -32,7 +32,7 @@
 //                               [--fix-cap 10]
 //   --write-held-out: write a held-out set for each role that has none (one case-writer run per role, from its
 //                     contract only); --score: score the current prompts once, no base (no --runs, no --fix).
-import { execFileSync } from 'node:child_process';
+import { gitExecFileSync } from './lib/git.cjs';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -92,7 +92,7 @@ let noBase = false;
 if (!o.scoreOnly) {
   let baseSource;
   try {
-    baseSource = execFileSync('git', ['show', `${o.base}:src/roles.ts`], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    baseSource = gitExecFileSync(['show', `${o.base}:src/roles.ts`], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
   } catch {
     console.error(`no src/roles.ts at ${o.base}`);
     // Without --spend the plan still prints (and the run stops there anyway).
@@ -134,65 +134,69 @@ if (!heldDir) console.log(`${HELD_OUT_NOT_ASKED}; scoring the visible cases only
 
 let total = 0;
 let bad = false;
-for (const role of roles) {
-  const file = join(casesDir, `${role}.md`);
-  if (!existsSync(file)) {
-    console.log(`role ${role}: no eval cases (${file})`);
-    bad = true;
-    continue;
-  }
-  const spentOut = () => {
-    console.log(`role ${role}: not run: the ${SPEND_FLAG} ceiling ($${spend}) is reached`);
-    bad = true;
-  };
-  if (!(bounded.left() > 0)) {
-    spentOut();
-    continue;
-  }
-  let heldOut = heldDir ? readHeldOut(heldDir, role) : null;
-  if (!heldOut && heldDir && o.writeHeldOut) {
-    // The writer sees the role's contract only: the base prompt's (the one not being changed), else the current one.
-    const { md, costUsd } = await writeHeldOutCases({ role, prompt: before(role) || after(role), ask: writerAsk, model: o.judge, maxBudgetUsd: WRITER_BUDGET_USD });
-    writeHeldOut(heldDir, role, md);
-    total += costUsd;
-    heldOut = readHeldOut(heldDir, role);
-    console.log(`role ${role}: wrote ${heldOut?.length ?? 0} held-out case(s) (~$${costUsd.toFixed(2)})`);
-  }
-  // The role's cap, bounded by what is left of --spend.
-  const cap = Math.min(o.cap, bounded.left());
-  if (!(cap > 0)) {
-    spentOut();
-    continue;
-  }
-  const cases = parseCases(readFileSync(file, 'utf8'));
-  const compareOf = (baseText, headText) => (capUsd) => compareInstructions({ target: `role ${role}`, baseText, headText, cases, heldOut, model: o.model, judge: o.judge, samples: o.samples, capUsd, ask });
-  let r;
-  let loop = null;
-  if (o.scoreOnly) {
-    const c = await compareOf(null, after(role))(cap);
-    total += c.costUsd;
-    r = roleReport(c);
-  } else {
-    const runs = await evalRoleRuns({ target: `role ${role}`, runs: o.runs, capUsd: cap, samples: o.samples, compare: compareOf(before(role) || null, after(role)) });
-    total += runs.costUsd;
-    r = runsReport(runs);
-    if (o.fixAttempts) {
-      // The head's report first, so a fixer or rerun that throws doesn't take it with it.
-      for (const line of r.lines) console.log(line);
-      r = { ...r, lines: [] };
-      // The held-out cases stay inside `rerun`; the loop gets their scores, ids and outcomes with the titles blanked
-      // (redactHeldOut), and the fixer's prompt gets nothing of them. The proposal is printed, never written.
-      const rerun = async (text, capUsd) => redactHeldOut(await evalRoleRuns({ target: `role ${role}`, runs: o.runs, capUsd, samples: o.samples, compare: compareOf(null, text) }));
-      loop = await fixLoop({ role, prompt: after(role), start: redactHeldOut(runs), visible: cases, rerun, fixer: ask, fixerModel: o.fixer, maxAttempts: o.fixAttempts, capUsd: Math.min(o.fixCap, bounded.left()) });
-      total += loop.costUsd;
+// WHY (#673): the total prints on every exit, a model call that throws (AskFailed) included; the error still ends the run.
+try {
+  for (const role of roles) {
+    const file = join(casesDir, `${role}.md`);
+    if (!existsSync(file)) {
+      console.log(`role ${role}: no eval cases (${file})`);
+      bad = true;
+      continue;
     }
+    const spentOut = () => {
+      console.log(`role ${role}: not run: the ${SPEND_FLAG} ceiling ($${spend}) is reached`);
+      bad = true;
+    };
+    if (!(bounded.left() > 0)) {
+      spentOut();
+      continue;
+    }
+    let heldOut = heldDir ? readHeldOut(heldDir, role) : null;
+    if (!heldOut && heldDir && o.writeHeldOut) {
+      // The writer sees the role's contract only: the base prompt's (the one not being changed), else the current one.
+      const { md, costUsd } = await writeHeldOutCases({ role, prompt: before(role) || after(role), ask: writerAsk, model: o.judge, maxBudgetUsd: WRITER_BUDGET_USD });
+      writeHeldOut(heldDir, role, md);
+      total += costUsd;
+      heldOut = readHeldOut(heldDir, role);
+      console.log(`role ${role}: wrote ${heldOut?.length ?? 0} held-out case(s) (~$${costUsd.toFixed(2)})`);
+    }
+    // The role's cap, bounded by what is left of --spend.
+    const cap = Math.min(o.cap, bounded.left());
+    if (!(cap > 0)) {
+      spentOut();
+      continue;
+    }
+    const cases = parseCases(readFileSync(file, 'utf8'));
+    const compareOf = (baseText, headText) => (capUsd) => compareInstructions({ target: `role ${role}`, baseText, headText, cases, heldOut, model: o.model, judge: o.judge, samples: o.samples, capUsd, ask });
+    let r;
+    let loop = null;
+    if (o.scoreOnly) {
+      const c = await compareOf(null, after(role))(cap);
+      total += c.costUsd;
+      r = roleReport(c);
+    } else {
+      const runs = await evalRoleRuns({ target: `role ${role}`, runs: o.runs, capUsd: cap, samples: o.samples, compare: compareOf(before(role) || null, after(role)) });
+      total += runs.costUsd;
+      r = runsReport(runs);
+      if (o.fixAttempts) {
+        // The head's report first, so a fixer or rerun that throws doesn't take it with it.
+        for (const line of r.lines) console.log(line);
+        r = { ...r, lines: [] };
+        // The held-out cases stay inside `rerun`; the loop gets their scores, ids and outcomes with the titles blanked
+        // (redactHeldOut), and the fixer's prompt gets nothing of them. The proposal is printed, never written.
+        const rerun = async (text, capUsd) => redactHeldOut(await evalRoleRuns({ target: `role ${role}`, runs: o.runs, capUsd, samples: o.samples, compare: compareOf(null, text) }));
+        loop = await fixLoop({ role, prompt: after(role), start: redactHeldOut(runs), visible: cases, rerun, fixer: ask, fixerModel: o.fixer, maxAttempts: o.fixAttempts, capUsd: Math.min(o.fixCap, bounded.left()) });
+        total += loop.costUsd;
+      }
+    }
+    for (const line of r.lines) console.log(line);
+    if (loop) for (const line of fixReport(loop)) console.log(line);
+    if (!heldOut && heldDir) console.log(`  no held-out cases for ${role} in ${heldDir}: run with --write-held-out`);
+    if (r.fails) bad = true;
   }
-  for (const line of r.lines) console.log(line);
-  if (loop) for (const line of fixReport(loop)) console.log(line);
-  if (!heldOut && heldDir) console.log(`  no held-out cases for ${role} in ${heldDir}: run with --write-held-out`);
-  if (r.fails) bad = true;
+} finally {
+  // The total through the ceiling: every call, including any that failed after spending.
+  total = Math.max(total, bounded.spent());
+  console.log(`total: ~$${total.toFixed(2)} (the CLI's estimate; model ${o.model}, judge ${o.judge}, ${o.scoreOnly ? '1 run' : `${o.runs} run(s) per side`}, ${o.samples} sample(s) per case${o.fixAttempts ? `, fix loop of up to ${o.fixAttempts} attempt(s) by ${o.fixer}` : ''}; ${SPEND_FLAG} $${spend}; recorded as run.cost in ${join(stateDir(), 'evals', 'events.db')})`);
 }
-// The total through the ceiling: every call, including any that failed after spending.
-total = Math.max(total, bounded.spent());
-console.log(`total: ~$${total.toFixed(2)} (the CLI's estimate; model ${o.model}, judge ${o.judge}, ${o.scoreOnly ? '1 run' : `${o.runs} run(s) per side`}, ${o.samples} sample(s) per case${o.fixAttempts ? `, fix loop of up to ${o.fixAttempts} attempt(s) by ${o.fixer}` : ''}; ${SPEND_FLAG} $${spend}; recorded as run.cost in ${join(stateDir(), 'evals', 'events.db')})`);
 process.exit(bad ? 1 : 0);

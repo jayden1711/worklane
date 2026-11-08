@@ -8,6 +8,7 @@ import { batchSummaries } from '../src/coordinator/pr-batch.js';
 import type { StoredEvent } from '../src/events/types.js';
 import { localDay } from '../src/local-day.js';
 import { WAIT_KINDS, type Digest, type MergedItem, type WaitItem, type WaitKind } from '../src/digest.js';
+import { buildInbox, inboxFold, inboxStep } from '../src/inbox.js';
 
 interface Ev {
   type: string;
@@ -167,5 +168,9 @@ export function waitingOnYou(events: Ev[], now = new Date(), o: { since?: Date; 
 
   items.sort((a, b) => WAIT_KINDS.indexOf(a.kind) - WAIT_KINDS.indexOf(b.kind) || a.since.localeCompare(b.since));
   const since = o.since ?? new Date(now.getTime() - 86_400_000);
-  return { at: now.toISOString(), items, mergedSince: since.toISOString(), merged: mergedSince(evs, since, now), batches: batchesSince(evs, since, now) };
+  // The operator inbox (#1032), added since: its own fold over the whole log read here, with this list.
+  const f = inboxFold();
+  for (const e of evs) inboxStep(f, e);
+  const inbox = buildInbox({ prs: { ok: true, value: f }, waits: { ok: true, value: items } }, now);
+  return { at: now.toISOString(), items, mergedSince: since.toISOString(), merged: mergedSince(evs, since, now), batches: batchesSince(evs, since, now), inbox };
 }

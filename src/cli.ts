@@ -20,7 +20,7 @@ import { hostname } from 'node:os';
 import { checkGuardrails } from './guardrails/check.js';
 import { liveContext, refreshFingerprints } from './guardrails/context.js';
 import { evaluate } from './guardrails/engine.js';
-import { globToRegExp } from './guardrails/glob.js';
+import { globRegExp } from './guardrails/glob.js';
 import { findProjectRoot, hookProcess, readStdin } from './hook.js';
 import { agentSettingsPath, guardrailSettings } from './agent-settings.js';
 import { install, installCheckoutPrePush, installGitHook, invokedEngine, migrateLegacyHooks } from './install.js';
@@ -71,6 +71,7 @@ import { sourceViewCommand } from './intake/source-view.js';
 import { intakeCheckCommand } from './intake/check.js';
 import { installService, stableNodePath, uninstallService } from './os/index.js';
 import { ownEnv } from './os/own-env.js';
+import { gitExecFileSync, repoConfigRefusal } from './os/git.js';
 import { projectStateDir } from './guardrails/context.js';
 import { fileURLToPath } from 'node:url';
 
@@ -132,9 +133,10 @@ usage: ${BRAND.cli} <command> [options]
                                    interventions. --record: into the log. --spend: the most it may spend
                                    (it bounds the budget); without it, prints the plan and exits 2. Held-out
                                    tasks only with ${HELD_OUT_ENV} set or --held-out-from-state
-  harness-eval add-task <owner/repo> <pr> [--id id] [--public]
+  harness-eval add-task <owner/repo> <pr> [--id id] [--public | --held-out-from-state]
                                    a merged PR as a past task (read-only gh calls); kept in the held-out
-                                   store, or with --public in templates/evals/tasks (the engine's own
+                                   store named by ${HELD_OUT_ENV} or --held-out-from-state (refused with
+                                   neither), or with --public in templates/evals/tasks (the engine's own
                                    public repository only)
   queue full-run [--max-load n] [-- <command>]
                                    queue the full test run; starts by itself when the machine-wide
@@ -310,10 +312,10 @@ function option(args: string[], name: string): string | undefined {
 }
 
 function changedTestFiles(root: string, globs: string[], branch: string): string[] {
-  const base = execFileSync('git', ['merge-base', `origin/${branch}`, 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
+  const base = gitExecFileSync(['merge-base', `origin/${branch}`, 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
   // A renamed test file is an added one, and is checked (with renames on it was R, and skipped); a valid UTF-8 path as itself (#683).
   const files = changedNames(root, ['--diff-filter=AM', base]);
-  const res = globs.map((g) => globToRegExp(g));
+  const res = globs.map((g) => globRegExp(g, 'deny'));
   return files.filter((f) => res.some((re) => re.test(f)) && existsSync(join(root, f)));
 }
 
@@ -1031,8 +1033,8 @@ async function main(argv: string[]): Promise<number> {
       const gh = i.credentials.github;
       const identity = i.commitIdentity ?? (gh.kind === 'app' ? await appBotIdentity({ appId: gh.app_id, installationId: gh.installation_id, keyPath: gh.key_path }) : { name: `${BRAND.cli}-${i.name}`, email: `${BRAND.cli}-${i.name}@users.noreply.invalid` });
       const main = cfg.project.project.default_branch;
-      execFileSync('git', ['fetch', '-q', 'origin', main], { cwd: i.repo.path, stdio: 'inherit' });
-      const base = execFileSync('git', ['rev-parse', `origin/${main}`], { cwd: i.repo.path, encoding: 'utf8' }).trim();
+      gitExecFileSync(['fetch', '-q', 'origin', main], { cwd: i.repo.path, stdio: 'inherit' });
+      const base = gitExecFileSync(['rev-parse', `origin/${main}`], { cwd: i.repo.path, encoding: 'utf8' }).trim();
       const dryRun = flag(rest, '--dry-run');
       const r = await tune({
         // Through worktreeOptions (#890 round 20): the root resolved once, here, and the instance's task directory kept.
@@ -1139,6 +1141,22 @@ async function main(argv: string[]): Promise<number> {
       } finally {
         log.close();
       }
+    }
+
+    case 'git-config-check': {
+      // #926: scripts/setup/checkout.sh's check before its own git in an instance checkout: the engine's parser
+      // (configRefusal), so a shell can never read the listing differently. Exit 1, saying why, when it's refused.
+      const dir = sub;
+      if (!dir) {
+        console.error('usage: git-config-check <dir>');
+        return 2;
+      }
+      const why = repoConfigRefusal(dir);
+      if (why) {
+        console.error(`refusing to run git in ${dir}: ${why}`);
+        return 1;
+      }
+      return 0;
     }
 
     case 'git-credential': {

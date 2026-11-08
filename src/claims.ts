@@ -7,8 +7,9 @@
 //   release = delete it, expecting our lease
 // Two coordinators (one per human) racing for the same issue: exactly one
 // push succeeds. Labels and assignees are cosmetic and follow the ref.
-import { execFileSync, spawnSync } from './os/child-process.js';
+import { gitExecFileSync, gitSpawnSync } from './os/git.js';
 import { BRAND } from './brand.js';
+import { gitRemote } from './git-remote.js';
 
 export interface Lease {
   instance: string;
@@ -27,7 +28,7 @@ export interface ClaimOptions {
 export const claimRef = (issue: number) => `refs/${BRAND.cli}/claims/issue-${issue}`;
 
 function git(repo: string, args: string[], input?: string): string {
-  return execFileSync('git', args, { cwd: repo, encoding: 'utf8', input, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+  return gitExecFileSync(args, { cwd: repo, encoding: 'utf8', input, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
 }
 
 /** A parentless commit holding the lease as its message. CAS needs no ancestry. */
@@ -39,7 +40,7 @@ function leaseCommit(repo: string, lease: Lease): string {
 /** Push `newSha` (or delete, when null) to the claim ref, only if it currently equals `expect` ('' = absent). */
 function casPush(repo: string, remote: string, issue: number, expect: string, newSha: string | null): boolean {
   const ref = claimRef(issue);
-  const r = spawnSync('git', ['push', '--porcelain', `--force-with-lease=${ref}:${expect}`, remote, `${newSha ?? ''}:${ref}`], { cwd: repo, encoding: 'utf8' });
+  const r = gitSpawnSync(['push', '--porcelain', `--force-with-lease=${ref}:${expect}`, remote, `${newSha ?? ''}:${ref}`], { cwd: repo, encoding: 'utf8' });
   if (r.status === 0) return true;
   if (/\[rejected\]|stale info|already exists|fetch first/.test(r.stdout + r.stderr)) return false;
   throw new Error(`claim push failed: ${(r.stderr || r.stdout).trim().split('\n').pop()}`);
@@ -47,7 +48,7 @@ function casPush(repo: string, remote: string, issue: number, expect: string, ne
 
 /** The current lease on an issue, read from the remote (never a local cache). */
 export function readClaim(issue: number, opts: ClaimOptions): { sha: string; lease: Lease } | null {
-  const remote = opts.remote ?? 'origin';
+  const remote = gitRemote(opts.remote ?? 'origin');
   const line = git(opts.repo, ['ls-remote', remote, claimRef(issue)]);
   if (!line) return null;
   const sha = line.split(/\s+/)[0]!;
@@ -62,7 +63,7 @@ export function readClaim(issue: number, opts: ClaimOptions): { sha: string; lea
 export type ClaimResult = { won: true; sha: string } | { won: false; holder: Lease | null };
 
 export function claim(lease: Lease, opts: ClaimOptions, now = Date.now(), graceMs = 60_000): ClaimResult {
-  const remote = opts.remote ?? 'origin';
+  const remote = gitRemote(opts.remote ?? 'origin');
   const sha = leaseCommit(opts.repo, lease);
   if (casPush(opts.repo, remote, lease.issue, '', sha)) {
     // Re-read: the claim only counts if the remote now holds exactly our lease.
@@ -81,9 +82,9 @@ export function claim(lease: Lease, opts: ClaimOptions, now = Date.now(), graceM
 
 export function renew(lease: Lease, currentSha: string, opts: ClaimOptions): string | null {
   const next = leaseCommit(opts.repo, lease);
-  return casPush(opts.repo, opts.remote ?? 'origin', lease.issue, currentSha, next) ? next : null;
+  return casPush(opts.repo, gitRemote(opts.remote ?? 'origin'), lease.issue, currentSha, next) ? next : null;
 }
 
 export function release(issue: number, currentSha: string, opts: ClaimOptions): boolean {
-  return casPush(opts.repo, opts.remote ?? 'origin', issue, currentSha, null);
+  return casPush(opts.repo, gitRemote(opts.remote ?? 'origin'), issue, currentSha, null);
 }

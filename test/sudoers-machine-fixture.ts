@@ -65,8 +65,8 @@ install_claude_token() {
   mkdir -p "$T/homes/$1/.claude"
   { printf '{"claudeAiOauth":{"accessToken":"'; cat; printf '"}}'; } > "$T/homes/$1/.claude/.credentials.json"
 }
-SRV_ROOT="$T/srv" ENGINE_CLI="$T/bin/worklane" MACHINE_HELPER="$T/helper" MACHINE_SUDOERS="$T/sudoers-machine" HUB_UNIT="$T/hub.service" ADD_PROJECT_LOCK="$T/lock"
-ADD_PROJECT_NEW="$T/add-project-new" ADD_PROJECT_NEW_UID=${process.getuid?.() ?? 0} HELPER_RULES="$T/helper-rules.json" MACHINE_SUDOERS_LOCK="$T/locks/sudoers.lock" MACHINE_SUDOERS_LOCK_UID=${process.getuid?.() ?? 0}
+SRV_ROOT="$T/srv" ENGINE_CLI="$T/bin/worklane" MACHINE_HELPER="$T/helper" MACHINE_SUDOERS="$T/sudoers-machine" HUB_UNIT="$T/hub.service" ADD_PROJECT_LOCK="$T/locks/add-project.lock"
+ADD_PROJECT_NEW="$T/add-project-new" ADD_PROJECT_NEW_UID=${process.getuid?.() ?? 0} HELPER_RULES="$T/helper-rules.json" MACHINE_SUDOERS_LOCK="$T/locks/sudoers.lock" MACHINE_LOCK_UID=${process.getuid?.() ?? 0}
 SETUP_POLL_SECONDS=0
 # instance-remove.sh resets PATH to lib.sh's ROOT_PATH (#902 round 9, N3): here the stand-ins come first on it, and every
 # host tool is a function too, which no PATH reset drops. node is this test's own.

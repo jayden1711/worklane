@@ -118,7 +118,7 @@ test('the digest\'s Markdown: a heading with the count, a section per kind, each
   assert.match(md, /\*\*Deploys that failed\*\* \(1\)\n- ffffffffffff: staging: health check 503 \(waiting 6 h\)/, 'a plain SHA, which GitHub links');
   assert.match(md, /\*\*Emergency stop in force\*\* \(1\)\n- by @example-owner: spend \(waiting 3 days\)/);
   assert.equal(digestMarkdown(waitingOnYou(log(), NOW), { project: 'example-shop' }), md, 'pure: the same text each time');
-  assert.equal(digestMarkdown(waitingOnYou([], NOW)), '## Waiting on you, 2026-10-15 (0)\n\nNothing is waiting on you.\n\n**Merged since yesterday** (0)\n- nothing merged on its own\n');
+  assert.equal(digestMarkdown(waitingOnYou([], NOW)), '## Waiting on you, 2026-10-15 (0)\n\n**Inbox: what waits on you** (0)\n- nothing in the event log waits on you\n\nNothing is waiting on you.\n\n**Merged since yesterday** (0)\n- nothing merged on its own\n');
 });
 
 test('merged since yesterday: each PR merged on its own since the last digest, with the merged head\'s review level and the evaluator\'s confidence', () => {
@@ -154,7 +154,7 @@ test('merged since yesterday: each PR merged on its own since the last digest, w
   assert.deepEqual(waitingOnYou(events, NOW, { since: new Date(h(48)) }).merged.map((m) => m.pr), [11, 21, 31]);
   const md = digestMarkdown(d);
   assert.match(md, /\*\*Merged since yesterday\*\* \(2\)\n- #21 for #2 Round totals to the cent: L0, evaluator confidence high\n- #31 for #3 Document the rounding rule: L1, evaluator confidence not recorded\n$/);
-  assert.match(md, /^## Waiting on you, 2026-10-15 \(0\)\n\nNothing is waiting on you\./, 'the count is still what waits');
+  assert.match(md, /^## Waiting on you, 2026-10-15 \(0\)\n\n\*\*Inbox: what waits on you\*\* \(0\)\n- nothing in the event log waits on you\n\nNothing is waiting on you\./, 'the count is still what waits');
 });
 
 test('a high-risk PR left to the owner carries why it waits, plainly (merge.decided why); older decisions without it still list', () => {

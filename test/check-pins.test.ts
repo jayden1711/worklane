@@ -61,12 +61,34 @@ const PIN_LAYOUT_FIXTURES: [string, (root: string) => void, string][] = [
     standIn(join(root, 'elsewhere', 'node_modules', 'yaml'));
     symlinkSync('../elsewhere/test', join(root, 'dist', 'test2'));
   }, 'dist/test2: a symbolic link'],
+  // #1007: what tsc emits for a JSON import of a package.json, which ci.yml's check after tsc must refuse.
+  ['a dist/package.json, as tsc emits for a JSON import of the top one', (root) => cpSync(join(root, 'package.json'), join(root, 'dist', 'package.json')), 'dist/package.json: a package.json besides the top one'],
+  ['a dist/examples/basic/package.json, as tsc emits for a JSON import of an allowed one', (root) => {
+    allowed(root, { name: 'example' });
+    mkdirSync(join(root, 'dist', 'examples', 'basic'), { recursive: true });
+    cpSync(join(root, 'examples', 'basic', 'package.json'), join(root, 'dist', 'examples', 'basic', 'package.json'));
+  }, 'dist/examples/basic/package.json: a package.json besides the top one'],
+  // #1007: an allowed nested package.json is a package scope too, so it may not carry a pinned name.
+  ['an allowed examples/basic/package.json named yaml', (root) => allowed(root, { name: 'yaml', exports: './x.js' }), 'yaml: examples/basic/package.json is named yaml'],
+  ['an allowed examples/basic/package.json that is not JSON', (root) => allowed(root, '{'), 'examples/basic/package.json: not JSON'],
 ];
+
+/** The allowed nested package.json (ALLOWED_PACKAGE_JSON), with `content` (an object as JSON, a string as is). */
+function allowed(root: string, content: object | string): void {
+  mkdirSync(join(root, 'examples', 'basic'), { recursive: true });
+  writeFileSync(join(root, 'examples', 'basic', 'package.json'), typeof content === 'string' ? content : JSON.stringify(content));
+}
 
 const pins = { yaml: PINS.yaml! };
 
 test('the pin check passes a clean checkout (round 22)', () => {
   assert.deepEqual(pinProblems(checkout(), pins), [], 'the control: a clean checkout');
+});
+
+test('the pin check passes an allowed nested package.json named after no pin (#1007)', () => {
+  const root = checkout();
+  allowed(root, { name: 'example-shop', private: true, type: 'module' });
+  assert.deepEqual(pinProblems(root, pins), [], 'the control: examples/basic/package.json with its own name');
 });
 
 // One test per fixture, so a regression names every refusal it drops, not only the first.

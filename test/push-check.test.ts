@@ -45,6 +45,9 @@ function repo() {
 
 const limits = (over: Partial<PushLimits> = {}): PushLimits => ({ ...DEFAULT_PUSH_LIMITS, ...over });
 
+/** The names git records in base..head, as its bytes read in UTF-8. */
+const rangeNamesOf = (cwd: string, base: string, head: string) => execFileSync('git', ['diff', '--name-only', '-z', base, head], { cwd, encoding: 'utf8' }).split('\0').filter(Boolean).join('\n');
+
 test('a small ordinary change passes the push limits', () => {
   const r = repo();
   const head = r.commit({ 'src/a.js': 'export const a = 1;\n' });
@@ -84,6 +87,37 @@ test('a checkpoint glob with ** matches at any depth', () => {
   const r = repo();
   const head = r.commit({ 'models/deep/m.ckpt': 'w\n' });
   assert.match(pushProblems(r.work, r.baseSha, head, limits({ refuse_paths: ['**/*.ckpt'] })).join(''), /models\/deep\/m\.ckpt/);
+});
+
+test('refuse_paths: a ? stands for one character outside the BMP, as ** does (#966)', () => {
+  const r = repo();
+  const head = r.commit({ 'keys/\u{1F511}.pem': 'k\n' });
+  for (const glob of ['keys/?.pem', 'keys/??.pem', 'keys/**']) {
+    const p = pushProblems(r.work, r.baseSha, head, limits({ refuse_paths: [glob] }));
+    assert.equal(p.length, 1, `${glob}: ${p.join('\n')}`);
+    assert.match(p[0]!, /push\.refuse_paths/);
+  }
+});
+
+test('refuse_paths: a name in NFD is refused by a glob in NFC, and the other way round (#966)', () => {
+  const nfc = 'secrets/caf\u00e9.pem';
+  const nfd = 'secrets/cafe\u0301.pem';
+  // A glob in mixed spellings matches only once it is normalised; `cafe*` matches the NFC name only in NFD.
+  const mixed = ['secrets/caf\u00e9-cafe\u0301.pem', 'secrets/caf\u00e9-caf\u00e9.pem'] as const;
+  for (const [name, glob] of [[nfd, nfc], [nfc, nfd], [nfd, 'secrets/caf?.pem'], [nfd, 'secrets/caf\u00e9*'], [nfc, 'secrets/cafe*'], [mixed[1], mixed[0]]] as const) {
+    const r = repo();
+    const head = r.commit({ [name]: 'k\n' });
+    assert.equal(rangeNamesOf(r.work, r.baseSha, head), name, 'git keeps the name as written');
+    const p = pushProblems(r.work, r.baseSha, head, limits({ refuse_paths: [glob] }));
+    assert.equal(p.length, 1, `${JSON.stringify(name)} against ${JSON.stringify(glob)}: ${p.join('\n')}`);
+    assert.match(p[0]!, /push\.refuse_paths/);
+  }
+});
+
+test('refuse_paths: a name outside the globs in every spelling still passes (#966)', () => {
+  const r = repo();
+  const head = r.commit({ 'docs/caf\u00e9.md': 'a\n', 'keys/\u{1F511}.txt': 'b\n' });
+  assert.deepEqual(pushProblems(r.work, r.baseSha, head, limits({ refuse_paths: ['secrets/**', 'keys/?.pem', 'docs/cafe\u0301.txt'] })), []);
 });
 
 test('a CI workflow change is refused with the reason (no Workflows permission), whatever the limits', () => {
@@ -174,6 +208,97 @@ test('checkedPush refuses the default branch, however the ref is spelled, record
   // A task branch whose name merely contains it goes through; so does the direct land, the one push of main by design.
   assert.deepEqual(checkedPush({ cwd: r.work, remote: 'origin', base: r.baseSha, head, ref: 'refs/heads/feature/main', limits: limits(), guard: guard(), force: true }), { ok: true });
   assert.deepEqual(checkedPush({ cwd: r.work, remote: 'origin', base: r.baseSha, head, ref: 'refs/heads/main', limits: limits(), guard: guard({ directLand: true }) }), { ok: true });
+});
+
+/**
+ * `fn` with a git stand-in first on PATH that, the first time a git command line contains `when`, runs `change` (a
+ * shell line, in that git's directory) and then the real git: a change to the repo between the push check's git calls,
+ * at a chosen one (#981).
+ */
+function racing<T>(when: string, change: string, fn: () => T): T {
+  const real = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+  const dir = mkdtempSync(join(tmpdir(), 'push-race-'));
+  writeFileSync(join(dir, 'git'), `#!/bin/sh\ncase " $* " in *"$RACE_WHEN"*) [ -e "$RACE_MARK" ] || { : > "$RACE_MARK"; sh -c "$RACE_CHANGE"; } ;; esac\nexec "$RACE_GIT" "$@"\n`, { mode: 0o755 });
+  const saved = { PATH: process.env.PATH, RACE_WHEN: process.env.RACE_WHEN, RACE_CHANGE: process.env.RACE_CHANGE, RACE_MARK: process.env.RACE_MARK, RACE_GIT: process.env.RACE_GIT };
+  Object.assign(process.env, { PATH: `${dir}:${process.env.PATH}`, RACE_WHEN: when, RACE_CHANGE: change, RACE_MARK: join(dir, 'ran'), RACE_GIT: real });
+  try {
+    const out = fn();
+    assert.ok(statSync(join(dir, 'ran'), { throwIfNoEntry: false }), `the change ran (no git call matched ${JSON.stringify(when)})`);
+    return out;
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+}
+
+const unix = { skip: process.platform === 'win32' ? 'the git stand-in is a shell script' : false };
+
+test('a repo config broken between the push check\'s git calls gives a named refusal, never a throw (#981)', unix, () => {
+  const r = repo();
+  const head = r.commit({ 'src/a.js': 'a\n' });
+  // The size check is the last read; its rename pairing reads the repo's config.
+  const p = racing(' -U0 ', `printf '[broken\\n' >> .git/config`, () => pushProblems(r.work, r.baseSha, head, limits()));
+  assert.equal(p.length, 1, p.join('\n'));
+  assert.match(p[0]!, /push limits couldn't read the range .*bad config/);
+  assert.match(p[0]!, /nothing is pushed/);
+});
+
+test('checkedPush refuses, never throws, when git fails mid-check, and pushes nothing (#981)', unix, () => {
+  const r = repo();
+  const head = r.commit({ 'src/a.js': 'a\n' });
+  const res = racing('rev-list --objects', `printf '[broken\\n' >> .git/config`, () => checkedPush({ cwd: r.work, remote: 'origin', base: r.baseSha, head, ref: 'refs/heads/task', limits: limits(), guard: guard(), force: true }));
+  assert.ok(!res.ok && 'refused' in res, JSON.stringify(res));
+  assert.match(res.refused[0]!, /push limits couldn't read the range/);
+  assert.equal(git(r.remote, 'for-each-ref', 'refs/heads/task'), '', 'nothing pushed');
+});
+
+test('a head or base that names no commit is a refusal, not a throw (#981)', () => {
+  const r = repo();
+  const head = r.commit({ 'src/a.js': 'a\n' });
+  for (const [base, h] of [[r.baseSha, 'no-such-branch'], ['no-such-base', head]] as const) {
+    const p = pushProblems(r.work, base, h, limits());
+    assert.equal(p.length, 1, p.join('\n'));
+    assert.match(p[0]!, /push limits couldn't read the range/);
+  }
+});
+
+test('a head or base that is a tree, a blob or a tag of a tree is refused, never read as a range with no names (#966)', () => {
+  const r = repo();
+  const head = r.commit({ 'data/x': 'b\n' });
+  const tree = git(r.work, 'rev-parse', `${head}^{tree}`);
+  const blob = git(r.work, 'rev-parse', `${head}:data/x`);
+  git(r.work, 'tag', 'a-tree', tree);
+  const res = checkedPush({ cwd: r.work, remote: 'origin', base: r.baseSha, head: tree, ref: 'refs/heads/task', limits: limits({ refuse_paths: ['data/**'] }), guard: guard(), force: true });
+  assert.ok(!res.ok && 'refused' in res, JSON.stringify(res));
+  assert.equal(git(r.remote, 'for-each-ref', 'refs/heads/task'), '', 'nothing pushed');
+  for (const [base, h] of [[r.baseSha, tree], [r.baseSha, blob], [r.baseSha, 'a-tree'], [tree, head], [blob, head]] as const) {
+    const p = pushProblems(r.work, base, h, limits());
+    assert.equal(p.length, 1, `${base}..${h}: ${p.join('\n')}`);
+    assert.match(p[0]!, /push limits couldn't read the range .*nothing is pushed/);
+  }
+});
+
+test('a head branch deleted between the push check\'s git calls changes nothing: the range is read by commit id (#981)', unix, () => {
+  const r = repo();
+  r.commit({ 'data/x': 'b\n' });
+  git(r.work, 'checkout', '-q', '-b', 'topic');
+  git(r.work, 'checkout', '-q', '--detach');
+  const p = racing('rev-list --objects', 'git update-ref -d refs/heads/topic', () => pushProblems(r.work, r.baseSha, 'topic', limits({ refuse_paths: ['data/**'] })));
+  assert.equal(p.length, 1, p.join('\n'));
+  assert.match(p[0]!, /data\/x/);
+});
+
+test('checkedPush pushes the commit it checked, even when the head branch moves before the push (#981)', unix, () => {
+  const r = repo();
+  const good = r.commit({ 'src/a.js': 'a\n' });
+  const bad = r.commit({ 'data/x': 'b\n' });
+  git(r.work, 'branch', 'topic', good);
+  const res = racing(' push ', `git update-ref refs/heads/topic ${bad}`, () => checkedPush({ cwd: r.work, remote: 'origin', base: r.baseSha, head: 'topic', ref: 'refs/heads/task', limits: limits({ refuse_paths: ['data/**'] }), guard: guard(), force: true }));
+  assert.deepEqual(res, { ok: true });
+  assert.equal(git(r.work, 'rev-parse', 'topic'), bad, 'the branch did move');
+  assert.equal(git(r.remote, 'rev-parse', 'refs/heads/task'), good, 'the checked commit was pushed, not the moved branch');
 });
 
 test('the coordinator passes the default branch guard on every push, and only the direct land may push main', () => {

@@ -3,6 +3,7 @@
 // that can't run reports why, and a feature the setup's mode can't have is
 // listed as off, with why.
 import { execFileSync, spawnSync } from './os/child-process.js';
+import { gitExecFileSync, gitSpawnSync } from './os/git.js';
 import { existsSync, lstatSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { agentRecordWarning } from './setup-steps.js';
@@ -11,7 +12,7 @@ import { checkSourceDoctor, workflowsAt, type Tip } from './check-pin-block.js';
 import { ConfigInvalid, loadConfig, type Config } from './config/load.js';
 import { checkGuardrails } from './guardrails/check.js';
 import { loadFingerprintSets } from './guardrails/context.js';
-import { agentSettingsPath, hookChecks, installCommand, legacyProjectHooks, projectSettingsRefusal, type Settings } from './agent-settings.js';
+import { agentSettingsPath, guardBlocksOnFailure, hookChecks, installCommand, legacyProjectHooks, projectSettingsRefusal, type Settings } from './agent-settings.js';
 import { GIT_HOOK_MARKER, legacyHookChecks } from './install.js';
 import { instancesDir, loadInstance, policiesForRepo, policyViolations, readPolicy } from './instance.js';
 import { instanceTargets, planMigrations, projectConfigFiles, type Targets } from './migrations.js';
@@ -36,6 +37,7 @@ import { vacuityDoctor } from './merge-policy-vacuity.js';
 import { HUB_UNIT_AS_ROOT, OWNER_TERMINAL_RERUN, ownerTerminalNotice, ownerTerminalRerun, type TerminalPaths } from './console/owner-terminal-removed.js';
 import { voiceSiriLeftoverCheck } from './doctor-voice-removed.js';
 import { moneyListCheck } from './review.js';
+import { gitTooOld } from './coordinator/change-files.js';
 import { DASHBOARD_KEY_PREFIX, isDashboardKey } from './events/redact.js';
 
 /** off: not available in this setup's mode (said why; never a failure). */
@@ -75,6 +77,10 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A pol
   // The engine's requirement (package.json engines): every part, hooks and coordinator alike, runs on it.
   if (maj < 22 || (maj === 22 && min < 13)) add('node', 'fail', `Node ${process.versions.node}; the engine needs >= 22.13`);
   else add('node', 'ok', `Node ${process.versions.node}`);
+  // The merge decision's checks need a git new enough to measure a merge; with an older one every PR waits (#1077).
+  const git = gitSpawnSync(['version'], { encoding: 'utf8', timeout: 20_000 });
+  const gitProblem = git.status === 0 ? gitTooOld(git.stdout) : `git can't run (${(git.error?.message ?? git.stderr ?? `exit ${git.status}`).trim().slice(0, 200)})`;
+  add('git', gitProblem ? 'fail' : 'ok', gitProblem ?? git.stdout.trim());
 
   let cfg: Config | null = null;
   try {
@@ -200,6 +206,10 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A pol
         if (!c.ok && c.detail === 'not installed' && instances.length) continue;
         add(`hook ${c.event}`, c.ok ? 'ok' : 'fail', `${c.detail}${where}`);
       }
+      // #930: the guard there must fail closed too; an install from before onFailure "block" doesn't.
+      if (hookChecks(s, (p) => p.replace('$CLAUDE_PROJECT_DIR', root)).find((c) => c.event === 'PreToolUse')?.ok && !guardBlocksOnFailure(s)) {
+        add('hook PreToolUse onFailure', 'fail', `the guard's hook in .claude/settings.json lacks onFailure "block": a hook stopped or timed out lets the tool call run${where}. Run \`${BRAND.cli} install\` again to rewrite it`);
+      }
     } catch (e) {
       add('hooks', 'fail', `.claude/settings.json unreadable: ${(e as Error).message}`);
     }
@@ -223,7 +233,7 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A pol
   if (!gl) add('gitleaks', 'fail', `not on PATH or in ${toolBin()}: commit and transcript scans cannot run`);
   else add('gitleaks', 'ok', execFileSync(gl, ['version'], { encoding: 'utf8' }).trim());
   try {
-    const common = execFileSync('git', ['rev-parse', '--git-common-dir'], { cwd: root, encoding: 'utf8' }).trim();
+    const common = gitExecFileSync(['rev-parse', '--git-common-dir'], { cwd: root, encoding: 'utf8' }).trim();
     const hook = join(resolve(root, common), 'hooks', 'pre-commit');
     if (existsSync(hook) && readFileSync(hook, 'utf8').includes(GIT_HOOK_MARKER)) add('pre-commit', 'ok', 'gitleaks pre-commit installed');
     else add('pre-commit', 'warn', `not installed (\`${BRAND.cli} install --git-hooks\`); the land queue still re-scans`);

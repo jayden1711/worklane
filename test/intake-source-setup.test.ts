@@ -99,16 +99,18 @@ test('the view commands: the secret is scrubbed from everything printed, and req
   assert.ok(!err.join('\n').includes(LINEAR_KEY) && !out.join('\n').includes(BOT_TOKEN), 'no secret printed');
 });
 
-test("the dashboard's Slack and Linear steps: looking changes nothing; owners only, audited; secrets to 0400 files; intake.yaml only as the confirmed diff", { skip: !posix && 'POSIX modes' }, async () => {
+test("the dashboard's Slack and Linear steps: looking changes nothing; owners only, audited; secrets to 0400 files; intake.yaml only as the confirmed diff", { skip: !posix && 'POSIX modes' }, async (t) => {
   const i = instance();
   const { dir: root } = exampleProject();
   const state = mkdtempSync(join(tmpdir(), 'ssetup-state-'));
   const eventsDb = join(state, 'events.db');
   const secretsHome = join(state, 'home');
   const runs: string[][] = [];
+  let failWith: string | null = null;
   const cli: RunCli = async (args) => {
     runs.push(args);
     assert.deepEqual(args.slice(1), ['view', '--instance', 'shop', '--json']);
+    if (failWith) return { status: 1, stdout: '', stderr: `${failWith}\n` };
     return { status: 0, stdout: `${JSON.stringify(args[0] === 'slack' ? SLACK_VIEW : LINEAR_VIEW)}\n`, stderr: '' };
   };
   const dash = await startDashboard({ root, cfg: loadConfig(root), eventsDb, stateDir: join(state, 'state'), user: 'example-owner', roleOf: exampleRoles, instance: 'shop', policyFile: join(i.home, 'policy.yaml'), slotsDir: join(state, 'slots'), secretsHome, webDir: join(state, 'web'), discordListing: discordListingStandIn(cli) });
@@ -161,6 +163,21 @@ test("the dashboard's Slack and Linear steps: looking changes nothing; owners on
     // The view, from the child process only; then a reviewed change, written only as confirmed.
     assert.equal((await call('/api/first-run/slack/view', owner)).status, 200);
     assert.deepEqual(runs.map((r) => r[0]), ['slack']);
+    // #1064: a view that fails says so; the child's own line (here a path and Linear's answer) is only logged.
+    failWith = `linear: ${i.home}/secrets/intake-linear: Linear answered 401 Unauthorized`;
+    const lines: string[] = [];
+    t.mock.method(console, 'error', (...a: unknown[]) => void lines.push(a.map(String).join(' ')));
+    const failed = await call('/api/first-run/linear/view', owner);
+    t.mock.restoreAll();
+    assert.deepEqual([failed.status, failed.json], [502, { error: "the Linear view failed; the detail is in the dashboard's log on the machine" }]);
+    assert.ok(lines.some((l) => l.includes('GET /api/first-run/linear/view') && l.includes(failWith!)), `the detail is logged: ${JSON.stringify(lines)}`);
+    // A review with no view cached loads it first: the same failure, the same answer, the line logged.
+    t.mock.method(console, 'error', (...a: unknown[]) => void lines.push(a.map(String).join(' ')));
+    const cold = await call('/api/first-run/linear/intake', owner, { values: { 'linear.enabled': true } });
+    t.mock.restoreAll();
+    assert.deepEqual([cold.status, cold.json], [502, { error: "the Linear view failed; the detail is in the dashboard's log on the machine" }]);
+    assert.ok(lines.some((l) => l.includes('POST /api/first-run/linear/intake') && l.includes(failWith!)), `the detail is logged: ${JSON.stringify(lines)}`);
+    failWith = null;
     const values = { 'slack.enabled': true, 'slack.team': TEAM, 'slack.channels': [IDEAS] };
     const review = await call('/api/first-run/slack/intake', owner, { values });
     assert.equal(review.status, 200, JSON.stringify(review.json));

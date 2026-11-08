@@ -157,11 +157,12 @@ async function withEnv<T>(vars: Record<string, string | undefined>, fn: () => Pr
   }
 }
 
-test('the bot view through the real child process: a failure is the command\'s own line, and bad output is refused', async () => {
+test('the bot view through the real child process: a failure says the listing failed, the command\'s own line is its cause, and bad output is refused', async () => {
   const i = instance();
   // The engine's own CLI, as the dashboard runs it; this instance has no token, so nothing reaches Discord.
+  // #1064: the child's line can name a path or quote Discord's answer, so it is the cause (logged), not the message.
   await withEnv({ [`${BRAND.envPrefix}_INSTANCES_DIR`]: i.dir }, () =>
-    assert.rejects(botView('shop', engineRunCli()), (e: unknown) => e instanceof DiscordSetupError && e.status === 502 && /instance shop has no bot token/.test(e.message)),
+    assert.rejects(botView('shop', engineRunCli()), (e: unknown) => e instanceof DiscordSetupError && e.status === 502 && e.message === "the bot's channel listing failed" && /instance shop has no bot token/.test(String(e.cause))),
   );
   await assert.rejects(botView('shop', async () => ({ status: 0, stdout: '{"application":{"id":"x"},"channels":[]}', stderr: '' })), /could not be read/);
   await assert.rejects(botView('shop', async () => ({ status: 0, stdout: 'not json', stderr: '' })), /could not be read/);
@@ -189,9 +190,10 @@ test("the listing runs this engine's own cli.js by absolute path: PATH, environm
     [`${BRAND.envPrefix}_DISCORD_API`]: 'http://discord.example',
   };
   await withEnv(vars, async () => {
-    // The engine's own CLI answered (its own line for an instance without a token); no decoy ran.
-    await assert.rejects(botView('shop', engineRunCli()), /instance shop has no bot token/);
-    await assert.rejects(botView('shop', listingRunner()), /instance shop has no bot token/);
+    // The engine's own CLI answered (its own line for an instance without a token, the error's cause); no decoy ran.
+    const ownLine = (e: unknown) => e instanceof DiscordSetupError && /instance shop has no bot token/.test(String(e.cause));
+    await assert.rejects(botView('shop', engineRunCli()), ownLine);
+    await assert.rejects(botView('shop', listingRunner()), ownLine);
   });
   assert.equal(existsSync(marks) ? readFileSync(marks, 'utf8') : '', '', 'a decoy ran');
   assert.deepEqual(Object.keys(listingEnv({ PATH: '/x', NODE_OPTIONS: '--require /y', NODE_PATH: '/z', HOME: '/h' })), ['PATH', 'HOME']);
@@ -446,7 +448,7 @@ test('lineDiff: a unified diff by line, with context and gaps', () => {
   assert.equal(lineDiff(before, before.replace('l0\n', 'L0\n').replace('l11\n', 'L11\n'), 'f'), '--- f\n+++ f\n-l0\n+L0\n l1\n l2\n l3\n@@\n l8\n l9\n l10\n-l11\n+L11');
 });
 
-test('the dashboard\'s Discord step: looking changes nothing; owners only; the token to a 0400 file and credentials.yaml; intake.yaml only as the confirmed diff', { skip: !posix && 'POSIX modes' }, async () => {
+test('the dashboard\'s Discord step: looking changes nothing; owners only; the token to a 0400 file and credentials.yaml; intake.yaml only as the confirmed diff', { skip: !posix && 'POSIX modes' }, async (t) => {
   const d = await fake.startFakeDiscord({ token: TOKEN });
   const i = instance();
   const { dir: root } = exampleProject();
@@ -457,7 +459,9 @@ test('the dashboard\'s Discord step: looking changes nothing; owners only; the t
   const cli = cliAgainst(d.api, i.dir);
   // The dashboard's cache clock, in the test's hand (#582): advanced, never slept on, so a wall-clock step can't fail it.
   let clock = 0;
-  const dash = await startDashboard({ root, cfg: loadConfig(root), eventsDb, stateDir: join(state, 'state'), user: 'example-owner', roleOf: exampleRoles, instance: 'shop', policyFile: join(i.home, 'policy.yaml'), slotsDir: join(state, 'slots'), secretsHome, webDir: join(state, 'web'), discordListing: discordListingStandIn((args) => (listings++, cli(args))), now: () => clock });
+  // #1064: a listing that fails, with a line naming a path and quoting Discord, while set.
+  let failWith: string | null = null;
+  const dash = await startDashboard({ root, cfg: loadConfig(root), eventsDb, stateDir: join(state, 'state'), user: 'example-owner', roleOf: exampleRoles, instance: 'shop', policyFile: join(i.home, 'policy.yaml'), slotsDir: join(state, 'slots'), secretsHome, webDir: join(state, 'web'), discordListing: discordListingStandIn((args) => (failWith ? Promise.resolve({ status: 1, stdout: '', stderr: `${failWith}\n` }) : (listings++, cli(args)))), now: () => clock });
   const base = dash.url.split('/?')[0]!;
   const bodies: string[] = [];
   const call = async (path: string, login: string, body?: unknown) => {
@@ -527,6 +531,20 @@ test('the dashboard\'s Discord step: looking changes nothing; owners only; the t
     const v1 = await call('/api/first-run/discord', owner);
     assert.deepEqual(v1.json.token, { configured: true, file, present: true, error: null });
     assert.equal(v1.json.ask, null);
+
+    // #1064: a listing that fails says so, on the channels read and on a review that must list first (nothing cached);
+    // the child's own line is only in the log.
+    failWith = `discord: ${i.home}/secrets/intake-discord: Discord answered 401: 401: Unauthorized`;
+    const lines: string[] = [];
+    t.mock.method(console, 'error', (...a: unknown[]) => void lines.push(a.map(String).join(' ')));
+    const failedList = await call('/api/first-run/discord/channels', owner);
+    const coldReview = await call('/api/first-run/discord/intake', owner, { values: { 'discord.enabled': true } });
+    t.mock.restoreAll();
+    const shown = { error: "the bot's channel listing failed; the detail is in the dashboard's log on the machine" };
+    assert.deepEqual([failedList.status, failedList.json], [502, shown]);
+    assert.deepEqual([coldReview.status, coldReview.json], [502, shown]);
+    for (const route of ['GET /api/first-run/discord/channels', 'POST /api/first-run/discord/intake']) assert.ok(lines.some((l) => l.includes(route) && l.includes(failWith!)), `${route}: the detail is logged: ${JSON.stringify(lines)}`);
+    failWith = null;
 
     // The bot's own view: its application, the invite link, its channels. One listing serves the calls that follow.
     const bot = await call('/api/first-run/discord/channels', owner);

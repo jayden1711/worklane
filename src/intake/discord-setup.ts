@@ -37,8 +37,9 @@ export class DiscordSetupError extends Error {
   constructor(
     message: string,
     readonly status: 400 | 409 | 502 = 400,
+    options?: ErrorOptions,
   ) {
-    super(message);
+    super(message, options);
   }
 }
 
@@ -110,6 +111,12 @@ export function engineRunCli(): RunCli {
     });
 }
 
+/** A child that failed (the listing, a source's view): `what`, with the child's last line as the cause, for the log only. */
+export function childFailed(what: string, r: { status: number | null; stderr: string }): DiscordSetupError {
+  const line = r.stderr.trim().split('\n').at(-1)?.trim() ?? '';
+  return new DiscordSetupError(what, 502, { cause: (line || `it ended with status ${r.status ?? 'unknown'}`).slice(0, 400) });
+}
+
 const STAND_IN = Symbol('a Discord listing stand-in');
 /** The stand-ins discordListingStandIn made: a copy or a look-alike is not one. */
 const MINTED = new WeakSet<object>();
@@ -156,14 +163,12 @@ export interface BotView {
 
 /**
  * The bot's application and the channels it can see, from `discord channels --instance <name> --json` run as a child
- * process. A failure is the child's own one-line message (it scrubs the token from everything it prints).
+ * process. A failure says the listing failed; the child's own last line (it scrubs the token from everything it
+ * prints, but it can name a path or quote Discord's answer) is the error's cause, for the log only (#1064).
  */
 export async function botView(instance: string, run: RunCli): Promise<BotView> {
   const r = await run(['discord', 'channels', '--instance', instance, '--json']);
-  if (r.status !== 0) {
-    const line = r.stderr.trim().split('\n').at(-1)?.trim() ?? '';
-    throw new DiscordSetupError((line || `the listing ended with status ${r.status ?? 'unknown'}`).slice(0, 400), 502);
-  }
+  if (r.status !== 0) throw childFailed("the bot's channel listing failed", r);
   let out: z.infer<typeof ChannelsOutput>;
   try {
     out = ChannelsOutput.parse(JSON.parse(r.stdout.trim().split('\n').at(-1) ?? ''));

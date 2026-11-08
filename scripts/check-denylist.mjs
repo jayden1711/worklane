@@ -3,10 +3,10 @@
 //
 //   node scripts/check-denylist.mjs            scan tracked + new files
 //   node scripts/check-denylist.mjs --hash t   print the hash entry for term t
-import { execFileSync } from 'node:child_process';
+import { gitExecFileSync } from './lib/git.cjs';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { loadRules, scanText, sha, SKIP } from './lib/denylist.mjs';
+import { loadRules, scanBinary, scanText, sha, SKIP } from './lib/denylist.mjs';
 
 const args = process.argv.slice(2);
 if (args[0] === '--hash') {
@@ -15,7 +15,7 @@ if (args[0] === '--hash') {
 }
 const root = args[0] ?? '.';
 const rules = loadRules(root);
-const files = execFileSync('git', ['ls-files', '-co', '--exclude-standard'], { cwd: root, encoding: 'utf8' })
+const files = gitExecFileSync(['ls-files', '-co', '--exclude-standard'], { cwd: root, encoding: 'utf8' })
   .split('\n')
   .filter((f) => f && !SKIP.has(f));
 
@@ -27,8 +27,8 @@ for (const file of files) {
   } catch {
     continue;
   }
-  if (text.includes('\0')) continue;
-  hits.push(...scanText(rules, file, text));
+  // A file holding a NUL byte is scanned for the hashed terms, as the push gate does (#1057).
+  hits.push(...(text.includes('\0') ? scanBinary(rules, file, text) : scanText(rules, file, text)));
 }
 
 if (hits.length) {

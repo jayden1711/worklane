@@ -97,7 +97,7 @@ function fixture() {
   // updater beside them, and its own .github/release-signers: the trusted list.
   const checkout = join(dir, 'checkout');
   sh(dir, 'git', ['clone', '-q', origin, checkout]);
-  for (const f of ['scripts/setup/engine.sh', 'scripts/setup/lib.sh', 'scripts/setup/engine-release.cjs', 'scripts/machine/worklane-update.cjs']) {
+  for (const f of ['scripts/setup/engine.sh', 'scripts/setup/lib.sh', 'scripts/setup/engine-release.cjs', 'scripts/machine/worklane-update.cjs', 'scripts/lib/git.cjs']) {
     if (!existsSync(join(repoRoot, f))) continue;
     mkdirSync(join(checkout, f, '..'), { recursive: true });
     copyFileSync(join(repoRoot, f), join(checkout, f));

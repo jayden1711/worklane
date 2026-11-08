@@ -24,7 +24,7 @@ import { CredentialsFile, setIntakeCredential, type IntakeCredentialKey } from '
 import { currentUser, replaceFileAtomically } from '../os/index.js';
 import { instanceUnit } from '../service.js';
 import { INTAKE_FILE, intakeErrorByName, loadIntakeConfig } from './config.js';
-import { DiscordSetupError, lineDiff, type RunCli } from './discord-setup.js';
+import { childFailed, DiscordSetupError, lineDiff, type RunCli } from './discord-setup.js';
 import { IntakeConfig, intakeWarnings, LINEAR_ID, SLACK_ID } from './report.js';
 import type { LinearView, SlackView } from './source-view.js';
 
@@ -194,14 +194,12 @@ export type SourceView = ({ kind: 'slack' } & SlackView) | ({ kind: 'linear' } &
 
 /**
  * What the source's secret can see, from `<kind> view --instance <name> --json` run as a child process (the Discord
- * step's runner: this engine's own cli.js, or a stand-in made in code). A failure is the child's own one line.
+ * step's runner: this engine's own cli.js, or a stand-in made in code). A failure says the view failed; the child's
+ * own last line is its cause, for the log only (#1064).
  */
 export async function sourceView(kind: SourceKind, instance: string, run: RunCli): Promise<SourceView & { at: string }> {
   const r = await run([kind, 'view', '--instance', instance, '--json']);
-  if (r.status !== 0) {
-    const line = r.stderr.trim().split('\n').at(-1)?.trim() ?? '';
-    throw new DiscordSetupError((line || `the view ended with status ${r.status ?? 'unknown'}`).slice(0, 400), 502);
-  }
+  if (r.status !== 0) throw childFailed(`the ${kind === 'slack' ? 'Slack' : 'Linear'} view failed`, r);
   try {
     const raw: unknown = JSON.parse(r.stdout.trim().split('\n').at(-1) ?? '');
     const at = new Date().toISOString();

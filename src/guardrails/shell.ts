@@ -10,6 +10,8 @@ export interface SimpleCommand {
   argv: string[];
   /** VAR=value assignments that prefixed the command. */
   assignments: Record<string, string>;
+  /** Options given to an `env` wrapper (`-i`, `-u`, `-`): removed from argv with the wrapper. */
+  envOptions: string[];
   /**
    * Files written by redirection (>, >>, &>) or tee, or that the command's own arguments name as changed: copied
    * or moved to, moved or removed, edited in place (sed -i, perl -i), created (touch, mkdir), linked, dd of=.
@@ -63,6 +65,43 @@ interface Token {
   op?: boolean;
 }
 
+/** A $'...' string's text as bash decodes it, from just after `$'`, and the index after its closing quote. */
+export function ansiC(src: string, from: number): [string, number] {
+  const simple: Record<string, string> = { a: '\x07', b: '\b', e: '\x1b', E: '\x1b', f: '\f', n: '\n', r: '\r', t: '\t', v: '\v', '\\': '\\', "'": "'", '"': '"', '?': '?' };
+  let out = '';
+  let j = from;
+  while (j < src.length && src[j] !== "'") {
+    if (src[j] !== '\\' || j + 1 >= src.length) {
+      out += src[j++];
+      continue;
+    }
+    const e = src[j + 1]!;
+    const rest = src.slice(j + 2);
+    let m: RegExpExecArray | null;
+    if (e in simple) {
+      out += simple[e];
+      j += 2;
+    } else if ((m = /^[0-7]{0,2}/.exec(rest)) && /[0-7]/.test(e)) {
+      out += String.fromCharCode(parseInt(e + m[0], 8) & 0xff);
+      j += 2 + m[0].length;
+    } else if (e === 'x' && (m = /^[0-9a-fA-F]{1,2}/.exec(rest))) {
+      out += String.fromCharCode(parseInt(m[0], 16));
+      j += 2 + m[0].length;
+    } else if ((e === 'u' || e === 'U') && (m = (e === 'u' ? /^[0-9a-fA-F]{1,4}/ : /^[0-9a-fA-F]{1,8}/).exec(rest))) {
+      const cp = parseInt(m[0], 16);
+      out += cp <= 0x10ffff ? String.fromCodePoint(cp) : '';
+      j += 2 + m[0].length;
+    } else if (e === 'c' && rest.length) {
+      out += String.fromCharCode(rest.charCodeAt(0) & 0x1f);
+      j += 3;
+    } else {
+      out += '\\' + e;
+      j += 2;
+    }
+  }
+  return [out, j < src.length ? j + 1 : src.length];
+}
+
 /** Tokenize one level; $(...) and backtick bodies are returned for recursion. */
 function tokenize(src: string, nested: string[]): Token[] {
   const out: Token[] = [];
@@ -101,6 +140,19 @@ function tokenize(src: string, nested: string[]): Token[] {
       cur += src[i + 1] ?? '';
       has = true;
       i += 2;
+      continue;
+    }
+    // WHY (#924): bash decodes $'...' (`$'\x2eenv'` is .env) and reads $"..." as "..." (a translation that is the
+    // same text here); left as written, the word kept a `$` and the escapes, and named no secret file.
+    if (c === '$' && src[i + 1] === "'") {
+      const [text, next] = ansiC(src, i + 2);
+      cur += text;
+      has = true;
+      i = next;
+      continue;
+    }
+    if (c === '$' && src[i + 1] === '"') {
+      i++;
       continue;
     }
     if (c === "'") {
@@ -214,27 +266,86 @@ function tokenize(src: string, nested: string[]): Token[] {
 }
 
 const SEPARATORS = new Set([';', '&&', '||', '|', '|&', '&', '(', ')', '{', '}']);
+
+/**
+ * Reserved words that start a command and put another command after them (#1125): `if <cmd>`, `then <cmd>`,
+ * `do <cmd>`, `! <cmd>`, `coproc <cmd>`. The shell reads a reserved word only at the start of a command, before any
+ * assignment, so only there is it dropped and the next word read as the program. Words that end or head a compound
+ * command (`fi`, `done`, `esac`, `for x in …`, `case …`) run nothing themselves. `time` is left to the runner table,
+ * which reads it as the time program, its options included (#993).
+ */
+const LEADING_RESERVED = new Set(['!', 'if', 'then', 'elif', 'else', 'do', 'while', 'until', 'coproc']);
+
+/** `words` from where its program starts: past every reserved word that leads it. */
+function pastReserved(words: string[]): string[] {
+  let k = 0;
+  while (k < words.length && LEADING_RESERVED.has(words[k]!)) k++;
+  return k ? words.slice(k) : words;
+}
 const WRITE_REDIRECTS = new Set(['>', '>>', '>|', '&>', '&>>']);
 
-/** argv without wrappers; VAR=value given to `env` is recorded in `assignments` (it sets the command's environment). */
-function stripWrappers(argv: string[], assignments: Record<string, string> = {}): string[] {
+/** A wrapper's options that take the next word as their value, so that word is not the command. */
+const WRAPPER_VALUE_OPTIONS: Record<string, RegExp> = {
+  sudo: /^-[ugCDhprtU]$/,
+  env: /^--(unset|chdir|split-string)$/,
+  nice: /^(-n|--adjustment)$/,
+  ionice: /^(-[cnpPu]|--class|--classdata|--pid|--pgid|--uid)$/,
+  exec: /^-[a-z]*a$/,
+  doas: /^-[uC]$/,
+  time: /^(-[fo]|--format|--output)$/,
+};
+/**
+ * A short-option cluster as getopt and git's parse-options read it, given the letters that take a value: every
+ * other letter is a flag and continues the cluster; the first value letter takes the rest of the word, or the next
+ * word when it ends the word. `flags`: the letters before it. null for a word that isn't a short-option cluster.
+ */
+export function shortCluster(opt: string, valueLetters: string): { flags: string; letter?: string; attached: string } | null {
+  if (!/^-[^-]/.test(opt)) return null;
+  const j = [...opt].findIndex((ch, k) => k > 0 && valueLetters.includes(ch));
+  return j < 0 ? { flags: opt.slice(1), attached: '' } : { flags: opt.slice(1, j), letter: opt[j]!, attached: opt.slice(j + 1) };
+}
+/** An env short-option cluster (GNU env's getopt string: "+C:iS:u:v0"); `-uCC` unsets CC. */
+export const envShort = (opt: string) => shortCluster(opt, 'CSu');
+/** Whether env option `opt` takes the next word as its value. */
+export function envTakesNext(opt: string): boolean {
+  const short = envShort(opt);
+  return WRAPPER_VALUE_OPTIONS.env!.test(opt) || (short?.letter !== undefined && short.attached === '');
+}
+
+/**
+ * argv without wrappers; VAR=value given to `env` is recorded in `assignments` (it sets the command's environment),
+ * and `env`'s options, with their values, in `envOptions`.
+ */
+function stripWrappers(argv: string[], assignments: Record<string, string> = {}, envOptions: string[] = []): string[] {
   let a = argv;
   for (let guard = 0; guard < 10 && a.length; guard++) {
     const base = basename(a[0]!);
     if (WRAPPERS.has(base)) {
       a = a.slice(1);
-      // sudo/env options and env assignments
+      // Wrapper options (with their values) and env assignments
       while (a.length && (a[0]!.startsWith('-') || (base === 'env' && /^[A-Za-z_][A-Za-z0-9_]*=/.test(a[0]!)))) {
         const opt = a[0]!;
         a = a.slice(1);
-        if (base === 'env' && !opt.startsWith('-')) assignments[opt.slice(0, opt.indexOf('='))] = opt.slice(opt.indexOf('=') + 1);
-        if (base === 'sudo' && ['-u', '-g', '-C', '-D', '-h', '-p', '-r', '-t', '-U'].includes(opt)) a = a.slice(1);
+        if (base === 'env' && !opt.startsWith('-')) {
+          assignments[opt.slice(0, opt.indexOf('='))] = opt.slice(opt.indexOf('=') + 1);
+          continue;
+        }
+        const takesValue = (base === 'env' ? envTakesNext(opt) : WRAPPER_VALUE_OPTIONS[base]?.test(opt)) && a.length > 0;
+        const value = takesValue ? a[0]! : undefined;
+        if (takesValue) a = a.slice(1);
+        if (base !== 'env') continue;
+        envOptions.push(opt, ...(value === undefined ? [] : [value]));
+        const short = envShort(opt);
+        if (short?.letter === 'S' || /^--split-string(=|$)/.test(opt)) {
+          const line = value ?? (short ? short.attached : opt.includes('=') ? opt.slice(opt.indexOf('=') + 1) : '');
+          a = [...line.split(/\s+/).filter(Boolean), ...a];
+        }
       }
       continue;
     }
     if (base === 'timeout') {
       a = a.slice(1);
-      while (a.length && a[0]!.startsWith('-')) a = a.slice(a[0] === '-s' || a[0] === '-k' ? 2 : 1);
+      while (a.length && a[0]!.startsWith('-')) a = a.slice(/^(-[sk]|--signal|--kill-after)$/.test(a[0]!) ? 2 : 1);
       a = a.slice(1); // duration
       continue;
     }
@@ -243,7 +354,7 @@ function stripWrappers(argv: string[], assignments: Record<string, string> = {})
       while (a.length && a[0]!.startsWith('-')) {
         const opt = a[0]!;
         a = a.slice(1);
-        if (['-I', '-n', '-P', '-L', '-s', '-d', '-E', '-a'].includes(opt)) a = a.slice(1);
+        if (/^(-[InPLsdEa]|--(max-args|max-procs|max-chars|delimiter|arg-file|process-slot-var))$/.test(opt)) a = a.slice(1);
       }
       continue;
     }
@@ -255,6 +366,13 @@ function stripWrappers(argv: string[], assignments: Record<string, string> = {})
     break;
   }
   return a;
+}
+
+/** A command's words with its wrappers removed, as splitCommands reads them (for a program another one runs). */
+export function unwrap(argv: string[]): Pick<SimpleCommand, 'argv' | 'assignments' | 'envOptions'> {
+  const assignments: Record<string, string> = {};
+  const envOptions: string[] = [];
+  return { argv: stripWrappers(argv, assignments, envOptions), assignments, envOptions };
 }
 
 export function basename(p: string): string {
@@ -274,6 +392,7 @@ export function splitCommands(src: string, depth = 0): SimpleCommand[] {
   let pendingRedirect: string | null = null;
 
   const flush = () => {
+    words = pastReserved(words);
     const assignments: Record<string, string> = {};
     let k = 0;
     while (k < words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[k]!)) {
@@ -282,12 +401,13 @@ export function splitCommands(src: string, depth = 0): SimpleCommand[] {
       assignments[w.slice(0, eq)] = w.slice(eq + 1);
       k++;
     }
-    const argv = stripWrappers(words.slice(k), assignments);
-    if (argv.length || Object.keys(assignments).length || writes.length || reads.length) {
+    const envOptions: string[] = [];
+    const argv = stripWrappers(words.slice(k), assignments, envOptions);
+    if (argv.length || Object.keys(assignments).length || writes.length || reads.length || envOptions.length) {
       const base = argv.length ? basename(argv[0]!) : '';
       if (base === 'tee') for (const f of argv.slice(1)) if (!f.startsWith('-')) writes.push(f);
       writes.push(...argumentWrites(base, argv));
-      result.push({ argv, assignments, writes, reads });
+      result.push({ argv, assignments, envOptions, writes, reads });
       // Re-parse the script given to a shell or eval.
       if (SHELLS.has(base)) {
         const ci = argv.findIndex((x, idx) => idx > 0 && /^-[a-z]*c[a-z]*$/.test(x));
