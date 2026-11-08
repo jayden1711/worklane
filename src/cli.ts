@@ -215,6 +215,12 @@ usage: ${BRAND.cli} <command> [options]
   rollout status --flag <name> [--file <rollout.json>]
                                    read-only: where a flagged change stands ring by ring (root's rollout.json
                                    names the rings' instances), and the one next step (docs/rollout.md)
+  audit verify --log <events.db> [--chain <file>] [--anchor <head>]
+                                   check the audit chain: recompute the hash chain over every event and check
+                                   each checkpoint the coordinator wrote; exit 1 names where the log or the
+                                   checkpoints were changed (a cut tail only against --anchor) (docs/audit-log.md)
+  audit checkpoint --log <events.db> [--chain <file>]
+                                   append a checkpoint of the audit chain now (the coordinator does every 10 min)
   receipts verify <file|dir> --key <pub> [--key <pub>]... [--anchor <receipt id>]
                                    check signed receipts offline: each signature by the chain's key, the order,
                                    and that none was changed or dropped (a dropped tail only against --anchor, a
@@ -821,6 +827,11 @@ async function main(argv: string[]): Promise<number> {
     case 'receipts': {
       const { receiptsCommand } = await import('./signed-receipts-cli.js');
       return receiptsCommand(sub, rest);
+    }
+
+    case 'audit': {
+      const { auditCommand } = await import('./audit-chain-cli.js');
+      return auditCommand(sub, rest);
     }
 
     case 'slots': {
