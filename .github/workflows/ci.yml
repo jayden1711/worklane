@@ -1,6 +1,7 @@
 name: ci
 # The fast checks, on every pull request and every push to main: test, desktop, agentshield, push-gate, denylist,
-# and dco on PRs (scan is gitleaks.yml's). They are what the main ruleset requires. The slow checks (the bootstrap
+# and dco on PRs (scan is gitleaks.yml's). They are what the main ruleset requires. On pushes to main only, the
+# systemd acceptance tests too (systemd-acceptance, below), which the updater requires. The slow checks (the bootstrap
 # on each OS, the real systemd and real users jobs) are ci-slow.yml's: on main they run in batches, on main's newest
 # commit, one batch at a time (ci-batch.yml), and on a PR only when it touches what they exercise. The engine
 # updater requires both sets green on the exact main commit it installs (UPDATE_DEFAULT_CHECKS in
@@ -287,6 +288,35 @@ jobs:
         run: |
           echo "test shard 1..4/4 (ubuntu-latest, 24): $RESULT"
           [ "$RESULT" = success ]
+
+  # The acceptance tests that need a booted systemd and passwordless sudo (each test gated on systemCi). The
+  # self-hosted tests runner's container has neither systemd as process 1 nor a host to change, so there they skip
+  # (#1165), and the main-only runner has no sudo (docs/ci-runners.md). So they run here, on GitHub's VM, on each
+  # push to main (the owner's choice): never on a self-hosted runner. scripts/ci/systemd-acceptance.mjs finds them by
+  # their gate and fails on a skip, so none runs nowhere. The updater requires this check, as every push's.
+  # test/systemd-acceptance.test.ts holds this shape.
+  systemd-acceptance:
+    name: systemd acceptance (real systemd)
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: npm
+      # As the shards do: no package scripts, the pins before and after the locked tsc builds.
+      - run: npm ci --ignore-scripts
+      - name: the pinned packages, before any of them runs
+        run: node scripts/ci/check-pins.mjs
+      - run: node node_modules/typescript/bin/tsc -p tsconfig.json
+      - name: the pinned packages again, after tsc emits
+        run: node scripts/ci/check-pins.mjs
+      # The machine these tests stand for, as the shards install it.
+      - name: machine.sh
+        run: sudo apt-get update -q && sudo bash scripts/setup/machine.sh
+      - name: the systemd acceptance tests, each run and passed
+        run: node scripts/ci/systemd-acceptance.mjs
 
   # Kept for one release after #744 removed what it tested, as a job that only succeeds: same job id, same check
   # name. An install whose updater is v0.5.2's or older requires a successful "desktop" run on every commit it

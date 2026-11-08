@@ -62,14 +62,16 @@ test('which push triggers run on a push to main', () => {
 type Step = { run?: string; env?: Record<string, string> };
 type Job = { name?: string; if?: string; needs?: string | string[]; strategy?: { matrix?: Record<string, unknown[]> }; steps?: Step[] };
 /**
- * both: every PR and every run of its workflow on main. pr-only: never on main. slow: a ci-slow.yml job, run when
- * the scope job lists its key: every job in each batch on main (a dispatch with job=all), on a PR only sometimes.
+ * both: every PR and every run of its workflow on main. pr-only: never on main. push-only: every push to main, never
+ * a PR (ci.yml's systemd-acceptance). slow: a ci-slow.yml job, run when the scope job lists its key: every job in
+ * each batch on main (a dispatch with job=all), on a PR only sometimes.
  */
-type Tier = 'both' | 'pr-only' | 'slow';
+type Tier = 'both' | 'pr-only' | 'push-only' | 'slow';
 /** push: every push to main runs it. batch: each batch on main does (ci-slow.yml, dispatched on main by ci-batch.yml). */
 type Check = { name: string; key: string; file: string; tier: Tier; push: boolean; batch: boolean; pr: boolean };
 
 const PR_ONLY = /^github\.event_name == 'pull_request'$/;
+const PUSH_ONLY = /^github\.event_name == 'push'$/;
 /** ci-slow.yml's jobs: each runs when the scope job (scripts/ci/slow-jobs.sh) lists its own key. */
 const SLOW = /^\$\{\{ !cancelled\(\) && contains\(needs\.scope\.outputs\.run, ' ([a-z0-9-]+) '\) \}\}$/;
 /** A summary job runs whatever its needs did, so a failed, cancelled or skipped need fails it rather than skipping it. */
@@ -89,6 +91,7 @@ const SHARDS: Record<string, string> = { 'test-shard-22': 'test-22', 'test-shard
 function tier(file: string, key: string, job: Job): Tier {
   if (!job.if) return 'both';
   if (PR_ONLY.test(job.if)) return 'pr-only';
+  if (PUSH_ONLY.test(job.if)) return 'push-only';
   const slow = SLOW.exec(job.if);
   if (slow) {
     assert.equal(file, batch.SLOW_WORKFLOW, `${file} ${key}: the slow jobs are ci-slow.yml's, the workflow a batch runs`);
@@ -138,7 +141,7 @@ function checks(): Check[] {
           ? name.replace(/\$\{\{ matrix\.([a-z]+) \}\}/g, (_, k: string) => vars[k] ?? assert.fail(`${f} ${key}: no matrix.${k}`))
           : c.length ? `${name} (${c.join(', ')})` : name;
         assert.doesNotMatch(named, /\$\{\{/, `${f} ${key}: a name expression this test doesn't expand`);
-        out.push({ name: named, key, file: f, tier: t, push: !!push && t !== 'slow', batch: batched && t !== 'pr-only', pr });
+        out.push({ name: named, key, file: f, tier: t, push: !!push && t !== 'slow', batch: batched && t !== 'pr-only', pr: pr && t !== 'push-only' });
       }
     }
   }
@@ -156,7 +159,10 @@ const SLOW_CHECKS = ['bootstrap (macos-latest)', 'bootstrap (ubuntu-latest)', 'b
 
 test('the updater\'s default required checks are exactly what a batched main commit gets: every push\'s checks and the batch\'s', () => {
   assert.deepEqual([...defaults()].sort(), [...pushChecks(), ...batchChecks()].sort());
-  assert.equal(defaults().length, 15);
+  assert.equal(defaults().length, 16);
+  // On every push to main but never a PR: the updater requires it, the ruleset can't (a PR never has it).
+  assert.equal(checks().find((c) => c.name === 'systemd acceptance (real systemd)')?.tier, 'push-only');
+  assert.ok(pushChecks().includes('systemd acceptance (real systemd)') && !prChecks().includes('systemd acceptance (real systemd)'));
   assert.deepEqual(batchChecks(), [...SLOW_CHECKS].sort(), 'a batch runs every slow job, and only those');
   for (const x of SLOW_CHECKS) {
     assert.ok(!pushChecks().includes(x), `${x}: not on every push to main, only in a batch`);
