@@ -3,8 +3,9 @@
 //   - Off by default, always: a flag is on only where the repo's config.yaml says `flags: { <name>: true }`.
 //   - Per repo: they live in the repo's own config, so each project opts in by itself, through a reviewed commit (the
 //     config is read from the default branch, src/config/live.ts).
-//   - Only flags the engine knows: a name not in FLAGS makes the config invalid (the coordinator keeps running on the
-//     last good one and raises config_invalid), so a typo never turns something on, or silently nothing.
+//   - Only flags the engine knows: a name in neither FLAGS nor RETIRED_FLAGS (src/config/schema.ts) makes the config
+//     invalid (the coordinator keeps running on the last good one and raises config_invalid), so a typo never turns
+//     something on, or silently nothing. A retired name is accepted and always off, so a repo naming one still starts.
 //   - Every flip is audited: the coordinator records a `flag.flipped` event (the flag, from, to, the config's commit)
 //     whenever a flag's state differs from the last one recorded, so a flip made while it was down is recorded too.
 // Pure but for recordFlagFlips, which reads and appends to the event log.
@@ -12,7 +13,7 @@ import type { EventLog } from './events/log.js';
 import type { EventPayload } from './events/types.js';
 import { FLAGS } from './config/schema.js';
 
-export { FLAG_NAME, FLAGS, RETIRED_FLAGS, flagsSchema, type FlagInfo } from './config/schema.js';
+export { FLAG_NAME, FLAGS, RETIRED_FLAGS, flagsSchema, withRetiredFlags, type FlagInfo } from './config/schema.js';
 
 /** Whether a flag is on for this repo: only an explicit `true` counts; anything else is off. */
 export const flagOn = (flags: Readonly<Record<string, boolean>> | undefined, name: string): boolean => flags?.[name] === true;

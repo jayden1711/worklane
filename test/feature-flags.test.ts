@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { appendFileSync, cpSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { appendFileSync, cpSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
 import { tmpdir } from 'node:os';
@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { EventLog } from '../src/events/log.js';
 import type { EventPayload } from '../src/events/types.js';
 import { ProjectConfig } from '../src/config/schema.js';
-import { FLAGS, RETIRED_FLAGS, flagOn, flagsSchema, recordFlagFlips, recordedFlags } from '../src/flags.js';
+import { FLAGS, FLAG_NAME, RETIRED_FLAGS, flagOn, flagsSchema, recordFlagFlips, recordedFlags, withRetiredFlags } from '../src/flags.js';
 import { loadConfig } from '../src/config/load.js';
 import { FakeRunner } from '../src/runner.js';
 import { coordinator, fixture, skip } from './repro-state-graph/harness.js';
@@ -49,18 +49,38 @@ test('the engine starts on a repo whose config still names a retired flag, on or
     try {
       // Before it is retired (an engine that never knew it): the config is invalid, as for any unknown name.
       assert.throws(() => loadConfig(dir), /no such flag: retired_one/);
-      RETIRED_FLAGS.push('retired_one');
-      try {
-        const cfg = loadConfig(dir);
-        assert.deepEqual(cfg.project.flags, {}, `retired_one: ${value} loads, and is off`);
-        assert.equal(flagOn(cfg.project.flags, 'retired_one'), false);
-      } finally {
-        RETIRED_FLAGS.splice(RETIRED_FLAGS.indexOf('retired_one'), 1);
-      }
+      const cfg = withRetiredFlags(['retired_one'], () => loadConfig(dir));
+      assert.deepEqual(cfg.project.flags, {}, `retired_one: ${value} loads, and is off`);
+      assert.equal(flagOn(cfg.project.flags, 'retired_one'), false);
+      assert.throws(() => loadConfig(dir), /no such flag: retired_one/, 'retired only for that call');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   }
+});
+
+test('the flag lists are frozen and share no name; only the schema itself retires one for a test (#1173 review)', () => {
+  assert.ok(Object.isFrozen(FLAGS), 'FLAGS is frozen');
+  assert.ok(Object.isFrozen(RETIRED_FLAGS), 'RETIRED_FLAGS is frozen');
+  assert.throws(() => (RETIRED_FLAGS as string[]).push('x'), TypeError, 'nothing can retire a name from outside the reviewed file');
+  assert.throws(() => ((RETIRED_FLAGS as string[]).length = 0), TypeError, 'nor bring the startup outage back by emptying it');
+  assert.throws(() => ((FLAGS as Record<string, unknown>).x = { what: 'w', since: '#1' }), TypeError);
+  const known = Object.keys(FLAGS);
+  assert.deepEqual(known.filter((n) => RETIRED_FLAGS.includes(n)), [], 'no name is both known and retired');
+  for (const n of [...known, ...RETIRED_FLAGS]) assert.match(n, FLAG_NAME);
+  // The seam: retired only inside the call, and nested calls unwind.
+  const s = () => flagsSchema().safeParse({ seam_one: true }).success;
+  assert.equal(s(), false);
+  assert.equal(withRetiredFlags(['seam_one'], () => withRetiredFlags(['other'], s)), true);
+  assert.equal(s(), false);
+  assert.throws(() => withRetiredFlags(['seam_one'], () => { throw new Error('boom'); }), /boom/);
+  assert.equal(s(), false, 'unwound after a throw too');
+  // No engine module calls the seam: only the schema defines it, and only tests use it.
+  const src = join(repoRoot, 'src');
+  const walk = (d: string): string[] => readdirSync(d).flatMap((n) => (statSync(join(d, n)).isDirectory() ? walk(join(d, n)) : n.endsWith('.ts') ? [join(d, n)] : []));
+  const callers = walk(src).filter((f) => !f.endsWith(join('config', 'schema.ts')) && !f.endsWith('flags.ts') && /withRetiredFlags\(/.test(readFileSync(f, 'utf8')));
+  assert.deepEqual(callers, []);
+  assert.doesNotMatch(readFileSync(join(src, 'flags.ts'), 'utf8'), /withRetiredFlags\(/, 'flags.ts only re-exports it');
 });
 
 test('flagOn: only an explicit true is on', () => {
