@@ -224,14 +224,17 @@ export function changedNamesOrNull(cwd: string, args: string[], o: NameListOptio
   return out instanceof Error ? null : names(out);
 }
 
-/** The untracked files of a worktree (`ls-files --others --exclude-standard -z`), each read by nameOf. */
-export function untrackedNames(cwd: string): string[] {
-  return names(must(runBytes(cwd, ['ls-files', '--others', '--exclude-standard', '-z'])));
+/**
+ * The untracked files of a worktree (`ls-files --others --exclude-standard -z`), each read by nameOf. `paths`: only
+ * under these pathspecs (whole pathspecs, after `--`).
+ */
+export function untrackedNames(cwd: string, paths: string[] = []): string[] {
+  return names(must(runBytes(cwd, ['ls-files', '--others', '--exclude-standard', '-z', ...(paths.length ? ['--', ...paths] : [])])));
 }
 
-/** The ignored untracked files of a worktree (`ls-files --others --ignored --exclude-standard -z`), each read by nameOf. */
-export function ignoredNames(cwd: string): string[] {
-  return names(must(runBytes(cwd, ['ls-files', '--others', '--ignored', '--exclude-standard', '-z'])));
+/** The ignored untracked files of a worktree (`ls-files --others --ignored --exclude-standard -z`), each read by nameOf; `paths` as for untrackedNames. */
+export function ignoredNames(cwd: string, paths: string[] = []): string[] {
+  return names(must(runBytes(cwd, ['ls-files', '--others', '--ignored', '--exclude-standard', '-z', ...(paths.length ? ['--', ...paths] : [])])));
 }
 
 /**

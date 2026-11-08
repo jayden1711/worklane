@@ -25,6 +25,7 @@ import { randomBytes } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { BRAND } from './brand.js';
+import { changedNames, ignoredNames, untrackedNames } from './coordinator/change-files.js';
 import { gitSpawnSync } from './os/git.js';
 
 /** Leading env assignment that marks our hook commands (the shell ignores it otherwise). */
@@ -193,15 +194,22 @@ const PROJECT_PERMISSION_KEYS = new Set(['allow', 'deny', 'ask']);
 export function uncommittedAgentFilesRefusal(cwd: string): string | null {
   const inside = gitSpawnSync(['rev-parse', '--is-inside-work-tree'], { cwd, encoding: 'utf8' });
   if (inside.status !== 0 || inside.stdout.trim() !== 'true') return null;
-  const status = (args: string[]) => {
-    const r = gitSpawnSync(['status', '--porcelain=v1', '-z', '--untracked-files=all', '--no-renames', ...args], { cwd, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
-    if (r.status !== 0) throw new Error(`git status failed in ${cwd}: ${String(r.stderr ?? '').trim().split('\n')[0]?.slice(0, 200) ?? ''}`);
-    // The coordinator's own worktrees, as git lists them collapsed (`.claude/worktrees/`) or file by file: never these.
-    return r.stdout.split('\0').filter(Boolean).map((e) => e.slice(3)).filter((p) => p !== '.claude/worktrees/' && !p.startsWith('.claude/worktrees/'));
-  };
+  // Under .claude/, never the coordinator's own worktrees; a CLAUDE.md or CLAUDE.local.md anywhere.
+  const inClaudeDir = (p: string) => p.startsWith('.claude/') && !p.startsWith('.claude/worktrees/');
+  const instructions = (p: string) => /(^|\/)CLAUDE(\.local)?\.md$/.test(p);
   let changed: string[];
   try {
-    changed = [...new Set([...status(['--ignored=matching', '--', ':(top).claude', ':(top,exclude).claude/worktrees']), ...status(['--', ':(top,glob)**/CLAUDE.md', ':(top,glob)**/CLAUDE.local.md'])])];
+    // Through the one helper for changed names (src/coordinator/change-files.ts): what differs from HEAD (staged or
+    // not), what is untracked, and under .claude/ what is ignored too; listed only where they can match.
+    // From the checkout's top, so the paths and the literal pathspec (the helper reads every pathspec literally) are
+    // the top's. Untracked files are listed whole (an ignored tree such as node_modules isn't), and filtered here.
+    const top = gitSpawnSync(['rev-parse', '--show-toplevel'], { cwd, encoding: 'utf8' });
+    if (top.status !== 0 || !top.stdout.trim()) throw new Error(`git can't say where the checkout at ${cwd} starts`);
+    const root = top.stdout.trim();
+    const differs = changedNames(root, ['HEAD']).filter((p) => inClaudeDir(p) || instructions(p));
+    const untracked = untrackedNames(root).filter((p) => inClaudeDir(p) || instructions(p));
+    const ignored = ignoredNames(root, ['.claude']).filter(inClaudeDir);
+    changed = [...new Set([...differs, ...untracked, ...ignored])];
   } catch (e) {
     return `the checkout's agent settings and instructions couldn't be compared with its last commit (${(e as Error).message})`;
   }
