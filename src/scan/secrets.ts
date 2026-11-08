@@ -6,7 +6,7 @@ import { accessSync, constants, existsSync, lstatSync, mkdirSync, mkdtempSync, r
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, isAbsolute, join, resolve as resolvePath } from 'node:path';
 import { BRAND } from '../brand.js';
-import { gitConfigRefusal, gitEnv, gitExecFileSync, gitSnapshot, gitSpawnSync, type GitSnapshot } from '../os/git.js';
+import { gitConfigRefusal, gitEnv, gitExecFileSync, gitGuarded, gitSnapshot, gitSpawnSync, type GitSnapshot } from '../os/git.js';
 import { ignoredNames, presentNames, rawChanges, untrackedNames } from '../coordinator/change-files.js';
 import { notRootsProgram } from '../os/index.js';
 import { findTool } from '../tool-path.js';
@@ -111,10 +111,13 @@ export const GIT_HOOK_MARKER = `# managed by ${BRAND.cli}`;
 /**
  * Why git would make a commit in checkout `top` without the engine's pre-commit hook (scanIndex, #983); null when it
  * runs that hook, or when the checkout's hooks dir holds no engine hook. INVARIANT (#983): git itself says which hook
- * file it runs (`rev-parse --git-path`, which reads core.hooksPath from all the config git reads, includes too), so no
- * config route to another hooks dir needs modelling; that file must be the engine's, and executable.
+ * file it runs (`rev-parse --git-path`, which reads core.hooksPath from the repository, worktree, system and global
+ * config git reads, includes too), so no config route to another hooks dir needs modelling; that file must be the
+ * engine's, and executable. In a process marked as an instance's (gitGuarded), this runner's git reads no global
+ * config, so it can't say what a commit's own git would run: refused there (R124d), never answered from less config.
  */
 export function commitHookSkipped(top: string): string | null {
+  if (gitGuarded()) return "this process's git reads no global config (it runs for an instance), so it can't say which pre-commit hook a commit here would run";
   const r = gitSpawnSync(['rev-parse', '--path-format=absolute', '--git-common-dir', '--git-path', 'hooks/pre-commit'], { cwd: top, encoding: 'utf8', timeout: 5_000 });
   const [common, runs] = r.error || r.status !== 0 ? [] : String(r.stdout).split('\n');
   if (!common || !runs) return "git can't say which pre-commit hook it runs here";

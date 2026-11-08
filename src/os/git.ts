@@ -173,6 +173,12 @@ const marks = (v: string | undefined): v is string => v === '1' || (!!v && isAbs
 /** Whether `env`, or this process, is marked as an instance's. Own variables only (#786). */
 const marked = (env: NodeJS.ProcessEnv): boolean => marks(ownEnv(env).get(GIT_GUARD_VAR)) || marks(ownEnv(process.env).get(GIT_GUARD_VAR));
 
+/**
+ * Whether a git run here through this runner is guarded (this process, or `env`, marked as an instance's): its git
+ * then reads no global config (GIT_GUARD_ENV), so it can't answer for a git that does, such as an agent's own commit.
+ */
+export const gitGuarded = (env: NodeJS.ProcessEnv = process.env): boolean => marked(env);
+
 /** The instance checkout a marked git is pinned to: this process's mark first (the coordinator's own), then the git's. */
 function markedRepo(env: NodeJS.ProcessEnv): string | null {
   for (const v of [ownEnv(process.env).get(GIT_GUARD_VAR), ownEnv(env).get(GIT_GUARD_VAR)]) if (marks(v) && v !== '1') return v;

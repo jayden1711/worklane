@@ -10,6 +10,8 @@ import { dirname, join } from 'node:path';
 import { BRAND } from '../../src/brand.js';
 import { runHook } from '../../src/hook.js';
 import { childEnv } from '../../src/os/index.js';
+import { GIT_GUARD_VAR } from '../../src/os/git.js';
+import { commitHookSkipped } from '../../src/scan/secrets.js';
 import { repoRoot } from '../helpers.js';
 
 // WHY: the host's own git config (system and user) must not change what these tests see.
@@ -237,4 +239,17 @@ test('the hook fails the commit when its scan can\'t run, when the hook it chain
   const h = spawnSync(process.execPath, [join(repoRoot, 'dist', 'src', 'hook-main.js'), 'pre-commit'], { cwd: outside, input: '', encoding: 'utf8', env: { ...process.env, GIT_CEILING_DIRECTORIES: dirname(outside) } });
   assert.equal(h.status, 1, h.stderr);
   assert.match(h.stderr, /no checkout found/);
+});
+
+test("R124d: in a process marked as an instance's, whose git reads no global config, which hook a commit runs can't be said, so it is refused", { skip: process.platform === 'win32' && 'POSIX hooks' }, () => {
+  const d = checkout();
+  assert.equal(commitHookSkipped(d), null, 'unmarked: the engine hook is the one git runs');
+  const before = process.env[GIT_GUARD_VAR];
+  process.env[GIT_GUARD_VAR] = d;
+  try {
+    assert.match(commitHookSkipped(d) ?? '', /reads no global config \(it runs for an instance\), so it can't say which pre-commit hook a commit here would run/);
+  } finally {
+    if (before === undefined) delete process.env[GIT_GUARD_VAR];
+    else process.env[GIT_GUARD_VAR] = before;
+  }
 });
