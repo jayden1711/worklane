@@ -9,6 +9,7 @@ import { FileBacklog } from '../src/backlog/file.js';
 import { loadConfig } from '../src/config/load.js';
 import { ReviewConfig } from '../src/config/schema.js';
 import { Coordinator } from '../src/coordinator.js';
+import { AUTO_OFF_WAIT } from '../src/coordinator/landing.js';
 import { EventLog } from '../src/events/log.js';
 import { DEFAULT_COMMIT_IDENTITY, FakeRunner, type RunRequest } from '../src/runner.js';
 import { which } from '../src/os/index.js';
@@ -69,7 +70,8 @@ async function run(stop: (f: ReturnType<typeof fixture>) => void) {
 }
 
 /**
- * The same, with the instance policy's auto-merge switch as `o.autoMerge` (absent: off), and with `o.l3` the change
+ * The same, with the instance policy's auto-merge switch as `o.autoMerge` (absent: no switch, as a local site with no
+ * instance policy, which lands as before), and with `o.l3` the change
  * raised to L3 so the owner is asked, then (`o.approve`) answers approve.
  */
 async function runWith(stop: (f: ReturnType<typeof fixture>) => void, o: { autoMerge?: () => boolean; l3?: boolean; approve?: boolean }) {
@@ -133,3 +135,23 @@ test("direct mode (#808 (c)): with the policy's auto-merge off, an L3 the owner 
   assert.equal(r.landed.length, 1, 'landed');
   assert.notEqual(r.mainAfter, r.mainBefore, 'main moved');
 });
+
+test("direct mode (#808 (c), R1183a): auto-merge on when the land starts and off by the push: the batch waits, main never moves", { skip }, async () => {
+  // The switch is read once by landNext's filter (on) and again right before the push (off from then on).
+  let reads = 0;
+  const r = await runWith(() => {}, { autoMerge: () => reads++ === 0 });
+  assert.equal(r.landed.length, 0, 'never landed');
+  assert.equal(r.mainAfter, r.mainBefore, 'main untouched');
+  const results = r.f.log.read(0, ['land.result']).map((e) => e.payload as { outcome: string; detail: string });
+  assert.ok(results.some((x) => x.outcome === 'deferred' && x.detail.includes("not pushed: the instance policy's auto-merge is off")), JSON.stringify(results));
+  assert.ok(reads >= 2, 'read at landNext and again before the push');
+});
+
+test("direct mode (#808 (c), R1183a): what the switch leaves queued says why it waits, once, not on every tick", { skip }, async () => {
+  const r = await runWith(() => {}, { autoMerge: () => false });
+  const waits = r.f.log.read(0, ['land.result']).map((e) => e.payload as { outcome: string; detail: string }).filter((x) => x.detail === AUTO_OFF_WAIT);
+  assert.equal(waits.length, 1, 'one event for the reason, across the ticks');
+  assert.equal(waits[0]!.outcome, 'deferred', 'deferred: it stays queued');
+  assert.equal(r.landed.length, 0);
+});
+

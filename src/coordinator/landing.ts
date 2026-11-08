@@ -25,6 +25,9 @@ import { redactString } from '../events/redact.js';
 import { slotDeferringSince } from './wait-caps.js';
 import { optimizePrLines } from '../optimize.js';
 
+/** Why an automatic land (below L3) waits queued while the instance policy's auto-merge is off (#808). */
+export const AUTO_OFF_WAIT = "waiting: the instance policy's auto-merge is off, so only what the owner approved (L3) lands; this lands once auto_merge is on";
+
 /**
  * Whether a queued land is one the owner approved: an L3 is queued only by the owner's approve answer (decisions.ts),
  * every other level straight from the review (coordinator.ts), so the level says it.
@@ -70,13 +73,6 @@ export abstract class Landing extends Decisions {
   private remoteIsLocal: boolean | undefined;
 
   /**
-   * Why a direct land may not push the default branch now, or null. The auto-merge stop first (#808): the same check
-   * PR mode makes, so a stop, whichever mode set it (one left from PR mode across a land_mode switch included), holds
-   * every direct land, approved or not, until the operator clears it. Then GitHub must enforce its protection, asked
-   * now (src/direct-land.ts). A protection refusal is recorded once until the answer changes (coordinator.error: health
-   * and the dashboard show it). Either way the queue waits, and lands once it is lifted.
-   */
-  /**
    * The instance policy's auto-merge switch for direct landing (#808, the owner's (c), 2026-11-07): `auto_merge: off`
    * stops automatic landing (L0 to L2), never what the owner approved (L3). Read at each use. A policy that can't be
    * read (the switch throws) is off, fail closed. No instance policy at all (a local site, which passes no switch) has
@@ -91,6 +87,13 @@ export abstract class Landing extends Decisions {
     }
   }
 
+  /**
+   * Why a direct land may not push the default branch now, or null. The auto-merge stop first (#808): the same check
+   * PR mode makes, so a stop, whichever mode set it (one left from PR mode across a land_mode switch included), holds
+   * every direct land, approved or not, until the operator clears it. Then GitHub must enforce its protection, asked
+   * now (src/direct-land.ts). A protection refusal is recorded once until the answer changes (coordinator.error: health
+   * and the dashboard show it). Either way the queue waits, and lands once it is lifted.
+   */
   private async directLandBlocked(): Promise<string | null> {
     const stopped = this.autoMergeStopped();
     if (stopped) return `auto-merge is stopped: ${stopped}`;
@@ -112,12 +115,30 @@ export abstract class Landing extends Decisions {
       // Direct: not even the gates run while the branch is unprotected (asked again just before the push, too). With
       // the policy's auto-merge off, only what the owner approved (L3) lands; the rest waits queued (#808).
       else if (!(await this.directLandBlocked())) {
-        const landing = this.directAutoOn() ? queue : queue.filter(ownerApproved);
+        const auto = this.directAutoOn();
+        const landing = auto ? queue : queue.filter(ownerApproved);
+        // What the switch leaves queued says why it waits (the dashboard's queue shows it), once until that changes.
+        if (!auto) for (const q of queue) if (!ownerApproved(q)) this.waitingOnce(q.issue, AUTO_OFF_WAIT);
         if (landing.length) await this.landBatch(this.buildBatch(landing));
       }
     } finally {
       this.landing = false;
     }
+  }
+
+  /**
+   * Record why queued `issue` waits (a `land.result` deferred, which keeps it queued), unless its last result since it
+   * was queued already says so: one event per reason, not one per tick.
+   */
+  private waitingOnce(issue: number, detail: string) {
+    const queuedAt = this.d.log.read(0, ['land.queued']).filter((e) => (e.payload as { issue: number }).issue === issue).at(-1)?.id ?? 0;
+    const last = this.d.log
+      .read(queuedAt, ['land.result'])
+      .map((e) => e.payload as EventPayload<'land.result'>)
+      .filter((r) => r.issue === issue)
+      .at(-1);
+    if (last?.outcome === 'deferred' && last.detail === detail) return;
+    this.emit('land.result', { issue, outcome: 'deferred', landed: null, detail });
   }
 
   private gateTiers(batch: EventPayload<'land.queued'>[]): string[] {
