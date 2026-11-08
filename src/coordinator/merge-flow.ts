@@ -1232,8 +1232,8 @@ export abstract class MergeFlow extends FixRuns {
   /**
    * What holds merges after a real red on `m`, in place before its verdict is recorded (#907): fix-forward's episode
    * (mainWentRed). When fix-forward can't take it on (it throws before its episode is open), auto-merge stops instead
-   * (fail closed), unless a stop that waits for green main is already in force; either way something holds the next
-   * merge. A throw after the episode opened (a read in its first move or bisect step) leaves the episode holding, and
+   * (fail closed), with a stop of its own naming this merge, even beside another stop in force (R1186c); either way
+   * something holds the next merge. A throw after the episode opened (a read in its first move or bisect step) leaves the episode holding, and
    * its next step() carries on: a stop there would also hold fix-forward's own fix PR (trainMerge), so a one-off error
    * would need an admin's resume (R1186a).
    */
@@ -1243,7 +1243,9 @@ export abstract class MergeFlow extends FixRuns {
     } catch (e) {
       const message = String((e as Error)?.message ?? e).replace(/\s+/g, ' ').slice(0, 300);
       this.emit('coordinator.error', { instance: this.d.instance, where: `fix-forward on ${m.sha.slice(0, 8)}`, kind: 'error', message });
-      if (!this.fixForward.open() && !this.gatedStopInForce()) this.stopFor(`${this.branch} went red after auto-merging #${m.number} (\`${m.sha.slice(0, 8)}\`: ${failed.join(', ')}), and fix-forward couldn't take it on (${message})`.slice(0, 2000), m.number, m.sha, null);
+      // A stop of its own, naming this merge, even with another gated stop in force (R1186c): kept, an earlier stop
+      // could be resumed (its own id, acknowledged for its own reason) while this red holds nothing.
+      if (!this.fixForward.open()) this.stopFor(`${this.branch} went red after auto-merging #${m.number} (\`${m.sha.slice(0, 8)}\`: ${failed.join(', ')}), and fix-forward couldn't take it on (${message})`.slice(0, 2000), m.number, m.sha, null);
     }
   }
 

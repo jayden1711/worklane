@@ -105,3 +105,19 @@ test("#907 (the owner's addition): a later merge whose handling throws on every 
   const results = f2.log.read(0, ['merge.main_result']).map((e) => e.payload as EventPayload<'merge.main_result'>);
   assert.deepEqual(results.map((r) => [r.number, r.outcome]), [[5, 'timed_out']], '#5 judged timed out once; #7 left unjudged, so a later pass takes it on');
 });
+
+test('#907 (R1186c): with another gated stop in force, fix-forward unable to take a red on still writes a stop of its own, so resuming the old one releases nothing', async () => {
+  const w = world();
+  const c = w.make(true) as Watching & { stopFor(reason: string, number: number | null, sha: string | null, revert: null, by?: string): void };
+  // An earlier merge's stop (main_unknown for #5) in force when #7 goes red.
+  c.stopFor("main isn't known green after auto-merging: ci never reported on `aaaaaaaa` (#5)", 5, 'a'.repeat(40), null, 'main_unknown');
+  const old = w.f.log.read(0, ['merge.stopped']).at(-1)!.id;
+  await c.watchMerges();
+  assert.equal(w.red().length, 1, 'judged red');
+  const stops = w.f.log.read(0, ['merge.stopped']);
+  assert.equal(stops.length, 2, 'a second stop, for #7');
+  assert.notEqual(stops.at(-1)!.id, old);
+  assert.match((stops.at(-1)!.payload as { reason: string }).reason, /went red after auto-merging #7/);
+  assert.match(c.autoMergeStopped() ?? '', /#7/, "the stop in force is #7's: a resume of #5's (its own id) can't release it");
+});
+
