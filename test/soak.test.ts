@@ -121,6 +121,10 @@ test('the soak workflow: schedule and dispatch only, read-only, on GitHub-hosted
   assert.deepEqual(job.steps.find((s) => s.uses?.startsWith('actions/checkout@'))?.with, { 'persist-credentials': false }, 'no token left in .git/config');
   const run = job.steps.find((s) => s.name === 'soak')!.run!;
   assert.match(run, /exit !\(h >= 1 && h <= 5\.5\)/, 'hours from 1 to 5.5');
+  // The gitleaks download rides out a release-download 504 (#1201), and its sha256 is still checked after it.
+  const gitleaks = job.steps.find((s) => s.name === 'install gitleaks')!.run!;
+  assert.match(gitleaks, /curl -sSfL --retry 5 --retry-all-errors --retry-delay 5 -o "\$f" "https:\/\/github\.com\/gitleaks\/gitleaks\/releases\/download\//);
+  assert.ok(gitleaks.indexOf('sha256sum -c -') > gitleaks.indexOf('curl '), 'the pinned sha256 is checked after the download');
   // After the run: the verdict file must exist and say no failures (a skipped or renamed test exits 0 with none).
   const check = run.indexOf('soak-verdict.json');
   assert.ok(check > run.indexOf('dist/test/soak.test.js'), 'the verdict is read after the run');
