@@ -253,3 +253,28 @@ test("R124d: in a process marked as an instance's, whose git reads no global con
     else process.env[GIT_GUARD_VAR] = before;
   }
 });
+
+test('R1124f D1: index entries whose names land on one file when written out (not UTF-8, a case pair) are each scanned: the secret is refused', { skip }, () => {
+  // Staged by plumbing, as the index holds them (names a macOS file system can't hold need no working-tree file).
+  const stage = (d: string, entries: [Buffer, string][]) => {
+    const lines = entries.map(([name, body]) => {
+      const blob = execFileSync('git', ['-C', d, 'hash-object', '-w', '--stdin'], { input: body, encoding: 'utf8' }).trim();
+      return Buffer.concat([Buffer.from(`100644 ${blob}\t`), name, Buffer.from([0])]);
+    });
+    execFileSync('git', ['-C', d, 'update-index', '-z', '--index-info'], { input: Buffer.concat(lines) });
+  };
+  for (const [what, entries] of [
+    // Both decode to "�.js"; git lists \xfe first, so the secret is the one a second write would overwrite.
+    ['two names that are not UTF-8', [[Buffer.from([0xfe, 0x2e, 0x6a, 0x73]), SECRET], [Buffer.from([0xff, 0x2e, 0x6a, 0x73]), 'export const y = 2;\n']]],
+    // One file on a case-insensitive file system (macOS); two on Linux, where this case passes either way.
+    ['a case pair', [[Buffer.from('Key.js'), SECRET], [Buffer.from('key.js'), 'export const y = 2;\n']]],
+  ] as [string, [Buffer, string][]][]) {
+    const d = checkout();
+    stage(d, entries);
+    const was = head(d);
+    const r = commit(d, '-m', 'wip');
+    assert.notEqual(r.status, 0, `${what}: the commit is refused`);
+    assert.match(r.stderr, /secret/i, what);
+    assert.equal(head(d), was, `${what}: nothing was committed`);
+  }
+});

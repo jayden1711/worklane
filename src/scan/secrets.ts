@@ -177,20 +177,34 @@ function scanComparisons(top: string, binary: string | null | undefined, compari
       const side = (name: string, pick: (c: Compared) => Buffer | null) => {
         const keys = new Map<string, string[]>();
         for (const [k, scannerName] of [[0, false], [1, true]] as const) {
-          const root = join(tmp, `c${i}-${name}-${k}`);
-          let any = false;
+          // R1124f D1: two entries can land on one file here: names that aren't UTF-8 decode alike (U+FFFD), and on a
+          // case-insensitive or normalising file system a case or NFC/NFD pair is one file. Each entry goes in the
+          // first root where its folded name, and every folder above it, is still free (as a file or as a folder), so
+          // none overwrites another and every one is scanned.
+          const roots: { files: Set<string>; dirs: Set<string> }[] = [];
+          const fold = (p: string) => p.normalize('NFC').toLowerCase();
+          const slotOf = (path: string): number => {
+            const parts = fold(path).split('/');
+            const self = parts.join('/');
+            const above = parts.slice(0, -1).map((_, j) => parts.slice(0, j + 1).join('/'));
+            let n = roots.findIndex((r) => !r.files.has(self) && !r.dirs.has(self) && above.every((d) => !r.files.has(d)));
+            if (n === -1) n = roots.push({ files: new Set(), dirs: new Set() }) - 1;
+            roots[n]!.files.add(self);
+            for (const d of above) roots[n]!.dirs.add(d);
+            return n;
+          };
           for (const c of files) {
             const content = pick(c);
             if (content === null || SCANNER_NAMES.has(c.path) !== scannerName) continue;
             const parts = c.path.split('/');
             if (!c.path || c.path.startsWith('/') || parts.some((p) => p === '..' || p === '')) throw new Error(`an unexpected path from git: ${JSON.stringify(c.path)}`);
             // WHY: a file the scanner would read as its own settings at its root goes, as content, a folder lower.
-            const at = join(root, scannerName ? SCANNER_DIR : '', c.path);
+            const at = join(tmp, `c${i}-${name}-${k}-${slotOf(c.path)}`, scannerName ? SCANNER_DIR : '', c.path);
             mkdirSync(dirname(at), { recursive: true });
             writeFileSync(at, Buffer.concat([TEXT_PREFIX, text(content)]));
-            any = true;
           }
-          if (any) for (const [file, found] of scan(root, scannerName)) keys.set(file, found);
+          // Each root's findings, added to what the others found under the same name (never in place of them).
+          for (const n of roots.keys()) for (const [file, found] of scan(join(tmp, `c${i}-${name}-${k}-${n}`), scannerName)) keys.set(file, [...(keys.get(file) ?? []), ...found]);
         }
         return keys;
       };
