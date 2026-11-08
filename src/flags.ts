@@ -132,27 +132,35 @@ export function recordedFlags(log: EventLog): Map<string, boolean> {
  *   its record is durably written (R1173k K2, R1173l D3: a buffered or dropped record turns nothing on). Returns what
  *   it recorded.
  */
-export function adoptFlags(o: { log: EventLog; repo: string; actor: string; check: (cfg: Config) => ConfigError[] }): EventPayload<'flag.flipped'>[] {
+export function adoptFlags(o: { log: EventLog; repo: string; actor: string; branch: string; check: (cfg: Config) => ConfigError[] }): EventPayload<'flag.flipped'>[] {
   const known = knownFlags();
   const head = remoteHead(o.repo);
-  const read = head ? flagsAt(o.repo, head.sha, known, o.check) : null;
+  // origin's HEAD must be the default branch this instance is configured for (R1173n M3: an origin HEAD moved to an
+  // unprotected branch turned flags on from it). A mismatch reads nothing: every flag off.
+  const read = head && head.branch === o.branch ? flagsAt(o.repo, head.sha, known, o.check) : null;
   const sha = read && head ? head.sha : null;
   const on = read ?? [];
+  const before = snapshot?.on ?? [];
+  // Turn-offs first, before anything here can throw (R1173m/n N2, N3: a failed record write kept a flag on while the
+  // log said off): only what is on now and still on at the head stays on until the records are written.
+  const keep = on.filter((n) => before.includes(n));
+  snapshot = sha ? Object.freeze({ sha, on: Object.freeze([...keep]) }) : null;
   const was = recordedFlags(o.log);
   const out: EventPayload<'flag.flipped'>[] = [];
-  let durable = true;
+  // Durable only when nothing is held in memory, before and after: a held record reads as recorded on the next tick
+  // (R1173m 1: a real SQLITE_FULL turned a flag on with no row on disk).
+  let durable = o.log.buffered().count === 0;
   for (const flag of [...new Set([...known, ...was.keys()])].sort()) {
     const from = was.get(flag) ?? false;
     const to = on.includes(flag);
     if (from === to) continue;
     const p = { flag, from, to, sha };
     const e = o.log.append('flag.flipped', p, o.actor);
-    if (e.id === 0 || o.log.buffered().count > 0) durable = false;
+    if (e.id === 0) durable = false;
     out.push(p);
   }
-  // Not durably recorded: no flag goes on that wasn't on; one that was on stays on only if the head still says so.
-  const before = snapshot?.on ?? [];
-  const now = durable ? on : on.filter((n) => before.includes(n));
-  snapshot = sha ? Object.freeze({ sha, on: Object.freeze([...now]) }) : null;
+  if (o.log.buffered().count > 0) durable = false;
+  // Durably recorded: the head's flags on; otherwise nothing goes on that wasn't (the turn-offs above stand).
+  if (durable && sha) snapshot = Object.freeze({ sha, on: Object.freeze([...on]) });
   return out;
 }

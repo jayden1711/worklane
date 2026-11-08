@@ -21,8 +21,12 @@ new behaviour can be tried on one repo before it reaches the rest. Code: `src/co
     that failed (the remote unreachable, the commit not fetched, the config invalid or removed) never keeps one on,
     and isn't cached, so the next tick reads again. A test holds that nothing else in `src/` names `adoptFlags`, and
     since nothing it takes picks the source, any caller could only adopt what the default branch says now.
-  - A flag goes on only once its `flag.flipped` is durably written: a record the event log dropped or holds in
-    memory (a full disk) turns nothing on.
+  - origin's default branch must be the instance's configured `default_branch`: if origin's `HEAD` points anywhere
+    else (an unprotected branch), nothing is adopted and every flag is off.
+  - A flag goes on only once its `flag.flipped` is durably written: while any record is held in memory (a full disk),
+    or one was dropped, nothing turns on. A flag the default branch turned off goes off at once, before its record
+    is written, so a record that can't be written never keeps one on. The coordinator adopts flags even when
+    refreshing its config failed.
   - It reads `flags:` in plain code, not through the zod schema.
   - A coordinator started on the checkout's config (main's invalid or missing) adopts nothing until main's config is
     valid: **every flag is off**. A branch, a hand edit, a written-to config object or a polluted prototype never
@@ -81,6 +85,9 @@ The engine knows no flags yet. The first one comes with the first risky change t
 - **They can't be read from anything but the default branch's committed config.** Not from a checkout, a branch, a
   config object or the schema; the freeze on `FILES` and `ProjectConfig.shape` is shallow (zod's own objects can be
   changed), so the flags don't rely on it.
+- **Limit: the test seam.** `withKnownFlags` (a flag registered for one test) runs only in node's test runner
+  (`--test`, or `NODE_TEST_CONTEXT` set). A process whose environment an attacker can set could set
+  `NODE_TEST_CONTEXT` and pass it; environment control is outside the threat model.
 - **They can't change without a record.** A flip is a reviewed commit plus a `flag.flipped` event. The only flip without
   a commit is a flag the engine stopped knowing, and that's always recorded as off.
 - **They can't be set from the dashboard, the CLI, an issue or an agent's run.** Only the repo's config sets them, and
