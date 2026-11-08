@@ -185,18 +185,21 @@ function scanCommit(rules, sha, owner) {
 
 // Vendor attribution (#576): this repo's attribution is the DCO sign-off only. A Co-Authored-By trailer with any
 // address (or none: the commit's own email is dropped from the scan above, so this is its own check), a coding tool's
-// "Generated with" line, or its session trailer. Whole lines only: naming them in prose is fine.
-// check-table: never-shrink
-const ATTRIBUTION = [
-  /^\s*Co-Authored-By\s*:/i,
-  /^[^\p{L}\p{N}]*Generated (?:with|by) \[?(?:Claude|Codex|Copilot|Cursor|Gemini|Aider)\b/iu,
-  /^\s*Claude-Session\s*:/i,
-];
+// "Generated with" line, or its session trailer. Whole lines only: naming them in prose is fine. ATTRIBUTION is data in
+// scripts/push-gate.tables.json (#941); this file runs on its own, so it carries it (scripts/lib/table-copies.mjs), and
+// the RegExps made from it are this file's own.
+// BEGIN tables from push-gate.tables.json: generated, do not edit (node scripts/gen-table-copies.mjs --write)
+// This script runs on its own, so it carries its tables as frozen literals of the data in
+// scripts/push-gate.tables.json, which the weakening hold compares parsed (#941).
+// test/table-copies.test.ts fails when this block is not what that file makes.
+const ATTRIBUTION = Object.freeze([Object.freeze({ source: "^\\s*Co-Authored-By\\s*:", flags: "i" }), Object.freeze({ source: "^[^\\p{L}\\p{N}]*Generated (?:with|by) \\[?(?:Claude|Codex|Copilot|Cursor|Gemini|Aider)\\b", flags: "iu" }), Object.freeze({ source: "^\\s*Claude-Session\\s*:", flags: "i" })]);
+// END tables from push-gate.tables.json
+const ATTRIBUTION_RES = Object.freeze(ATTRIBUTION.map((p) => new RegExp(p.source, p.flags)));
 const ATTRIBUTION_FIX = "This repo's attribution is the DCO sign-off (git commit -s) only: remove those lines.";
 
 /** `<where>:<line>: vendor attribution (<line text>)` for each attribution line in `text`. */
 function attributionLines(where, text) {
-  return text.split(/\r?\n/).flatMap((line, i) => (ATTRIBUTION.some((re) => re.test(line)) ? [`${where}:${i + 1}: vendor attribution (${line.trim().slice(0, 120)})`] : []));
+  return text.split(/\r?\n/).flatMap((line, i) => (ATTRIBUTION_RES.some((re) => re.test(line)) ? [`${where}:${i + 1}: vendor attribution (${line.trim().slice(0, 120)})`] : []));
 }
 
 /**

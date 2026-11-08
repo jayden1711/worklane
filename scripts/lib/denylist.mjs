@@ -128,5 +128,36 @@ export function scanBinary(rules, path, text) {
   return [...hits];
 }
 
-// check-table: never-grow
-export const SKIP = new Set(['.denylist.json', '.denylist-allow', 'package-lock.json', 'LICENSE']);
+// SKIP is data in scripts/lib/denylist.tables.json (#941); the push gate runs this file on its own, so it carries it
+// (scripts/lib/table-copies.mjs).
+// BEGIN tables from denylist.tables.json: generated, do not edit (node scripts/gen-table-copies.mjs --write)
+// This script runs on its own, so it carries its tables as frozen literals of the data in
+// scripts/lib/denylist.tables.json, which the weakening hold compares parsed (#941).
+// test/table-copies.test.ts fails when this block is not what that file makes.
+/** A set that can't change, as src/check-tables.ts frozenSet: a frozen object over a set held in a closure. */
+const frozenSet = (values) => {
+  const store = new Set(values);
+  return Object.freeze({
+    get size() {
+      return store.size;
+    },
+    has: (v) => store.has(v),
+    forEach(f, self) {
+      for (const v of store) f.call(self, v, v, this);
+    },
+    *entries() {
+      for (const v of store) yield [v, v];
+    },
+    *keys() {
+      yield* store;
+    },
+    *values() {
+      yield* store;
+    },
+    *[Symbol.iterator]() {
+      yield* store;
+    },
+  });
+};
+export const SKIP = frozenSet([".denylist.json", ".denylist-allow", "package-lock.json", "LICENSE"]);
+// END tables from denylist.tables.json

@@ -3,10 +3,13 @@
 // readFragments, which reads the changelog.d folder: the hand-written notes of the next release, one file per change.
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { regExpsOf, tablesOf } from './check-tables.mjs';
 
-/** Files whose change is a guardrail change: the rules, the hooks that apply them, the sandbox and the scanners. */
-// check-table: never-shrink
-export const GUARDRAIL_PATHS = [/^src\/guardrails\//, /^src\/hook\.ts$/, /^src\/sandbox\.ts$/, /^src\/scan\//, /^src\/push-check\.ts$/, /^templates\/project\/guardrails/];
+/**
+ * Files whose change is a guardrail change: the rules, the hooks that apply them, the sandbox and the scanners. Data in
+ * scripts/lib/changelog.tables.json (#941); these RegExps are this module's own, made from it.
+ */
+const GUARDRAIL_PATHS = regExpsOf(tablesOf(import.meta.url).get('GUARDRAIL_PATHS'));
 
 /**
  * The PR numbers in first-parent commit subjects, oldest first: a squash merge ends "(#N)"; a merge commit names

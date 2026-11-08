@@ -1,0 +1,32 @@
+{
+  "GUARDRAIL_PATHS": {
+    "//": "Files whose change is a guardrail change in the release notes (scripts/lib/changelog.mjs): the rules, the hooks that apply them, the sandbox and the scanners.",
+    "kind": "never-shrink",
+    "value": [
+      {
+        "$regexp": "^src\\/guardrails\\/",
+        "flags": ""
+      },
+      {
+        "$regexp": "^src\\/hook\\.ts$",
+        "flags": ""
+      },
+      {
+        "$regexp": "^src\\/sandbox\\.ts$",
+        "flags": ""
+      },
+      {
+        "$regexp": "^src\\/scan\\/",
+        "flags": ""
+      },
+      {
+        "$regexp": "^src\\/push-check\\.ts$",
+        "flags": ""
+      },
+      {
+        "$regexp": "^templates\\/project\\/guardrails",
+        "flags": ""
+      }
+    ]
+  }
+}

@@ -23,6 +23,7 @@ import { Coordinator } from '../src/coordinator.js';
 import { EventLog } from '../src/events/log.js';
 // Read through the namespace, so a module without one of them fails only the test that uses it.
 import * as weakening from '../src/merge-policy-weakening.js';
+import { parseTables, TABLES_FILE } from '../src/check-tables.js';
 import type { ChangeFile, LockScope } from '../src/review.js';
 import { FakeRunner } from '../src/runner.js';
 import { parse } from 'yaml';
@@ -1155,6 +1156,32 @@ test('weakening backstop: each registered table is found where it is registered,
   assert.deepEqual(registryProblems(repoTexts()).tables, []);
 });
 
+test('weakening backstop (#941): src/ and scripts/ register no table by a mark (their tables are data); every tables file parses, and an allowlist name in one is never-grow', () => {
+  const marked = engineFiles.filter((f) => /^(?:src|scripts)\//.test(f) && markable(f) && marksOf(readFileSync(join(repoRoot, f), 'utf8')).tables.length);
+  assert.deepEqual(marked, [], 'move the table to the module\'s <module>.tables.json (src/check-tables.ts)');
+  const files = engineFiles.filter((f) => TABLES_FILE.test(f));
+  assert.equal(files.length, 16, `${files.length} tables files`);
+  const problems: string[] = [];
+  for (const f of files) {
+    try {
+      for (const [name, d] of parseTables(readFileSync(join(repoRoot, f), 'utf8'), f)) if (weakening.ALLOW_NAMED.test(name) && d.kind !== 'never-grow') problems.push(`${f} ${name}: its name says it allows or exempts something, so it is never-grow`);
+    } catch (e) {
+      problems.push(String((e as Error).message));
+    }
+  }
+  assert.deepEqual(problems, []);
+  // The 43 registered tables of src/ and scripts/ before #941: 35 here, and the root updater's 8, which were its
+  // generated copy of src/events/redact.ts's and still are (scripts/lib/redact-vendor.mjs).
+  assert.equal(dataTables().length, 35, 'the 35 tables files entries of src/ and scripts/ (#941), each with its module');
+  assert.deepEqual(dataTables().filter((d) => d.module.endsWith('(no module)')).map((d) => d.file), []);
+  // A tables file is locked with its module: the same self-modification part, or neither locked.
+  const part = (path: string) => SELF_MODIFICATION_PARTS.find((p) => p.globs.some((g) => globToRegExp(g).test(path)))?.what ?? 'not locked';
+  assert.deepEqual(
+    [...new Set(dataTables().map((d) => `${d.file}: ${part(d.file)}; ${d.module}: ${part(d.module)}`))].filter((x) => x.split('; ').map((s) => s.split(': ')[1]).some((w, _, a) => w !== a[0])),
+    [],
+  );
+});
+
 test('weakening backstop: every test that lists src/ or scripts/ files is a registered lint test or says why it is not', () => {
   const found = registryProblems(repoTexts());
   assert.ok(found.listing.length > 10, `${found.listing.length} tests list sources`);
@@ -1477,8 +1504,26 @@ const REGISTERED_BEFORE_MARKS: readonly { path: string; table?: string; kind: st
   { path: 'test/claude-accounts-retired.test.ts', kind: 'lint' },
 ];
 
+/**
+ * The data tables (#941): each `<module>.tables.json` the repo tracks, its tables by name with their kinds, and the
+ * module it is beside (the one that loads it, or carries its generated copy). A table moved there from its module is
+ * still registered under the module's path, with its kind.
+ */
+function dataTables(): { file: string; module: string; table: string; kind: string; text: string }[] {
+  return engineFiles
+    .filter((f) => TABLES_FILE.test(f))
+    .flatMap((file) => {
+      const stem = file.replace(/\.tables\.json$/, '');
+      const module = ['.ts', '.mjs', '.cjs', '.js'].map((x) => stem + x).find((m) => existsSync(join(repoRoot, m))) ?? `${stem} (no module)`;
+      const text = readFileSync(join(repoRoot, file), 'utf8');
+      return [...parseTables(text, file)].map(([table, d]) => ({ file, module, table, kind: d.kind, text }));
+    });
+}
+
 test('registration (#869): every check registered before the marks is still registered, with the same kind (none lost in the move)', () => {
   const now = new Set<string>([...weakening.CHECK_TABLES.map((t) => `${t.path} ${t.table} ${t.kind}`), ...weakening.LINT_TESTS.map((p) => `${p} lint`)]);
+  // A table moved to its module's tables file (#941) is registered there, under the module's path.
+  for (const d of dataTables()) now.add(`${d.module} ${d.table} ${d.kind}`);
   for (const [path, text] of repoTexts()) {
     if (!markable(path)) continue;
     const marks = marksOf(text);
@@ -1504,6 +1549,26 @@ test('registration (#869): every check registered before the marks is still held
     const text = texts.get(r.path);
     if (text === undefined) {
       notHeld.push(`${r.path}: not read`);
+      continue;
+    }
+    // A table moved to its module's tables file (#941): its first entry taken out (never-shrink) or an entry put in
+    // (never-grow) of the parsed data waits, naming the table.
+    const data = dataTables().find((d) => d.module === r.path && d.table === r.table);
+    if (data) {
+      for (const kind of weakening.heldKinds(data.table, data.kind as weakening.TableKind)) {
+        const top = JSON.parse(data.text) as Record<string, { value: unknown }>;
+        const v = top[data.table]!.value;
+        const probe = (list: unknown[]) => (kind === 'never-grow' ? list.push('held-probe') : list.shift());
+        if (Array.isArray(v)) probe(v);
+        else if (v && typeof v === 'object' && Array.isArray((v as { $set?: unknown[] }).$set)) probe((v as { $set: unknown[] }).$set);
+        else if (v && typeof v === 'object') {
+          const o = v as Record<string, unknown>;
+          if (kind === 'never-grow') o['held-probe'] = 'x';
+          else delete o[Object.keys(o).filter((k) => k !== '//')[0]!];
+        }
+        const now = `${JSON.stringify(top, null, 2)}\n`;
+        if (!names(reasonsFor(data.file, data.text, now), kind === 'never-grow' ? GROWN : SHRUNK, `${data.table}: `)) notHeld.push(`${r.path} ${r.table} ${kind} (${data.file})`);
+      }
       continue;
     }
     const lines = text.split('\n');

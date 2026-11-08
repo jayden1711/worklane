@@ -117,6 +117,7 @@ const exports = {};
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.CUT_MARGIN = exports.UNSCANNABLE = exports.MAX_PASSES = exports.UNSCANNABLE_KIND = exports.TRACKER = exports.REDACTION_PATTERNS = exports.isDashboardKey = exports.DASHBOARD_KEY_PREFIX = void 0;
 exports.secretKinds = secretKinds;
+exports.redactTableProblems = redactTableProblems;
 exports.fixedPoint = fixedPoint;
 exports.redactString = redactString;
 exports.redactCut = redactCut;
@@ -124,6 +125,35 @@ exports.redactClip = redactClip;
 exports.readWindow = readWindow;
 exports.redactRecords = redactRecords;
 exports.redact = redact;
+const frozenSet = (values) => {
+    const store = new Set(values);
+    return Object.freeze({
+        get size() {
+            return store.size;
+        },
+        has: (v) => store.has(v),
+        forEach(f, self) {
+            for (const v of store)
+                f.call(self, v, v, this);
+        },
+        *entries() {
+            for (const v of store)
+                yield [v, v];
+        },
+        *keys() {
+            yield* store;
+        },
+        *values() {
+            yield* store;
+        },
+        *[Symbol.iterator]() {
+            yield* store;
+        },
+    });
+};
+const regExpOf = (p) => new RegExp(p.source, p.flags);
+const TABLES_DATA = { "CREDENTIAL_WORDS": frozenSet(["token", "secret", "secrets", "password", "passwd", "pwd", "pass", "passphrase", "jwt", "bearer", "credential", "credentials", "authorization"]), "CREDENTIAL_ENDINGS": Object.freeze(["token", "secret", "password", "passwd", "accesskey"]), "KEY_QUALIFIERS": frozenSet(["api", "access", "secret", "private", "signing", "encryption", "master", "client", "app", "auth", "account", "service", "license", "deploy", "admin", "webhook", "session", "ssh", "hmac", "consumer"]), "PATTERNS": Object.freeze([Object.freeze({ "re": Object.freeze({ source: "wld_[A-Za-z0-9_-]{32,}(?![A-Za-z0-9_-])", flags: "g" }), "rep": "wld_[REDACTED]", "kind": "dashboard key" }), Object.freeze({ "re": Object.freeze({ source: "gh[pousr]_[A-Za-z0-9]{30,}(?![A-Za-z0-9])", flags: "g" }), "rep": "gh*_[REDACTED]", "kind": "GitHub token" }), Object.freeze({ "re": Object.freeze({ source: "github_pat_[A-Za-z0-9_]{40,}", flags: "g" }), "rep": "github_pat_[REDACTED]", "kind": "GitHub token" }), Object.freeze({ "re": Object.freeze({ source: "sk-ant-[A-Za-z0-9_-]{20,}", flags: "g" }), "rep": "sk-[REDACTED]", "kind": "API key (sk-)" }), Object.freeze({ "re": Object.freeze({ source: "\\bsk-(?:ant-)?[A-Za-z0-9_-]{20,}\\b", flags: "g" }), "rep": "sk-[REDACTED]", "kind": "API key (sk-)" }), Object.freeze({ "re": Object.freeze({ source: "(^|[^A-Za-z0-9_])([sr]k)_(?:live|test)_([A-Za-z0-9]{16,})(?![A-Za-z0-9_])", flags: "g" }), "rep": Object.freeze({ "replacer": "stripe" }), "kind": "Stripe key" }), Object.freeze({ "re": Object.freeze({ source: "AIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])", flags: "g" }), "rep": "AIza[REDACTED]", "kind": "Google API key" }), Object.freeze({ "re": Object.freeze({ source: "(^|[^A-Za-z0-9_+/-])(?=([A-Za-z0-9_+/-]*?)eyJ)\\2eyJ(?=[A-Za-z0-9_+/-]{8})(?=([A-Za-z0-9_+/-]+))\\3=*\\.(?=[A-Za-z0-9_+/-]{8})(?=([A-Za-z0-9_+/-]+))\\4=*\\.[A-Za-z0-9_+/=-]*(?:\\.[A-Za-z0-9_+/=-]*)*", flags: "g" }), "rep": "$1$2[REDACTED JWT]", "kind": "JWT" }), Object.freeze({ "re": Object.freeze({ source: "(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Za-z0-9])", flags: "g" }), "rep": "AKIA[REDACTED]", "kind": "AWS access key" }), Object.freeze({ "re": Object.freeze({ source: "xoxe[.-][A-Za-z0-9.-]{10,}(?![A-Za-z0-9])", flags: "g" }), "rep": "xoxe-[REDACTED]", "kind": "Slack token" }), Object.freeze({ "re": Object.freeze({ source: "xox[abprs]-[A-Za-z0-9-]{10,}(?![A-Za-z0-9])", flags: "g" }), "rep": "xox-[REDACTED]", "kind": "Slack token" }), Object.freeze({ "re": Object.freeze({ source: "xapp-[A-Za-z0-9-]{10,}(?![A-Za-z0-9])", flags: "g" }), "rep": "xapp-[REDACTED]", "kind": "Slack app-level token" }), Object.freeze({ "re": Object.freeze({ source: "lin_(?:api|oauth)_[A-Za-z0-9]{20,}(?![A-Za-z0-9])", flags: "g" }), "rep": "lin_[REDACTED]", "kind": "Linear key" }), Object.freeze({ "re": Object.freeze({ source: "https:\\/\\/hooks\\.slack\\.com\\/services\\/[A-Za-z0-9/]+", flags: "g" }), "rep": "https://hooks.slack.com/services/[REDACTED]", "kind": "Slack webhook" }), Object.freeze({ "re": Object.freeze({ source: "tskey-[A-Za-z0-9_-]+", flags: "g" }), "rep": "tskey-[REDACTED]", "kind": "Tailscale key" }), Object.freeze({ "re": Object.freeze({ source: "-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----(?:[\\s\\S]*?-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----|[\\s\\S]*)", flags: "g" }), "rep": "[REDACTED PRIVATE KEY]", "kind": "private key" }), Object.freeze({ "re": Object.freeze({ source: "^[\\s\\S]*-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----", flags: "" }), "rep": Object.freeze({ "replacer": "orphanEnd" }), "kind": "private key" }), Object.freeze({ "re": Object.freeze({ source: "\\b(bearer)\\s+(?:[A-Za-z0-9._~+/-]|\\\\\\/){20,}=*", flags: "gi" }), "rep": "$1 [REDACTED]", "kind": "bearer token" }), Object.freeze({ "re": Object.freeze({ source: "\\b(basic)(\\s+)((?:[A-Za-z0-9+/]|\\\\\\/){8,}={0,2})", flags: "gi" }), "rep": Object.freeze({ "replacer": "basic" }), "kind": "Basic credential" }), Object.freeze({ "re": Object.freeze({ source: "([a-z0-9+.-]{1,32}:\\/\\/[^:/\\s@]+):[^@\\s/]+@", flags: "gi" }), "rep": "$1:[REDACTED]@", "kind": "password in a URL" }), Object.freeze({ "re": Object.freeze({ source: "\\b0x[0-9a-fA-F]{64}(?![A-Za-z0-9])", flags: "g" }), "rep": "0x[REDACTED-32-BYTES]", "kind": "32-byte hex key" }), Object.freeze({ "re": Object.freeze({ source: "(\\\\?\"|')([A-Za-z0-9_-]+)\\1(\\s*(?::|=>)\\s*)(\\\\?\"|')([A-Za-z0-9_\\-.+/=~]{16,})\\4", flags: "g" }), "rep": Object.freeze({ "replacer": "jsonKey" }), "kind": "secret under a JSON key" }), Object.freeze({ "re": Object.freeze({ source: "(^|[^A-Za-z0-9])[A-Za-z0-9_-]{23,28}\\.[A-Za-z0-9_-]{6,7}\\.[A-Za-z0-9_-]{27,}\\b", flags: "g" }), "rep": "$1[REDACTED]", "kind": "Discord bot token" })]), "BROAD": Object.freeze([Object.freeze({ "re": Object.freeze({ source: "(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{8,}", flags: "g" }), "mask": "{mask}", "kind": "GitHub token, cut short" }), Object.freeze({ "re": Object.freeze({ source: "sk-ant-[A-Za-z0-9_-]+", flags: "g" }), "mask": "{mask}", "kind": "Anthropic key, cut short" }), Object.freeze({ "re": Object.freeze({ source: "\\b(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-ant-[A-Za-z0-9_-]{10,}|xox[abprs]-[A-Za-z0-9-]{10,})", flags: "g" }), "mask": "{mask}", "kind": "the updater's token rule" }), Object.freeze({ "re": Object.freeze({ source: "xox[abprs]-[A-Za-z0-9_-]+", flags: "g" }), "mask": "{mask}", "kind": "Slack token, cut short" }), Object.freeze({ "re": Object.freeze({ source: "eyJ[A-Za-z0-9_-]{8,512}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*", flags: "g" }), "mask": "{mask}", "kind": "JWT after a hyphen" }), Object.freeze({ "re": Object.freeze({ source: "\\b(bearer)\\s+[A-Za-z0-9._~+/=-]{8,}", flags: "gi" }), "mask": "$1 {mask}", "kind": "short bearer token" }), Object.freeze({ "re": Object.freeze({ source: "([a-z0-9+.-]{1,32}:\\/\\/)[^\\s/@]+@", flags: "gi" }), "mask": "$1{mask}@", "kind": "user info in a URL" }), Object.freeze({ "re": Object.freeze({ source: "\\b([A-Za-z_]*(?:token|secret|password|passwd|api[_-]?key))(\\s*[=:]\\s*)(\"[^\"]*\"|'[^']*'|\\S+)", flags: "gi" }), "mask": "$1$2{mask}", "kind": "value after a secret name" })]), "BROAD_RULES": Object.freeze([Object.freeze({ "re": Object.freeze({ source: "wld_[A-Za-z0-9_-]{32,}(?![A-Za-z0-9_-])", flags: "g" }), "rep": "wld_[REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "gh[pousr]_[A-Za-z0-9]{30,}(?![A-Za-z0-9])", flags: "g" }), "rep": "gh*_[REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "github_pat_[A-Za-z0-9_]{40,}", flags: "g" }), "rep": "github_pat_[REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "sk-ant-[A-Za-z0-9_-]{20,}", flags: "g" }), "rep": "sk-[REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "\\bsk-(?:ant-)?[A-Za-z0-9_-]{20,}\\b", flags: "g" }), "rep": "sk-[REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "(^|[^A-Za-z0-9_])([sr]k)_(?:live|test)_([A-Za-z0-9]{16,})(?![A-Za-z0-9_])", flags: "g" }), "rep": Object.freeze({ "replacer": "stripe" }) }), Object.freeze({ "re": Object.freeze({ source: "AIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])", flags: "g" }), "rep": "AIza[REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "(^|[^A-Za-z0-9_+/-])(?=([A-Za-z0-9_+/-]*?)eyJ)\\2eyJ(?=[A-Za-z0-9_+/-]{8})(?=([A-Za-z0-9_+/-]+))\\3=*\\.(?=[A-Za-z0-9_+/-]{8})(?=([A-Za-z0-9_+/-]+))\\4=*\\.[A-Za-z0-9_+/=-]*(?:\\.[A-Za-z0-9_+/=-]*)*", flags: "g" }), "rep": "$1$2[REDACTED JWT]" }), Object.freeze({ "re": Object.freeze({ source: "(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Za-z0-9])", flags: "g" }), "rep": "AKIA[REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "xoxe[.-][A-Za-z0-9.-]{10,}(?![A-Za-z0-9])", flags: "g" }), "rep": "xoxe-[REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "xox[abprs]-[A-Za-z0-9-]{10,}(?![A-Za-z0-9])", flags: "g" }), "rep": "xox-[REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "xapp-[A-Za-z0-9-]{10,}(?![A-Za-z0-9])", flags: "g" }), "rep": "xapp-[REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "lin_(?:api|oauth)_[A-Za-z0-9]{20,}(?![A-Za-z0-9])", flags: "g" }), "rep": "lin_[REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "https:\\/\\/hooks\\.slack\\.com\\/services\\/[A-Za-z0-9/]+", flags: "g" }), "rep": "https://hooks.slack.com/services/[REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "tskey-[A-Za-z0-9_-]+", flags: "g" }), "rep": "tskey-[REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----(?:[\\s\\S]*?-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----|[\\s\\S]*)", flags: "g" }), "rep": "[REDACTED PRIVATE KEY]" }), Object.freeze({ "re": Object.freeze({ source: "^[\\s\\S]*-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----", flags: "" }), "rep": Object.freeze({ "replacer": "orphanEnd" }) }), Object.freeze({ "re": Object.freeze({ source: "\\b(bearer)\\s+(?:[A-Za-z0-9._~+/-]|\\\\\\/){20,}=*", flags: "gi" }), "rep": "$1 [REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "\\b(basic)(\\s+)((?:[A-Za-z0-9+/]|\\\\\\/){8,}={0,2})", flags: "gi" }), "rep": Object.freeze({ "replacer": "basic" }) }), Object.freeze({ "re": Object.freeze({ source: "([a-z0-9+.-]{1,32}:\\/\\/[^:/\\s@]+):[^@\\s/]+@", flags: "gi" }), "rep": "$1:[REDACTED]@" }), Object.freeze({ "re": Object.freeze({ source: "\\b0x[0-9a-fA-F]{64}(?![A-Za-z0-9])", flags: "g" }), "rep": "0x[REDACTED-32-BYTES]" }), Object.freeze({ "re": Object.freeze({ source: "(\\\\?\"|')([A-Za-z0-9_-]+)\\1(\\s*(?::|=>)\\s*)(\\\\?\"|')([A-Za-z0-9_\\-.+/=~]{16,})\\4", flags: "g" }), "rep": Object.freeze({ "replacer": "jsonKey" }) }), Object.freeze({ "re": Object.freeze({ source: "(^|[^A-Za-z0-9])[A-Za-z0-9_-]{23,28}\\.[A-Za-z0-9_-]{6,7}\\.[A-Za-z0-9_-]{27,}\\b", flags: "g" }), "rep": "$1[REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{8,}", flags: "g" }), "rep": "[REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "sk-ant-[A-Za-z0-9_-]+", flags: "g" }), "rep": "[REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "\\b(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-ant-[A-Za-z0-9_-]{10,}|xox[abprs]-[A-Za-z0-9-]{10,})", flags: "g" }), "rep": "[REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "xox[abprs]-[A-Za-z0-9_-]+", flags: "g" }), "rep": "[REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "eyJ[A-Za-z0-9_-]{8,512}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*", flags: "g" }), "rep": "[REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "\\b(bearer)\\s+[A-Za-z0-9._~+/=-]{8,}", flags: "gi" }), "rep": "$1 [REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "([a-z0-9+.-]{1,32}:\\/\\/)[^\\s/@]+@", flags: "gi" }), "rep": "$1[REDACTED]@" }), Object.freeze({ "re": Object.freeze({ source: "\\b([A-Za-z_]*(?:token|secret|password|passwd|api[_-]?key))(\\s*[=:]\\s*)(\"[^\"]*\"|'[^']*'|\\S+)", flags: "gi" }), "rep": "$1$2[REDACTED]" })]), "GLUED_PREFIXES": Object.freeze(["ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_", "sk-", "sk_live_", "sk_test_", "rk_live_", "rk_test_", "xoxa-", "xoxb-", "xoxe", "xoxp-", "xoxr-", "xoxs-", "xapp-", "lin_api_", "lin_oauth_", "AKIA", "ASIA", "AIza", "eyJ", "0x", "Bearer", "bearer", "BEARER", "Basic", "basic", "BASIC", "wld_"]), "GLUE_PARTS": Object.freeze(["(?:\\u001b|\\\\u001[bB]|\\\\x1[bB]|\\\\033|\\\\e|\\^\\[)(?:\\[[0-?]*[ -/]*[@-~]|[ -/]+[0-~]|[0-~])", "\\u009b[0-?]*[ -/]*[@-~]", "\\\\(?:u[0-9A-Fa-f]{4}|[nrtbf\"\\\\/])"]) };
+const TABLES = { get: (name) => TABLES_DATA[name] };
 const credentialShaped = (v) => (/[a-z]/.test(v) && /[A-Z]/.test(v) && /\d/.test(v)) || /^[0-9a-fA-F]{32,}$/.test(v);
 const basicShaped = (v) => /[0-9+/=]/.test(v) || (v.length >= 16 && v.length % 4 !== 1 && /[a-z]/.test(v) && /[A-Z]/.test(v)) || basicPair(v);
 function basicPair(v) {
@@ -136,13 +166,10 @@ function basicPair(v) {
     }
     return /^[\x20-\x7e]*:[\x20-\x7e]*$/.test(text);
 }
-// check-table: never-shrink
-const CREDENTIAL_WORDS = new Set(['token', 'secret', 'secrets', 'password', 'passwd', 'pwd', 'pass', 'passphrase', 'jwt', 'bearer', 'credential', 'credentials', 'authorization']);
-// check-table: never-shrink
-const CREDENTIAL_ENDINGS = ['token', 'secret', 'password', 'passwd', 'accesskey'];
+const CREDENTIAL_WORDS = TABLES.get('CREDENTIAL_WORDS');
+const CREDENTIAL_ENDINGS = TABLES.get('CREDENTIAL_ENDINGS');
 const credentialWord = (w) => CREDENTIAL_WORDS.has(w) || CREDENTIAL_ENDINGS.some((e) => w.endsWith(e));
-// check-table: never-shrink
-const KEY_QUALIFIERS = new Set(['api', 'access', 'secret', 'private', 'signing', 'encryption', 'master', 'client', 'app', 'auth', 'account', 'service', 'license', 'deploy', 'admin', 'webhook', 'session', 'ssh', 'hmac', 'consumer']);
+const KEY_QUALIFIERS = TABLES.get('KEY_QUALIFIERS');
 function credentialKey(k) {
     const words = k
         .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
@@ -176,51 +203,23 @@ function orphanEnd(m) {
     }
     return cut === -1 ? m : `[REDACTED PRIVATE KEY]${m.slice(cut)}`;
 }
-// check-table: never-shrink
-const PATTERNS = [
-    [new RegExp(`${exports.DASHBOARD_KEY_PREFIX}${DASHBOARD_KEY_BODY}(?![A-Za-z0-9_-])`, 'g'), `${exports.DASHBOARD_KEY_PREFIX}[REDACTED]`, 'dashboard key'],
-    [/gh[pousr]_[A-Za-z0-9]{30,}(?![A-Za-z0-9])/g, 'gh*_[REDACTED]', 'GitHub token'],
-    [/github_pat_[A-Za-z0-9_]{40,}/g, 'github_pat_[REDACTED]', 'GitHub token'],
-    [/sk-ant-[A-Za-z0-9_-]{20,}/g, 'sk-[REDACTED]', 'API key (sk-)'],
-    [/\bsk-(?:ant-)?[A-Za-z0-9_-]{20,}\b/g, 'sk-[REDACTED]', 'API key (sk-)'],
-    [/(^|[^A-Za-z0-9_])([sr]k)_(?:live|test)_([A-Za-z0-9]{16,})(?![A-Za-z0-9_])/g, (m, pre, k, v) => (/\d/.test(v) ? `${pre}${k}_[REDACTED]` : m), 'Stripe key'],
-    [/AIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])/g, 'AIza[REDACTED]', 'Google API key'],
-    [
-        /(^|[^A-Za-z0-9_+/-])(?=([A-Za-z0-9_+/-]*?)eyJ)\2eyJ(?=[A-Za-z0-9_+/-]{8})(?=([A-Za-z0-9_+/-]+))\3=*\.(?=[A-Za-z0-9_+/-]{8})(?=([A-Za-z0-9_+/-]+))\4=*\.[A-Za-z0-9_+/=-]*(?:\.[A-Za-z0-9_+/=-]*)*/g,
-        '$1$2[REDACTED JWT]',
-        'JWT',
-    ],
-    [/(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Za-z0-9])/g, 'AKIA[REDACTED]', 'AWS access key'],
-    [/xoxe[.-][A-Za-z0-9.-]{10,}(?![A-Za-z0-9])/g, 'xoxe-[REDACTED]', 'Slack token'],
-    [/xox[abprs]-[A-Za-z0-9-]{10,}(?![A-Za-z0-9])/g, 'xox-[REDACTED]', 'Slack token'],
-    [/xapp-[A-Za-z0-9-]{10,}(?![A-Za-z0-9])/g, 'xapp-[REDACTED]', 'Slack app-level token'],
-    [/lin_(?:api|oauth)_[A-Za-z0-9]{20,}(?![A-Za-z0-9])/g, 'lin_[REDACTED]', 'Linear key'],
-    [/https:\/\/hooks\.slack\.com\/services\/[A-Za-z0-9/]+/g, 'https://hooks.slack.com/services/[REDACTED]', 'Slack webhook'],
-    [/tskey-[A-Za-z0-9_-]+/g, 'tskey-[REDACTED]', 'Tailscale key'],
-    [/-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----(?:[\s\S]*?-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----|[\s\S]*)/g, '[REDACTED PRIVATE KEY]', 'private key'],
-    [/^[\s\S]*-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----/, orphanEnd, 'private key'],
-    [/\b(bearer)\s+(?:[A-Za-z0-9._~+/-]|\\\/){20,}=*/gi, '$1 [REDACTED]', 'bearer token'],
-    [/\b(basic)(\s+)((?:[A-Za-z0-9+/]|\\\/){8,}={0,2})/gi, (m, s, sp, v) => (basicShaped(v) ? `${s}${sp}[REDACTED]` : m), 'Basic credential'],
-    [/([a-z0-9+.-]{1,32}:\/\/[^:/\s@]+):[^@\s/]+@/gi, '$1:[REDACTED]@', 'password in a URL'],
-    [/\b0x[0-9a-fA-F]{64}(?![A-Za-z0-9])/g, '0x[REDACTED-32-BYTES]', '32-byte hex key'],
-    [
-        /(\\?"|')([A-Za-z0-9_-]+)\1(\s*(?::|=>)\s*)(\\?"|')([A-Za-z0-9_\-.+/=~]{16,})\4/g,
-        (m, q, k, sep, vq, v) => (credentialKey(k) && credentialShaped(v) ? `${q}${k}${q}${sep}${vq}[REDACTED]${vq}` : m),
-        'secret under a JSON key',
-    ],
-    [/(^|[^A-Za-z0-9])[A-Za-z0-9_-]{23,28}\.[A-Za-z0-9_-]{6,7}\.[A-Za-z0-9_-]{27,}\b/g, '$1[REDACTED]', 'Discord bot token'],
-];
-// check-table: never-shrink
-const BROAD = [
-    [/(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{8,}/g, (k) => k, 'GitHub token, cut short'],
-    [/sk-ant-[A-Za-z0-9_-]+/g, (k) => k, 'Anthropic key, cut short'],
-    [/\b(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-ant-[A-Za-z0-9_-]{10,}|xox[abprs]-[A-Za-z0-9-]{10,})/g, (k) => k, "the updater's token rule"],
-    [/xox[abprs]-[A-Za-z0-9_-]+/g, (k) => k, 'Slack token, cut short'],
-    [/eyJ[A-Za-z0-9_-]{8,512}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*/g, (k) => k, 'JWT after a hyphen'],
-    [/\b(bearer)\s+[A-Za-z0-9._~+/=-]{8,}/gi, (k) => `$1 ${k}`, 'short bearer token'],
-    [/([a-z0-9+.-]{1,32}:\/\/)[^\s/@]+@/gi, (k) => `$1${k}@`, 'user info in a URL'],
-    [/\b([A-Za-z_]*(?:token|secret|password|passwd|api[_-]?key))(\s*[=:]\s*)("[^"]*"|'[^']*'|\S+)/gi, (k) => `$1$2${k}`, 'value after a secret name'],
-];
+const REPLACERS = Object.freeze({
+    stripe: (m, pre, k, v) => (/\d/.test(v) ? `${pre}${k}_[REDACTED]` : m),
+    orphanEnd,
+    basic: (m, s, sp, v) => (basicShaped(v) ? `${s}${sp}[REDACTED]` : m),
+    jsonKey: (m, q, k, sep, vq, v) => (credentialKey(k) && credentialShaped(v) ? `${q}${k}${q}${sep}${vq}[REDACTED]${vq}` : m),
+});
+function replacementOf(rep) {
+    if (typeof rep === 'string')
+        return rep;
+    const f = REPLACERS[rep.replacer];
+    if (!f)
+        throw new Error(`redact.tables.json: no replacer ${rep.replacer}`);
+    return f;
+}
+const PATTERNS = Object.freeze(TABLES.get('PATTERNS').map((e) => Object.freeze([regExpOf(e.re), replacementOf(e.rep), e.kind])));
+const BROAD = Object.freeze(TABLES.get('BROAD').map((e) => Object.freeze([regExpOf(e.re), e.mask, e.kind])));
+const masked = (template, mask) => template.split('{mask}').join(mask);
 const CODE_HEADS = new Set(['this', 'self', 'super', 'opts', 'options', 'o', 'ctx', 'context', 'config', 'cfg', 'conf', 'settings', 'props', 'state', 'env', 'process', 'module', 'exports', 'window', 'document', 'globalThis', 'args', 'params', 'req', 'res', 'request', 'response', 'obj', 'result', 'item', 'e', 'err', 'x']);
 function internalHost(m, pre, name) {
     const lower = name.toLowerCase();
@@ -251,18 +250,12 @@ const IDENTIFIERS = [
     [/(^|[^\w:])f(?:[cd][0-9a-f]{2}|e[89ab][0-9a-f]):(?:[0-9a-f]{0,4}:){1,6}[0-9a-f]{0,4}(?![\w:])/gi, '$1[private-ip]', 'private IP'],
 ];
 exports.REDACTION_PATTERNS = [
-    ...PATTERNS.map(([re, rep, kind]) => ({ kind, re, rep, group: 'secret' })),
-    ...BROAD.map(([re, rep, kind]) => ({ kind, re, rep: rep('[REDACTED]'), group: 'broad' })),
-    ...IDENTIFIERS.map(([re, rep, kind]) => ({ kind, re, rep, group: 'identifier' })),
+    ...PATTERNS.map(([re, rep, kind]) => ({ kind, re: new RegExp(re), rep, group: 'secret' })),
+    ...BROAD.map(([re, rep, kind]) => ({ kind, re: new RegExp(re), rep: masked(rep, '[REDACTED]'), group: 'broad' })),
+    ...IDENTIFIERS.map(([re, rep, kind]) => ({ kind, re: new RegExp(re), rep, group: 'identifier' })),
 ];
-// check-table: never-shrink
-const GLUED_PREFIXES = ['ghp_', 'gho_', 'ghu_', 'ghs_', 'ghr_', 'github_pat_', 'sk-', 'sk_live_', 'sk_test_', 'rk_live_', 'rk_test_', 'xoxa-', 'xoxb-', 'xoxe', 'xoxp-', 'xoxr-', 'xoxs-', 'xapp-', 'lin_api_', 'lin_oauth_', 'AKIA', 'ASIA', 'AIza', 'eyJ', '0x', 'Bearer', 'bearer', 'BEARER', 'Basic', 'basic', 'BASIC', exports.DASHBOARD_KEY_PREFIX];
-// check-table: never-shrink
-const GLUE_PARTS = [
-    String.raw `(?:\u001b|\\u001[bB]|\\x1[bB]|\\033|\\e|\^\[)(?:\[[0-?]*[ -/]*[@-~]|[ -/]+[0-~]|[0-~])`,
-    String.raw `\u009b[0-?]*[ -/]*[@-~]`,
-    String.raw `\\(?:u[0-9A-Fa-f]{4}|[nrtbf"\\/])`,
-];
+const GLUED_PREFIXES = TABLES.get('GLUED_PREFIXES');
+const GLUE_PARTS = TABLES.get('GLUE_PARTS');
 const GLUE = new RegExp(GLUE_PARTS.join('|'), 'g');
 function gluePoints(s) {
     const cuts = [...s.matchAll(GLUE)].map((m) => m.index + m[0].length).filter((c) => /\w/.test(s[c - 1]));
@@ -370,8 +363,23 @@ function spansOf(t, re, rep, rank, out) {
     }
 }
 const SHAPE_RULES = PATTERNS.map(([re, rep]) => [re, rep]);
-// check-table: never-shrink
-const BROAD_RULES = [...SHAPE_RULES, ...BROAD.map(([re, rep]) => [re, rep('[REDACTED]')])];
+const BROAD_RULES = Object.freeze(TABLES.get('BROAD_RULES').map((e) => Object.freeze([regExpOf(e.re), replacementOf(e.rep)])));
+function redactTableProblems(patterns = TABLES.get('PATTERNS'), broad = TABLES.get('BROAD'), rules = TABLES.get('BROAD_RULES'), glued = GLUED_PREFIXES) {
+    const out = [];
+    const key = (re, rep) => JSON.stringify([re.source, re.flags, rep]);
+    const want = [...patterns.map((p) => key(p.re, p.rep)), ...broad.map((b) => key(b.re, masked(b.mask, '[REDACTED]')))];
+    const got = rules.map((r) => key(r.re, r.rep));
+    if (want.length !== got.length || want.some((w, k) => w !== got[k]))
+        out.push("BROAD_RULES isn't PATTERNS' rules then BROAD's");
+    const first = patterns[0]?.re;
+    if (first?.source !== `${exports.DASHBOARD_KEY_PREFIX}${DASHBOARD_KEY_BODY}(?![A-Za-z0-9_-])` || first.flags !== 'g')
+        out.push("PATTERNS' first isn't the dashboard key's");
+    if (glued.at(-1) !== exports.DASHBOARD_KEY_PREFIX)
+        out.push("GLUED_PREFIXES doesn't end with DASHBOARD_KEY_PREFIX");
+    return out;
+}
+if (redactTableProblems().length)
+    throw new Error(`src/events/redact.tables.json: ${redactTableProblems().join('; ')}`);
 function allSpans(s, rules) {
     const spans = [];
     rules.forEach(([re, rep], i) => spansOf(s, re, rep, i, spans));

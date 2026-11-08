@@ -26,10 +26,13 @@ import { lstatSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { tablesOf } from '../lib/check-tables.mjs';
 
-/** The package.json files the checkout may hold besides its top one (tracked today: examples/basic only). */
-// check-table: never-grow
-export const ALLOWED_PACKAGE_JSON = ['examples/basic/package.json'];
+/**
+ * The package.json files the checkout may hold besides its top one (tracked today: examples/basic only). Data in
+ * scripts/ci/check-pins.tables.json (#941), which the weakening hold compares parsed; deep-frozen at load.
+ */
+export const ALLOWED_PACKAGE_JSON = tablesOf(import.meta.url).get('ALLOWED_PACKAGE_JSON');
 /** The places, relative to the top, that load code in a test shard: Node resolves a bare name from each. */
 export const LOADERS = ['x.js', 'test/x.js', 'dist/test/x.js', 'dist/src/x.js', 'dist/src/os/x.js', 'dist/src/coordinator/x.js', 'dist/src/guardrails/x.js'];
 

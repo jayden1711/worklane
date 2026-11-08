@@ -54,6 +54,7 @@
 // A repo with no vacuity section waits too (the owner's decision): with the tamper guard's own test globs
 // (FALLBACK_TEST_GLOBS), any other changed file with runtime code holds it, naming the missing section.
 import { BRAND } from './brand.js';
+import { regExpsOf, tablesOf } from './check-tables.js';
 import { globToRegExp } from './guardrails/glob.js';
 import { shownPath } from './path-text.js';
 import { countAssertionCalls, FALLBACK_TEST_GLOBS } from './vacuity.js';
@@ -151,21 +152,10 @@ const RUNNER_ONE = /^node --test((?: [^ ]+)*) \{file\}$/;
  * option can preload code: measured on Node 22.23, `--env-file` (a NODE_OPTIONS line in the file), the config-file
  * options (a node.config.json `import`), `--import`/`--require`/a loader, `-e`/`--eval`, and
  * `--experimental-transform-types` (other text). Reporters are the built-in ones only: a reporter module is code
- * too. Node's own TypeScript type stripping keeps every offset, so a `.ts` file is measured (ranSegments).
+ * too. Node's own TypeScript type stripping keeps every offset, so a `.ts` file is measured (ranSegments). Data in
+ * src/merge-policy-vacuity.tables.json (#941); these RegExps are this module's own, made from it.
  */
-// check-table: never-grow
-const RUNNER_OPTIONS: readonly RegExp[] = [
-  /^--test-reporter=(?:spec|tap|dot|junit|lcov)$/,
-  // A file in the worktree: relative, no `..` segment (#784 round 7: Node writes wherever it points).
-  /^--test-reporter-destination=(?:stdout|stderr|(?!(?:.*\/)?\.\.(?:\/|$))[A-Za-z0-9_][A-Za-z0-9._/-]*)$/,
-  /^--test-(?:timeout|concurrency)=\d+$/,
-  /^--test-(?:name|skip)-pattern=[A-Za-z0-9._:/@-]+$/,
-  /^--(?:experimental-)?test-isolation=(?:process|none)$/,
-  /^--test-(?:force-exit|only)$/,
-  /^--test-shard=\d+\/\d+$/,
-  /^--(?:no-)?experimental-strip-types$/,
-  /^--no-warnings$/,
-];
+const RUNNER_OPTIONS: readonly RegExp[] = regExpsOf(tablesOf(import.meta.url).get('RUNNER_OPTIONS'));
 
 /** A runner.one the coverage run can measure: RUNNER_ONE, each option one of RUNNER_OPTIONS. */
 export function coverageRunnerOne(one: string | null | undefined): boolean {
