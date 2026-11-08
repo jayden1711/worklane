@@ -1,0 +1,14 @@
+### Guardrail changes: what each one does
+
+- **The engine's own check tables are data, compared parsed and frozen at load (#941, part).** The weakening hold read
+  registered tables as lines of code, and every review round found code that changed or emptied a table where no line
+  showed it. Now the 43 tables `src/` and `scripts/` registered by a mark live in data-only files beside their modules
+  (`<module>.tables.json`). The hold compares each one as parsed data, before and after, and never runs code: a table or
+  its file gone, its kind changed, a file that doesn't parse, an entry lost or changed in a rule list, or an entry
+  added or changed in an allowlist waits for the owner; an entry added to a rule list passes. Each module loads its own
+  file by its own URL and gets its tables deep-frozen, so a write from any file (a `splice`, `length = 0`, `delete`, a
+  callback given the list, a regexp's `compile`) throws instead of loosening a check. Scripts that run on their own
+  (the push gate's hook, the gate and its denylist, the App permission check, the root helpers) carry a generated
+  frozen copy of their file that a test holds to it. The tables registered in tests stay code, read as before, and are
+  frozen by the test loader. The syntax matcher this PR first added is gone. Still open, and named: a use moved off a
+  data table while its data stays the same (a decoy, a shadow, a re-pointed import).
