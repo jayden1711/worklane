@@ -173,7 +173,7 @@ export function readInstance(events: readonly StoredEvent[], flag: string, maxEr
     }
     if (e.type === 'coordinator.stopped') stoppedAfterTick = true;
     if (e.type === 'coordinator.started') {
-      if (after && running) bad ??= 'the coordinator restarted without a clean stop';
+      if (inStretch && running) bad ??= 'the coordinator restarted without a clean stop';
       running = true;
     }
     if (e.type === 'coordinator.stopped' && (e.payload as { clean?: boolean }).clean === true) running = false;
