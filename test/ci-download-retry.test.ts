@@ -269,7 +269,9 @@ const WORKFLOW_PROBES: string[] = [
 ];
 
 /** The actions a workflow may use (R1228f D4: a release-download action has no URL text), pinned by commit; ./ local. */
-const USES_ALLOWED = /^(?:(?:actions\/(?:checkout|setup-node|upload-artifact|download-artifact)|Vampire\/setup-wsl)@[0-9a-f]{40}|\.\/\S+)$/;
+// A local one only under .github (R1228g D1: `./\S+` let any repo path in, e.g. ./tools/zzdl, whose action.yml the
+// walk of .github never reads): a reusable workflow file, or an action folder, each one plain name (no `..`).
+const USES_ALLOWED = /^(?:(?:actions\/(?:checkout|setup-node|upload-artifact|download-artifact)|Vampire\/setup-wsl)@[0-9a-f]{40}|\.\/\.github\/(?:workflows\/[\w-]+\.ya?ml|actions\/[\w-]+\/?))$/;
 
 /** Setup scripts that download pinned binaries themselves, each with its own checksum (the pinned-URL text rule skips them; the retry rule holds them). */
 const SETUP_DOWNLOADERS = ['scripts/bootstrap.sh', 'scripts/setup/node.sh', 'scripts/setup/ci-runner.sh', 'scripts/setup/tools.sh'];
@@ -545,6 +547,13 @@ test('the scripts lint: the last --retry counts, comments and continuations are 
   assert.ok(isShell('x.bash', '') && isShell('stand-in', '#!/usr/bin/env bash\n') && !isShell('x.mjs', '#!/usr/bin/env bash\n'), '.bash files and shebang scripts are walked');
 });
 
+test('R1228g D1: a workflow using a local action outside .github (whose action.yml the walk never reads) is reported', () => {
+  const problems: string[] = [];
+  const text = 'on: push\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./tools/zzdl\n        with:\n          url: https://example.com/x\n';
+  workflowFiles([{ name: '.github/workflows/planted.yml', text }], (name, p) => problems.push(`${name}: ${p}`));
+  assert.ok(problems.some((p) => /^\.github\/workflows\/planted\.yml: an action this lint doesn't allow .*: \.\/tools\/zzdl$/.test(p)), problems.join('\n'));
+});
+
 test(`every pinned download in .github goes through ${HELPER}, and nothing else there downloads (#1201)`, () => {
   const problems: string[] = [];
   let helperLines = 0;
@@ -618,7 +627,9 @@ test('R1228f: any spelling of curl, bash-joined continuations, YAML escapes, gh 
   // A downloader action, and the actions used today.
   assert.equal(USES_ALLOWED.test('robinraju/release-downloader@v1'), false);
   assert.equal(USES_ALLOWED.test('actions/checkout@v7'), false, 'by tag: refused (pinned by commit only)');
-  for (const u of ['actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1', 'Vampire/setup-wsl@d1da7f2c0322a5ee4f24975344f67fc0f5baf364', './.github/workflows/ci-slow.yml']) assert.ok(USES_ALLOWED.test(u), u);
+  for (const u of ['actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1', 'Vampire/setup-wsl@d1da7f2c0322a5ee4f24975344f67fc0f5baf364', './.github/workflows/ci-slow.yml', './.github/actions/setup']) assert.ok(USES_ALLOWED.test(u), u);
+  // R1228g D1: a local action outside .github, or one reached through `..`, is refused.
+  for (const u of ['./tools/zzdl', './.github/../tools/zzdl', './.github/actions/../../tools/zzdl', './.github/actions/a/b', './scripts/ci']) assert.equal(USES_ALLOWED.test(u), false, u);
   // Kept: probes and loopback, and a shell file under scripts/ or .github/.
   for (const s of ['curl -sf "$GH_FAKE/repos/example/alpha" >/dev/null', `curl -fsS -o /dev/null ${U}`, 'curl -sS -o f "http://127.0.0.1:8080/x"', 'bash scripts/ci/x.sh', 'bash "$GITHUB_WORKSPACE/scripts/ci/fetch-pinned.sh" "https://x/y" ' + PIN + ' f'.replace('https://x/y', 'https://example.com/y')]) {
     assert.deepEqual(runProblems(s), [], `kept: ${s}`);
