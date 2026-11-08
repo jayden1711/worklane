@@ -183,7 +183,11 @@ const PROJECT_PERMISSION_KEYS = new Set(['allow', 'deny', 'ask']);
 
 /** The instruction files Claude Code loads up front from each folder from the checkout's top down to the run's cwd. */
 const LOADED_INSTRUCTIONS = ['CLAUDE.md', '.claude/CLAUDE.md'];
-/** What these runs never load (measured, R1185f L3: --setting-sources project): a local settings file and CLAUDE.local.md. */
+/**
+ * What a run with --setting-sources project never loads (measured, R1185f L3): a local settings file and CLAUDE.local.md.
+ * A guarded run (where this check runs) loads no source at all now (--setting-sources '', runner.ts cliArgs): the
+ * check stays as a second line, should that flag ever change.
+ */
 const NOT_LOADED = /(^|\/)\.claude\/settings\.local\.json$|(^|\/)claude\.local\.md$/i;
 /** How many `@` imports deep a loaded instruction file's imports are followed (as Claude Code follows them). */
 const MAX_IMPORT_DEPTH = 5;
@@ -589,7 +593,8 @@ function ancestorsChanged(root: string): string[] {
  * Why an agent run in `cwd` must not start because of the checkout's .claude/settings.json, or null. Deny and ask
  * rules only tighten and hooks only add, so they're fine; an allow rule our settings don't have would widen what
  * the agent may do, and any other key (env, sandbox, additionalDirectories, defaultMode, ...) could loosen the run.
- * .claude/settings.local.json isn't checked: the runner loads project settings only (--setting-sources project).
+ * .claude/settings.local.json isn't checked: an unguarded run loads project settings only (--setting-sources project),
+ * and a guarded one none (--setting-sources '').
  */
 export function projectSettingsRefusal(cwd: string, ours: Settings): string | null {
   const file = join(cwd, '.claude', 'settings.json');

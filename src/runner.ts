@@ -470,8 +470,12 @@ const EFFORT_FLAGS = new Set<string>(EFFORTS);
  */
 export const NO_PROJECT_SOURCE_ROLES: readonly string[] = ['planner', 'plan-reviewer'];
 
-export function cliArgs(req: RunRequest, settings?: object, systemPromptFile?: string, pluginDirs: readonly string[] = [], mcpConfigFile?: string): string[] {
-  const sources = NO_PROJECT_SOURCE_ROLES.includes(req.role) ? '' : 'project';
+export function cliArgs(req: RunRequest, settings?: object, systemPromptFile?: string, pluginDirs: readonly string[] = [], mcpConfigFile?: string, o: { guarded?: boolean } = {}): string[] {
+  // A guarded run (the instance's agent settings, #958; the owner's decision, 2026-11-08) and a planner (#973) load no
+  // setting source at all: no project settings, hooks or CLAUDE.md from the checkout (measured with Claude Code
+  // 2.1.319: with '', neither a SessionStart hook in .claude/settings.json nor any CLAUDE.md, a parent folder's
+  // included, reaches the run). Its settings are the instance's own, through --settings.
+  const sources = o.guarded || NO_PROJECT_SOURCE_ROLES.includes(req.role) ? '' : 'project';
   const args = [...(settings ? ['--settings', JSON.stringify(settings)] : []), '-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--model', req.model, '--setting-sources', sources, '--strict-mcp-config', '--permission-mode', 'dontAsk', '--max-turns', String(req.maxTurns), '--max-budget-usd', String(req.maxBudgetUsd)];
   // WHY: not on a provider run: whether an open model's endpoint takes the effort parameter is unknown (#579).
   if (req.effort && EFFORT_FLAGS.has(req.effort) && !req.provider) args.push('--effort', req.effort);
@@ -832,7 +836,7 @@ export class CliRunner implements AgentRunner {
           return;
         }
       }
-      const argv = cliArgs(mcpArgs ? { ...req, allowedTools: [...req.allowedTools, ...mcpArgs.allowedTools] } : req, settings, systemPromptFile, plugins?.dirs ?? [], mcpConfigFile);
+      const argv = cliArgs(mcpArgs ? { ...req, allowedTools: [...req.allowedTools, ...mcpArgs.allowedTools] } : req, settings, systemPromptFile, plugins?.dirs ?? [], mcpConfigFile, { guarded: guard !== null });
       const [file, args] = runAs ? asUser(runAs.user, this.bin, argv, runEnv) : [this.bin, argv];
       // As another user, sudo gets only PATH; the agent's environment is passed explicitly through env -i.
       const child = spawn(file, args, { cwd: req.cwd, env: runAs ? { PATH: ownEnv(env).get('PATH') ?? '' } : runEnv, stdio: ['pipe', 'pipe', 'pipe'], detached: spawnDetached });

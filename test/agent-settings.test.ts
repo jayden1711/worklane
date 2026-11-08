@@ -809,9 +809,34 @@ test('#958 (R1185g G4, G5, R1185h H12): a link redirected through a folder swapp
   assert.match(uncommittedAgentFilesRefusal(dir) ?? '', /\.claude\/settings\.json/, 'H12: a FIFO');
 });
 
-test("#958 (R1185f L3, R1185g): settings.local.json and CLAUDE.local.md don't count because these runs load project settings only", () => {
-  const args = cliArgs({ prompt: 'p', model: 'm', cwd: '/x', allowedTools: [], maxTurns: 1, maxBudgetUsd: 1, stallMs: 1, timeoutMs: 1, role: 'worker' } as Parameters<typeof cliArgs>[0]);
-  const k = args.indexOf('--setting-sources');
-  assert.equal(args[k + 1], 'project', 'widen --setting-sources and NOT_LOADED in src/agent-settings.ts must change with it');
+test("#958 (R1185f L3, R1185g): an unguarded run loads project settings only (so settings.local.json and CLAUDE.local.md aren't its); a guarded run loads no source at all", () => {
+  const r = { prompt: 'p', model: 'm', cwd: '/x', allowedTools: [], maxTurns: 1, maxBudgetUsd: 1, stallMs: 1, timeoutMs: 1, role: 'worker' } as Parameters<typeof cliArgs>[0];
+  const sources = (args: string[]) => args[args.indexOf('--setting-sources') + 1];
+  assert.equal(sources(cliArgs(r)), 'project', 'widen --setting-sources and NOT_LOADED in src/agent-settings.ts must change with it');
+  assert.equal(sources(cliArgs(r, undefined, undefined, [], undefined, { guarded: true })), '', 'guarded: no setting source');
+});
+
+test("#958 (the owner's decision, 2026-11-08), acceptance: a guarded run starts claude with --setting-sources '', so nothing in the checkout (settings, hooks, CLAUDE.md) is loaded", { skip: isWindows && 'POSIX stand-in claude' }, async (t) => {
+  const { dir, home } = setup(t);
+  const lanes = { default: { settings: { sandbox: { enabled: true }, permissions: { deny: ['Read(//x/**)'] } } } };
+  install({ root: dir, engineCli, instance: 'shop' });
+  const d = mkdtempSync(join(tmpdir(), 'fake-claude-'));
+  const log = join(d, 'argv.json');
+  const bin = join(d, 'claude');
+  writeFileSync(bin, `#!/usr/bin/env node
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+if (args[0] === 'auth') { console.log(JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' })); process.exit(0); }
+fs.writeFileSync(${JSON.stringify(log)}, JSON.stringify(args));
+${STDIN_LINE};
+const i = args.indexOf('--settings');
+console.log(JSON.stringify({ type: 'system', subtype: 'init', output_style: (i >= 0 && JSON.parse(args[i + 1]).outputStyle) || 'default' }));
+console.log(JSON.stringify({ type: 'result', subtype: 'success', result: 'done', total_cost_usd: 0, num_turns: 1 }));
+`);
+  chmodSync(bin, 0o755);
+  const r = await new CliRunner('cli', childEnv(), bin, undefined, lanes, undefined, {}, () => guardrailSettings(home, 'shop', dir)).run(req(dir));
+  assert.equal(r.reason, 'succeeded', r.detail);
+  const argv = JSON.parse(readFileSync(log, 'utf8')) as string[];
+  assert.equal(argv[argv.indexOf('--setting-sources') + 1], '', JSON.stringify(argv));
 });
 

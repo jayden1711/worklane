@@ -507,7 +507,7 @@ This catches any receipt that was changed, reordered, inserted, or dropped from 
   - A task may declare `files:` scope. Diffs outside that scope are flagged.
   - `collisions` lists unlanded changes that touch the same files.
 - **Agent runs** go through an `AgentRunner` interface with two implementations:
-  - **`cli`** (default): spawns the locally installed `claude -p --output-format stream-json` with the user's existing auth and `--setting-sources project`.
+  - **`cli`** (default): spawns the locally installed `claude -p --output-format stream-json` with the user's existing auth and `--setting-sources project`; a guarded run (an instance's agent settings) and a planner `--setting-sources ''`, so nothing in the checkout, its settings, hooks or any CLAUDE.md, is loaded (#958, #973).
   - **`sdk`**: the same CLI, authenticated with `ANTHROPIC_API_KEY` (passed through to the run). There is no in-process SDK runner.
 
   Both runners use the same settings:
@@ -954,7 +954,7 @@ What exists, and where it deviates from the plan above:
 - **Decisions:** answered by `worklane decide <id> <option>`, or by a writer commenting `/worklane <option>` on the issue. The Decisions page arrives in step 3. Since #715 one rule (`src/dashboard-auth.ts` `mayAnswerKind`) decides who may answer each kind on every surface: a comment counts only from a listed writer whose repo role may answer that kind (a held plan, a high-risk merge and an automation's run: owners; a high-risk merge also writers where review.yaml on main says `approvals: { land: writers }` and an instance's `policy.yaml` `writers_approve_land` allows it). `decide` runs only as root or the coordinator user (on a local site, the user whose event log it is) and records the instance's owner, audited via `cli`. A batched PR's approving review counts only under the same rule, and never while auto-merge is stopped.
 - **Landing:** direct mode is complete. In PR mode the coordinator records `rejected` with a pointer to step 3; opening and merging PRs ships with the dashboard.
 - **Gate at landing:** the project's `changed` test command must exit 0. The "no new failures against the recorded baseline" comparison needs a per-runner failure parser, and arrives with tiered tests in step 4. Until then, a red main blocks landing, so getting main green is the first backlog item.
-- **Runner:** `claude -p` with `--setting-sources project`, `--strict-mcp-config`, `--permission-mode dontAsk`, explicit allowed tools, and per-run turn and USD caps. `claude auth status` is checked before each run. The Agent SDK path (`agent_runtime.kind: sdk`) uses the same CLI with an API key. An in-process SDK runner is deferred.
+- **Runner:** `claude -p` with `--setting-sources project`; a guarded run (an instance's agent settings) and a planner `--setting-sources ''`, so nothing in the checkout, its settings, hooks or any CLAUDE.md, is loaded (#958, #973), `--strict-mcp-config`, `--permission-mode dontAsk`, explicit allowed tools, and per-run turn and USD caps. `claude auth status` is checked before each run. The Agent SDK path (`agent_runtime.kind: sdk`) uses the same CLI with an API key. An in-process SDK runner is deferred.
 - **Live verification:** the example project ran end to end with the real CLI (haiku for every role). Repro, then fix, then the coordinator's checks, then the verdict, then L1, then landed and closed, in under a minute for about $0.01.
 
 ## 18. Build order (history)
