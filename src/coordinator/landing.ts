@@ -347,25 +347,81 @@ export abstract class Landing extends Decisions {
    * file (each held path, none behind "and N more"), as the question names it. `seen`: no output (every judged file is an entry's own).
    */
   private landFloor(path: string, tip: string, head: string, applied: EventPayload<'land.queued'>[]): { held: string[]; ask: EventPayload<'land.queued'>[]; seen: boolean; listed: string[]; print: string } {
+    try {
+      return this.landFloorExact(path, tip, head, applied);
+    } catch (e) {
+      // R1182l 3: fail closed with a hold, never a throw that stalls the queue unasked. Its print is new each time, so
+      // no approval matches it: the owner decides on what the next pass reads.
+      const unapproved = applied.filter((q) => !this.landApproved(q));
+      const why = `the land commit's files could not be read exactly (${(e as Error).message.slice(0, 300)})`;
+      return { held: [why], ask: unapproved.length ? unapproved : applied, seen: false, listed: [], print: `unreadable ${randomBytes(16).toString('hex')}` };
+    }
+  }
+
+  /**
+   * landFloor's reading, byte for byte (R1182l): each revision's whole tree from `git ls-tree -r -z --full-tree`, and
+   * the land commit's changed paths from `git diff --raw -z --no-renames`, both keyed by the path's own bytes. No path
+   * is ever given to git as a pathspec, so `:`-prefixed or magic names mean nothing. A path that isn't UTF-8 can't be
+   * an entry's own (entries' files are recorded as text), so it is output.
+   */
+  private landFloorExact(path: string, tip: string, head: string, applied: EventPayload<'land.queued'>[]): { held: string[]; ask: EventPayload<'land.queued'>[]; seen: boolean; listed: string[]; print: string } {
     const approved = applied.filter((q) => this.landApproved(q));
     const unapproved = applied.filter((q) => !approved.includes(q));
-    const entry = (rev: string, p: string) => {
-      const r = gitSpawnSync(['ls-tree', '-z', '--full-tree', rev, '--', p], { cwd: path, encoding: 'utf8' });
-      if (r.status !== 0) throw new Error(`git ls-tree ${rev.slice(0, 8)} -- ${p} failed: ${r.stderr.trim()}`);
-      return r.stdout;
+    const run = (args: string[]): Buffer => {
+      const r = gitSpawnSync(args, { cwd: path, maxBuffer: 1 << 30 });
+      if (r.status !== 0) throw new Error(`git ${args[0]} failed: ${String(r.stderr ?? '').trim().slice(0, 200)}`);
+      return r.stdout as Buffer;
     };
+    const records = (b: Buffer): Buffer[] => {
+      const out: Buffer[] = [];
+      let at = 0;
+      for (let i = b.indexOf(0, at); i >= 0; i = b.indexOf(0, at)) {
+        out.push(b.subarray(at, i));
+        at = i + 1;
+      }
+      return out;
+    };
+    const trees = new Map<string, Map<string, string>>();
+    const treeOf = (rev: string): Map<string, string> => {
+      let t = trees.get(rev);
+      if (!t) {
+        t = new Map();
+        for (const rec of records(run(['ls-tree', '-r', '-z', '--full-tree', rev]))) {
+          const tab = rec.indexOf(9);
+          if (tab < 0) throw new Error(`an ls-tree record of ${rev.slice(0, 8)} with no path`);
+          t.set(rec.subarray(tab + 1).toString('hex'), rec.subarray(0, tab).toString('latin1'));
+        }
+        trees.set(rev, t);
+      }
+      return t;
+    };
+    // `:<modes> <objects> <status>` then the path, each NUL-ended; with --no-renames, one path per change.
+    const diff = records(run(['diff', '--raw', '-z', '--no-renames', '--no-ext-diff', '--no-textconv', tip, head]));
+    const changed: string[] = [];
+    for (let i = 0; i + 1 < diff.length; i += 2) changed.push(diff[i + 1]!.toString('hex'));
+    const text = (hex: string): string | null => {
+      const b = Buffer.from(hex, 'hex');
+      const t = b.toString('utf8');
+      return Buffer.from(t, 'utf8').equals(b) ? t : null;
+    };
+    const entryAt = (rev: string, hex: string) => treeOf(rev).get(hex) ?? '';
     const ownerOfPath = new Map<string, EventPayload<'land.queued'>>();
     for (const q of applied) for (const f of this.filesOf(q.issue, q.head)) ownerOfPath.set(f, q);
-    const files = this.changeFiles(path, tip, head);
-    const own = (f: { path: string }) => {
-      const q = ownerOfPath.get(f.path);
-      return q && entry(head, f.path) === entry(q.head, f.path) ? q : undefined;
+    const own = (hex: string) => {
+      const t = text(hex);
+      const q = t === null ? undefined : ownerOfPath.get(t);
+      return q && entryAt(head, hex) === entryAt(q.head, hex) ? q : undefined;
     };
-    const judged = files.filter((f) => {
-      const q = own(f);
+    const judgedHex = changed.filter((h) => {
+      const q = own(h);
       return q === undefined || !approved.includes(q);
     });
-    const output = files.filter((f) => own(f) === undefined);
+    const outputHex = changed.filter((h) => own(h) === undefined);
+    // The level reads changeFiles' (lossily decoded) names: a non-UTF-8 name's reasons are judged as git decodes it.
+    const files = this.changeFiles(path, tip, head);
+    const decoded = (hs: string[]) => new Set(hs.map((h) => Buffer.from(h, 'hex').toString('utf8')));
+    const judgedNames = decoded(judgedHex);
+    const judged = files.filter((f) => judgedNames.has(f.path));
     const review: ReviewConfig = this.d.cfg.review ?? DEFAULT_REVIEW;
     const labels = [...new Set(applied.flatMap((q) => this.events(q.issue).filter((e) => e.type === 'issue.seen').flatMap((e) => (e.payload as { labels: string[] }).labels)))];
     const reasons = (fs: typeof files) => (fs.length ? riskAndDesignReasons({ level: computeLevel({ files: fs, labels, moneyPaths: this.moneyPaths(review.money_path_source), scope: lockScopeOf(this.d) }, review), waitCategories: waitCategoriesOf(review), newTopLevel: [] }) : []);
@@ -373,16 +429,17 @@ export abstract class Landing extends Decisions {
     const none = { held: [], ask: [], seen: true, listed: [], print: '' };
     if (!held.length) return none;
     const shown = (e: string) => {
-      const m = /^(\d+) (\w+) ([0-9a-f]+)\t/.exec(e);
+      const m = /^(\d+) (\w+) ([0-9a-f]+)$/.exec(e);
       return m ? `${m[1]} ${m[2]} ${m[3]!.slice(0, 12)}` : 'deleted';
     };
-    const listed = judged.map((f) => `judged at landing: ${f.path} (${shown(entry(head, f.path))})`);
+    const named = (hex: string) => text(hex) ?? `${Buffer.from(hex, 'hex').toString('utf8')} (not UTF-8; bytes ${hex})`;
+    const listed = judgedHex.map((h) => `judged at landing: ${named(h)} (${shown(entryAt(head, h))})`);
     const print = createHash('sha256')
-      .update(JSON.stringify({ batch: applied.map((q) => `${q.issue}@${q.head}`).sort(), files: files.map((f) => [f.path, entry(head, f.path)]).sort((a, b) => (a[0]! < b[0]! ? -1 : a[0]! > b[0]! ? 1 : 0)) }))
+      .update(JSON.stringify({ batch: applied.map((q) => `${q.issue}@${q.head}`).sort(), files: changed.map((h) => [h, entryAt(head, h)]).sort((a, b) => (a[0]! < b[0]! ? -1 : a[0]! > b[0]! ? 1 : 0)) }))
       .digest('hex');
     const covered = approved.some((q) => this.landingPrint(q) === print);
     const ask = unapproved.length ? unapproved : covered ? [] : approved;
-    return ask.length ? { held, ask, seen: output.length === 0, listed, print } : none;
+    return ask.length ? { held, ask, seen: outputHex.length === 0, listed, print } : none;
   }
 
   /**
