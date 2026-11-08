@@ -87,6 +87,16 @@ test('soak verdict: a coordinator that stops landing work fails, however fast it
   assert.deepEqual(soakVerdict(series(330, (m) => ({ tasksDone: Math.min(200, m), filed: Math.min(200, m) + 1 }))).failures, []);
 });
 
+test('soak verdict: a run too short to judge, or shorter than asked, fails; never judged on its warm-up (#1181 review, 4)', () => {
+  // hours=0.07 or 0.1: 5 or 6 one-minute samples, every one in the 10-minute warm-up.
+  for (const n of [5, 6, 10]) assert.match(soakVerdict(series(n)).failures.join(), /^too short: 0 sample\(s\) after the 10-minute warm-up \(at least 4\): nothing was judged$/, `${n} samples`);
+  assert.match(soakVerdict(series(13)).failures.join(), /^too short: 3 sample\(s\) after/);
+  assert.deepEqual(soakVerdict(series(14)).failures, [], 'four past the warm-up: judged');
+  // Asked for 5.5 h, stopped at 2 h: too short; at 5.4 h (the last sample a minute before the end): fine.
+  assert.match(soakVerdict(series(120), SOAK_LIMITS, { expectedMs: 5.5 * 3600_000 }).failures.join(), /too short: it ran 1\.98 h of the 5\.50 h asked for/);
+  assert.deepEqual(soakVerdict(series(330), SOAK_LIMITS, { expectedMs: 5.5 * 3600_000 - 60_000 }).failures, []);
+});
+
 /** Open file handles of this process, where the platform shows them. */
 function openFds(): number | null {
   for (const d of ['/proc/self/fd', '/dev/fd']) {
@@ -171,7 +181,8 @@ test('soak: the real coordinator works for a while with stand-in agents; nothing
   }
   // The short smoke run has no warm-up to leave out and too little time to judge a slope: its limits say so.
   const limits = hours > 0 ? SOAK_LIMITS : { ...SOAK_LIMITS, warmupMs: 0, heapGrowthBytes: 512 * MB, rssGrowthBytes: 1024 * MB, fdGrowth: 256, tickDrift: 20 };
-  const v = soakVerdict(samples, limits);
+  // A real soak is judged against the hours it was asked for (a run that stopped early fails).
+  const v = soakVerdict(samples, limits, hours > 0 ? { expectedMs: ms - sampleMs } : {});
   const out = process.env.SOAK_REPORT_DIR;
   if (out) {
     mkdirSync(out, { recursive: true });

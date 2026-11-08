@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
     inputs:
       hours:
-        description: 'How long to soak, in hours (at most 5.5 on GitHub-hosted runners)'
+        description: 'How long to soak, in hours (1 to 5.5; GitHub-hosted runners stop a job at 6 h)'
         required: false
         default: '5.5'
 concurrency:
@@ -53,8 +53,8 @@ jobs:
           HOURS: ${{ inputs.hours || '5.5' }}
           SOAK_REPORT_DIR: ${{ runner.temp }}/soak
         run: |
-          if ! [[ "$HOURS" =~ ^[0-9]+(\.[0-9]+)?$ ]] || ! awk -v h="$HOURS" 'BEGIN { exit !(h > 0 && h <= 5.5) }'; then
-            echo "hours must be a number above 0 and at most 5.5 (got: $HOURS)"; exit 2
+          if ! [[ "$HOURS" =~ ^[0-9]+(\.[0-9]+)?$ ]] || ! awk -v h="$HOURS" 'BEGIN { exit !(h >= 1 && h <= 5.5) }'; then
+            echo "hours must be a number from 1 to 5.5 (got: $HOURS): a shorter run is no soak"; exit 2
           fi
           SOAK_HOURS="$HOURS" timeout --signal=INT "$(awk -v h="$HOURS" 'BEGIN { printf "%d", h * 3600 + 900 }')" \
             node --max-old-space-size=4096 --import ./dist/test/isolate.js --test --test-name-pattern='^soak: the real coordinator' dist/test/soak.test.js

@@ -92,11 +92,16 @@ export const END_SAMPLES = 10;
 const MB = (n: number) => `${(n / 2 ** 20).toFixed(1)} MB`;
 
 /** What failed the soak (empty: it passed), and what it measured. */
-export function soakVerdict(samples: readonly SoakSample[], limits: SoakLimits = SOAK_LIMITS): { failures: string[]; measured: Record<string, string | number> } {
+export function soakVerdict(samples: readonly SoakSample[], limits: SoakLimits = SOAK_LIMITS, o: { expectedMs?: number } = {}): { failures: string[]; measured: Record<string, string | number> } {
   const failures: string[] = [];
   if (samples.length < 4) return { failures: [`only ${samples.length} sample(s): a soak needs at least 4 to compare its start and end`], measured: {} };
+  // WHY (#1181 review): with too few samples past the warm-up, the warm-up's were judged instead, so a 4-minute run
+  // passed as a soak. Too short is a failure; and a run must last (nearly) as long as it was asked to.
   const warm = samples.filter((s) => s.at >= limits.warmupMs);
-  const use = warm.length >= 4 ? warm : samples;
+  if (warm.length < 4) return { failures: [`too short: ${warm.length} sample(s) after the ${Math.round(limits.warmupMs / 60_000)}-minute warm-up (at least 4): nothing was judged`], measured: {} };
+  const ran = samples.at(-1)!.at;
+  if (o.expectedMs !== undefined && ran < o.expectedMs * 0.9) failures.push(`too short: it ran ${(ran / 3_600_000).toFixed(2)} h of the ${(o.expectedMs / 3_600_000).toFixed(2)} h asked for`);
+  const use = warm;
   const q = Math.max(1, Math.floor(use.length / 4));
   const first = use.slice(0, q);
   const last = use.slice(-q);
