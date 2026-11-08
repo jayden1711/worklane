@@ -869,7 +869,7 @@ function statementsOf(text: string): ReturnType<typeof readStatements> {
   if (!r) statementCache.set(text, (r = readStatements(text)));
   return r;
 }
-function readStatements(text: string): { code: string[]; span: (k: number) => [number, number] } {
+function readStatements(text: string): { code: string[]; raw: string[]; span: (k: number) => [number, number] } {
   const code = codeLinesOf(text).map(withoutComments);
   const n = code.length;
   const start = new Array<number>(n);
@@ -882,16 +882,19 @@ function readStatements(text: string): { code: string[]; span: (k: number) => [n
   }
   const end = new Array<number>(n);
   for (let k = n - 1; k >= 0; k--) end[k] = k + 1 < n && start[k + 1] === start[k] ? end[k + 1]! : k;
-  return { code, span: (k) => [start[k]!, end[k]!] };
+  return { code, raw: text.split('\n'), span: (k) => [start[k]!, end[k]!] };
 }
 
 /**
  * #941: the names that stand for each table in `tables`, in each of `texts` (by path). In every file, the table's own
  * name. In a file, also every name it binds to one of its names (`const rules = CHECKS`, `const { a } = CHECKS`,
  * `const run = () => CHECKS.length`), the binding's whole statement read (statementsOf), and every name such a binding
- * anywhere gives that the file imports (`import`, `require` or `export {` naming it). So another file's own `rules`
- * isn't the table's. `all`: every such name. Not followed: a re-export under another name
- * (`export { rules as R }` is read as naming `rules` only), a property, a function declaration or a class field.
+ * anywhere gives that the file imports (`import`, `require` or `export {` naming it), and every name an import or a
+ * destructuring gives one of those under another name (`import { CHECKS as C }`, `export { rules as R }`,
+ * `const { CHECKS: C } = require(...)`), or a default import (`import C from`, `const C = require(...)`) of a file
+ * whose default export (`export default`, `module.exports =`, `export { X as default }`) stands for it (R1184c). So
+ * another file's own `rules` isn't the table's. `all`: every such name. Not followed: a property, a function
+ * declaration, a class field, a namespace import's member under another name, or a dynamic `import()`'s result.
  */
 export function useNames(texts: ReadonlyMap<string, string>, tables: readonly string[]): Map<string, { all: Set<string>; in: (path: string) => Set<string> }> {
   const files = [...texts];
@@ -899,43 +902,76 @@ export function useNames(texts: ReadonlyMap<string, string>, tables: readonly st
   const read = new Map<string, ReturnType<typeof statementsOf>>();
   const statements = (p: string, t: string) => read.get(p) ?? read.set(p, statementsOf(t)).get(p)!;
   const nameRe = (ns: Iterable<string>) => new RegExp(`(?<![\\w$])(?:${[...ns].map((x) => x.replace(/\$/g, '\\$')).join('|')})(?![\\w$])`);
+  const IMPORTISH = /^\s*(?:import\b|export\s*(?:type\s*)?\{|export\s*\*)|\brequire\s*\(/;
+  /** The relative specifier in a statement's raw text (strings are blanked in its code). */
+  const specOf = (raw: string) => /(?:\bfrom\s*|\brequire\s*\(\s*|\bimport\s*\(\s*)(['"])([^'"\n]{1,300})\1/.exec(raw)?.[2] ?? null;
   const out = new Map<string, { all: Set<string>; in: (path: string) => Set<string> }>();
   for (const table of tables) {
     const per = new Map<string, Set<string>>();
     const bound = new Set<string>();
+    // The files whose default export (`export default X`, `module.exports = X`) stands for the table.
+    const defaults = new Set<string>();
     for (let round = 0; round < 16; round++) {
       let grew = false;
       const sought = [table, ...bound];
       for (const [p, text] of files) {
-        if (!sought.some((n) => text.includes(n))) continue;
-        const { code, span } = statements(p, text);
+        // A file that names none of the names can still import a default that stands for the table.
+        if (!sought.some((n) => text.includes(n)) && !(defaults.size && /\bimport\b|\brequire\s*\(/.test(text))) continue;
+        const { code, raw, span } = statements(p, text);
         const here = per.get(p) ?? per.set(p, new Set([table])).get(p)!;
+        const add = (id: string, exported: boolean) => {
+          if (exported) bound.add(id);
+          if (here.has(id)) return;
+          here.add(id);
+          grew = true;
+        };
         const re = nameRe(here);
+        const stands = (id: string) => here.has(id) || bound.has(id);
+        const fromDefault = (rawStmt: string) => {
+          const spec = specOf(rawStmt);
+          return spec !== null && specifierPaths(p, spec).some((x) => defaults.has(x));
+        };
         for (let k = 0; k < code.length; k++) {
           if (span(k)[0] !== k) continue;
           const stmt = code.slice(k, span(k)[1] + 1).join('\n');
-          if (bound.size && /^\s*(?:import|export\s*\{)|\brequire\s*\(/.test(stmt)) {
-            for (const id of stmt.match(IDENT) ?? []) {
-              if (bound.has(id) && !here.has(id)) {
-                here.add(id);
-                grew = true;
-              }
+          const rawStmt = raw.slice(k, span(k)[1] + 1).join('\n');
+          // Its default export stands for the table.
+          const def = /^\s*(?:export\s+default\s+|module\.exports\s*=\s*)([\s\S]*)$/.exec(stmt);
+          if (def && re.test(def[1]!) && !defaults.has(p)) {
+            defaults.add(p);
+            grew = true;
+          }
+          if (IMPORTISH.test(stmt)) {
+            // A name another file binds, imported as itself; one renamed (`X as Y`, `{ X: Y } = require(...)`); a
+            // default import of a file whose default stands for the table.
+            for (const id of stmt.match(IDENT) ?? []) if (bound.has(id)) add(id, false);
+            for (const m of stmt.matchAll(/([A-Za-z_$][\w$]*)\s+as\s+([A-Za-z_$][\w$]*)/g)) {
+              if (!(stands(m[1]!) || (m[1] === 'default' && fromDefault(rawStmt)))) continue;
+              // `export { rules as default }`: this file's default stands for it (never the word `default` as a name).
+              if (m[2] === 'default') {
+                if (!defaults.has(p)) {
+                  defaults.add(p);
+                  grew = true;
+                }
+              } else add(m[2]!, true);
             }
+            const dflt = /^\s*import\s+(?:type\s+)?([A-Za-z_$][\w$]*)\s*(?:,|from\b)/.exec(stmt);
+            if (dflt && fromDefault(rawStmt)) add(dflt[1]!, true);
           }
           // Only a module's own binding: a statement at column 0 that is a `const`, `let` or `var` (exported or not),
           // its first binding. A local inside a function is not followed (each would make every line near it a use).
           const m = TOP_BINDS.exec(stmt);
-          if (m) {
-            if (!re.test(stmt.slice(m[0].length))) continue;
-            for (const id of m[1]!.match(IDENT) ?? []) {
-              if (/^(?:const|let|var)$/.test(id)) continue;
-              if (!here.has(id)) {
-                here.add(id);
-                grew = true;
-              }
-              bound.add(id);
-            }
+          if (!m) continue;
+          const init = stmt.slice(m[0].length);
+          const pattern = m[1]!;
+          if (re.test(init)) {
+            for (const id of pattern.match(IDENT) ?? []) if (!/^(?:const|let|var)$/.test(id)) add(id, true);
+            continue;
           }
+          // Destructured under another name (`const { CHECKS: C } = require(...)`, `= mod`): the key stands for it.
+          if (pattern.startsWith('{')) for (const pair of pattern.matchAll(/([A-Za-z_$][\w$]*)\s*:\s*([A-Za-z_$][\w$]*)/g)) if (stands(pair[1]!)) add(pair[2]!, true);
+          // A CommonJS default (`const C = require('./x')`) of a file whose `module.exports` stands for it.
+          if (/^[A-Za-z_$]/.test(pattern) && /^\s*require\s*\(/.test(init) && fromDefault(rawStmt)) add(pattern, true);
         }
       }
       if (!grew) break;
@@ -1436,23 +1472,24 @@ function contextAt(cwd: string, from: string, files: ChangeFile[], markedAll: Re
 
 /** The files `text` (at `path`) may import by a relative specifier (`from './x.js'`, `require('../y')`, `import('./z')`), each extension a TS build maps to it. */
 export function relativeImports(path: string, text: string): string[] {
-  const dir = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
-  const out: string[] = [];
-  for (const m of text.matchAll(/(?:\bfrom\s*|\bimport\s*\(?\s*|\brequire\s*\(\s*)(['"])(\.{1,2}\/[^'"\n]{1,300})\1/g)) {
-    const parts: string[] = dir ? dir.split('/') : [];
-    let ok = true;
-    for (const seg of m[2]!.split('/')) {
-      if (seg === '.' || seg === '') continue;
-      if (seg === '..') ok = parts.pop() !== undefined && ok;
-      else parts.push(seg);
-    }
-    if (!ok || !parts.length) continue;
-    const p = parts.join('/');
-    const ext = /\.[cm]?[jt]sx?$/.exec(p)?.[0];
-    const stem = ext ? p.slice(0, -ext.length) : p;
-    const alts: Record<string, string[]> = { '.js': ['.js', '.ts', '.tsx', '.jsx'], '.mjs': ['.mjs', '.mts'], '.cjs': ['.cjs', '.cts'], '.jsx': ['.jsx', '.tsx'] };
-    if (!ext) out.push(...['.ts', '.tsx', '.js', '.mjs', '.cjs', '/index.ts', '/index.js'].map((e) => p + e));
-    else out.push(...(alts[ext] ?? [ext]).map((e) => stem + e));
+  return [...text.matchAll(/(?:\bfrom\s*|\bimport\s*\(?\s*|\brequire\s*\(\s*)(['"])(\.{1,2}\/[^'"\n]{1,300})\1/g)].flatMap((m) => specifierPaths(path, m[2]!));
+}
+
+/** The paths a relative specifier `spec` in the file at `path` may name, each extension a TS build maps to it; none for a bare one. */
+function specifierPaths(path: string, spec: string): string[] {
+  if (!/^\.{1,2}\//.test(spec)) return [];
+  const parts: string[] = path.includes('/') ? path.slice(0, path.lastIndexOf('/')).split('/') : [];
+  for (const seg of spec.split('/')) {
+    if (seg === '.' || seg === '') continue;
+    if (seg === '..') {
+      if (parts.pop() === undefined) return [];
+    } else parts.push(seg);
   }
-  return out;
+  if (!parts.length) return [];
+  const p = parts.join('/');
+  const ext = /\.[cm]?[jt]sx?$/.exec(p)?.[0];
+  const stem = ext ? p.slice(0, -ext.length) : p;
+  const alts: Record<string, string[]> = { '.js': ['.js', '.ts', '.tsx', '.jsx'], '.mjs': ['.mjs', '.mts'], '.cjs': ['.cjs', '.cts'], '.jsx': ['.jsx', '.tsx'] };
+  if (!ext) return ['.ts', '.tsx', '.js', '.mjs', '.cjs', '/index.ts', '/index.js'].map((e) => p + e);
+  return (alts[ext] ?? [ext]).map((e) => stem + e);
 }

@@ -227,6 +227,28 @@ test('decoy (#941, R1184a #2): a use through an alias, or with the name on a con
   for (const cap of [Infinity, 60]) assert.deepEqual(filesAtOnce(dir, head, asked, cap), filesAt(dir, head, asked, cap), `cap ${cap}`);
 });
 
+test('decoy (#941, R1184c): an alias an import or a destructuring makes, then its use moved to a decoy, waits', () => {
+  const live = { 'src/x-live.ts': "export const LIVE = ['a'];\n" };
+  const shapes: [string, Record<string, string>, string][] = [
+    ['import { CHECKS as C }', {}, "import { CHECKS as C } from '../test/x-rules.test.js';\nexport const run = () => C.length;\n"],
+    ['a default import of export default CHECKS', { 'src/x-default.ts': "import { CHECKS } from '../test/x-rules.test.js';\nexport default CHECKS;\n" }, "import C from './x-default.js';\nexport const run = () => C.length;\n"],
+    ['const { CHECKS: C } = require(...)', {}, "const { CHECKS: C } = require('../test/x-rules.test.js');\nexport const run = () => C.length;\n"],
+    ['import { rules as r }', { 'src/x-alias.ts': "import { CHECKS } from '../test/x-rules.test.js';\nexport const rules = CHECKS;\n" }, "import { rules as r } from './x-alias.js';\nexport const run = () => r.length;\n"],
+    ['export { rules as default }, then a default import', { 'src/x-alias.ts': "import { CHECKS } from '../test/x-rules.test.js';\nconst rules = CHECKS;\nexport { rules as default };\n" }, "import r from './x-alias.js';\nexport const run = () => r.length;\n"],
+    ['module.exports = CHECKS, then a CommonJS default', { 'src/x-cjs.cjs': "const { CHECKS } = require('../test/x-rules.test.js');\nmodule.exports = CHECKS;\n" }, "const C = require('./x-cjs.cjs');\nexport const run = () => C.length;\n"],
+  ];
+  for (const [what, extra, user] of shapes) {
+    const before = { [F]: BASE, ...extra, 'src/x-user.ts': user };
+    // The import or destructuring line kept as it was; only the use switched to the decoy.
+    const switched = `import { LIVE } from './x-live.js';\n${user.replace(/\b(?:C|r)\.length/, 'LIVE.length')}`;
+    assert.notEqual(switched, user);
+    assert.deepEqual(weakensChanged(before, { ...before, 'src/x-user.ts': switched, ...live }), [USE_REMOVED], what);
+  }
+  // Control: an unrelated default import named like nothing bound; `default` is never a name.
+  const other = { [F]: BASE, 'src/x-other.ts': "export default ['x'];\n", 'src/x-user.ts': "import d from './x-other.js';\nexport default d;\nexport const n = d.length;\n" };
+  assert.deepEqual(weakensChanged(other, { ...other, 'src/x-user.ts': "import d from './x-other.js';\nexport default d;\nexport const n = d.length + 1;\n" }), []);
+});
+
 test('decoy (#941), control: adding a use of the table, changing a line that never named it, or another file\'s own name like an alias, adds no such reason', () => {
   const more = BASE.replace("test('t', () => { for (const c of CHECKS) void c; });", "test('t', () => { for (const c of CHECKS) void c; });\ntest('u', () => { void CHECKS.length; });");
   assert.ok(!weakensChanged({ [F]: BASE }, { [F]: more }).includes(USE_REMOVED), 'an added use (the table-used rule reads added lines)');
