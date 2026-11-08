@@ -2,7 +2,7 @@
 // healthy twins a fix must still pass. Each case asserts the SAFE outcome exactly, so a failing case is an attack that
 // works, or a fix that refuses too much. Sources (the attack files the reviews kept): R1174b and R1174c (their cases,
 // from the review comments), R1174d (r1174d-attacks.test.ts), R1174e's A9b, R1174f (r1174f-attacks.test.ts), R1174g
-// (r1174g-attacks.test.ts), R1174h (attacks-1174h/r1174h-attacks.test.ts). Revised per the spec reviews R1231a, R1231b. Frozen
+// (r1174g-attacks.test.ts), R1174h (attacks-1174h/r1174h-attacks.test.ts). Revised per the spec reviews R1231a, R1231b, R1231d. Frozen
 // once its spec review passes: a change to it then needs its own acceptance review (#1231).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -388,6 +388,65 @@ test("healthy (R1231b TWIN): a later ring with ticks before its flip and one eng
   const s = status({ e1: healthy(300, 250), p1, p2: [] }, R3);
   assert.deepEqual(states(s), ['promoted', 'promoted', 'off']);
   assert.match(s.next, /^turn it on for ring second/);
+});
+
+// --- R1231d: the cases its review found missing ---
+test('R1231d P7: R1174d A3 with a replayed on inside the earlier on-period keeps its "rolled back before" trace', () => {
+  const s = status({ e1: [on(200), ev('merge.stopped', { by: 'red_main' }, hoursAgo(150)), on(149), off(148), ...healthy(60, 30)], p1: [], p2: [], p3: [] });
+  assert.equal(s.rings[0]!.state, 'promoted');
+  assert.match(s.rings[0]!.why, /rolled back before/);
+});
+
+test('R1231d P7b: the same in ring 1, ring 0 healthy', () => {
+  const s = status({ e1: healthy(400, 390), p1: [on(200), ev('merge.stopped', { by: 'red_main' }, hoursAgo(150)), on(149), off(148), ...healthy(60, 30)], p2: [], p3: [] });
+  assert.equal(s.rings[1]!.state, 'promoted');
+  assert.match(s.rings[1]!.why, /rolled back before/);
+});
+
+const ENGINE = ['example/engine'];
+test("R1231d P8a: ring 0 holding only a project's instance is a problem", () => {
+  const p = ringZeroProblem({ rollout: RolloutFile.parse({ rings: [{ name: 'engine', instances: ['p1'] }] }), repos: new Map([['p1', ['o/p1']]]), engine: ENGINE, outsideNames: [] });
+  assert.match(p ?? '', /p1, which is not an instance of the engine's own repo/);
+});
+
+test("R1231d P8b: an engine instance outside ring 0, or in a later ring, is a problem", () => {
+  const outside = ringZeroProblem({ rollout: RolloutFile.parse({ rings: [{ name: 'engine', instances: ['e1'] }] }), repos: new Map([['e1', ENGINE], ['e2', ENGINE]]), engine: ENGINE, outsideNames: ['e2'] });
+  assert.match(outside ?? '', /e2 is an instance of the engine's own repo but isn't in ring 0/);
+  const later = ringZeroProblem({ rollout: RolloutFile.parse({ rings: [{ name: 'engine', instances: ['e1'] }, { name: 'p', instances: ['e2'] }] }), repos: new Map([['e1', ENGINE], ['e2', ENGINE]]), engine: ENGINE, outsideNames: [] });
+  assert.match(later ?? '', /e2 is an instance of the engine's own repo but isn't in ring 0/);
+});
+
+test("R1231d P8c: a later ring's instance whose repo can't be told is a problem", () => {
+  const p = ringZeroProblem({ rollout: RolloutFile.parse({ rings: [{ name: 'engine', instances: ['e1'] }, { name: 'p', instances: ['q'] }] }), repos: new Map<string, string[] | null>([['e1', ENGINE], ['q', null]]), engine: ENGINE, outsideNames: [] });
+  assert.match(p ?? '', /can't tell q's repo/);
+});
+
+test("R1231d P9: the CLI with ring 0 naming a project's repo: exit 1, and its advice is to fix rollout.json", () => {
+  const dir = mkdtempSync(join(tmpdir(), 'acc-rollout-'));
+  try {
+    const file = twoRings(dir);
+    const own = join(dir, 'own');
+    instancesAt(own, { e1: { repo: 'o/proj' }, p1: { repo: 'o/p1' } });
+    const r = run(file, { ownDir: () => own, srvRoot: () => join(dir, 'no-srv'), homeOf: () => null, engine });
+    assert.equal(r.code, 1, r.out.join('\n'));
+    assert.match(r.next, /^next: wait: .*fix rollout\.json first/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Healthy twins with a coordinator start: over-fixes of the restart sign (R1231b C3) fail these.
+test('R1231d T1 (healthy): a crash restart long before the flag went on, then a full soak: promoted', () => {
+  const s = status({ e1: [started(400, 1), started(390, 2), tick(389), ...healthy(100, 50)], p1: [], p2: [], p3: [] });
+  assert.equal(s.rings[0]!.state, 'promoted', s.rings[0]!.why);
+  assert.match(s.next, /^turn it on for ring first/);
+});
+
+test('R1231d T2 (healthy): a clean stop and start mid-soak (an engine update): promoted', () => {
+  const stopped = ev('coordinator.stopped', { instance: 'i', clean: true, ms: 1, pending: [] }, hoursAgo(70));
+  const s = status({ e1: [started(101, 1), on(100), ...merges(2, 80), stopped, started(69.9, 2), ...merges(1, 50), tick()], p1: [], p2: [], p3: [] });
+  assert.equal(s.rings[0]!.state, 'promoted', s.rings[0]!.why);
+  assert.match(s.next, /^turn it on for ring first/);
 });
 
 // --- Healthy twins: a fix that refuses everything, or freezes a ring, fails these ---
