@@ -5,6 +5,7 @@ import { cpSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { stopFilePath } from '../src/auto-merge-stop.js';
+import { stopAll } from '../src/slots.js';
 import { FileBacklog } from '../src/backlog/file.js';
 import { loadConfig } from '../src/config/load.js';
 import { ReviewConfig } from '../src/config/schema.js';
@@ -74,13 +75,13 @@ async function run(stop: (f: ReturnType<typeof fixture>) => void) {
  * instance policy, which lands as before), and with `o.l3` the change
  * raised to L3 so the owner is asked, then (`o.approve`) answers approve.
  */
-async function runWith(stop: (f: ReturnType<typeof fixture>) => void, o: { autoMerge?: () => boolean; l3?: boolean; approve?: boolean }) {
+async function runWith(stop: (f: ReturnType<typeof fixture>) => void, o: { autoMerge?: () => boolean; l3?: boolean; approve?: boolean; protection?: (f: ReturnType<typeof fixture>) => { protection: (branch: string) => Promise<'enforced' | 'none'> } }) {
   const f = fixture();
   if (o.l3) f.cfg.review = ReviewConfig.parse({ version: 1, levels: { L0_auto: { when: [] }, L1_evaluator: { when: [] }, L2_notify: { when: [] }, L3_human: { when: ['app-non-money'] } } });
   stop(f);
   f.backlog.open({ title: 'Totals skip non-positive quantities', body: ISSUE, author: 'example-owner', labels: ['ready'] });
   const mainBefore = git(f.repo, 'ls-remote', 'origin', 'refs/heads/main').split('\t')[0];
-  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: runner(), repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, maxAttempts: 1, machine: { load: () => 1, disk: () => ({ freePct: 80, totalGb: 500 }) }, ...(o.autoMerge ? { autoMerge: o.autoMerge } : {}) });
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: runner(), repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, maxAttempts: 1, machine: { load: () => 1, disk: () => ({ freePct: 80, totalGb: 500 }) }, ...(o.autoMerge ? { autoMerge: o.autoMerge } : {}), ...(o.protection ? { protection: o.protection(f) } : {}) });
   for (let i = 0; i < 3; i++) {
     await c.tick();
     await c.idle();
@@ -153,5 +154,25 @@ test("direct mode (#808 (c), R1183a): what the switch leaves queued says why it 
   assert.equal(waits.length, 1, 'one event for the reason, across the ticks');
   assert.equal(waits[0]!.outcome, 'deferred', 'deferred: it stays queued');
   assert.equal(r.landed.length, 0);
+});
+
+test("direct mode (#808, R1183d): a stop set while GitHub answers the push-time protection call is read before the push: it waits, main never moves", { skip }, async () => {
+  for (const [what, set] of [
+    ['the auto-merge stop', (f: ReturnType<typeof fixture>) => writeFileSync(stopFilePath(f.stateDir), JSON.stringify({ reason: 'main went red while the land pushed' }))],
+    ['an emergency stop', (f: ReturnType<typeof fixture>) => stopAll('example-owner', 'stop everything', f.slotsDir)],
+  ] as const) {
+    // Enforced each time; on its second call (the one right before the push) the stop lands while it answers.
+    let calls = 0;
+    const protection = (f: ReturnType<typeof fixture>) => ({
+      protection: async () => {
+        if (++calls === 2) set(f);
+        return 'enforced' as const;
+      },
+    });
+    const r = await runWith(() => {}, { autoMerge: () => true, protection });
+    assert.ok(calls >= 2, `${what}: asked at landNext and again before the push`);
+    assert.equal(r.landed.length, 0, `${what}: never landed`);
+    assert.equal(r.mainAfter, r.mainBefore, `${what}: main untouched`);
+  }
 });
 

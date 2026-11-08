@@ -141,6 +141,19 @@ export abstract class Landing extends Decisions {
     this.emit('land.result', { issue, outcome: 'deferred', landed: null, detail });
   }
 
+  /**
+   * Why a direct land's batch may not push now, read synchronously (nothing awaited, so nothing can change between this
+   * and the push): an emergency stop, the auto-merge stop (#808), or the policy's auto-merge off with anything in the
+   * batch the owner didn't approve. Null: push.
+   */
+  private heldAtPush(applied: EventPayload<'land.queued'>[]): string | null {
+    if (this.emergencyInForce()) return 'emergency stop in force; lands once it is lifted';
+    const stopped = this.autoMergeStopped();
+    if (stopped) return `not pushed: auto-merge is stopped: ${stopped}`;
+    if (!this.directAutoOn() && applied.some((q) => !ownerApproved(q))) return "not pushed: the instance policy's auto-merge is off, so only what the owner approved (L3) lands";
+    return null;
+  }
+
   private gateTiers(batch: EventPayload<'land.queued'>[]): string[] {
     const gates = this.d.cfg.tests.gates;
     const money = this.moneyPaths();
@@ -290,20 +303,17 @@ export abstract class Landing extends Decisions {
         return;
       }
       const head = this.git(path, 'rev-parse', 'HEAD');
-      // A stop that came in while the gates ran: left queued, landed once it's lifted.
-      if (this.emergencyInForce()) {
-        for (const q of applied) result(q.issue, 'deferred', null, 'emergency stop in force; lands once it is lifted');
-        return;
-      }
       // The branch's protection, asked again right before the push: none (or no answer) and nothing is pushed.
       const unprotected = await this.directLandBlocked();
       if (unprotected) {
         for (const q of applied) result(q.issue, 'deferred', null, `not pushed: ${unprotected}`);
         return;
       }
-      // Auto-merge turned off while the gates ran (#808): a batch holding anything the owner didn't approve waits whole.
-      if (!this.directAutoOn() && applied.some((q) => !ownerApproved(q))) {
-        for (const q of applied) result(q.issue, 'deferred', null, "not pushed: the instance policy's auto-merge is off, so only what the owner approved (L3) lands");
+      // INVARIANT (R1183d): after the last await and with nothing awaited between, read again what holds the push: a
+      // stop or a switch turned off while the gates ran, or while GitHub answered the protection call, is never missed.
+      const held = this.heldAtPush(applied);
+      if (held) {
+        for (const q of applied) result(q.issue, 'deferred', null, held);
         return;
       }
       // A plain (non-force) push only succeeds if the tip hasn't moved: compare-and-swap.
