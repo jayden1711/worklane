@@ -202,7 +202,7 @@ const MAX_CLAUDE_DIR_ENTRIES = 10_000;
  *   HEAD, or isn't in it;
  * - a `.claude` that is a link or not a folder, or a link anywhere under one (R1185a D1): git lists a linked folder as
  *   one entry and never looks inside, and what it points at is never compared;
- * - a CLAUDE.md or .claude/CLAUDE.md in a folder from the top down to `cwd` (and `.claude/rules/**/*.md`), the files Claude Code
+ * - a CLAUDE.md or .claude/CLAUDE.md in a folder from the top down to `cwd` (and the `.md` files under `.claude/rules/`), the files Claude Code
  *   loads up front, whose bytes (through a link, to its target in the checkout) aren't HEAD's, compared directly, so an
  *   ignore rule (a `.gitignore` the same step writes, info/exclude, core.excludesFile) can't hide it (R1185a D3).
  * Not counted: an empty, untracked regular file (R1185a D2), the mount points Claude Code's Linux sandbox leaves
@@ -459,7 +459,7 @@ function linkedClaudeDirs(root: string, cwd: string, head: Map<string, { mode: s
  * Each instruction file Claude Code loads up front (LOADED_INSTRUCTIONS, from the top down to `cwd`) whose bytes aren't
  * HEAD's (D3): compared directly, whatever ignore rules say (line endings aside, R1185f L2). Through a link, the target's
  * bytes against HEAD's at the target's path, which must be in the checkout. An empty, untracked file is a placeholder
- * (D2). Missing: it loads nothing. Each `@` import (also from `.claude/rules/**/*.md`, R1185g G1) in one (R1185f F6) is read the same way, MAX_IMPORT_DEPTH deep: one
+ * (D2). Missing: it loads nothing. Each `@` import (also from the `.md` files under `.claude/rules/`, R1185g G1) in one (R1185f F6) is read the same way, MAX_IMPORT_DEPTH deep: one
  * outside the checkout refuses, since nothing compares it.
  */
 function loadedInstructionsChanged(root: string, cwd: string): string[] {
