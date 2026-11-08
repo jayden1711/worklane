@@ -144,7 +144,7 @@ const runAt = (r: Run): CheckRunAt => {
   const c = checkRun(r);
   return { name: c.name, status: c.status, conclusion: c.conclusion, startedAt: c.started_at, completedAt: c.status === 'completed' ? '2026-10-18T10:10:00Z' : null, id: c.id, url: c.html_url, app: c.app.id, suite: r.suite };
 };
-const sources: Record<string, WorkflowSource> = Object.fromEntries(WORKFLOWS.map((w) => [String(w.check_suite_id), { run: w.id, url: w.html_url, path: w.path, repo: w.repository.full_name, sha: w.head_sha, event: 'push', branch: 'main', bases: [] }]));
+const sources: Record<string, WorkflowSource> = Object.fromEntries(WORKFLOWS.map((w) => [String(w.check_suite_id), { run: w.id, url: w.html_url, path: w.path, repo: w.repository.full_name, sha: w.head_sha, event: 'push', branch: 'main', bases: [], prHeads: [] }]));
 function watch(runs: Run[], pins: Record<string, CheckPin> | undefined): 'installs' | 'fail' | 'wait' {
   const at = runs.map(runAt);
   const outcome = pins

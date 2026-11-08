@@ -596,7 +596,7 @@ export const EventSchemas = {
    * The main watch reads it for the merged PR, whose runs GitHub no longer links to it (pull_requests is only filled
    * for open PRs), so the base its runs were for can be told only while it was open.
    */
-  'checks.judged': z.strictObject({ issue, number: z.number().int().positive(), head: sha, checks: z.array(z.strictObject({ name: z.string(), outcome: z.enum(['pass', 'fail', 'pending', 'missing']) })) }),
+  'checks.judged': z.strictObject({ issue, number: z.number().int().positive(), head: sha, checks: z.array(z.strictObject({ name: z.string(), outcome: z.enum(['pass', 'fail', 'pending', 'missing']), pin: z.union([z.strictObject({ app_id: z.number().int() }), z.strictObject({ workflow: z.string() })]).nullable().optional() })) }),
   'pr.unready': z.strictObject({ issue, number: z.number().int().positive(), head: sha, why: z.string() }),
   'pr.closed': z.strictObject({ issue, number: z.number().int().positive(), merged: z.boolean() }),
   /**

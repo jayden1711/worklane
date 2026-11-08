@@ -995,16 +995,14 @@ function startedBy(w) {
 }
 
 /**
- * Did workflow run `w` read its workflow file from `branch`'s own history (#943)? A pull_request run reads it from the
- * PR's merge ref but posts its checks on the head, so a PR whose head is a commit already on `branch` and whose base
- * is another branch, with its own workflow, would post green runs of the file's name on that commit. Only a push,
- * dispatch or schedule run on `branch`, or a pull_request run whose every pull request (at least one) is based on
- * `branch`. The same rule as src/check-source.ts fromBranch (test/required-check-source.test.ts and test/update-check-sources.test.ts hold each).
+ * Did workflow run `w`, on a commit of `branch` the updater judges, read its workflow file from `branch`'s own history
+ * (#943)? Only a push, dispatch or schedule run on `branch` itself. A pull_request run reads its workflow from the PR's
+ * merge ref, and GitHub lists on it every OPEN PR matching its head branch or commit, not the one that started it
+ * (R1176c/d): no pull_request run ever counts for a main commit. As src/check-source.ts fromBranch with no PR
+ * (test/update-check-sources.test.ts holds it).
  */
 function fromBranch(w, branch) {
-  if (w.event === 'push' || w.event === 'workflow_dispatch' || w.event === 'schedule') return w.branch === branch;
-  if (w.event === 'pull_request') return Array.isArray(w.bases) && w.bases.length > 0 && w.bases.every((b) => b === branch);
-  return false;
+  return (w.event === 'push' || w.event === 'workflow_dispatch' || w.event === 'schedule') && w.branch === branch;
 }
 
 /**

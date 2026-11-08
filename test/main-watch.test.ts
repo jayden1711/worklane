@@ -13,13 +13,16 @@ import { readiness } from '../src/pr-watch.js';
 import type { Role } from '../src/dashboard-auth.js';
 import { GitHubMainWatchApi } from '../src/github/main-watch-api.js';
 import { TooManyPages } from '../src/main-watch.js';
-import { acceptGit, acceptMerge, checksAt, CONFIG_PATH, DEAD_CHECK_MS, disabledWorkflowFor, disabledWorkflowsOf, judge, LINK_LAG_MS, MAIN_WATCH_CALL_MS, MainWatch, outcomesAt, protectionView, readWatchState, repoGit, revertCapsAt, type Acceptance, type AcceptTarget, type CheckRunAt, type Compared, type MainWatchApi, type MainWatchDeps, type MergedPull, type ProtectionMode, type StatusAt, subjectPrNumber, tripOf, type Trip, type WatchGit, type WorkflowAt } from '../src/main-watch.js';
+import { acceptGit, acceptMerge, checksAt, CONFIG_PATH, DEAD_CHECK_MS, disabledWorkflowFor, disabledWorkflowsOf, judge, LINK_LAG_MS, MAIN_WATCH_CALL_MS, MainWatch, outcomesAt, protectionView, readWatchState, repoGit, revertCapsAt, type Acceptance, type AcceptTarget, type CheckRunAt, type Compared, type MainWatchApi, type MainWatchDeps, type MergedPull, type ProtectionMode, type ReadinessRecord, type StatusAt, subjectPrNumber, tripOf, type Trip, type WatchGit, type WorkflowAt } from '../src/main-watch.js';
 
 const git = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 const ident = ['-c', 'user.email=ada@example.com', '-c', 'user.name=Ada', '-c', 'commit.gpgsign=false'];
-/** What started a PR head's workflow run (#943): a pull_request for a PR into main, the watched branch. */
-/** What started a merged PR head's workflow run (#943): a pull_request, which GitHub no longer links to the PR once it is closed (pull_requests is filled only for open PRs). */
-const PR_RUN = { event: 'pull_request', branch: 'feature', bases: [] as string[] };
+/**
+ * What started a merged PR head's workflow run (#943): a pull_request, which GitHub no longer lists the PR on once it
+ * is closed (pull_requests holds only OPEN PRs matching the run's head branch or commit). The main watch never trusts
+ * such a run itself; it reads readiness's record (checks.judged).
+ */
+const PR_RUN = { event: 'pull_request', branch: 'feature', bases: [] as string[], prHeads: [] as string[] };
 
 /** A remote, a clone people push from, and the coordinator's clone the watch reads. */
 function world(o: { config?: string; files?: Record<string, string> } = {}) {
@@ -120,13 +123,15 @@ function watcher(w: ReturnType<typeof world>, gh: ReturnType<typeof fakeGitHub>,
     // The pins and names as the watch reads them: the committed config's, over the loaded ones.
     const committed = (o.config ? parseYaml(o.config) : {}) as { required_checks?: string[]; required_check_sources?: Record<string, CheckPin> };
     const configured = { ...o.pins.sources(), ...(committed.required_check_sources ?? {}) };
-    const open = Object.fromEntries(Object.entries(gh.sources.get(head) ?? {}).map(([k, v]) => [k, { ...v, bases: ['main'] }]));
-    const out: Record<string, 'pass' | 'fail' | 'pending' | 'missing'> = {};
+    // Readiness's view (#943, R1176c/d): the PR open on its head ref, GitHub listing it on its runs, no PR from that ref
+    // based elsewhere.
+    const open = Object.fromEntries(Object.entries(gh.sources.get(head) ?? {}).map(([k, v]) => [k, { ...v, bases: ['main'], prHeads: [v.sha] }]));
+    const out: Record<string, ReadinessRecord> = {};
     for (const name of committed.required_checks ?? o.required ?? ['ci']) {
       const pin = pinOf(name, configured, apps);
       if (!pin) continue;
-      const c = pinnedVerdict(checksAt(name, gh.runs.get(head) ?? [], gh.statuses.get(head) ?? [], new Date(gh.g.now).toISOString(), open), pin, { repo: o.pins.repo, sha: head, branch: 'main' });
-      out[name] = !c ? 'missing' : c.status !== 'completed' ? 'pending' : c.conclusion === 'success' ? 'pass' : 'fail';
+      const c = pinnedVerdict(checksAt(name, gh.runs.get(head) ?? [], gh.statuses.get(head) ?? [], new Date(gh.g.now).toISOString(), open), pin, { repo: o.pins.repo, sha: head, branch: 'main', pr: { headRef: 'feature', foreignBase: false } });
+      out[name] = { outcome: !c ? 'missing' : c.status !== 'completed' ? 'pending' : c.conclusion === 'success' ? 'pass' : 'fail', pin };
     }
     void number;
     return out;
@@ -211,12 +216,12 @@ test("main watch (#943 (a), R1176a): a merged PR's pinned runs, which GitHub no 
   const config = 'required_checks: [lint]\nrequired_check_sources:\n  lint: { workflow: .github/workflows/ci.yml }\n';
   const runPage = `https://github.com/${repo}/actions/runs/7000`;
   // The merged PR's genuine green lint run, as GitHub lists it after the merge: a pull_request, no pull request named.
-  const merged = async (o: { readiness?: MainWatchDeps['readiness'] | false; conclusion?: 'failure' }) => {
+  const merged = async (o: { readiness?: MainWatchDeps['readiness'] | false; conclusion?: 'failure'; noRuns?: true }) => {
     const s = await started({ pins, config, ...(o.readiness === undefined ? {} : { readiness: o.readiness }) });
     const m = s.w.mergedPr();
     s.gh.pr(7, m.merge, m.head, iso(T), 'example-collaborator');
     s.gh.roles.set('example-collaborator', 'writer');
-    s.gh.runs.set(m.head, [ci({ name: 'lint', app: 15368, suite: 70, id: 701, url: `${runPage}/job/701`, ...(o.conclusion ? { conclusion: o.conclusion } : {}) })]);
+    s.gh.runs.set(m.head, o.noRuns ? [] : [ci({ name: 'lint', app: 15368, suite: 70, id: 701, url: `${runPage}/job/701`, ...(o.conclusion ? { conclusion: o.conclusion } : {}) })]);
     s.gh.sources.set(m.head, { '70': { run: 7000, url: runPage, path: '.github/workflows/ci.yml', repo, sha: m.head, ...PR_RUN } });
     await run(s.gh, s.watch, 8);
     return s;
@@ -226,12 +231,23 @@ test("main watch (#943 (a), R1176a): a merged PR's pinned runs, which GitHub no 
   assert.equal(none.unaccounted.length, 1);
   assert.match(none.unaccounted[0]!.reason, /lint missing/);
   // Readiness judged it passing while it was open (checks.judged): accounted for.
-  const judged = await merged({ readiness: () => ({ lint: 'pass' }) });
+  const judged = await merged({ readiness: () => ({ lint: { outcome: 'pass', pin: { workflow: '.github/workflows/ci.yml' } } }) });
   assert.deepEqual(judged.unaccounted, []);
   // A red run of the name at merge time still fails it, whatever readiness recorded.
-  const red = await merged({ readiness: () => ({ lint: 'pass' }), conclusion: 'failure' });
+  const red = await merged({ readiness: () => ({ lint: { outcome: 'pass', pin: { workflow: '.github/workflows/ci.yml' } } }), conclusion: 'failure' });
   assert.equal(red.unaccounted.length, 1);
   assert.match(red.unaccounted[0]!.reason, /lint fail/);
+  // R1176d D2: a record stands only under the pin it was judged under: one with no pin, no known pin, or another pin never does.
+  const under = (pin: ReadinessRecord['pin']) => merged({ readiness: () => ({ lint: { outcome: 'pass', pin } }) });
+  for (const [what, pin] of [['no pin recorded', undefined], ['the pin unknown when judged', null], ['another workflow', { workflow: '.github/workflows/evil.yml' }], ['an App', { app_id: 15368 }]] as const) {
+    const s = await under(pin);
+    assert.equal(s.unaccounted.length, 1, what);
+    assert.match(s.unaccounted[0]!.reason, /lint missing/, what);
+  }
+  // R1176d D3: a record alone never accounts a merge with no run or status of the name at merge time.
+  const bare = await merged({ readiness: () => ({ lint: { outcome: 'pass', pin: { workflow: '.github/workflows/ci.yml' } } }), noRuns: true });
+  assert.equal(bare.unaccounted.length, 1, 'no run or status of lint at merge time');
+  assert.match(bare.unaccounted[0]!.reason, /lint missing/);
 });
 
 test('main watch (#727): a merge whose required checks came from another App or workflow than their pins, or a status, is unaccounted', async () => {
@@ -1208,16 +1224,18 @@ async function readinessVerdict(c: Case, head: string, pin: { configured: Record
       return answer({ total_count: runs.length, check_runs: runs });
     }
     if (path.startsWith(`/repos/${AGREE_REPO}/actions/runs?head_sha=${head}`)) {
-      const runs = Object.entries(c.files ?? {}).map(([suite, file]) => ({ id: Number(suite) * 100, html_url: `https://github.com/${AGREE_REPO}/actions/runs/${Number(suite) * 100}`, check_suite_id: Number(suite), path: file, head_sha: head, repository: { full_name: AGREE_REPO }, event: 'pull_request', head_branch: 'feature', pull_requests: [{ base: { ref: 'main' } }] }));
+      const runs = Object.entries(c.files ?? {}).map(([suite, file]) => ({ id: Number(suite) * 100, html_url: `https://github.com/${AGREE_REPO}/actions/runs/${Number(suite) * 100}`, check_suite_id: Number(suite), path: file, head_sha: head, repository: { full_name: AGREE_REPO }, event: 'pull_request', head_branch: 'feature', pull_requests: [{ base: { ref: 'main' }, head: { sha: head } }] }));
       return answer({ total_count: runs.length, workflow_runs: runs });
     }
     if (path.startsWith(`/repos/${AGREE_REPO}/commits/${head}/status`)) return answer({ total_count: (c.statuses ?? []).length, statuses: c.statuses ?? [] });
+    // R1176c: every PR from `feature`, or holding the head, targets main.
+    if (path.startsWith(`/repos/${AGREE_REPO}/pulls?head=`) || path.startsWith(`/repos/${AGREE_REPO}/commits/${head}/pulls`)) return answer([{ base: { ref: 'main' } }]);
     if (path === `/repos/${AGREE_REPO}/branches/main`) return answer({ name: 'main', protection: { enabled: false } });
     if (path.startsWith(`/repos/${AGREE_REPO}/rules/branches/main`)) return answer(Object.entries(pin.github).map(([context, id]) => ({ type: 'required_status_checks', parameters: { required_status_checks: [{ context, integration_id: id }] } })));
     return answer({ message: 'Not Found' }, 404);
   }) as typeof fetch;
   const pinned = new PinnedChecks({ backlog: new GitHubBacklog(AGREE_REPO, () => 't', f), branch: () => 'main', repo: () => AGREE_REPO, configured: () => pin.configured });
-  const out = readiness({ required: ['ci'], checks: await pinned.of(head), head, evaluated: { head, approved: true } }).checks[0]!.outcome;
+  const out = readiness({ required: ['ci'], checks: await pinned.of(head, { pr: { headRef: 'feature' } }), head, evaluated: { head, approved: true } }).checks[0]!.outcome;
   return out === 'pass' || out === 'pending' || out === 'missing' ? out : 'fail';
 }
 

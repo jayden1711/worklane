@@ -197,6 +197,12 @@ export interface Acceptance {
 }
 
 export type Outcome = 'pass' | 'fail' | 'pending' | 'missing' | 'unknown';
+/** How readiness judged one required check on an open PR's head (checks.judged), and the pin it judged it under. */
+export interface ReadinessRecord {
+  outcome: Exclude<Outcome, 'unknown'>;
+  /** null: judged by name; undefined: a record from before pins were recorded, never trusted (R1176d D2). */
+  pin: CheckPin | null | undefined;
+}
 
 /**
  * Each required check's outcome on a commit at time `at` (a merge), from the check runs that had started by then (the
@@ -292,7 +298,7 @@ const outcomeOf = (c: CommitCheck | undefined): Outcome => (!c ? 'missing' : c.s
  * Is commit `sha` accounted for, given what is known? Or which one call would tell. Pure: the watch and the tests
  * share it. An empty commit-to-PR link is asked again until an answer LINK_LAG_MS after its first one (pullsAt).
  */
-export function judge(sha: string, f: Facts, o: { branch: string; required: string[]; accepted?: Acceptance[]; pins?: WatchPins; rulesUnknown?: boolean; readiness?: (number: number, head: string) => Record<string, Exclude<Outcome, 'unknown'>> | null }): Verdict {
+export function judge(sha: string, f: Facts, o: { branch: string; required: string[]; accepted?: Acceptance[]; pins?: WatchPins; rulesUnknown?: boolean; readiness?: (number: number, head: string) => Record<string, ReadinessRecord> | null }): Verdict {
   const short = sha.slice(0, 8);
   const bySha = o.accepted?.find((a) => a.sha === sha);
   if (bySha) return { done: true, accounted: true, how: 'accepted', number: null, acceptance: bySha };
@@ -395,7 +401,11 @@ export function judge(sha: string, f: Facts, o: { branch: string; required: stri
       // then does the verdict readiness recorded at this head while the PR was open stand (R1176a: never a red hidden).
       const bad = checks.filter((c) => !(c.status === 'completed' && c.conclusion === 'success'));
       if (bad.length) return { name: byName.name, outcome: bad.some((c) => c.status === 'completed') ? 'fail' : 'pending' };
-      return { name: byName.name, outcome: o.readiness?.(number, head)?.[byName.name] ?? now };
+      // R1176d D3: a record alone never accounts a merge: some run or status of the name must be there at merge time.
+      if (!checks.length) return { name: byName.name, outcome: now };
+      // R1176d D2: only a record judged under the pin judging now (a record with no pin, or another, never stands).
+      const rec = o.readiness?.(number, head)?.[byName.name];
+      return { name: byName.name, outcome: rec && rec.pin !== undefined && JSON.stringify(rec.pin) === JSON.stringify(pin) ? rec.outcome : now };
     });
   }
   const bad = out.filter((c) => c.outcome !== 'pass');
@@ -681,7 +691,7 @@ export interface MainWatchDeps {
    * #943 (a): how readiness judged PR `number`'s required checks at `head` while it was open (checks.judged), by
    * name, or null when it never did. Absent: none is known.
    */
-  readiness?(number: number, head: string): Record<string, Exclude<Outcome, 'unknown'>> | null;
+  readiness?(number: number, head: string): Record<string, ReadinessRecord> | null;
   now?: () => number;
   /** The mode changed (or its detail): recorded as main_watch.mode. */
   mode(mode: ProtectionMode, detail: string): void;

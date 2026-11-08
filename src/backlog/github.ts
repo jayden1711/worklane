@@ -321,6 +321,25 @@ export class GitHubBacklog implements Backlog {
     }
   }
 
+  /**
+   * #943 (R1176c/d): the base of every pull request, open or closed, from this repo's `headRef` (pulls?head=&state=all)
+   * or that holds commit `sha` (commits/{sha}/pulls), every page up to 10 of 100; past that, or any read GitHub refuses,
+   * throws: the head waits, it is never judged from part of the list.
+   */
+  async prBases(headRef: string, sha: string): Promise<string[]> {
+    const owner = this.repo.split('/')[0]!;
+    const out: string[] = [];
+    for (const first of [`/repos/${this.repo}/pulls?head=${encodeURIComponent(`${owner}:${headRef}`)}&state=all&per_page=100`, `/repos/${this.repo}/commits/${sha}/pulls?per_page=100`]) {
+      for (let page = 1; ; page++) {
+        if (page > 10) throw new Error(`more than 10 pages of pull requests for ${headRef} at ${sha.slice(0, 8)}: not judged`);
+        const list = await this.req<{ base?: { ref?: unknown } }[]>('GET', `${first}&page=${page}`);
+        for (const p of list) out.push(typeof p?.base?.ref === 'string' ? p.base.ref : '');
+        if (list.length < 100) break;
+      }
+    }
+    return out;
+  }
+
   /** #727: the App each required check needs on `branch`, as classic protection (get a branch) and rulesets name it. */
   async checkApps(branch: string): Promise<GithubCheckApps> {
     const b = encodeURIComponent(branch);

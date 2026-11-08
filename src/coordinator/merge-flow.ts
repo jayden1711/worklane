@@ -2,7 +2,7 @@
 // main's checks after a merge (revert on red).
 import { startRefusal, TestRunHeld } from '../testrun/gate.js';
 import { CI_NONE_MAIN_WATCH, ciIsNone, requiredFor } from '../ci-none.js';
-import { PinnedChecks, type JudgedChecks } from '../check-source.js';
+import { PinnedChecks, pinOf, type CheckPin, type JudgedChecks } from '../check-source.js';
 import type { Coordinator } from '../coordinator.js';
 import { gitExecFileSync, gitSpawn, gitSpawnSync } from '../os/git.js';
 import { randomBytes } from 'node:crypto';
@@ -420,7 +420,7 @@ export abstract class MergeFlow extends FixRuns {
     const plan = this.checksPlan(n, pr.headSha);
     const batching = this.prBatching() && !plan.fast;
     const except = plan.fast ? this.requiredChecks().filter((c) => !plan.checks.includes(c)) : batching ? this.d.cfg.tests.land.pr_batch.full_checks : [];
-    const r = this.prReadiness(n, pr.headSha, this.recordJudged(n, number, pr.headSha, await this.pinned.of(pr.headSha)), except);
+    const r = this.prReadiness(n, pr.headSha, await this.recordJudged(n, number, pr.headSha, await this.pinned.of(pr.headSha, { pr: { headRef: pr.head } })), except);
     const returned = batching && r.ready ? this.prBatch.returnedFor(number, pr.headSha) : null;
     if (returned) {
       r.ready = false;
@@ -530,22 +530,25 @@ export abstract class MergeFlow extends FixRuns {
    * from the last record for the same PR and head; returns the checks as given. The main watch reads it for the merged
    * PR: once a PR is closed GitHub lists no pull request on its runs, so their base can be told only while it is open.
    */
-  private recordJudged(issue: number, number: number, head: string, checks: JudgedChecks): JudgedChecks {
+  private async recordJudged(issue: number, number: number, head: string, checks: JudgedChecks): Promise<JudgedChecks> {
     const required = this.requiredChecks();
     const outcome = (name: string) => {
       const c = checks.find((x) => x.name === name);
       return !c ? 'missing' : c.status !== 'completed' ? 'pending' : c.conclusion === 'success' ? 'pass' : 'fail';
     };
-    const now = required.map((name) => ({ name, outcome: outcome(name) }) as const);
+    // R1176d D2: each name with the pin it was judged under (the main watch uses the record only under the same pin).
+    const configured = this.d.cfg.project.required_check_sources;
+    const apps = this.pinned.enforced ? await this.pinned.githubAppsFor(required, configured) : {};
+    const now = required.map((name) => ({ name, outcome: outcome(name), pin: apps === null ? null : pinOf(name, configured, apps) }) as const);
     const last = this.d.log.read(0, ['checks.judged']).map((e) => e.payload as EventPayload<'checks.judged'>).filter((p) => p.number === number && p.head === head).at(-1);
     if (now.length && JSON.stringify(last?.checks) !== JSON.stringify(now)) this.emit('checks.judged', { issue, number, head, checks: now });
     return checks;
   }
 
   /** The last checks.judged for PR `number` at `head`, by name, or null (#943 (a); the main watch's readiness lookup). */
-  readinessJudged(number: number, head: string): Record<string, 'pass' | 'fail' | 'pending' | 'missing'> | null {
+  readinessJudged(number: number, head: string): Record<string, { outcome: 'pass' | 'fail' | 'pending' | 'missing'; pin: CheckPin | null | undefined }> | null {
     const last = this.d.log.read(0, ['checks.judged']).map((e) => e.payload as EventPayload<'checks.judged'>).filter((p) => p.number === number && p.head === head).at(-1);
-    return last ? Object.fromEntries(last.checks.map((c) => [c.name, c.outcome])) : null;
+    return last ? Object.fromEntries(last.checks.map((c) => [c.name, { outcome: c.outcome, pin: c.pin }])) : null;
   }
 
   /** Why auto-merge is stopped for this instance (never empty), or null. Persisted in a file only the operator clears. */
@@ -958,7 +961,7 @@ export abstract class MergeFlow extends FixRuns {
     if (pr.state !== 'open') return { ok: false, error: `PR #${number} is ${pr.state}` };
     if (pr.headSha !== head || decided.head !== head) return { ok: false, error: `the head of PR #${number} moved since the decision (${head.slice(0, 8)}, now ${pr.headSha.slice(0, 8)}); nothing is approved: the new head is decided afresh` };
     const batching = this.prBatching();
-    const r = this.prReadiness(w.issue, head, this.recordJudged(w.issue, number, head, await this.pinned.of(head)), batching ? this.d.cfg.tests.land.pr_batch.full_checks : []);
+    const r = this.prReadiness(w.issue, head, await this.recordJudged(w.issue, number, head, await this.pinned.of(head, { pr: { headRef: pr.head } })), batching ? this.d.cfg.tests.land.pr_batch.full_checks : []);
     if (!r.ready) return { ok: false, error: `PR #${number} isn't ready at ${head.slice(0, 8)}: ${r.reasons.join('; ').slice(0, 300) || 'its required checks are not all green'}` };
     const got = approveMerge(this.d.log, { issue: w.issue, number, head, who: { login: who.login, role: who.role!, via: 'discord' }, instance: this.d.instance, repo: this.d.cfg.project.project.repo });
     if (!got.ok) return got.status === 409 ? { ok: false, already: { answer: 'approve', by: got.by! } } : { ok: false, error: got.error };

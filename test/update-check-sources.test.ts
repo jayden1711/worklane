@@ -90,6 +90,9 @@ test('a same-name check from another workflow, a run for another commit, another
     // #943: a pull_request run reads its workflow from the PR's merge ref but posts on the head. A PR from main into
     // another base, with its own ci.yml, posts green runs on main's commit; so does anything not started on main.
     ['the right file, from a PR into another base', [{ name: 'test (ubuntu-latest, 22)', suite: 9 }, { name: 'scan', suite: 2 }], [...legit.slice(1), workflowRun(9, '.github/workflows/ci.yml', { event: 'pull_request', branch: 'main', bases: ['evil'] })]],
+    // R1176c: a main commit counts only push, workflow_dispatch and schedule runs, never a pull_request run, even
+    // one started on main into main (its workflow came from a merge ref, not from main).
+    ['the right file, from a pull_request run on main into main', [{ name: 'test (ubuntu-latest, 22)', suite: 9 }, { name: 'scan', suite: 2 }], [...legit.slice(1), workflowRun(9, '.github/workflows/ci.yml', { event: 'pull_request', branch: 'main', bases: ['main'] })]],
     ['the right file, from a PR GitHub lists no base for', [{ name: 'test (ubuntu-latest, 22)', suite: 9 }, { name: 'scan', suite: 2 }], [...legit.slice(1), workflowRun(9, '.github/workflows/ci.yml', { event: 'pull_request', branch: 'main', bases: [] })]],
     ['the right file, pushed to another branch', [{ name: 'test (ubuntu-latest, 22)', suite: 9 }, { name: 'scan', suite: 2 }], [...legit.slice(1), workflowRun(9, '.github/workflows/ci.yml', { branch: 'evil' })]],
     ['the right file, from pull_request_target', [{ name: 'test (ubuntu-latest, 22)', suite: 9 }, { name: 'scan', suite: 2 }], [...legit.slice(1), workflowRun(9, '.github/workflows/ci.yml', { event: 'pull_request_target', bases: ['main'] })]],
