@@ -5,9 +5,10 @@
 //
 // Written to file descriptor 3 (R1169g, R1169h), which only the `node --test` process that runs this reporter has:
 // the script that starts it holds the other end, and the test files' own processes get stdio 0-2 only, so no test
-// can write it or replace it. Its destination (--test-reporter-destination) is /dev/null.
+// can write it or replace it. Its destination (--test-reporter-destination) is stdout, where it writes nothing: not
+// /dev/null, which node fsyncs at the end, and Linux refuses an fsync of it (EINVAL), failing every run there.
 //
-//   node --test --test-reporter=./scripts/ci/systemd-acceptance-reporter.mjs --test-reporter-destination=/dev/null ...
+//   node --test --test-reporter=./scripts/ci/systemd-acceptance-reporter.mjs --test-reporter-destination=stdout ...
 //   (with a pipe as fd 3)
 import { writeSync } from 'node:fs';
 

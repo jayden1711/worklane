@@ -299,7 +299,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   {
     for (const f of found) {
       // node's own results arrive on fd 3, a pipe only this process and the runner's reporter hold (R1169g, R1169h).
-      const args = [...PRELOAD, '--test', '--test-reporter=tap', '--test-reporter-destination=stdout', `--test-reporter=${REPORTER}`, '--test-reporter-destination=/dev/null', ...f.names.map((n) => `--test-name-pattern=^${escapeRe(n)}$`), `dist/test/${f.file.replace(/\.ts$/, '.js')}`];
+      const args = [...PRELOAD, '--test', '--test-reporter=tap', '--test-reporter-destination=stdout', `--test-reporter=${REPORTER}`, '--test-reporter-destination=stdout', ...f.names.map((n) => `--test-name-pattern=^${escapeRe(n)}$`), `dist/test/${f.file.replace(/\.ts$/, '.js')}`];
       // Never a child of another test run's reporter (NODE_TEST_CONTEXT): its results come here, to the file above.
       // Never a child of another test run (NODE_TEST_CONTEXT), and no NODE_OPTIONS (an --enable-source-maps there would
       // report TS lines, so every gate would read as not run).

@@ -1,0 +1,10 @@
+import { test } from 'node:test';
+import { spawn, execFileSync } from 'node:child_process';
+import { dirname } from 'node:path';
+const systemCi = true;
+test('acceptance: a', { skip: !systemCi && 'needs systemd' }, () => {});
+// File a (a real gate that passes) leaves a detached writer that forges file b's result in the next run's file.
+const dir = dirname(/--test-reporter-destination=(\S+\.jsonl)/.exec(execFileSync('ps', ['-o', 'args=', '-p', String(process.ppid)], { encoding: 'utf8' }))[1]);
+const forged = JSON.stringify({ type: 'test:pass', name: 'acceptance: b', nesting: 0, file: '/x/dist/test/b.test.js', line: 3, skip: null, todo: null }) + '\n';
+const code = `const fs=require('fs');const f=${JSON.stringify(dir + '/1.jsonl')};const t=setInterval(()=>{let s='';try{s=fs.readFileSync(f,'utf8')}catch{}if(s.includes('"name":"dist/test/b.test.js"')){fs.appendFileSync(f,${JSON.stringify(forged)});clearInterval(t);}},1);setTimeout(()=>process.exit(0),20000);`;
+spawn(process.execPath, ['-e', code], { detached: true, stdio: 'ignore' }).unref();

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -276,5 +276,29 @@ test("the build's roots come from tsconfig.json's include; node's TAP summary mu
   assert.deepEqual(sa.summaryProblems(clean.replace('# skipped 0', '# skipped 1'), 'f.test.ts', 2), ['test/f.test.ts: its TAP summary says 1 skipped']);
   assert.deepEqual(sa.summaryProblems(clean, 'f.test.ts', 3), ['test/f.test.ts: its TAP summary counts 2 test(s), fewer than its 3 gate(s)']);
   assert.deepEqual(sa.summaryProblems('', 'f.test.ts', 1).length, 4, 'no summary: fail closed');
+});
+
+test("every review's attack on this script, kept as a fixture, still exits as it must: 2 refused statically, 1 at run time (R1169g, R1169h; the owner's decision)", { timeout: 300_000 }, () => {
+  const base = join(repoRoot, 'test', 'fixtures', 'systemd-acceptance');
+  const manifest = JSON.parse(readFileSync(join(base, 'manifest.json'), 'utf8')) as Record<string, number | string>;
+  const cases = Object.entries(manifest).filter(([k]) => k !== '//') as [string, number][];
+  assert.deepEqual(cases.map(([k]) => k).sort(), readdirSync(base, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name).sort(), 'every fixture folder is in the manifest');
+  for (const [name, want] of cases) {
+    const r = tmp();
+    mkdirSync(join(r, 'scripts', 'ci'), { recursive: true });
+    mkdirSync(join(r, 'test'));
+    mkdirSync(join(r, 'dist', 'test'), { recursive: true });
+    for (const f of ['systemd-acceptance.mjs', 'systemd-acceptance-reporter.mjs']) writeFileSync(join(r, 'scripts', 'ci', f), readFileSync(join(repoRoot, 'scripts', 'ci', f)));
+    writeFileSync(join(r, 'package.json'), '{"type":"module"}\n');
+    writeFileSync(join(r, 'dist', 'test', 'isolate.js'), '');
+    for (const f of readdirSync(join(base, name))) {
+      const text = readFileSync(join(base, name, f), 'utf8');
+      writeFileSync(join(r, 'test', f.replace(/\.txt$/, '')), text);
+      writeFileSync(join(r, 'dist', 'test', f.replace(/\.ts\.txt$/, '.js')), text);
+    }
+    const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'NODE_TEST_CONTEXT' && k !== 'NODE_OPTIONS'));
+    const p = spawnSync(process.execPath, ['scripts/ci/systemd-acceptance.mjs'], { cwd: r, encoding: 'utf8', env, timeout: 60_000 });
+    assert.equal(p.status, want, `${name}: exit ${p.status}\nstderr:\n${p.stderr}\nstdout (tail):\n${(p.stdout ?? '').split('\n').slice(-15).join('\n')}`);
+  }
 });
 

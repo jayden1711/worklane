@@ -1,0 +1,3 @@
+import { test } from 'node:test';
+const systemCi = false;
+const v = 'x'; test(`acceptance: ${v}`, { skip: !systemCi && 'needs systemd' }, () => {}); test('acceptance: ${v}', () => {});
