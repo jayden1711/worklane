@@ -891,6 +891,8 @@ export const EventSchemas = {
   /** One tier's outcome. `summary`: the end of its output; `log_ref`: its full log in the instance's state (never a viewer's). */
   // `gpu`: only for a tier that asked for the GPU: whether the sandbox helper granted it, the nodes, and its line.
   // `network`: whether its command had the network (none unless it asked and root's file granted it; absent before 0.5.1).
+  /** A test-run step met a machine fault (src/testrun/faults.ts): reported on its check, never run again by itself. */
+  'testrun.fault': z.strictObject({ id: z.string(), tier: z.string(), fault: z.enum(['gpu_lost', 'host_key_changed', 'host_unreachable', 'disk_full', 'self_matching_wait']), evidence: z.string().max(200) }),
   'testrun.tier': z.strictObject({ id: z.string(), tier: z.string(), ok: z.boolean(), duration_ms: z.number().int().nonnegative(), summary: z.string().max(2000), log_ref: z.string(), cpu_s: z.number().nonnegative().nullable(), mem_peak_mb: z.number().nonnegative().nullable(), gpu: z.strictObject({ granted: z.boolean(), devices: z.array(z.string()), detail: z.string().max(300) }).optional(), network: z.enum(['none', 'granted']).optional() }),
   /** `results`: each tier's pass or fail, all a viewer sees of a run. */
   'testrun.finished': z.strictObject({
