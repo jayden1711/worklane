@@ -585,24 +585,17 @@ const SHARED = {
       return taken;
     },
   },
-  // The canary rollout's rings (src/rollout.ts): the instance leaves its ring; a ring left empty goes; with no ring
-  // left, the file goes (a rollout.json needs at least one ring).
+  // The canary rollout's rings (src/rollout.ts). No drop: taking an instance out of a ring would throw away its evidence
+  // (a bad sign since the flag went on, so the ring reads promoted) or a ring whole (ring 0, the engine's own repo, and
+  // the next ring gets the flag with no engine soak). remove() refuses while the instance is in a ring, and
+  // instance-remove.sh refuses before it changes anything: an admin takes it out of rollout.json by hand, judging the
+  // ring again (docs/rollout.md).
   rollout: {
     file: P.rollout,
     get: (prefix, name) => {
       const r = readJson(at(prefix, P.rollout));
       const rings = r && Array.isArray(r.rings) ? r.rings.filter((g) => g && Array.isArray(g.instances) && g.instances.includes(name)).map((g) => g.name) : [];
       return rings.length ? { rings } : null;
-    },
-    drop: (prefix, name) => {
-      const f = at(prefix, P.rollout);
-      const r = readJson(f);
-      if (!(r && Array.isArray(r.rings) && r.rings.some((g) => g && Array.isArray(g.instances) && g.instances.includes(name)))) return null;
-      const taken = { rings: r.rings.filter((g) => g.instances.includes(name)).map((g) => g.name) };
-      r.rings = r.rings.map((g) => ({ ...g, instances: g.instances.filter((n) => n !== name) })).filter((g) => g.instances.length);
-      if (r.rings.length) writeKeeping(f, JSON.stringify(r, null, 2) + '\n');
-      else fs.rmSync(f, { force: true });
-      return taken;
     },
   },
   incidents: {
@@ -741,7 +734,7 @@ const REKEY = {
     const f = at(prefix, P.rollout);
     const r = readJson(f);
     if (!(r && Array.isArray(r.rings) && r.rings.some((g) => g && Array.isArray(g.instances) && g.instances.includes(old)))) return null;
-    r.rings = r.rings.map((g) => ({ ...g, instances: g.instances.map((n) => (n === old ? nu : n)) }));
+    r.rings = r.rings.map((g) => (g && Array.isArray(g.instances) ? { ...g, instances: g.instances.map((n) => (n === old ? nu : n)) } : g));
     writeKeeping(f, JSON.stringify(r, null, 2) + '\n');
     return true;
   },
@@ -793,6 +786,10 @@ function profileRecords(p, name) {
   return out.active || out.switched_at || out.failover || out.profiles.length ? out : null;
 }
 
+/** Why a removal of an instance in a canary rollout ring is refused (remove(), instance-remove.sh). */
+const ROLLOUT_REFUSAL = (name, rings) =>
+  `${name} is in the canary rollout (ring ${rings.join(', ')} of ${P.rollout}): removing it would throw away its evidence, or a whole ring (ring 0 is the engine's own repo). Take it out of ${P.rollout} by hand first, judging that ring again (docs/rollout.md), then run this again; nothing was changed`;
+
 /** What <name> has in each shared file: { item: records } for the ones it has. */
 function plan(name, prefix = '') {
   if (!NAME.test(name)) throw new Error(`not an instance name: ${name}`);
@@ -811,6 +808,8 @@ function plan(name, prefix = '') {
 function remove(name, archive, prefix = '') {
   if (!NAME.test(name)) throw new Error(`not an instance name: ${name}`);
   const before = plan(name, prefix);
+  // Before anything is written (the archive too): a rollout ring is never changed by a removal (SHARED.rollout).
+  if (before.rollout) throw new Error(ROLLOUT_REFUSAL(name, before.rollout.rings));
   const kept = { instance: name, at: new Date().toISOString(), records: before };
   writeArchive(archive, kept);
   const taken = {};
@@ -933,7 +932,7 @@ function writeArchive(file, data) {
 
 function main(argv) {
   const [cmd, name, archive] = argv;
-  const usage = 'usage: instance-records.cjs items <name> | plan <name> | remove <name> <archive file> | rekey <old> <new> <archive file> | carry <old> <new> <from dir> <to dir> <old home> <new home> <old agent home> <new agent home> [<old eval home> <new eval home>]';
+  const usage = 'usage: instance-records.cjs items <name> | plan <name> | rollout-refusal <name> | remove <name> <archive file> | rekey <old> <new> <archive file> | carry <old> <new> <from dir> <to dir> <old home> <new home> <old agent home> <new agent home> [<old eval home> <new eval home>]';
   if (!NAME.test(name || '')) {
     process.stderr.write(`${usage}\n`);
     return 2;
@@ -979,6 +978,12 @@ function main(argv) {
     for (const [id, r] of Object.entries(plan(name))) process.stdout.write(`${id}\t${SHARED[id].file}\t${JSON.stringify(r)}\n`);
     return 0;
   }
+  if (cmd === 'rollout-refusal') {
+    // instance-remove.sh's refusal for an instance in a canary rollout ring (remove() refuses the same way); nothing when it is in none.
+    const r = plan(name).rollout;
+    if (r) process.stdout.write(`${ROLLOUT_REFUSAL(name, r.rings)}\n`);
+    return 0;
+  }
   if (cmd === 'remove' && archive && path.isAbsolute(archive)) {
     const taken = remove(name, archive);
     for (const id of Object.keys(taken)) process.stdout.write(`removed ${name}'s ${id} records from ${SHARED[id].file}\n`);
@@ -1003,7 +1008,7 @@ function main(argv) {
   return 2;
 }
 
-module.exports = { holdSlot, releaseSlot, updaterQuiet, ENGINE_OWNED, CLAIM_SOURCES, ITEMS, NOT_RECORDS, SHARED_FILES, SHARED, REKEY, ARCHIVE_DIR, items, plan, remove, rekey, carry, moveText, withLock, writeKeeping };
+module.exports = { ROLLOUT_REFUSAL, holdSlot, releaseSlot, updaterQuiet, ENGINE_OWNED, CLAIM_SOURCES, ITEMS, NOT_RECORDS, SHARED_FILES, SHARED, REKEY, ARCHIVE_DIR, items, plan, remove, rekey, carry, moveText, withLock, writeKeeping };
 
 if (require.main === module) {
   try {

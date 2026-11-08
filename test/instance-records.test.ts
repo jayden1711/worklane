@@ -23,6 +23,8 @@ const reg = createRequire(import.meta.url)(join(repoRoot, 'scripts', 'setup', 'i
   rekey: (old: string, nu: string, archive: string, prefix?: string) => string[];
   carry: (h: Record<string, string>, from: string, to: string) => ({ from: string; to: string } | { skipped: string })[];
   moveText: (text: string, h: Record<string, string>) => string;
+  ROLLOUT_REFUSAL: (name: string, rings: string[]) => string;
+  SHARED: Record<string, { file: string; get: unknown; drop?: unknown }>;
 };
 const cli = BRAND.cli;
 const posix = process.platform !== 'win32';
@@ -280,7 +282,8 @@ test('instance-remove.sh takes one name and --print or --yes, before anything el
 
 const NAME = 'alpha';
 /** A machine's root files under a temp prefix: alpha's records, and alpha-2's and beta's beside them. */
-function machine(): string {
+/** `alpha` in a canary rollout ring only when asked: a removal refuses then (#1174 review), a rename moves it. */
+function machine(o: { alphaInRing?: boolean } = {}): string {
   const root = mkdtempSync(join(tmpdir(), 'records-'));
   const put = (p: string, v: unknown) => {
     const f = join(root, p);
@@ -291,7 +294,7 @@ function machine(): string {
   put(`/etc/${cli}/testrun-network.json`, { version: 1, instances: { alpha: { tiers: ['e2e'] }, 'alpha-2': { tiers: ['e2e'] } } });
   put(`/etc/${cli}/updates.json`, { enabled: true, channel: 'release', canary: { instance: 'alpha', repo: 'o/scratch', time_limit_minutes: 60 }, required_checks: ['a'] });
   put(`/var/lib/${cli}/canary.json`, { running: { issue: 7 }, lastFiledAt: '2026-10-15T00:00:00Z' });
-  put(`/etc/${cli}/rollout.json`, { rings: [{ name: 'engine', instances: ['alpha'] }, { name: 'first', instances: ['alpha-2', 'beta'] }], promote: { soak_hours: 48, min_merges: 3 } });
+  put(`/etc/${cli}/rollout.json`, { rings: [{ name: 'engine', instances: o.alphaInRing ? ['alpha'] : ['gamma'] }, { name: 'first', instances: ['alpha-2', 'beta'] }], promote: { soak_hours: 48, min_merges: 3 } });
   const rec = (instance: string, user: string) => ({ instance, kind: 'agent', user, api_ok: true });
   put(`/var/lib/${cli}/claude-account/profiles.json`, {
     version: 1,
@@ -316,13 +319,17 @@ function machine(): string {
 const read = (root: string, p: string) => JSON.parse(readFileSync(join(root, p), 'utf8'));
 
 test("remove takes out exactly alpha's records, never alpha-2's or beta's, and keeps what it took in a 0600 archive first", () => {
-  const root = machine();
+  const root = machine({ alphaInRing: true });
   const archive = join(root, 'archive', 'alpha.records.json');
+  assert.deepEqual(Object.keys(reg.plan(NAME, root)).sort(), ['canary', 'claude-paused', 'claude-profiles', 'claude-status', 'gpu', 'incidents', 'managed-apps', 'pending-signers', 'plugin-pending', 'rollout', 'testrun-net']);
+  // alpha is in a canary rollout ring: the removal is refused until an admin takes it out by hand (below).
+  assert.throws(() => reg.remove(NAME, archive, root), /alpha is in the canary rollout \(ring engine of/);
+  writeFileSync(join(root, `/etc/${cli}/rollout.json`), JSON.stringify({ rings: [{ name: 'engine', instances: ['alpha-2'] }, { name: 'first', instances: ['beta'] }] }));
   const planned = reg.plan(NAME, root);
-  assert.deepEqual(Object.keys(planned).sort(), ['canary', 'claude-paused', 'claude-profiles', 'claude-status', 'gpu', 'incidents', 'managed-apps', 'pending-signers', 'plugin-pending', 'rollout', 'testrun-net']);
+  assert.deepEqual(Object.keys(planned).sort(), ['canary', 'claude-paused', 'claude-profiles', 'claude-status', 'gpu', 'incidents', 'managed-apps', 'pending-signers', 'plugin-pending', 'testrun-net']);
   const taken = reg.remove(NAME, archive, root);
   // The GPU grant is testrun-gpu.sh's to take out (its strict form): planned, never written here.
-  assert.deepEqual(Object.keys(taken).sort(), ['canary', 'claude-paused', 'claude-profiles', 'claude-status', 'incidents', 'managed-apps', 'pending-signers', 'plugin-pending', 'rollout']);
+  assert.deepEqual(Object.keys(taken).sort(), ['canary', 'claude-paused', 'claude-profiles', 'claude-status', 'incidents', 'managed-apps', 'pending-signers', 'plugin-pending']);
   // Root's word that alpha's repo is an app goes with alpha; alpha-2's stays, in the form the engine reads.
   assert.equal(readFileSync(join(root, `/etc/${cli}/managed-apps.json`), 'utf8'), '{"version":1,"apps":{"alpha-2":"o/site"}}\n');
   assert.deepEqual(taken['managed-apps'], { alpha: 'o/shop' });
@@ -332,8 +339,7 @@ test("remove takes out exactly alpha's records, never alpha-2's or beta's, and k
   const u = read(root, `/etc/${cli}/updates.json`);
   assert.deepEqual(u, { enabled: true, channel: 'release', required_checks: ['a'] }, 'only the canary goes');
   assert.ok(!existsSync(join(root, `/var/lib/${cli}/canary.json`)), "the canary's run state goes with it");
-  assert.deepEqual(read(root, `/etc/${cli}/rollout.json`), { rings: [{ name: 'first', instances: ['alpha-2', 'beta'] }], promote: { soak_hours: 48, min_merges: 3 } }, 'alpha leaves its ring, which goes with it; the others stay');
-  assert.deepEqual(taken.rollout, { rings: ['engine'] });
+  assert.deepEqual(read(root, `/etc/${cli}/rollout.json`), { rings: [{ name: 'engine', instances: ['alpha-2'] }, { name: 'first', instances: ['beta'] }] }, 'the rollout file is never written by a removal');
 
   const p = read(root, `/var/lib/${cli}/claude-account/profiles.json`);
   assert.deepEqual(Object.keys(p.active), ['alpha-2', 'beta']);
@@ -363,6 +369,48 @@ test("remove takes out exactly alpha's records, never alpha-2's or beta's, and k
   assert.deepEqual(Object.keys(reg.plan(NAME, root)).sort(), ['gpu', 'testrun-net'], "the GPU and network grants are their scripts' to take out");
 });
 
+test('an instance in a canary rollout ring is never removed: no ring loses its evidence or its engine gate, and nothing at all is written (#1174 review)', () => {
+  /** Every file under the machine's root, with its bytes. */
+  const tree = (root: string) => {
+    const out: Record<string, string> = {};
+    const walk = (d: string) => {
+      for (const e of readdirSync(d, { withFileTypes: true })) {
+        const p = join(d, e.name);
+        if (e.isDirectory()) walk(p);
+        else out[relative(root, p)] = readFileSync(p, 'latin1');
+      }
+    };
+    walk(root);
+    return out;
+  };
+  for (const [what, rings, refused] of [
+    // Ring 0's only instance (the engine's own repo): removing it would hand the next ring the flag with no engine soak.
+    ['ring 0', [{ name: 'engine', instances: ['alpha'] }, { name: 'first', instances: ['beta'] }], /alpha is in the canary rollout \(ring engine of /],
+    // One of two in a ring: removing it would throw away its bad signs, and the ring would read promoted.
+    ['one of two', [{ name: 'engine', instances: ['beta'] }, { name: 'p', instances: ['alpha', 'alpha-2'] }], /alpha is in the canary rollout \(ring p of /],
+  ] as const) {
+    const root = machine();
+    writeFileSync(join(root, `/etc/${cli}/rollout.json`), JSON.stringify({ rings }));
+    const before = tree(root);
+    const archive = join(root, 'archive', 'alpha.records.json');
+    assert.throws(() => reg.remove(NAME, archive, root), refused, what);
+    assert.throws(() => reg.remove(NAME, archive, root), /Take it out of \/etc\/[a-z]+\/rollout\.json by hand first, judging that ring again \(docs\/rollout\.md\), then run this again; nothing was changed/);
+    assert.deepEqual(tree(root), before, `${what}: nothing written, no archive either`);
+    assert.ok(!existsSync(archive));
+  }
+  // The message instance-remove.sh shows is the registry's own; for an instance in no ring there is none.
+  assert.equal(reg.ROLLOUT_REFUSAL('alpha', ['engine']).startsWith('alpha is in the canary rollout (ring engine of /etc/'), true);
+  // instance-remove.sh asks before anything changes: among its refusals, before the plan is shown and before any step.
+  const sh = readFileSync(join(repoRoot, 'scripts', 'setup', 'instance-remove.sh'), 'utf8');
+  const at = (s: string) => sh.indexOf(s);
+  assert.ok(at('rollout_refusal="$(records rollout-refusal "$name")"') > at('# --- refusals: nothing changes before these pass'));
+  assert.ok(at('[ -z "$rollout_refusal" ] || refuse "$rollout_refusal"') > 0);
+  assert.ok(at('[ -z "$rollout_refusal" ] || refuse "$rollout_refusal"') < at('# --- the plan'));
+  assert.ok(at('[ -z "$rollout_refusal" ] || refuse "$rollout_refusal"') < at('records remove "$name" "$kept"'));
+  assert.ok(reg.SHARED.rollout, 'the rollout file is a shared item');
+  assert.equal(reg.SHARED.rollout?.drop, undefined, 'no removal step ever changes a ring');
+});
+
 test('a shared file keeps its mode through a removal', { skip: !posix && 'POSIX modes' }, () => {
   const root = machine();
   const f = join(root, `/var/lib/${cli}/agent-slots/incidents.json`);
@@ -390,7 +438,7 @@ test("the incident store is changed under its lock: a coordinator's write in pro
 // --- moving one instance's records to a new name (instance-rename.sh)
 
 test("rekey moves exactly alpha's records to bravo, never alpha-2's or beta's; a rerun after a stop part way finishes it; two instances' records are never merged", () => {
-  const root = machine();
+  const root = machine({ alphaInRing: true });
   const init = (n: string) => join(root, `/var/lib/${cli}/init/${n}.json`);
   mkdirSync(dirname(init('alpha')), { recursive: true });
   writeFileSync(init('alpha'), JSON.stringify({ version: 1, mode: 'server', instance: 'alpha' }));
