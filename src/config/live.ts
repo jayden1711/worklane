@@ -157,11 +157,10 @@ export class LiveConfig {
 
 /**
  * The config to start with: the default branch's, read from git after a fetch, when it is there and valid;
- * otherwise the checkout's (`fallback`), and why. `tree` is what the running config was loaded from; `sha`, the
- * default branch's commit when it is that branch's config (null for the checkout's), which is the commit the
- * coordinator reads feature flags at (src/flags.ts): a checkout's config never turns one on.
+ * otherwise the checkout's (`fallback`), and why. `tree` is what the running config was loaded from. Feature flags
+ * are never read from it (src/flags.ts: the coordinator adopts them from the default branch's head itself).
  */
-export function startConfig(o: { repo: string; remote: string; fallback: Config; check?: (cfg: Config) => ConfigError[] }): { cfg: Config; tree: string | null; sha: string | null; note: string | null } {
+export function startConfig(o: { repo: string; remote: string; fallback: Config; check?: (cfg: Config) => ConfigError[] }): { cfg: Config; tree: string | null; note: string | null } {
   gitRemote(o.remote);
   const branch = o.fallback.project.project.default_branch;
   gitSpawnSync(['fetch', '-q', o.remote, `+refs/heads/${branch}:refs/remotes/${o.remote}/${branch}`], { cwd: o.repo, stdio: 'ignore', timeout: 60_000 });
@@ -171,24 +170,21 @@ export function startConfig(o: { repo: string; remote: string; fallback: Config;
   // default branch as the clone last saw it) runs, never its working tree, where a hand edit could loosen the policy the
   // merges are judged by. The working tree only when HEAD has no valid config either (a first run before any commit).
   // The note names which one ran: the committed config (HEAD), or the working tree.
-  // Feature flags (#1173 reviews R1173f, R1173g): `sha` is null here, so none is on until the coordinator adopts the
-  // default branch's config at a commit; a checkout's config (a branch, a hand edit) never turns one on.
   const checkout = (why: string, detail = '') => {
     try {
       const committed = loadConfigAt(o.repo, 'HEAD');
-      if (!(o.check?.(committed) ?? []).length) return { cfg: committed, tree: configTree(o.repo, 'HEAD'), sha: null, note: `${why}, started with the checkout's committed config (HEAD)${detail}` };
+      if (!(o.check?.(committed) ?? []).length) return { cfg: committed, tree: configTree(o.repo, 'HEAD'), note: `${why}, started with the checkout's committed config (HEAD)${detail}` };
     } catch {
       // none valid at HEAD either
     }
-    return { cfg: o.fallback, tree: configTree(o.repo, 'HEAD'), sha: null, note: `${why}, started with the checkout's working tree (no valid config committed at HEAD)${detail}` };
+    return { cfg: o.fallback, tree: configTree(o.repo, 'HEAD'), note: `${why}, started with the checkout's working tree (no valid config committed at HEAD)${detail}` };
   };
   if (tree === null) return checkout(`no ${BRAND.configDir}/ at ${o.remote}/${branch}`);
   try {
     const cfg = loadConfigAt(o.repo, ref);
     const extra = o.check?.(cfg) ?? [];
     if (extra.length) throw new ConfigInvalid(extra);
-    const at = gitSpawnSync(['rev-parse', '-q', '--verify', `${ref}^{commit}`], { cwd: o.repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-    return { cfg, tree, sha: at.status === 0 && /^[0-9a-f]{40}$/.test(at.stdout.trim()) ? at.stdout.trim() : null, note: null };
+    return { cfg, tree, note: null };
   } catch (e) {
     return checkout(`${BRAND.configDir}/ at ${o.remote}/${branch} is invalid`, `: ${(e as Error).message.slice(0, 1000)}`);
   }

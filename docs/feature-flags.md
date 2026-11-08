@@ -13,13 +13,20 @@ new behaviour can be tried on one repo before it reaches the rest. Code: `src/co
 - **One reader, one writer.** No config object carries flags: every parsed `flags:` is a frozen `{}`, whichever
   loader read it (the coordinator, the tool guard, the CLI, the dashboard, a branch). The one reader is
   `flagOn('<name>')`. It reads only a snapshot of the flags the default branch's committed config turns on, at one
-  commit: the commit whose config the coordinator is running.
-  - The coordinator's config step is the only writer (a test holds that nothing else calls `adoptFlags`).
-  - It reads `config.yaml` at that commit from git and checks `flags:` in plain code, not through the zod schema.
-  - A started-on-the-checkout coordinator (main's config invalid or missing) has no such commit, so **every flag is
-    off**. A branch, a hand edit, a written-to config object or a polluted prototype never turns one on.
-  - Started on main's config, its commit counts at once. A config main later applies, confirms or recovers to moves
-    the commit; an invalid one keeps the last good commit, as it keeps the last good config.
+  commit: the default branch's head, as the remote last said it was, when its config was valid.
+  - The coordinator's config step is the only writer. It names no commit: it asks the remote for the default
+    branch's head (`ls-remote`, never a local ref an agent could move), and adopts that commit's flags only when the
+    commit is here (fetched) and its config is valid, by the schema and by the instance's own checks. Otherwise the
+    last adopted flags stay, as the last good config does; at start, that is none. A test holds that nothing else in
+    `src/` names `adoptFlags`, and since it takes no commit, any caller could only adopt what the default branch
+    says now.
+  - It reads `flags:` in plain code, not through the zod schema.
+  - It writes each `flag.flipped` before the flags change, so a flag is never on without its record.
+  - A coordinator started on the checkout's config (main's invalid or missing) adopts nothing until main's config is
+    valid: **every flag is off**. A branch, a hand edit, a written-to config object or a polluted prototype never
+    turns one on.
+  - The snapshot is the process's own: one coordinator process, one repo. A process serving several would need one
+    per repo.
 - **Only flags the engine knows.** The engine lists its flags in `FLAGS` (`src/config/schema.ts`).
   - **A name it doesn't know makes the config invalid.** The coordinator keeps running on the last good config and
     raises `config_invalid`, naming the flag and the ones it knows. A typo never turns something on, and never quietly

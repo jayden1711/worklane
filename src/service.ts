@@ -293,7 +293,7 @@ export async function runInstanceCoordinator(name: string, opts: { once?: boolea
   // WHY (#392): root's provider hosts, or that there are none (provider runs off), and each configured provider they refuse.
   for (const line of providerHostsAtStart(i.config.agents)) console.error(line);
   writeInstanceHooks(i);
-  const liveConfig = { tree: start.tree, sha: start.sha, check };
+  const liveConfig = { tree: start.tree, check };
   const gh = i.credentials.github;
   const warn = gh.kind === 'app' ? appKeyWarning(appKeyAge(gh.key_path)) : tokenWarning(scope.expiresAt);
   if (warn) console.error(warn.replaceAll('**', ''));
@@ -381,7 +381,7 @@ export function runCoordinator(root: string, opts: { once?: boolean; intervalMs?
   const site = { ...checkout, cfg: start.cfg };
   // A remote on GitHub: its protection, asked with the gh login (direct-land.ts); a local path has none to ask.
   const protection = localRemote(root, 'origin') ? undefined : new GitHubMainWatchApi(site.cfg.project.project.repo, async () => execFileSync('gh', ['auth', 'token'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 15_000 }).trim(), fetch, githubApi());
-  return runSite(site, { ...opts, label: 'coordinator', liveConfig: { tree: start.tree, sha: start.sha }, ...(protection ? { protection } : {}) });
+  return runSite(site, { ...opts, label: 'coordinator', liveConfig: { tree: start.tree }, ...(protection ? { protection } : {}) });
 }
 
 /** How long a shutdown (SIGTERM, SIGINT) may take before the process exits anyway, naming what was still pending. */

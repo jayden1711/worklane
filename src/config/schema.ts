@@ -157,6 +157,9 @@ export function retiredFlags(): readonly string[] {
  * nothing in src/ but this file names it.
  */
 export async function withKnownFlags<T>(names: readonly string[], fn: () => T | Promise<T>): Promise<T> {
+  // Only in node's test runner (R1173j: a module reached this through a computed name). It registers a flag, so a
+  // config naming it would be valid; outside a test run it refuses.
+  if (!process.execArgv.includes('--test') && process.env.NODE_TEST_CONTEXT === undefined) throw new Error('withKnownFlags is for tests only (node --test)');
   const before = knownForTest;
   knownForTest = Object.freeze([...(before ?? []), ...names]);
   try {

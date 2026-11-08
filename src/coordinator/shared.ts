@@ -98,8 +98,7 @@ export interface CoordinatorDeps {
    * The config follows the default branch (src/config/live.ts): `tree`, the config tree `cfg` was loaded from
    * (absent: the checkout's HEAD); `check`, checks beyond the schema a new config must pass (an instance's policy).
    */
-  /** `sha`: the default branch's commit the start config came from (startConfig), which feature flags are read at. */
-  liveConfig?: { tree?: string | null; sha?: string | null; check?: (cfg: Config) => ConfigError[] };
+  liveConfig?: { tree?: string | null; check?: (cfg: Config) => ConfigError[] };
   /**
    * When the last Claude account switch put this instance on a new login and resumed it (src/claude-account.ts,
    * switchedOnto): that time, else null. A usage-limit pause from before it ends then. Absent: only the reset ends it.
