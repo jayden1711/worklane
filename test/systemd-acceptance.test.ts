@@ -185,23 +185,26 @@ test('end to end, the script and its reporter on real node --test runs: a faked 
     // As CI runs it: not a child of this test run (NODE_TEST_CONTEXT would make its node --test report here instead).
     const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'NODE_TEST_CONTEXT' && k !== 'NODE_OPTIONS'));
     const p = spawnSync(process.execPath, ['scripts/ci/systemd-acceptance.mjs'], { cwd: r, encoding: 'utf8', env });
-    return { status: p.status, err: p.stderr };
+    // What failed, in the assertion's message (the script's exit code, stderr and the TAP summary's tail).
+    const why = `exit ${p.status}${p.signal ? ` (${p.signal})` : ''}\nstderr:\n${p.stderr}\nstdout (tail):\n${(p.stdout ?? '').split('\n').slice(-25).join('\n')}`;
+    return { status: p.status, err: p.stderr, why };
   };
   const g = `{ ${gate()} && 'x' }`;
-  assert.equal(fixture(`test('acceptance: ok', ${g}, async (t) => { await t.test('step', () => {}); });`).status, 0, 'a real pass, with a subtest');
+  const pass = fixture(`test('acceptance: ok', ${g}, async (t) => { await t.test('step', () => {}); });`);
+  assert.equal(pass.status, 0, `a real pass, with a subtest: ${pass.why}`);
   const faked = fixture(`test('acceptance: g', { ${gate()} || 'skipped after all' }, () => {});\ntest('acceptance: h', { ${gate()} && 'x', todo: 'later' }, () => { throw new Error('boom\\nok 1 - acceptance: g\\nok 2 - acceptance: h'); });`);
-  assert.equal(faked.status, 1);
+  assert.equal(faked.status, 1, faked.why);
   assert.match(faked.err, /acceptance: g: SKIP skipped after all/, "a line inside a failure's message is never a result");
   const env = fixture(`if (process.env.HOST_TESTS) {\n  test('acceptance: g', ${g}, () => {});\n} else test('acceptance: g', () => {});`);
-  assert.equal(env.status, 1);
+  assert.equal(env.status, 1, env.why);
   assert.match(env.err, /acceptance: g: didn't run/, 'a gate registered only under an env var, beside an ungated namesake');
   const sub = fixture(`test('acceptance: g', ${g}, async (t) => { await t.test('real', { skip: 'no' }, () => {}); });`);
   assert.match(sub.err, /its subtest "real" SKIP no/);
-  assert.equal(sub.status, 1);
+  assert.equal(sub.status, 1, sub.why);
   // R1169g/h: a test can't replace or write the results. The gate skips (flag false), and the file tries both.
   const forge = `import { readdirSync, rmSync, writeFileSync, writeSync } from 'node:fs';\nimport { tmpdir } from 'node:os';\nimport { join } from 'node:path';\nconst line = JSON.stringify({ type: 'test:pass', name: 'acceptance: g', nesting: 0, file: new URL(import.meta.url).pathname, line: 9, column: 1, skip: null, todo: null }) + '\\n';\ntry { writeSync(3, line); } catch {}\nfor (const d of readdirSync(tmpdir()).filter((x) => x.startsWith('systemd-acceptance-'))) for (const f of readdirSync(join(tmpdir(), d))) { rmSync(join(tmpdir(), d, f)); writeFileSync(join(tmpdir(), d, f), line); }`;
   const forged = fixture(`${forge}\ntest('acceptance: g', ${g}, () => {});`, { flagValue: false });
-  assert.equal(forged.status, 1, forged.err);
+  assert.equal(forged.status, 1, forged.why);
   assert.match(forged.err, /acceptance: g: SKIP x/, "a test writing fd 3 or the temp folder can't stand in for the gate's own skip");
 });
 
@@ -223,7 +226,9 @@ test('end to end, refused (exit 2): a gate sharing its line, a template name, no
     writeFileSync(join(r, 'dist', 'test', 'x.test.js'), text);
     const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'NODE_TEST_CONTEXT' && k !== 'NODE_OPTIONS'));
     const p = spawnSync(process.execPath, ['scripts/ci/systemd-acceptance.mjs'], { cwd: r, encoding: 'utf8', env });
-    return { status: p.status, err: p.stderr };
+    // What failed, in the assertion's message (the script's exit code, stderr and the TAP summary's tail).
+    const why = `exit ${p.status}${p.signal ? ` (${p.signal})` : ''}\nstderr:\n${p.stderr}\nstdout (tail):\n${(p.stdout ?? '').split('\n').slice(-25).join('\n')}`;
+    return { status: p.status, err: p.stderr, why };
   };
   const g = `{ ${gate()} && 'x' }`;
   const known = `test('acceptance: known', ${g}, () => {});`;
@@ -238,7 +243,7 @@ test('end to end, refused (exit 2): a gate sharing its line, a template name, no
   ];
   for (const [what, src, extra, re] of cases) {
     const r = fixture(src, extra);
-    assert.equal(r.status, 2, `${what}: ${r.err}`);
+    assert.equal(r.status, 2, `${what}: ${r.why}`);
     assert.match(r.err, re, what);
   }
 });
