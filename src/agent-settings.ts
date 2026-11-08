@@ -22,8 +22,8 @@
 //   that sets env, widens allow rules, or sets anything but hooks and
 //   permission rules refuses the run (projectSettingsRefusal).
 import { randomBytes } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
+import { join, relative, sep } from 'node:path';
 import { BRAND } from './brand.js';
 import { changedNames, ignoredNames, untrackedNames } from './coordinator/change-files.js';
 import { gitSpawnSync } from './os/git.js';
@@ -180,22 +180,36 @@ export function guardrailSettings(instanceHome: string, instance: string, checko
 const PROJECT_KEYS = new Set(['$schema', 'hooks', 'permissions']);
 const PROJECT_PERMISSION_KEYS = new Set(['allow', 'deny', 'ask']);
 
+/** The instruction files Claude Code loads up front from each folder from the checkout's top down to the run's cwd. */
+const LOADED_INSTRUCTIONS = ['CLAUDE.md', 'CLAUDE.local.md', '.claude/CLAUDE.md'];
+/** The most entries under a `.claude/` folder it walks for links; past it, the run is refused (fail closed). */
+const MAX_CLAUDE_DIR_ENTRIES = 10_000;
+
 /**
  * Why an agent run in `cwd` must not start because what Claude Code loads from the checkout isn't what its last
  * commit holds (#958), or null. A project command (a worktree setup step, a dependency's install script) runs as the
  * agent user and can write `.claude/settings.json` with a SessionStart hook, or a CLAUDE.md, into the checkout; the
- * next run would load it, and run the hook outside any sandbox. So anything under `.claude/` (ignored files too, as a
- * gitignored settings.local.json; never the coordinator's own `.claude/worktrees/`) and any CLAUDE.md or
- * CLAUDE.local.md (tracked or untracked; an ignored one, as under node_modules, isn't listed) that differs from the
- * checkout's HEAD, or isn't in it, refuses the run. Not a checkout: null (nothing committed to compare with). A git
- * status that fails: refused (fail closed). It compares with HEAD, not the task's base: a hook an agent commits
- * itself is the merge policy's (agent-instructions waits), and not caught here.
+ * next run would load it, and run the hook outside any sandbox. So the run is refused for any of these:
+ * - anything under `.claude/` (ignored files too, as a gitignored settings.local.json; never the coordinator's own
+ *   `.claude/worktrees/`) or any CLAUDE.md or CLAUDE.local.md (tracked or untracked) that differs from the checkout's
+ *   HEAD, or isn't in it;
+ * - a `.claude` that is a link or not a folder, or a link anywhere under one (R1185a D1): git lists a linked folder as
+ *   one entry and never looks inside, and what it points at is never compared;
+ * - a CLAUDE.md, CLAUDE.local.md or .claude/CLAUDE.md in a folder from the top down to `cwd`, the files Claude Code
+ *   loads up front, whose bytes (through a link, to its target in the checkout) aren't HEAD's, compared directly, so an
+ *   ignore rule (a `.gitignore` the same step writes, info/exclude, core.excludesFile) can't hide it (R1185a D3).
+ * Not counted: an empty, untracked regular file (R1185a D2), the mount points Claude Code's Linux sandbox leaves
+ * (src/worktrees.ts removeSandboxPlaceholders removes the same ones after task runs; never in the main checkout, or
+ * after a stuck attempt): empty, it holds no hook and no instruction. Not a checkout: null (nothing committed to compare
+ * with). A git status that fails: refused (fail closed). It compares with HEAD, not the task's base: a hook an agent
+ * commits itself is the merge policy's (agent-instructions waits), and not caught here. Not covered: an ignored
+ * CLAUDE.md below `cwd` (as under node_modules), which Claude Code reads only when the agent works in that folder.
  */
 export function uncommittedAgentFilesRefusal(cwd: string): string | null {
   const inside = gitSpawnSync(['rev-parse', '--is-inside-work-tree'], { cwd, encoding: 'utf8' });
   if (inside.status !== 0 || inside.stdout.trim() !== 'true') return null;
-  // Under .claude/, never the coordinator's own worktrees; a CLAUDE.md or CLAUDE.local.md anywhere.
-  const inClaudeDir = (p: string) => p.startsWith('.claude/') && !p.startsWith('.claude/worktrees/');
+  // Under .claude/ (and .claude itself), never the coordinator's own worktrees; a CLAUDE.md or CLAUDE.local.md anywhere.
+  const inClaudeDir = (p: string) => (p === '.claude' || p.startsWith('.claude/')) && !p.startsWith('.claude/worktrees/');
   const instructions = (p: string) => /(^|\/)CLAUDE(\.local)?\.md$/.test(p);
   let changed: string[];
   try {
@@ -206,16 +220,118 @@ export function uncommittedAgentFilesRefusal(cwd: string): string | null {
     const top = gitSpawnSync(['rev-parse', '--show-toplevel'], { cwd, encoding: 'utf8' });
     if (top.status !== 0 || !top.stdout.trim()) throw new Error(`git can't say where the checkout at ${cwd} starts`);
     const root = top.stdout.trim();
+    // An untracked file that is empty and regular is a sandbox mount point: inert (D2).
+    const placeholder = (p: string) => {
+      try {
+        const st = lstatSync(join(root, p));
+        return st.isFile() && st.size === 0;
+      } catch {
+        return false;
+      }
+    };
     const differs = changedNames(root, ['HEAD']).filter((p) => inClaudeDir(p) || instructions(p));
-    const untracked = untrackedNames(root).filter((p) => inClaudeDir(p) || instructions(p));
-    const ignored = ignoredNames(root, ['.claude']).filter(inClaudeDir);
-    changed = [...new Set([...differs, ...untracked, ...ignored])];
+    const untracked = untrackedNames(root).filter((p) => (inClaudeDir(p) || instructions(p)) && !placeholder(p));
+    const ignored = ignoredNames(root, ['.claude']).filter((p) => inClaudeDir(p) && !placeholder(p));
+    changed = [...new Set([...differs, ...untracked, ...ignored, ...linkedClaudeDirs(root, cwd), ...loadedInstructionsChanged(root, cwd)])];
   } catch (e) {
     return `the checkout's agent settings and instructions couldn't be compared with its last commit (${(e as Error).message})`;
   }
   if (!changed.length) return null;
   const shown = changed.slice(0, 5).map((p) => JSON.stringify(p)).join(', ');
   return `the checkout's agent settings or instructions (${shown}${changed.length > 5 ? ` and ${changed.length - 5} more` : ''}) differ from its last commit or aren't in it: written by a setup step or a command since, a run would load them, and a hook there would run outside the sandbox`;
+}
+
+/** The folders from the checkout's top `root` down to `cwd`, as paths from the top ('' for the top). */
+function foldersDown(root: string, cwd: string): string[] {
+  let rel: string;
+  try {
+    rel = relative(realpathSync(root), realpathSync(cwd));
+  } catch {
+    rel = '';
+  }
+  if (rel.startsWith('..')) rel = '';
+  const parts = rel ? rel.split(sep) : [];
+  return parts.reduce<string[]>((acc, part) => [...acc, acc.at(-1) ? `${acc.at(-1)}/${part}` : part], ['']);
+}
+
+/** Each `.claude` from the top down to `cwd` that is a link or not a folder, and each link under one (D1). */
+function linkedClaudeDirs(root: string, cwd: string): string[] {
+  const out: string[] = [];
+  for (const folder of foldersDown(root, cwd)) {
+    const rel = folder ? `${folder}/.claude` : '.claude';
+    let st;
+    try {
+      st = lstatSync(join(root, rel));
+    } catch {
+      continue;
+    }
+    if (!st.isDirectory()) {
+      // An empty regular file is a sandbox mount point (D2): nothing loads from it.
+      if (!(st.isFile() && st.size === 0)) out.push(rel);
+      continue;
+    }
+    let seen = 0;
+    const walk = (dir: string) => {
+      for (const e of readdirSync(join(root, dir), { withFileTypes: true })) {
+        const p = `${dir}/${e.name}`;
+        if (p === '.claude/worktrees') continue;
+        if (++seen > MAX_CLAUDE_DIR_ENTRIES) throw new Error(`over ${MAX_CLAUDE_DIR_ENTRIES} entries under ${rel}`);
+        if (e.isSymbolicLink()) out.push(p);
+        else if (e.isDirectory()) walk(p);
+      }
+    };
+    walk(rel);
+  }
+  return out;
+}
+
+/**
+ * Each instruction file Claude Code loads up front (LOADED_INSTRUCTIONS, from the top down to `cwd`) whose bytes aren't
+ * HEAD's (D3): compared directly, whatever ignore rules say. Through a link, the target's bytes against HEAD's at the
+ * target's path, which must be in the checkout. An empty, untracked file is a placeholder (D2). Missing: deleted, which
+ * the changed names list.
+ */
+function loadedInstructionsChanged(root: string, cwd: string): string[] {
+  const out: string[] = [];
+  const realRoot = realpathSync(root);
+  for (const folder of foldersDown(root, cwd)) {
+    for (const name of LOADED_INSTRUCTIONS) {
+      const rel = folder ? `${folder}/${name}` : name;
+      let st;
+      try {
+        st = lstatSync(join(root, rel));
+      } catch {
+        continue;
+      }
+      let at = rel;
+      if (st.isSymbolicLink()) {
+        let target: string;
+        try {
+          target = relative(realRoot, realpathSync(join(root, rel)));
+        } catch {
+          out.push(rel); // a dangling link: refused rather than guessed
+          continue;
+        }
+        if (!target || target.startsWith('..') || target.startsWith(sep)) {
+          out.push(rel); // outside the checkout: never compared
+          continue;
+        }
+        at = target.split(sep).join('/');
+        st = lstatSync(join(root, at));
+      }
+      if (!st.isFile()) {
+        out.push(rel);
+        continue;
+      }
+      const head = gitSpawnSync(['cat-file', 'blob', `HEAD:${at}`], { cwd: root, encoding: 'buffer', maxBuffer: 64 * 1024 * 1024 });
+      if (head.status !== 0) {
+        if (st.size > 0) out.push(rel); // not in HEAD, and not empty
+        continue;
+      }
+      if (!head.stdout.equals(readFileSync(join(root, at)))) out.push(rel);
+    }
+  }
+  return out;
 }
 
 /**
