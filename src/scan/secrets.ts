@@ -546,7 +546,7 @@ function gitVar(top: string, name: string): string | null {
 }
 
 /** The large-file filter's config exactly as its standard install writes it (#971, owner 2026-10-21). */
-const LFS_STANDARD: Record<string, string> = {
+export const LFS_STANDARD: Readonly<Record<string, string>> = {
   'filter.lfs.clean': 'git-lfs clean -- %f',
   'filter.lfs.smudge': 'git-lfs smudge -- %f',
   'filter.lfs.process': 'git-lfs filter-process',
