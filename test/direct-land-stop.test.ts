@@ -176,3 +176,13 @@ test("direct mode (#808, R1183d): a stop set while GitHub answers the push-time 
   }
 });
 
+test("direct mode (#808 (c), R1183f): auto-merge turned off while the push limits run (after the last check before checkedPush) is read before git push", { skip }, async () => {
+  // The switch is read by landNext's filter (1), heldAtPush after the protection call (2), then checkedPush's hold
+  // (3), after its limits' git runs: on for the first two, off from the third, as a policy.yaml written in that moment.
+  let reads = 0;
+  const r = await runWith(() => {}, { autoMerge: () => ++reads <= 2 });
+  assert.equal(r.landed.length, 0, 'never landed');
+  assert.equal(r.mainAfter, r.mainBefore, 'main untouched');
+  assert.ok(reads >= 3, 'read again inside checkedPush');
+});
+

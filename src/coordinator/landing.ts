@@ -142,9 +142,10 @@ export abstract class Landing extends Decisions {
   }
 
   /**
-   * Why a direct land's batch may not push now, read synchronously (nothing awaited, so nothing can change between this
-   * and the push): an emergency stop, the auto-merge stop (#808), or the policy's auto-merge off with anything in the
-   * batch the owner didn't approve. Null: push.
+   * Why a direct land's batch may not push now, read synchronously: an emergency stop, the auto-merge stop (#808), or
+   * the policy's auto-merge off with anything in the batch the owner didn't approve. Null: push. Synchronous means
+   * nothing in this process changes it before the push; another process can still write a stop file or policy.yaml
+   * in the moment before `git push` runs, which is why checkedPush asks it again last (R1183f).
    */
   private heldAtPush(applied: EventPayload<'land.queued'>[]): string | null {
     if (this.emergencyInForce()) return 'emergency stop in force; lands once it is lifted';
@@ -309,15 +310,22 @@ export abstract class Landing extends Decisions {
         for (const q of applied) result(q.issue, 'deferred', null, `not pushed: ${unprotected}`);
         return;
       }
-      // INVARIANT (R1183d): after the last await and with nothing awaited between, read again what holds the push: a
-      // stop or a switch turned off while the gates ran, or while GitHub answered the protection call, is never missed.
+      // INVARIANT (R1183d, R1183f): after the last await, read again what holds the push: a stop or a switch turned
+      // off while the gates ran, or while GitHub answered the protection call, is never missed. And once more inside
+      // checkedPush (its `hold`), after the push limits' own git runs, right before `git push`: those take a moment,
+      // and another process (an operator's stop, policy.yaml) can write in it.
       const held = this.heldAtPush(applied);
       if (held) {
         for (const q of applied) result(q.issue, 'deferred', null, held);
         return;
       }
       // A plain (non-force) push only succeeds if the tip hasn't moved: compare-and-swap.
-      const push = checkedPush({ cwd: path, remote: this.remote, base: tip, head, ref: `refs/heads/${this.branch}`, limits: this.d.cfg.guardrails.push, guard: this.pushGuard(this.d.cfg.project.land_mode === 'direct') });
+      // R1183f: asked again inside checkedPush, after its limits' git runs and right before `git push`.
+      const push = checkedPush({ cwd: path, remote: this.remote, base: tip, head, ref: `refs/heads/${this.branch}`, limits: this.d.cfg.guardrails.push, guard: this.pushGuard(this.d.cfg.project.land_mode === 'direct'), hold: () => this.heldAtPush(applied) });
+      if (!push.ok && 'held' in push && push.held) {
+        for (const q of applied) result(q.issue, 'deferred', null, push.error);
+        return;
+      }
       if (!push.ok && 'refused' in push) {
         for (const q of applied) {
           this.emit('push.refused', { issue: q.issue, head, stage: 'push', reasons: push.refused });
