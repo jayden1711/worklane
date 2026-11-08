@@ -16,8 +16,10 @@ type Script = {
   gateCount: (text: string) => number;
   mentionCount: (text: string) => number;
   findAll: (dir: string, prefix?: string) => { file: string; names: string[] }[];
-  problems: (runs: { file: string; gates: { name: string; line: number }[]; events: Ev[] }[]) => string[];
-  gatesOf: (text: string) => { name: string; line: number; member: boolean }[];
+  problems: (runs: { file: string; gates: { name: string; line: number; column: number }[]; events: Ev[] }[]) => string[];
+  gatesOf: (text: string) => { name: string; line: number; column: number; member: boolean; first: boolean; computed: boolean }[];
+  buildRoots: (dir: string) => string[];
+  summaryProblems: (tap: string, file: string, gates: number) => string[];
   gateLikeCount: (text: string) => number;
 };
 const sa = (await import(pathToFileURL(join(repoRoot, 'scripts', 'ci', 'systemd-acceptance.mjs')).href)) as Script;
@@ -28,9 +30,9 @@ const flag = `${'system'}Ci`;
 const gate = (sp = ' ') => `skip:${sp}!${flag}`;
 const tmp = () => mkdtempSync(join(tmpdir(), 'sa-'));
 
-type Ev = { type: 'test:pass' | 'test:fail'; name: string; nesting: number; file: string | null; line: number | null; skip: string | boolean | null; todo: string | boolean | null };
+type Ev = { type: 'test:pass' | 'test:fail'; name: string; nesting: number; file: string | null; line: number | null; column: number | null; skip: string | boolean | null; todo: string | boolean | null };
 /** One of node's results, as the reporter writes it: in `file` (built), at `line`, passed unless `o` says otherwise. */
-const ev = (name: string, line: number, o: Partial<Ev> = {}, file = '/r/dist/test/f.test.js'): Ev => ({ type: 'test:pass', name, nesting: 0, file, line, skip: null, todo: null, ...o });
+const ev = (name: string, line: number, o: Partial<Ev> = {}, file = '/r/dist/test/f.test.js'): Ev => ({ type: 'test:pass', name, nesting: 0, file, line, column: 1, skip: null, todo: null, ...o });
 
 type Step = { run?: string; uses?: string; name?: string };
 type Job = { name?: string; if?: string; 'runs-on'?: unknown; container?: unknown; 'continue-on-error'?: unknown; 'timeout-minutes'?: unknown; steps?: Step[] };
@@ -56,7 +58,7 @@ test('a gate outside a test() call the script reads stops it, so no gated test i
 });
 
 test('a gated test passes the run only by running and passing: a skip, a todo, a failure or no result each fail it', () => {
-  const gates = [{ name: 'acceptance: a', line: 3 }, { name: 'acceptance: b # c', line: 9 }];
+  const gates = [{ name: 'acceptance: a', line: 3, column: 1 }, { name: 'acceptance: b # c', line: 9, column: 1 }];
   const run = (events: Ev[]) => sa.problems([{ file: 'f.test.ts', gates, events }]);
   assert.deepEqual(run([ev('acceptance: a', 3), ev('acceptance: b # c', 9)]), []);
   assert.deepEqual(run([ev('acceptance: a', 3, { skip: 'needs systemd' }), ev('acceptance: b # c', 9)]), ['test/f.test.ts: acceptance: a: SKIP needs systemd (it must run here: this is the one place it does)']);
@@ -68,11 +70,13 @@ test('a gated test passes the run only by running and passing: a skip, a todo, a
 });
 
 test("a result counts for a gate only at its own file, line and name: a namesake elsewhere, or in another file, can't stand in for it (R1169b #1, R1169e, R1169f)", () => {
-  const gates = [{ name: 'acceptance: x', line: 4 }];
+  const gates = [{ name: 'acceptance: x', line: 4, column: 1 }];
   // The gate skipped; a same-named test on another line passes.
   assert.deepEqual(sa.problems([{ file: 'a.test.ts', gates, events: [ev('acceptance: x', 4, { skip: 'needs systemd' }, '/r/dist/test/a.test.js'), ev('acceptance: x', 5, {}, '/r/dist/test/a.test.js')] }]), ['test/a.test.ts: acceptance: x: SKIP needs systemd (it must run here: this is the one place it does)']);
   // Registered only sometimes (under an env var): no result at its line, while a namesake on the next line passes.
   assert.deepEqual(sa.problems([{ file: 'a.test.ts', gates, events: [ev('acceptance: x', 5, {}, '/r/dist/test/a.test.js')] }]), ["test/a.test.ts: acceptance: x: didn't run"]);
+  // The same line and name at another column (a namesake sharing the gate's line, R1169h).
+  assert.deepEqual(sa.problems([{ file: 'a.test.ts', gates, events: [ev('acceptance: x', 4, { column: 40 }, '/r/dist/test/a.test.js')] }]), ["test/a.test.ts: acceptance: x: didn't run"]);
   // Another file's pass at the same line and name.
   assert.deepEqual(sa.problems([{ file: 'a.test.ts', gates, events: [ev('acceptance: x', 4, {}, '/r/dist/test/b.test.js')] }]), ["test/a.test.ts: acceptance: x: didn't run"]);
   // Twice at its line and name (a loop registering it): it ran more than once.
@@ -134,7 +138,7 @@ test("ci.yml's systemd-acceptance job: GitHub's VM on each push to main, never s
 });
 
 test("a gated test passes only when all of it ran: a subtest that skips, is a todo or fails fails it (R1169d #3); a test here skipped for systemd fails the run (R1169f's floor)", () => {
-  const gates = [{ name: 'acceptance: parent', line: 7 }];
+  const gates = [{ name: 'acceptance: parent', line: 7, column: 1 }];
   const run = (events: Ev[]) => sa.problems([{ file: 'f.test.ts', gates, events }]);
   assert.deepEqual(run([ev('the real check', 8, { nesting: 1, skip: 'no systemd' }), ev('acceptance: parent', 7)]), ['test/f.test.ts: acceptance: parent: its subtest "the real check" SKIP no systemd (all of it must run here)']);
   assert.deepEqual(run([ev('deeper', 9, { nesting: 2, todo: 'later' }), ev('step', 8, { nesting: 1 }), ev('acceptance: parent', 7)]), ['test/f.test.ts: acceptance: parent: its subtest "deeper" TODO later (all of it must run here)']);
@@ -163,15 +167,19 @@ test('a gate on a subtest (t.test), a function or an inline check that reads sys
 });
 
 test('end to end, the script and its reporter on real node --test runs: a faked line, a gate under an env var, a crash and a skipped subtest fail it; a real pass passes', { timeout: 120_000 }, () => {
-  const fixture = (src: string) => {
+  const fixture = (src: string, o: { flagValue?: boolean; extra?: Record<string, string> } = {}) => {
     const r = tmp();
+    for (const [p, t] of Object.entries(o.extra ?? {})) {
+      mkdirSync(join(r, p, '..'), { recursive: true });
+      writeFileSync(join(r, p), t);
+    }
     mkdirSync(join(r, 'scripts', 'ci'), { recursive: true });
     mkdirSync(join(r, 'test'));
     mkdirSync(join(r, 'dist', 'test'), { recursive: true });
     for (const f of ['systemd-acceptance.mjs', 'systemd-acceptance-reporter.mjs']) writeFileSync(join(r, 'scripts', 'ci', f), readFileSync(join(repoRoot, 'scripts', 'ci', f)));
     writeFileSync(join(r, 'package.json'), '{"type":"module"}\n');
     writeFileSync(join(r, 'dist', 'test', 'isolate.js'), '');
-    const text = `import { test } from 'node:test';\nconst ${flag} = true;\n${src}\n`;
+    const text = `import { test } from 'node:test';\nconst ${flag} = ${o.flagValue ?? true};\n${src}\n`;
     writeFileSync(join(r, 'test', 'x.test.ts'), text);
     writeFileSync(join(r, 'dist', 'test', 'x.test.js'), text);
     // As CI runs it: not a child of this test run (NODE_TEST_CONTEXT would make its node --test report here instead).
@@ -184,12 +192,55 @@ test('end to end, the script and its reporter on real node --test runs: a faked 
   const faked = fixture(`test('acceptance: g', { ${gate()} || 'skipped after all' }, () => {});\ntest('acceptance: h', { ${gate()} && 'x', todo: 'later' }, () => { throw new Error('boom\\nok 1 - acceptance: g\\nok 2 - acceptance: h'); });`);
   assert.equal(faked.status, 1);
   assert.match(faked.err, /acceptance: g: SKIP skipped after all/, "a line inside a failure's message is never a result");
-  const env = fixture(`if (process.env.HOST_TESTS) test('acceptance: g', ${g}, () => {});\nelse test('acceptance: g', () => {});`);
+  const env = fixture(`if (process.env.HOST_TESTS) {\n  test('acceptance: g', ${g}, () => {});\n} else test('acceptance: g', () => {});`);
   assert.equal(env.status, 1);
   assert.match(env.err, /acceptance: g: didn't run/, 'a gate registered only under an env var, beside an ungated namesake');
   const sub = fixture(`test('acceptance: g', ${g}, async (t) => { await t.test('real', { skip: 'no' }, () => {}); });`);
   assert.match(sub.err, /its subtest "real" SKIP no/);
   assert.equal(sub.status, 1);
+  // R1169g/h: a test can't replace or write the results. The gate skips (flag false), and the file tries both.
+  const forge = `import { readdirSync, rmSync, writeFileSync, writeSync } from 'node:fs';\nimport { tmpdir } from 'node:os';\nimport { join } from 'node:path';\nconst line = JSON.stringify({ type: 'test:pass', name: 'acceptance: g', nesting: 0, file: new URL(import.meta.url).pathname, line: 9, column: 1, skip: null, todo: null }) + '\\n';\ntry { writeSync(3, line); } catch {}\nfor (const d of readdirSync(tmpdir()).filter((x) => x.startsWith('systemd-acceptance-'))) for (const f of readdirSync(join(tmpdir(), d))) { rmSync(join(tmpdir(), d, f)); writeFileSync(join(tmpdir(), d, f), line); }`;
+  const forged = fixture(`${forge}\ntest('acceptance: g', ${g}, () => {});`, { flagValue: false });
+  assert.equal(forged.status, 1, forged.err);
+  assert.match(forged.err, /acceptance: g: SKIP x/, "a test writing fd 3 or the temp folder can't stand in for the gate's own skip");
+});
+
+test('end to end, refused (exit 2): a gate sharing its line, a template name, node:vm in a gated file, a detector built from parts, a renamed flag on the next line, a gate in src/ or scripts/bench/ (R1169g, R1169h)', { timeout: 120_000 }, () => {
+  const fixture = (src: string, extra: Record<string, string> = {}) => {
+    const r = tmp();
+    for (const [p, t] of Object.entries(extra)) {
+      mkdirSync(join(r, p, '..'), { recursive: true });
+      writeFileSync(join(r, p), t);
+    }
+    mkdirSync(join(r, 'scripts', 'ci'), { recursive: true });
+    mkdirSync(join(r, 'test'), { recursive: true });
+    mkdirSync(join(r, 'dist', 'test'), { recursive: true });
+    for (const f of ['systemd-acceptance.mjs', 'systemd-acceptance-reporter.mjs']) writeFileSync(join(r, 'scripts', 'ci', f), readFileSync(join(repoRoot, 'scripts', 'ci', f)));
+    writeFileSync(join(r, 'package.json'), '{"type":"module"}\n');
+    writeFileSync(join(r, 'dist', 'test', 'isolate.js'), '');
+    const text = `import { test } from 'node:test';\nimport { existsSync } from 'node:fs';\nimport { join } from 'node:path';\nconst ${flag} = true;\n${src}\n`;
+    writeFileSync(join(r, 'test', 'x.test.ts'), text);
+    writeFileSync(join(r, 'dist', 'test', 'x.test.js'), text);
+    const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'NODE_TEST_CONTEXT' && k !== 'NODE_OPTIONS'));
+    const p = spawnSync(process.execPath, ['scripts/ci/systemd-acceptance.mjs'], { cwd: r, encoding: 'utf8', env });
+    return { status: p.status, err: p.stderr };
+  };
+  const g = `{ ${gate()} && 'x' }`;
+  const known = `test('acceptance: known', ${g}, () => {});`;
+  const cases: [string, string, Record<string, string>, RegExp][] = [
+    ['a namesake on its line', `false && test('acceptance: x', ${g}, () => {}); test('acceptance: x', () => {});`, {}, /isn't its line's first statement/],
+    ['a template name', `const v = 'x';\ntest(\`acceptance: \${v}\`, ${g}, () => {});`, {}, /computed \(template\) name/],
+    ['node:vm in a gated file', `import vm from 'node:vm';\nvoid vm;\n${known}`, {}, /uses node:vm, new Function or eval/],
+    ['a detector built from parts', `const booted = existsSync(join('/run', 'sys' + 'temd', 'system')) || existsSync(join('/run', '${'sys'}temd', 'system'));\n${known}\ntest('acceptance: y', { skip: !booted && 'x' }, () => {});`, {}, /booted read\(s\) systemd's sign/],
+    ['a renamed flag on the line after skip:', `const ${'system'}dCi = false;\n${known}\ntest('acceptance: r', { skip:\n  !${'system'}dCi && 'x' }, () => {});`, {}, /2 skip\(s\) that look like a systemd gate, 1 a gate/],
+    ['a gate in src/, through a test helper', `import { hostOnly } from '../src/gates.js';\n${known}\ntest('acceptance: h', hostOnly, () => {});`, { 'src/gates.ts': `const ${flag} = true;\nexport const hostOnly = { ${gate()} && 'x' };\n` }, /src\/gates\.ts: a systemd gate outside a \*\.test\.ts file/],
+    ['a gate in scripts/bench/', `${known}`, { 'scripts/bench/gates.ts': `const ${flag} = true;\nexport const hostOnly = { ${gate()} && 'x' };\n` }, /scripts\/bench\/gates\.ts: a systemd gate outside a \*\.test\.ts file/],
+  ];
+  for (const [what, src, extra, re] of cases) {
+    const r = fixture(src, extra);
+    assert.equal(r.status, 2, `${what}: ${r.err}`);
+    assert.match(r.err, re, what);
+  }
 });
 
 test('a systemd flag under another name, or a gate in a helper module, stops it, so no gated test is hidden (R1169d #1, #2)', () => {
@@ -208,5 +259,17 @@ test('a systemd flag under another name, or a gate in a helper module, stops it,
   assert.throws(() => sa.findAll(dir), /test\/sys-helpers\.ts: a systemd gate outside a \*\.test\.ts file/);
   // A test that checks for systemctl itself, with "systemd" only in its reason, is not a gate.
   assert.equal(sa.gateLikeCount("{ skip: process.platform !== 'linux' || !which('systemctl') ? 'needs systemd' : false }"), 0);
+});
+
+test("the build's roots come from tsconfig.json's include; node's TAP summary must agree with a clean run (R1169g)", () => {
+  assert.deepEqual(sa.buildRoots(repoRoot), ['src', 'test', 'scripts/bench'], "this repo's tsconfig");
+  const dir = tmp();
+  writeFileSync(join(dir, 'tsconfig.json'), JSON.stringify({ include: ['lib/**/*.ts', 'test/**/*.ts', 'tools/x/*.ts'] }));
+  assert.deepEqual(sa.buildRoots(dir), ['lib', 'test', 'tools/x']);
+  const clean = '# tests 2\n# suites 0\n# pass 2\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n';
+  assert.deepEqual(sa.summaryProblems(clean, 'f.test.ts', 2), []);
+  assert.deepEqual(sa.summaryProblems(clean.replace('# skipped 0', '# skipped 1'), 'f.test.ts', 2), ['test/f.test.ts: its TAP summary says 1 skipped']);
+  assert.deepEqual(sa.summaryProblems(clean, 'f.test.ts', 3), ['test/f.test.ts: its TAP summary counts 2 test(s), fewer than its 3 gate(s)']);
+  assert.deepEqual(sa.summaryProblems('', 'f.test.ts', 1).length, 4, 'no summary: fail closed');
 });
 

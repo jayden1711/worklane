@@ -15,8 +15,7 @@
 // Exit 1: a test failed, skipped, didn't run, ran more than once or has a subtest that didn't pass, or a test here
 // skipped naming systemd. Exit 2: no such test was found, a file couldn't be read, or a gate isn't one it reads.
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -47,8 +46,19 @@ const GATE = /(?<![\w$])test\(\s*(['"`])((?:\\.|(?!\1)[^\\])*)\1\s*,\s*\{\s*skip
 export function gatesOf(text) {
   return [...text.matchAll(GATE)].map((m) => {
     const before = text.slice(0, m.index);
-    // A member call (`t.test(`, `sub.test (`): a `.` right before it on its line.
-    return { name: unescape(m[2]), line: before.split('\n').length, member: /\.[ \t]*$/.test(before.slice(before.lastIndexOf('\n') + 1)) };
+    const lineStart = before.slice(before.lastIndexOf('\n') + 1);
+    return {
+      name: unescape(m[2]),
+      line: before.split('\n').length,
+      // Where node reports the test: the `test` token's column, 1-based (R1169h: a namesake on the same line is elsewhere).
+      column: lineStart.length + 1,
+      // A member call (`t.test(`, `sub.test (`): a `.` right before it on its line.
+      member: /\.[ \t]*$/.test(lineStart),
+      // The gate must be its line's first statement (only spaces, or `await`, before it), so no other call shares it.
+      first: /^[ \t]*(?:await[ \t]+)?$/.test(lineStart),
+      // A template name with `${...}` isn't the text the run selects by.
+      computed: m[1] === '`' && m[2].includes('${'),
+    };
   });
 }
 
@@ -63,22 +73,70 @@ export const gateCount = (text) => (text.match(/\bskip:\s*!systemCi\b/g) ?? []).
 export const mentionCount = (text) => (text.match(/\bsystemCi\b/g) ?? []).length - (text.match(/\bconst\s+systemCi\s*=/g) ?? []).length;
 
 /**
- * How many `skip:` options in `text` look like a systemd gate: their line, from `skip:` on, names a flag like
- * `system…Ci` (`systemdCi`, `isSystemCi`, `SYSTEM_CI`; a string's words don't count, as "needs systemd" in a test that
- * checks for systemctl itself). Each must be a gate systemdTests reads, so a flag renamed (R1169d:
- * `skip: !systemdCi && ...`) stops the job instead of hiding its test.
+ * Each `skip:` option's expression in `text`: from `skip:` to the first `,` or `}` outside brackets, across lines (a
+ * value on the line after `skip:`, R1169e), at most 400 characters, comments left out.
  */
-export const gateLikeCount = (text) => [...text.matchAll(/\bskip\s*:([^\n]{0,300})/g)].filter((m) => /(?<![\w$])[A-Za-z_$]*system[\w$]*ci(?![\w$])/i.test(m[1].replace(/(['"`])(?:\\.|(?!\1)[^\\])*\1/g, "''"))).length;
+export function skipExprs(text) {
+  const out = [];
+  for (const m of text.matchAll(/\bskip\s*:/g)) {
+    let depth = 0;
+    let k = m.index + m[0].length;
+    const end = Math.min(text.length, k + 400);
+    let quote = null;
+    for (; k < end; k++) {
+      const c = text[k];
+      if (quote) {
+        if (c === '\\') k++;
+        else if (c === quote) quote = null;
+        continue;
+      }
+      if (c === "'" || c === '"' || c === '`') quote = c;
+      else if (c === '(' || c === '[' || c === '{') depth++;
+      else if (c === ')' || c === ']' || c === '}') {
+        if (depth === 0) break;
+        depth--;
+      } else if (c === ',' && depth === 0) break;
+    }
+    out.push(text.slice(m.index + m[0].length, k).replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/[^\n]*/g, ' '));
+  }
+  return out;
+}
+const unquoted = (e) => e.replace(/(['"`])(?:\\.|(?!\1)[^\\])*\1/g, "''");
 
-/** The names `text` declares from systemd's own sign (`/run/systemd/system`): each must be systemCi. */
-export const detectorNames = (text) => [
-  ...[...text.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=[^;]*\/run\/systemd\/system/g)].map((m) => m[1]),
-  // A function that reads it (R1169f: `function onSystemd() { return existsSync('/run/systemd/system'); }`).
-  ...[...text.matchAll(/\bfunction\s*\*?\s*([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*(?::[^{]*)?\{[^}]{0,500}\/run\/systemd\/system/g)].map((m) => m[1]),
-];
+/**
+ * How many `skip:` options in `text` look like a systemd gate: their expression names a flag like `system…Ci`
+ * (`systemdCi`, `isSystemCi`, `SYSTEM_CI`; a string's words don't count, as "needs systemd" in a test that checks for
+ * systemctl itself). Each must be a gate systemdTests reads, so a flag renamed (R1169d) stops the job.
+ */
+export const gateLikeCount = (text) => skipExprs(text).filter((e) => /(?<![\w$])[A-Za-z_$]*system[\w$]*ci(?![\w$])/i.test(unquoted(e))).length;
 
-/** How many `skip:` options read systemd's sign inline (R1169f: `skip: !existsSync('/run/systemd/system')`): each must be a read gate. */
-export const inlineSignCount = (text) => [...text.matchAll(/\bskip\s*:([^\n]{0,300})/g)].filter((m) => /\/run\/systemd/.test(m[1])).length;
+/**
+ * systemd's sign, however a path to it is built (R1169h): `/run/systemd`, `'systemd'` as a path part
+ * (`join('/run', 'systemd', 'system')`, `['', 'run', 'systemd', ...].join('/')`), `is-system-running`, `sd_booted`.
+ * Not `systemctl`: a test that checks for that program is not a booted-systemd gate.
+ */
+const SIGN = /\/run\/systemd|(['"`])systemd\1|is-system-running|sd_booted/;
+
+/**
+ * The names `text` declares from systemd's sign (a `const`/`let`/`var` whose statement reads it, or a function whose
+ * body does) that a `skip:` uses: each must be systemCi. A name read from it that no skip uses (data, a path list)
+ * isn't a gate.
+ */
+export const detectorNames = (text) => {
+  const code = text.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:'"`\\])\/\/[^\n]*/g, '$1');
+  const declared = [
+    ...[...code.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=;]*)?=([^;]*)/g)].filter((m) => SIGN.test(m[2])).map((m) => m[1]),
+    ...[...code.matchAll(/\bfunction\s*\*?\s*([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*(?::[^{]*)?\{([^}]{0,500})/g)].filter((m) => SIGN.test(m[2])).map((m) => m[1]),
+  ];
+  const used = new Set(skipExprs(code).flatMap((e) => unquoted(e).match(/[A-Za-z_$][\w$]*/g) ?? []));
+  return [...new Set(declared)].filter((n) => used.has(n));
+};
+
+/** How many `skip:` options read systemd's sign inline (`skip: !existsSync('/run/systemd/system')`): each must be a read gate. */
+export const inlineSignCount = (text) => skipExprs(text).filter((e) => SIGN.test(e)).length;
+
+/** Code that can register a test under a location it makes up (R1169h: `vm.runInThisContext` with a filename). */
+const FORGES = /\bfrom\s+['"](?:node:)?vm['"]|\brequire\s*\(\s*['"](?:node:)?vm['"]\s*\)|\bnew\s+Function\b|(?<![\w$.])eval\s*\(/;
 
 /**
  * Every gated test under `dir` (test/), at any depth, by its path from `dir` ('/'-separated). Throws when a mention
@@ -106,6 +164,12 @@ export function findAll(dir, prefix = 'test/') {
     if (inline) throw new Error(`${prefix}${f}: ${inline} skip(s) that read systemd's sign inline: gate the test on systemCi, as \`test(<name>, { skip: !systemCi ...\``);
     const member = gatesOf(text).filter((g) => g.member);
     if (member.length) throw new Error(`${prefix}${f}: a gate on a subtest (\`t.test(\`: ${JSON.stringify(member[0].name)}); gate a top-level test(), which the run selects by name`);
+    const gates = gatesOf(text);
+    const notFirst = gates.find((g) => !g.first && !g.member);
+    if (notFirst) throw new Error(`${prefix}${f}: the gate ${JSON.stringify(notFirst.name)} isn't its line's first statement (line ${notFirst.line}): put it on a line of its own, so no other call shares its place`);
+    const computed = gates.find((g) => g.computed);
+    if (computed) throw new Error(`${prefix}${f}: the gate ${JSON.stringify(computed.name)} has a computed (template) name: name it with a literal`);
+    if (gates.length && FORGES.test(text)) throw new Error(`${prefix}${f}: a gated file that uses node:vm, new Function or eval, which can register a test under a place it makes up`);
     if (names.length) found.push({ file: f, names });
   }
   return found;
@@ -114,8 +178,8 @@ export function findAll(dir, prefix = 'test/') {
 /**
  * What's wrong with each gate in `runs`, one entry per file: { file, gates: [{ name, line }], events }, where `events`
  * are node's own results from running that file alone (systemd-acceptance-reporter.mjs: { type, name, nesting, file,
- * line, skip, todo }, in the order they finished). A gate's result is the event of its file (`dist/test/<file>.js`),
- * its line and its name, so a namesake elsewhere, a gate registered only sometimes (under an env var), or a line a
+ * line, column, skip, todo }, in the order they finished). A gate's result is the event of its file
+ * (`dist/test/<file>.js`), its line, its column (the `test` token's, R1169h) and its name, so a namesake elsewhere, a gate registered only sometimes (under an env var), or a line a
  * test prints can't stand in for it (R1169e, R1169f). Each problem is a gate with no result, more than one, a failure,
  * a skip or a todo, or a subtest (the deeper events just before it) that didn't pass. And a floor: any test in the
  * run that skipped with a reason naming systemd. [] when every gate ran once and passed, all of it.
@@ -128,7 +192,7 @@ export function problems(runs) {
     const matched = new Set();
     for (const g of gates) {
       const at = `test/${file}: ${g.name}`;
-      const ks = events.flatMap((e, k) => (inFile(e) && e.line === g.line && e.name === g.name ? [k] : []));
+      const ks = events.flatMap((e, k) => (inFile(e) && e.line === g.line && e.column === g.column && e.name === g.name ? [k] : []));
       ks.forEach((k) => matched.add(k));
       if (!ks.length) {
         out.push(`${at}: didn't run`);
@@ -163,6 +227,27 @@ export function problems(runs) {
   });
 }
 
+/**
+ * What node's TAP summary for one file's run says against a clean run (R1169g): its `# fail`, `# cancelled`,
+ * `# skipped` and `# todo` all 0, and its `# tests` at least the file's gates. A second count of the same results, from
+ * the runner's own reporter (stdout), beside the events. [] when it agrees; a summary it can't find is a problem.
+ */
+export function summaryProblems(tap, file, gates) {
+  const n = (k) => {
+    const m = new RegExp(`^# ${k} (\\d+)$`, 'm').exec(tap);
+    return m ? Number(m[1]) : null;
+  };
+  const out = [];
+  for (const k of ['fail', 'cancelled', 'skipped', 'todo']) {
+    const v = n(k);
+    if (v === null) out.push(`test/${file}: its TAP summary has no "# ${k}" line`);
+    else if (v !== 0) out.push(`test/${file}: its TAP summary says ${v} ${k}`);
+  }
+  const tests = n('tests');
+  if (tests !== null && tests < gates) out.push(`test/${file}: its TAP summary counts ${tests} test(s), fewer than its ${gates} gate(s)`);
+  return out;
+}
+
 /** The reporter's JSON lines, read; a line that isn't one is a problem (fail closed). */
 export function eventsOf(text) {
   return text
@@ -171,14 +256,25 @@ export function eventsOf(text) {
     .map((l) => JSON.parse(l));
 }
 
+/** The folders the build compiles: tsconfig.json's include, each glob's part before its first wildcard. */
+export function buildRoots(dir) {
+  // No tsconfig.json (a bare fixture): the roots this repo's names.
+  if (!existsSync(join(dir, 'tsconfig.json'))) return ['src', 'test', 'scripts/bench'];
+  const config = JSON.parse(readFileSync(join(dir, 'tsconfig.json'), 'utf8'));
+  return [...new Set((config.include ?? []).map((g) => g.split('/').filter((x, k, a) => !a.slice(0, k + 1).some((y) => /[*?{[]/.test(y))).join('/')).filter(Boolean))];
+}
+
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   let found;
   try {
     found = findAll(join(root, 'test'));
-    // src/ holds no gate: one there (re-exported through a test helper, R1169f) would be run nowhere.
-    if (existsSync(join(root, 'src'))) findAll(join(root, 'src'), 'src/').forEach(() => {});
+    // Every other root the build compiles (tsconfig.json's include, read from it so a new root is never missed:
+    // src/, scripts/bench/, R1169g) holds no gate: one there, re-exported through a test helper, would run nowhere.
+    for (const r of buildRoots(root).filter((x) => x !== 'test')) if (existsSync(join(root, r))) findAll(join(root, r), `${r}/`).forEach((f) => {
+      throw new Error(`${r}/${f.file}: a systemd gate outside test/: write the gated test in test/`);
+    });
     // The built files are what runs: each gate's line is read there, and its names must be the source's.
     for (const f of found) {
       const built = readFileSync(join(root, 'dist', 'test', f.file.replace(/\.ts$/, '.js')), 'utf8');
@@ -200,27 +296,27 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   // One run per file; TAP to the log, node's own results to a file only this process names.
   const runs = [];
   const exits = [];
-  const out = mkdtempSync(join(tmpdir(), 'systemd-acceptance-'));
-  try {
-    for (const [k, f] of found.entries()) {
-      const results = join(out, `${k}.jsonl`);
-      const args = [...PRELOAD, '--test', '--test-reporter=tap', '--test-reporter-destination=stdout', `--test-reporter=${REPORTER}`, `--test-reporter-destination=${results}`, ...f.names.map((n) => `--test-name-pattern=^${escapeRe(n)}$`), `dist/test/${f.file.replace(/\.ts$/, '.js')}`];
+  {
+    for (const f of found) {
+      // node's own results arrive on fd 3, a pipe only this process and the runner's reporter hold (R1169g, R1169h).
+      const args = [...PRELOAD, '--test', '--test-reporter=tap', '--test-reporter-destination=stdout', `--test-reporter=${REPORTER}`, '--test-reporter-destination=/dev/null', ...f.names.map((n) => `--test-name-pattern=^${escapeRe(n)}$`), `dist/test/${f.file.replace(/\.ts$/, '.js')}`];
       // Never a child of another test run's reporter (NODE_TEST_CONTEXT): its results come here, to the file above.
-      const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'NODE_TEST_CONTEXT'));
-      const r = spawnSync(process.execPath, args, { cwd: root, env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'inherit'] });
+      // Never a child of another test run (NODE_TEST_CONTEXT), and no NODE_OPTIONS (an --enable-source-maps there would
+      // report TS lines, so every gate would read as not run).
+      const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'NODE_TEST_CONTEXT' && k !== 'NODE_OPTIONS'));
+      const r = spawnSync(process.execPath, args, { cwd: root, env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'inherit', 'pipe'] });
       process.stdout.write(r.stdout ?? '');
       let events;
       try {
-        events = eventsOf(existsSync(results) ? readFileSync(results, 'utf8') : '');
+        events = eventsOf(r.output?.[3] ?? '');
       } catch (e) {
         console.error(`test/${f.file}: its results couldn't be read (${e.message})`);
         process.exit(1);
       }
       runs.push({ file: f.file, gates: f.gates, events });
+      exits.push(...summaryProblems(r.stdout ?? '', f.file, f.gates.length));
       if (r.status !== 0) exits.push(`test/${f.file}: the test run exited ${r.status ?? r.signal}`);
     }
-  } finally {
-    rmSync(out, { recursive: true, force: true });
   }
   const bad = problems(runs);
   if (!bad.length) bad.push(...exits);
