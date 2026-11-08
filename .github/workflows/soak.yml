@@ -60,7 +60,7 @@ jobs:
             echo "hours must be a number from 1 to 5.5 (got: $HOURS): a shorter run is no soak"; exit 2
           fi
           SOAK_HOURS="$HOURS" timeout --signal=INT "$(awk -v h="$HOURS" 'BEGIN { printf "%d", h * 3600 + 900 }')" \
-            node --max-old-space-size=4096 --import ./dist/test/isolate.js --test --test-name-pattern='^soak: the real coordinator' dist/test/soak.test.js
+            node --max-old-space-size=4096 --expose-gc --import ./dist/test/isolate.js --test --test-name-pattern='^soak: the real coordinator' dist/test/soak.test.js
           node -e 'const v = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); if (!Array.isArray(v.failures) || v.failures.length) { console.error(`soak failed: ${JSON.stringify(v.failures)}`); process.exit(1); }' "$SOAK_REPORT_DIR/soak-verdict.json"
       - name: report
         if: ${{ !cancelled() }}

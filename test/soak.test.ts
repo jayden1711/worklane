@@ -9,7 +9,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, wri
 import { join } from 'node:path';
 import { FakeRunner, type RunRequest } from '../src/runner.js';
 import { slotStatus } from '../src/slots.js';
-import { SOAK_LIMITS, openRunsOf, soakVerdict, type SoakSample } from '../src/soak.js';
+import { SOAK_LIMITS, openRunsOf, soakVerdict, theilSen, type SoakSample } from '../src/soak.js';
 import { commitAll, coordinator, easyIssue, fixture, readAll, skip } from './repro-state-graph/harness.js';
 import { repoRoot } from './helpers.js';
 
@@ -30,8 +30,8 @@ test('soak verdict: each failure it is there for (a leak of heap, RSS or handles
   assert.match(fails(series(120, (m) => ({ heapUsed: 80 * MB + m * 2 * MB }))), /^leak: the heap grew/);
   assert.match(fails(series(120, (m) => ({ rss: 200 * MB + m * 4 * MB }))), /leak: RSS grew/);
   assert.match(fails(series(120, (m) => ({ fds: 40 + m }))), /leak: open file handles grew by/);
-  assert.match(fails([...series(119), sample(119 * 60_000, { openRuns: 1, oldestOpenRunMs: 45 * 60_000, slotsHeld: 1 })]), /^stuck: 1 agent run\(s\) open, the oldest for 45 min/);
-  assert.match(fails([...series(119), sample(119 * 60_000, { slotsHeld: 2 })]), /leaked slots: 2 agent slot\(s\) held with 0 run\(s\) open/);
+  assert.match(fails([...series(119), sample(119 * 60_000, { openRuns: 1, oldestOpenRunMs: 45 * 60_000, slotsHeld: 1 })]), /^stuck: 1 agent run\(s\) open at minute 119, the oldest for 45 min/);
+  assert.match(fails([...series(119), sample(119 * 60_000, { slotsHeld: 2 })]), /leaked slots: 2 agent slot\(s\) held at minute 119 with 0 run\(s\) open/);
   assert.match(fails(series(120, (m) => ({ eventsBytes: 1_000_000 + m * 400 * 1024 }))), /log growth: the event log grew \d+ KB per finished task/);
   assert.match(fails(series(120, (m) => ({ walBytes: m === 60 ? 80 * MB : MB }))), /the WAL reached 80\.0 MB/);
   assert.match(fails(series(120, (m) => ({ tickMs: m < 60 ? 50 : 400 }))), /^drift: the median tick went from 50 ms to 400 ms/);
@@ -39,9 +39,10 @@ test('soak verdict: each failure it is there for (a leak of heap, RSS or handles
   assert.match(fails(series(3)), /only 3 sample\(s\)/);
   // The warm-up is left out: a heap that fills its caches in the first minutes, then holds, is no leak.
   assert.deepEqual(soakVerdict(series(40, (m) => ({ heapUsed: m < 9 ? 20 * MB : 300 * MB }))).failures, []);
-  assert.match(soakVerdict(series(40, (m) => ({ heapUsed: m < 9 ? 20 * MB : 300 * MB })), { ...SOAK_LIMITS, warmupMs: 0 }).failures.join(), /leak: the heap grew/, "the same samples judged with no warm-up: a leak");
-  // A short open run is a run in progress, not a stuck one.
-  assert.deepEqual(soakVerdict([...series(119), sample(119 * 60_000, { openRuns: 1, oldestOpenRunMs: 60_000, slotsHeld: 1 })]).failures, []);
+  assert.match(soakVerdict(series(40, (m) => ({ heapUsed: m < 9 ? 20 * MB : 300 * MB })), { ...SOAK_LIMITS, warmupMs: 0 }).failures.join(), /leak: the heap grew/, 'the same samples judged with no warm-up: a leak');
+  // A run open at the end, however young, never finished: the driver samples after idle(), with nothing in flight
+  // (#1181 review R1181d: an orphaned run.started hid one leaked slot each).
+  assert.match(soakVerdict([...series(119), sample(119 * 60_000, { openRuns: 1, oldestOpenRunMs: 60_000, slotsHeld: 1 })]).failures.join(), /^never finished: 1 agent run\(s\) started and not finished at the end/);
 });
 
 test('open runs: a finish closes its own run, never another; a run stuck while hundreds of others finish out of order is the oldest (#1181 review, 1)', () => {
@@ -60,7 +61,7 @@ test('open runs: a finish closes its own run, never another; a run stuck while h
   assert.deepEqual(openRunsOf([], now), { open: 0, oldestMs: 0 });
   // And so the verdict: that stuck run and its slot fail the soak.
   const r = openRunsOf(events, now);
-  assert.match(soakVerdict([...series(329), sample(329 * 60_000, { openRuns: r.open, oldestOpenRunMs: r.oldestMs, slotsHeld: 1 })]).failures.join(), /^stuck: 1 agent run\(s\) open, the oldest for 330 min/);
+  assert.match(soakVerdict([...series(329), sample(329 * 60_000, { openRuns: r.open, oldestOpenRunMs: r.oldestMs, slotsHeld: 1 })]).failures.join(), /^stuck: 1 agent run\(s\) open at minute 329, the oldest for 330 min/);
 });
 
 test('soak verdict: a late leak and a linear one just over the limit both fail; the end is judged, not only quarter medians (#1181 review, 2)', () => {
@@ -69,7 +70,7 @@ test('soak verdict: a late leak and a linear one just over the limit both fail; 
   assert.match(soakVerdict(late).failures.join(' | '), /leak: the heap grew 1520\.0 MB .*\| leak: RSS grew 1600\.0 MB/);
   // A linear 165 MB over the run after the warm-up (limit 128 MB): quarter medians read ~124 MB, the end reads more.
   const linear = series(330, (m) => ({ heapUsed: 80 * MB + Math.max(0, m - 10) * (165 * MB) / 320 }));
-  assert.match(soakVerdict(linear).failures.join(), /^leak: the heap grew 1[3-9]\d\.\d MB from the first quarter to the last or the end/);
+  assert.match(soakVerdict(linear).failures.join(), /^leak: the heap grew 16\d\.\d MB/, 'read whole, by its slope');
   // A heap that rises and falls back (a GC) by the end, and one that only rises within the limit, still pass.
   assert.deepEqual(soakVerdict(series(330, (m) => (m >= 200 && m < 280 ? { heapUsed: 400 * MB } : {}))).failures, []);
   assert.deepEqual(soakVerdict(series(330, (m) => ({ heapUsed: 80 * MB + Math.max(0, m - 10) * (60 * MB) / 320 }))).failures, []);
@@ -111,12 +112,15 @@ test('soak verdict: open file handles are judged over the samples that counted t
 test('the soak workflow: schedule and dispatch only, read-only, on GitHub-hosted runners, 1 to 5.5 h, and green only on a verdict with no failure (#1181 review, 5b)', async () => {
   const { parse } = await import('yaml');
   const text = readFileSync(join(repoRoot, '.github', 'workflows', 'soak.yml'), 'utf8');
-  const w = parse(text) as { on: Record<string, unknown>; permissions: unknown; jobs: Record<string, { 'runs-on': unknown; steps: { uses?: string; with?: Record<string, unknown>; run?: string; name?: string }[] }> };
+  const w = parse(text) as { on: Record<string, unknown>; permissions: unknown; jobs: Record<string, { 'runs-on': unknown; permissions?: unknown; 'continue-on-error'?: unknown; steps: { uses?: string; with?: Record<string, unknown>; run?: string; name?: string; 'continue-on-error'?: unknown }[] }> };
   assert.deepEqual(Object.keys(w.on).sort(), ['schedule', 'workflow_dispatch'], 'never on a pull request or a push');
   assert.deepEqual(w.permissions, { contents: 'read' });
   assert.deepEqual(Object.keys(w.jobs), ['soak']);
   const job = w.jobs.soak!;
   assert.equal(job['runs-on'], 'ubuntu-latest');
+  // No job-level permissions: they would override the read-only top level (#1181 review R1181c).
+  assert.equal(job.permissions, undefined, 'the job takes the top-level read-only token');
+  assert.equal(job['continue-on-error'], undefined, 'a failed soak fails the job');
   assert.doesNotMatch(text, /secrets\./);
   assert.deepEqual(job.steps.find((s) => s.uses?.startsWith('actions/checkout@'))?.with, { 'persist-credentials': false }, 'no token left in .git/config');
   const run = job.steps.find((s) => s.name === 'soak')!.run!;
@@ -129,6 +133,55 @@ test('the soak workflow: schedule and dispatch only, read-only, on GitHub-hosted
   const check = run.indexOf('soak-verdict.json');
   assert.ok(check > run.indexOf('dist/test/soak.test.js'), 'the verdict is read after the run');
   assert.match(run.slice(check - 400), /failures\.length[^\n]*process\.exit\(1\)/);
+  // Nothing may swallow that exit (#1181 review R1181c): the check is the step's last line, as written, and the step can't
+  // carry on past a failure.
+  const lines = run.trimEnd().split('\n');
+  assert.match(lines.at(-1)!, /^\s*node -e '[^']*process\.exit\(1\);? \}' "\$SOAK_REPORT_DIR\/soak-verdict\.json"$/, 'the verdict check ends the step, with nothing after it');
+  assert.doesNotMatch(run, /\|\|\s*(true|:)\b|set \+e|; *true *$/m, 'no failure is swallowed');
+  assert.equal(job.steps.find((s) => s.name === 'soak')!['continue-on-error'], undefined);
+});
+
+test('soak verdict: a stall that begins inside the last quarter still fails, judged from the last landing (#1181 review R1181c, 1)', () => {
+  // A task filed every 30 s for 5.5 h; landing stops at minute 251, 260, 300 or 320 of 330.
+  for (const stop of [251, 260, 300, 320]) {
+    const f = soakVerdict(series(330, (m) => ({ tasksDone: Math.min(stop, m), filed: 2 * m + 1, eventsBytes: 1_000_000 + Math.min(stop, m) * 1000 }))).failures.join(' | ');
+    assert.match(f, /stalled: no task landed in the last \d+ min \(\d+ filed since; limit 5 min; \d+ landed in all\)/, `landing stopped at minute ${stop}: ${f}`);
+  }
+  // Landing to the very end, however slowly: no stall.
+  assert.deepEqual(soakVerdict(series(330, (m) => ({ tasksDone: Math.floor(m * 0.6), filed: m + 1 }))).failures, []);
+});
+
+// R1181d's attacks, each a bad run that the verdict passed (failures: []) at 81d057a2: every one must fail now.
+test('soak verdict: R1181d attacks A1-A14, each a bad 5.5 h run, fail (#1181 review R1181d)', () => {
+  const N = 330;
+  const opts = { expectedMs: 5.5 * 3600_000 - 60_000 };
+  const v = (s: SoakSample[]) => soakVerdict(s, SOAK_LIMITS, opts).failures.join(' | ');
+  const cases: [string, SoakSample[], RegExp][] = [
+    ['A1 heap +1.5 GB in the last 4 samples', series(N, (m) => (m >= N - 4 ? { heapUsed: 1600 * MB } : {})), /leak: the heap grew/],
+    ['A2 RSS +3 GB in the last 4 samples', series(N, (m) => (m >= N - 4 ? { rss: 3200 * MB } : {})), /leak: RSS grew/],
+    ['A3 heap +250 MB over the last 5 samples', series(N, (m) => (m >= N - 5 ? { heapUsed: 330 * MB } : {})), /leak: the heap grew 250\.0 MB/],
+    ['A4 heap linear +148 MB', series(N, (m) => ({ heapUsed: 80 * MB + (Math.max(0, m - 10) * (148 * MB)) / (N - 11) })), /leak: the heap grew 14\d\.\d MB/],
+    ['A5 RSS linear +295 MB', series(N, (m) => ({ rss: 200 * MB + (Math.max(0, m - 10) * (295 * MB)) / (N - 11) })), /leak: RSS grew 29\d\.\d MB/],
+    ['A6 fds +300 in the last 4 samples', series(N, (m) => (m >= N - 4 ? { fds: 340 } : {})), /leak: open file handles grew by 300/],
+    ['A7 fds linear +37', series(N, (m) => ({ fds: 40 + Math.floor((Math.max(0, m - 10) * 37) / (N - 11)) })), /leak: open file handles grew by 3[3-9]/],
+    ['A8 a leaked slot with an orphaned run under 30 min', [...series(N - 1), sample((N - 1) * 60_000, { openRuns: 1, oldestOpenRunMs: 25 * 60_000, slotsHeld: 1 })], /never finished: 1 agent run/],
+    ['A9 two leaked slots with two orphaned runs', [...series(N - 1), sample((N - 1) * 60_000, { openRuns: 2, oldestOpenRunMs: 29 * 60_000, slotsHeld: 2 })], /never finished: 2 agent run/],
+    ['A10 a slot leaked mid-run, a run stuck 4 h closed a minute before the end', series(N, (m) => (m >= 60 && m < N - 1 ? { slotsHeld: 2, openRuns: 1, oldestOpenRunMs: (m - 60) * 60_000 } : {})), /stuck: 1 agent run\(s\) open at minute \d+, the oldest for 31 min .*leaked slots: 2 agent slot\(s\) held at minute 60/],
+    ['A11 landing stops 78 min before the end', series(N, (m) => ({ tasksDone: Math.min(m, 252), filed: m + 1 })), /stalled: no task landed in the last 77 min/],
+    ['A12 landing stops for the last third at the half-share edge', series(N, (m) => ({ tasksDone: 2 * Math.min(m, 252), filed: 2 * m + 1, eventsBytes: 1_000_000 + 2 * Math.min(m, 252) * 1000 })), /stalled: no task landed in the last 77 min/],
+    ['A13 the log grows 50 MB in the last 30 min', series(N, (m) => ({ eventsBytes: 1_000_000 + m * 60 * 1024 + (m >= N - 30 ? ((m - (N - 30)) * (50 * MB)) / 29 : 0) })), /log growth: the event log grew \d+ KB per finished task \(over the run, its last quarter or its last 30 min/],
+    ['A14 the per-task log rate 100 then 350 KB', (() => { let b = 1_000_000; return series(N, (m) => ({ eventsBytes: (b += m < N / 2 ? 100 * 1024 : 350 * 1024) })); })(), /log growth: the event log grew 35\d KB per finished task/],
+  ];
+  for (const [name, samples, want] of cases) assert.match(v(samples), want, name);
+  // And their good twins pass: the same shape within its limit.
+  assert.deepEqual(soakVerdict(series(N, (m) => (m >= N - 4 ? { heapUsed: 180 * MB } : {})), SOAK_LIMITS, opts).failures, [], 'heap +100 MB at the end: within 128');
+  assert.deepEqual(soakVerdict(series(N, (m) => ({ fds: 40 + Math.floor((Math.max(0, m - 10) * 20) / (N - 11)) })), SOAK_LIMITS, opts).failures, [], 'fds +20: within 32');
+});
+
+test('theilSen: the median pairwise slope, robust to a spike', () => {
+  assert.equal(theilSen([{ x: 0, y: 0 }, { x: 1, y: 2 }, { x: 2, y: 4 }]), 2);
+  assert.equal(theilSen([{ x: 0, y: 0 }, { x: 1, y: 1 }, { x: 2, y: 100 }, { x: 3, y: 3 }, { x: 4, y: 4 }]), 1, 'one spike moves no median');
+  assert.equal(theilSen([{ x: 0, y: 5 }]), 0);
 });
 
 /** Open file handles of this process, where the platform shows them. */
@@ -187,6 +240,8 @@ test('soak: the real coordinator works for a while with stand-in agents; nothing
       if (at - lastSample >= sampleMs) {
         const events = f.log.read(0, ['run.started', 'run.finished', 'land.result']);
         const runs = openRunsOf(events, Date.now());
+        // A forced GC before each reading (soak.yml runs node --expose-gc), so a peak is held memory, not garbage.
+        (globalThis as { gc?: () => void }).gc?.();
         const mem = process.memoryUsage();
         // The log's size is its file and its WAL: writes sit in the WAL until a checkpoint moves them over.
         const wal = existsSync(`${f.log.path}-wal`) ? statSync(`${f.log.path}-wal`).size : 0;

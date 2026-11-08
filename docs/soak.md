@@ -26,21 +26,26 @@ verdict). Workflow: `.github/workflows/soak.yml`.
 
 | Finding | Limit (`SOAK_LIMITS`) |
 |---|---|
-| Heap grew, last quarter or end (last 10 samples) vs first quarter, after a 10-minute warm-up | 128 MB |
+| Heap grew from the first quarter (after a 10-minute warm-up): the highest of the last 3 samples, the last quarter's median, or the robust slope over the run | 128 MB |
 | RSS grew | 256 MB |
 | Open file handles grew | 32 |
-| An agent run open at the end for longer than | 30 min |
-| Agent slots held at the end beyond the runs open | 0 |
-| Event log growth per landed task | 256 KB |
+| An agent run open, at any sample, for longer than | 30 min |
+| Agent runs started and never finished, at the end | 0 |
+| Agent slots held beyond the runs open, at any sample after the warm-up (any at the end) | 0 |
+| Event log growth per landed task, over the run, its last quarter and its last 30 min | 256 KB |
 | WAL size at any sample (checkpoints falling behind) | 64 MB |
 | Median tick, last quarter vs first | 3× |
 | Tasks landed | at least 1, and at least half of those filed |
 | Tasks landed in the last quarter, while tasks were filed in it | at least 1 |
+| Minutes since the last landing, at the end, with tasks filed since | 5 |
 | Samples after the warm-up | at least 4, and the run at least 90% of the hours asked for |
 | Samples that counted open file handles | at least half |
 
-Medians are compared: a quarter's, and the end's (its last 10 samples), against the first quarter's. One slow tick
-or one GC pause doesn't fail a soak, but a leak late in the run does.
+Growth is read three ways against the first quarter's median, and the largest counts: the highest of the last 3
+samples, the last quarter's median, and a robust (Theil-Sen) slope over the run times its length. The driver forces a
+GC before each sample (`--expose-gc`), so a peak is memory held, not garbage. A late spike, a late step and a slow
+linear leak are each read whole. The driver samples after the coordinator's `idle()`, with no run in flight, so a run
+open at a sample is one that never finished, and a slot held then is leaked.
 
 - **Work must keep landing.** A soak fails when no task landed in its last quarter while tasks were filed, or when
   fewer than half the tasks filed landed.

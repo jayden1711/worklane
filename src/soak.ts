@@ -1,13 +1,14 @@
 // The soak test's verdict (docs/soak.md; the run is test/soak.test.ts, scheduled by .github/workflows/soak.yml). A
 // coordinator works for hours with stand-in agents; every SAMPLE it records what it holds. Pure: samples in, findings
 // out. What fails a soak:
-//   - a leak: the median heap, RSS or open file handles of the last quarter, or of the end (its last END_SAMPLES), above
-//     the first quarter's (after the warm-up) by more than the limit;
-//   - a stuck run: an agent run started and not finished for longer than stuck_minutes, at the end;
-//   - log growth: the event log growing more per finished task than log_bytes_per_task, or its WAL past wal_bytes
+//   - a leak: heap, RSS or open file handles grown past the limit from the first quarter's median (after the warm-up), by
+//     the highest of the last END_PEAK samples, the last quarter's median, or the robust slope over the run;
+//   - a stuck run: an agent run open for longer than stuck_minutes at any sample; a run never finished at the end;
+//   - log growth: the event log growing more per finished task than log_bytes_per_task (over the run, its last quarter
+//     or its last 30 minutes), or its WAL past wal_bytes
 //     (checkpoints stopped);
 //   - drift: the last quarter's median tick slower than tick_drift times the first quarter's;
-//   - leaked slots: agent slots still held at the end with no run going;
+//   - leaked slots: agent slots held beyond the runs open at any sample after the warm-up, or any at the end;
 //   - too little work: fewer finished tasks than min_tasks, or than min_landed_share of the tasks filed; stalled: none
 //     landed in the last quarter while tasks were filed (a soak that did nothing, or stopped, proves nothing).
 
@@ -45,6 +46,8 @@ export interface SoakLimits {
   minTasks: number;
   /** At least this share of the tasks filed must have landed (the rest may be in flight). */
   minLandedShare: number;
+  /** Tasks filed since the last landing, and that landing longer ago than this at the end: stalled. */
+  stallMinutes: number;
 }
 
 export const SOAK_LIMITS: SoakLimits = {
@@ -58,6 +61,7 @@ export const SOAK_LIMITS: SoakLimits = {
   tickDrift: 3,
   minTasks: 1,
   minLandedShare: 0.5,
+  stallMinutes: 5,
 };
 
 /**
@@ -86,10 +90,23 @@ const median = (xs: number[]): number => {
   return s.length % 2 ? s[m]! : (s[m - 1]! + s[m]!) / 2;
 };
 
-/** The end a leak is judged by too: its last this many samples (or the last quarter's, if fewer). */
-export const END_SAMPLES = 10;
+/** The end a leak is judged by too: the highest of its last this many samples. */
+export const END_PEAK = 3;
 
 const MB = (n: number) => `${(n / 2 ** 20).toFixed(1)} MB`;
+
+/**
+ * A robust slope (Theil-Sen: the median of every pair's slope) of `y` over `x`, per unit of x. WHY (#1181 review R1181d):
+ * quarter medians read a linear leak at about 86% of its size; a slope over the run reads it whole, and one GC dip or
+ * spike barely moves it.
+ */
+export function theilSen(points: readonly { x: number; y: number }[]): number {
+  const slopes: number[] = [];
+  // At most ~400 points (a sample a minute for 5.5 h): every pair is ~80k slopes.
+  const pts = points.length > 400 ? points.filter((_, i) => i % Math.ceil(points.length / 400) === 0) : points;
+  for (let i = 0; i < pts.length; i++) for (let j = i + 1; j < pts.length; j++) if (pts[j]!.x !== pts[i]!.x) slopes.push((pts[j]!.y - pts[i]!.y) / (pts[j]!.x - pts[i]!.x));
+  return median(slopes);
+}
 
 /** What failed the soak (empty: it passed), and what it measured. */
 export function soakVerdict(samples: readonly SoakSample[], limits: SoakLimits = SOAK_LIMITS, o: { expectedMs?: number } = {}): { failures: string[]; measured: Record<string, string | number> } {
@@ -105,14 +122,22 @@ export function soakVerdict(samples: readonly SoakSample[], limits: SoakLimits =
   const q = Math.max(1, Math.floor(use.length / 4));
   const first = use.slice(0, q);
   const last = use.slice(-q);
-  // Growth is judged twice against the first quarter: by the last quarter, and by the END (its last END_SAMPLES).
-  // WHY (#1181 review): quarter medians alone missed a late step (a leak in the last half hour moves no quarter's
-  // median) and read a linear leak at about three quarters of its size; the end sees both.
-  const end10 = use.slice(-Math.min(END_SAMPLES, q));
-  const grew = (f: (s: SoakSample) => number) => Math.max(median(last.map(f)), median(end10.map(f))) - median(first.map(f));
-  const heap = grew((s) => s.heapUsed);
-  const rss = grew((s) => s.rss);
-  if (heap > limits.heapGrowthBytes) failures.push(`leak: the heap grew ${MB(heap)} from the first quarter to the last or the end (limit ${MB(limits.heapGrowthBytes)})`);
+  // Growth (heap, RSS, open file handles) is the largest of three readings, each against the first quarter's median.
+  // WHY (#1181 reviews): quarter medians missed a late step or spike and under-read a linear leak.
+  //   - the end: the highest of the last END_PEAK samples (the driver forces a GC before each, so a peak is held memory);
+  //   - the last quarter's median;
+  //   - the robust slope over the run after the warm-up, times its length (a slow leak, read whole).
+  const growth = (pts: readonly SoakSample[], f: (s: SoakSample) => number) => {
+    const fq = Math.max(1, Math.floor(pts.length / 4));
+    const base = median(pts.slice(0, fq).map(f));
+    const peakEnd = Math.max(...pts.slice(-END_PEAK).map(f)) - base;
+    const lastQ = median(pts.slice(-fq).map(f)) - base;
+    const slope = theilSen(pts.map((s) => ({ x: s.at, y: f(s) }))) * (pts.at(-1)!.at - pts[0]!.at);
+    return Math.max(peakEnd, lastQ, slope);
+  };
+  const heap = growth(use, (s) => s.heapUsed);
+  const rss = growth(use, (s) => s.rss);
+  if (heap > limits.heapGrowthBytes) failures.push(`leak: the heap grew ${MB(heap)} (at the end, the last quarter or its slope over the run; limit ${MB(limits.heapGrowthBytes)})`);
   if (rss > limits.rssGrowthBytes) failures.push(`leak: RSS grew ${MB(rss)} (limit ${MB(limits.rssGrowthBytes)})`);
   // Open file handles are judged over the samples that counted them. WHY (#1181 review): one uncounted sample turned the
   // check off for the whole run. Most uncounted is a failure: a leak there couldn't be seen.
@@ -120,16 +145,25 @@ export function soakVerdict(samples: readonly SoakSample[], limits: SoakLimits =
   let fds: number | null = null;
   if (counted.length * 2 < use.length) failures.push(`open file handles not counted in ${use.length - counted.length} of ${use.length} sample(s): a leak of them can't be judged`);
   else {
-    const cq = Math.max(1, Math.floor(counted.length / 4));
-    const f0 = median(counted.slice(0, cq).map((s) => s.fds!));
-    fds = Math.max(median(counted.slice(-cq).map((s) => s.fds!)), median(counted.slice(-Math.min(END_SAMPLES, cq)).map((s) => s.fds!))) - f0;
+    fds = Math.round(growth(counted, (s) => s.fds!) * 10) / 10;
     if (fds > limits.fdGrowth) failures.push(`leak: open file handles grew by ${fds} (limit ${limits.fdGrowth})`);
   }
   const end = samples.at(-1)!;
-  if (end.openRuns && end.oldestOpenRunMs > limits.stuckMinutes * 60_000) failures.push(`stuck: ${end.openRuns} agent run(s) open, the oldest for ${Math.round(end.oldestOpenRunMs / 60_000)} min (limit ${limits.stuckMinutes})`);
-  if (end.slotsHeld > end.openRuns) failures.push(`leaked slots: ${end.slotsHeld} agent slot(s) held with ${end.openRuns} run(s) open`);
-  const perTask = end.tasksDone ? (end.eventsBytes - samples[0]!.eventsBytes) / end.tasksDone : 0;
-  if (perTask > limits.logBytesPerTask) failures.push(`log growth: the event log grew ${Math.round(perTask / 1024)} KB per finished task (limit ${Math.round(limits.logBytesPerTask / 1024)} KB)`);
+  // Runs and slots at EVERY sample, not only the last (#1181 review R1181d): the driver samples after the coordinator's
+  // idle(), when no run is in flight, so an open run then is one that never finished (it threw after it started), and a
+  // held slot is a leaked one. A run stuck for hours that closed just before the end was missed, and so was a slot held
+  // mid-run.
+  const stuckAt = samples.find((s) => s.openRuns && s.oldestOpenRunMs > limits.stuckMinutes * 60_000);
+  if (stuckAt) failures.push(`stuck: ${stuckAt.openRuns} agent run(s) open at minute ${Math.round(stuckAt.at / 60_000)}, the oldest for ${Math.round(stuckAt.oldestOpenRunMs / 60_000)} min (limit ${limits.stuckMinutes})`);
+  if (end.openRuns) failures.push(`never finished: ${end.openRuns} agent run(s) started and not finished at the end (the oldest ${Math.round(end.oldestOpenRunMs / 60_000)} min): with nothing in flight at a sample, each is a run that ended without its record`);
+  const leakAt = use.find((s) => s.slotsHeld > s.openRuns) ?? (end.slotsHeld ? end : undefined);
+  if (leakAt) failures.push(`leaked slots: ${leakAt.slotsHeld} agent slot(s) held at minute ${Math.round(leakAt.at / 60_000)} with ${leakAt.openRuns} run(s) open`);
+  // The log per landed task, over the whole run AND over its last quarter and its last stall_minutes x 6 (#1181 review
+  // R1181d): a whole-run average hid a late surge and a second half over the limit.
+  const rate = (a: SoakSample, b: SoakSample) => (b.tasksDone - a.tasksDone > 0 ? (b.eventsBytes - a.eventsBytes) / (b.tasksDone - a.tasksDone) : 0);
+  const tailLog = samples.find((s) => s.at >= end.at - 30 * 60_000)!;
+  const perTask = Math.max(rate(samples[0]!, end), rate(last[0]!, end), rate(tailLog, end));
+  if (perTask > limits.logBytesPerTask) failures.push(`log growth: the event log grew ${Math.round(perTask / 1024)} KB per finished task (over the run, its last quarter or its last 30 min; limit ${Math.round(limits.logBytesPerTask / 1024)} KB)`);
   const wal = Math.max(...samples.map((s) => s.walBytes));
   if (wal > limits.walBytes) failures.push(`log growth: the WAL reached ${MB(wal)} (limit ${MB(limits.walBytes)}): checkpoints aren't keeping up`);
   const t0 = median(first.map((s) => s.tickMs));
@@ -141,6 +175,13 @@ export function soakVerdict(samples: readonly SoakSample[], limits: SoakLimits =
   const lastLanded = end.tasksDone - last[0]!.tasksDone;
   const lastFiled = end.filed - last[0]!.filed;
   if (lastFiled > 0 && lastLanded <= 0) failures.push(`stalled: no task landed in the last quarter (${lastFiled} filed in it; ${end.tasksDone} landed in all)`);
+  // And the end itself (#1181 reviews R1181c, R1181d): one task landed early in the last quarter cleared a stall that
+  // began after it. Tasks filed since the last landing, with that landing more than stall_minutes before the end, is a
+  // stall too.
+  const lastLanding = [...samples].reverse().find((s, i, r) => i === r.length - 1 || s.tasksDone > r[i + 1]!.tasksDone)!;
+  const filedSince = end.filed - lastLanding.filed;
+  const sinceMin = (end.at - lastLanding.at) / 60_000;
+  if (filedSince > 0 && sinceMin > limits.stallMinutes) failures.push(`stalled: no task landed in the last ${Math.round(sinceMin)} min (${filedSince} filed since; limit ${limits.stallMinutes} min; ${end.tasksDone} landed in all)`);
   if (end.filed && end.tasksDone < end.filed * limits.minLandedShare) failures.push(`too little work: ${end.tasksDone} of ${end.filed} task(s) filed landed (at least ${Math.round(limits.minLandedShare * 100)}%)`);
   return {
     failures,
