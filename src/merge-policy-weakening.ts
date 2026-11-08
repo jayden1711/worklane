@@ -1111,8 +1111,9 @@ function useRemovedIn(i: WeakeningInput, inChange: readonly (CheckTable & { mark
         const declares = new RegExp(`\\b(?:const|let|var|function\\*?|class)\\s+${e}(?![\\w$])|\\b(?:const|let|var)\\s*[{[][^=]*(?<![\\w$.])${e}(?![\\w$])[^=]*[}\\]]\\s*=|\\bimport\\b[^;]*\\bas\\s+${e}(?![\\w$])`);
         const mutates = new RegExp(`(?<![\\w$.])${e}\\s*(?:\\.\\s*(?:push|pop|shift|unshift|splice|sort|reverse|fill|copyWithin|add|delete|clear|set)\\s*\\(|\\.\\s*length\\s*=(?!=)|\\[[^\\]]*\\]\\s*=(?!=)|=(?![=>]))|\\b(?:Object\\.(?:assign|defineProperty|defineProperties|setPrototypeOf)|Reflect\\.(?:set|defineProperty|deleteProperty))\\s*\\(\\s*${e}(?![\\w$])|\\bdelete\\s+${e}\\s*[.[]`);
         for (const l of added) {
-          // The table's own declaration in its own file is the table checks' (a name declared twice waits there).
-          if (f.path === t.path && n === t.table && own.has(entry(l))) continue;
+          // The table's own name in its own file is the table checks' (its declaring line changed, or declared twice,
+          // waits there; any other added line naming it there waits as table-used).
+          if (f.path === t.path && n === t.table) continue;
           // A declaration shadows only where the file used the name before (a new file's own `FLOOR` is no use of it).
           if (declares.test(l)) {
             if (usedBefore(f.path, n)) hit('table-use-removed', f.path, `${t.table}: ${l.trim()}`);
