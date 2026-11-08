@@ -125,7 +125,7 @@ usage: ${BRAND.cli} <command> [options]
   skill lint                       every SKILL.md has When to use, Inputs and access, Steps, Validate,
                                    Return and Approval, none empty; exits 1 otherwise (for CI)
   harness-eval run --spend usd [--held-out-from-state] [--task id]... [--samples k] [--budget usd]
-                   [--work dir] [--keep] [--record]
+                   [--work dir] [--keep] [--record] [--keep-logs dir]
                                    replay the harness eval suite's past tasks (templates/evals/tasks, and the
                                    held-out store when named) through the real coordinator in scratch
                                    instances, with real agents, within the budget (default
@@ -212,6 +212,16 @@ usage: ${BRAND.cli} <command> [options]
                                    root's testrun-gpu.json lists (docs/test-runs.md "GPU")
   stuck-scan [--instance name]     read-only: how many recorded runs the stuck-run guard would have
                                    flagged or stopped (run as the coordinator user)
+  shadow diff --current <dir> --candidate <dir>
+                                   compare two engines' kept harness-eval replay logs (harness-eval run
+                                   --keep-logs): each task's decisions, in order; exit 3 when any differ
+                                   (docs/shadow-runs.md)
+  audit verify --log <events.db> [--chain <file>] [--anchor <head>]
+                                   check the audit chain: recompute the hash chain over every event and check
+                                   each checkpoint the coordinator wrote; exit 1 names where the log or the
+                                   checkpoints were changed (a cut tail only against --anchor) (docs/audit-log.md)
+  audit checkpoint --log <events.db> [--chain <file>]
+                                   append a checkpoint of the audit chain now (the coordinator does every 10 min)
   receipts verify <file|dir> --key <pub> [--key <pub>]... [--anchor <receipt id>]
                                    check signed receipts offline: each signature by the chain's key, the order,
                                    and that none was changed or dropped (a dropped tail only against --anchor, a
@@ -810,9 +820,19 @@ async function main(argv: string[]): Promise<number> {
       return policyCommand(sub, rest);
     }
 
+    case 'shadow': {
+      const { shadowCommand } = await import('./shadow.js');
+      return shadowCommand(sub, rest);
+    }
+
     case 'receipts': {
       const { receiptsCommand } = await import('./signed-receipts-cli.js');
       return receiptsCommand(sub, rest);
+    }
+
+    case 'audit': {
+      const { auditCommand } = await import('./audit-chain-cli.js');
+      return auditCommand(sub, rest);
     }
 
     case 'slots': {

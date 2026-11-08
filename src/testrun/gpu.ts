@@ -7,7 +7,7 @@
 // tiers ask for the GPU on an instance the file lists (or that can't be read) is recorded as gpu=planned when it
 // starts, before any GPU command, so a run cut off by a hung machine is never run again by itself after the restart.
 // WHY: on 2026-10-14 a GPU driver fault hung a whole machine; running the same job again at the next start would hang
-// it again. A GPU command that timed out or was killed is never retried by itself either (gpuStopped).
+// it again. A GPU command that timed out, was killed or lost its GPU (./faults.ts) is never retried by itself either.
 import { lstatSync, readFileSync } from 'node:fs';
 import { BRAND } from '../brand.js';
 import type { EventPayload, StoredEvent } from '../events/types.js';
@@ -178,7 +178,7 @@ export function gpuRunsNotToRepeat(events: readonly StoredEvent[], sha: string |
 }
 
 /** What a GPU run that must not repeat says, for the record and the check. */
-export const GPU_NO_REPEAT = 'a GPU run that timed out, was killed or was cut off (the coordinator or the machine stopped) is never run again by itself: push a new commit to run it again';
+export const GPU_NO_REPEAT = 'a GPU run that timed out, was killed, lost its GPU or was cut off (the coordinator or the machine stopped) is never run again by itself: push a new commit to run it again';
 
 /** The setup step a cut-off GPU run's posted check names (./checks.ts gives it its own title). */
 export const GPU_STEP = 'gpu';

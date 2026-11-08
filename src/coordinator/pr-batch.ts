@@ -707,7 +707,7 @@ export class PrBatcher {
     if (signal?.aborted) throw new NoVerdict(`its run was cancelled: ${this.current?.why ?? 'cancelled'}`);
     // A GPU command stopped at its cap or killed: never red (no bisection would run it again), never batched again.
     const stopped = results.find((r) => r.gpuStopped);
-    if (stopped) throw new GpuHeld(`a GPU command of its run ${stopped.id} timed out or was killed`);
+    if (stopped) throw new GpuHeld(`a GPU command of its run ${stopped.id} timed out, was killed or lost its GPU`);
     for (const r of results) {
       if (r.sha !== sha || r.kind !== 'full') throw new NoVerdict(`the test run reported ${r.kind} on ${r.sha.slice(0, 8)}, not full on ${sha.slice(0, 8)}`);
       const why = noVerdict(r);
