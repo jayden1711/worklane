@@ -8,7 +8,7 @@ import { gitExecFileSync, gitSpawnSync } from './os/git.js';
 import { createHash, randomBytes } from 'node:crypto';
 import { cpSync, mkdirSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { recordFlagFlips } from './flags.js';
+import { adoptFlags } from './flags.js';
 import { CHECKPOINT_EVERY_MS, chainFileFor, checkpoint } from './audit-chain.js';
 import { BRAND } from './brand.js';
 import { RECOMMENDATION_PREFIX } from './decision-ask.js';
@@ -126,11 +126,11 @@ export class Coordinator extends AutomationRuns {
     // The config as the default branch has it now, before anything below reads it (src/config/live.ts).
     await step('config', () => {
       this.refreshConfig();
-      // Every flag flip is audited (src/flags.ts): against the last state the log recorded, so one made while this
-      // coordinator was down is recorded at its first tick.
-      // A flag counts as on only from a config the default branch has (configSha set by a poll of it): never from a
-      // checkout's (#1173 review R1173f).
-      recordFlagFlips({ log: this.d.log, flags: this.configSha ? this.repoCfg.project.flags : {}, sha: this.configSha, actor: this.d.instance });
+      // Feature flags (src/flags.ts): the default branch's committed config at configSha, the commit whose config is
+      // running (null: a checkout's, so every flag is off), read from git and adopted here only. Every flip is audited
+      // against the last state the log recorded, so one made while this coordinator was down is recorded at its first
+      // tick (#1173 reviews R1173f-h).
+      adoptFlags({ log: this.d.log, repo: this.d.repo, sha: this.configSha, actor: this.d.instance });
     }, undefined);
     await step('settings', () => this.refreshSettings(), undefined);
     // The audit chain's checkpoint (src/audit-chain.ts, docs/audit-log.md): at most every 10 minutes. WHY early: a step
@@ -517,8 +517,11 @@ export class Coordinator extends AutomationRuns {
 
   private liveCfg: LiveConfig | null = null;
 
-  /** The commit of the config last applied or confirmed from the default branch (null until one is). */
-  private configSha: string | null = null;
+  /**
+   * The default branch's commit whose config is running: the start's when it started on that branch's config, then
+   * each one applied, confirmed or recovered (null: a checkout's config is running). Feature flags are read at it.
+   */
+  private configSha: string | null = this.d.liveConfig?.sha ?? null;
 
   /**
    * Follow the default branch's config: fetch it, and when its config changed, swap the new one in whole (one
