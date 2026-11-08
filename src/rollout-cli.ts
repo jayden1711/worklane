@@ -6,7 +6,7 @@ import { BRAND } from './brand.js';
 import type { StoredEvent } from './events/types.js';
 import { openReadOnly } from './events/read-only.js';
 import { FLAGS } from './flags.js';
-import { instancesDir } from './instance.js';
+import { instancesDir, listInstances } from './instance.js';
 import { ROLLOUT_FILE, readRollout, rolloutStatus, type Rollout } from './rollout.js';
 
 const USAGE = `usage: ${BRAND.cli} rollout status --flag <name> [--file <rollout.json>]`;
@@ -22,14 +22,21 @@ export function readEvents(db: string): StoredEvent[] {
   }
 }
 
-export function rolloutCommand(sub: string | undefined, args: readonly string[], o: { out?: (s: string) => void; err?: (s: string) => void; eventsOf?: (instance: string) => StoredEvent[]; now?: Date } = {}): number {
+export function rolloutCommand(sub: string | undefined, args: readonly string[], o: { out?: (s: string) => void; err?: (s: string) => void; eventsOf?: (instance: string) => StoredEvent[]; instances?: () => string[]; now?: Date } = {}): number {
   const out = o.out ?? console.log;
   const err = o.err ?? console.error;
-  const opt = (name: string) => {
-    const i = args.indexOf(name);
-    return i < 0 ? null : (args[i + 1] ?? '');
-  };
-  if (sub !== 'status' || args.some((a, i) => a.startsWith('--') && !['--flag', '--file'].includes(a) && i % 2 === 0)) {
+  // Options as pairs, each once: anything else is a usage error (a stray word is never skipped).
+  const given = new Map<string, string>();
+  for (let i = 0; i < args.length; i += 2) {
+    const [k, v] = [args[i]!, args[i + 1]];
+    if (!['--flag', '--file'].includes(k) || v === undefined || v.startsWith('--') || given.has(k)) {
+      err(USAGE);
+      return 2;
+    }
+    given.set(k, v);
+  }
+  const opt = (name: string) => given.get(name) ?? null;
+  if (sub !== 'status') {
     err(USAGE);
     return 2;
   }
@@ -55,9 +62,26 @@ export function rolloutCommand(sub: string | undefined, args: readonly string[],
       err(`can't read ${n}'s event log: ${(e as Error).message.split('\n')[0]}`);
     }
   }
+  // Every other instance on this machine, in no ring: the flag may be on there too (#1174 review).
+  const inRings = new Set(rollout.rings.flatMap((r) => r.instances));
+  let others: string[] = [];
+  try {
+    others = (o.instances ?? (() => listInstances()))().filter((n) => !inRings.has(n));
+  } catch (e) {
+    err(`can't list this machine's instances: ${(e as Error).message.split('\n')[0]}`);
+  }
+  const outside = new Map<string, StoredEvent[]>();
+  for (const n of others) {
+    try {
+      outside.set(n, eventsOf(n));
+    } catch (e) {
+      err(`can't read ${n}'s event log (in no ring): ${(e as Error).message.split('\n')[0]}`);
+    }
+  }
   if (!(flag in FLAGS)) out(`note: ${flag} is not a flag this engine knows (${Object.keys(FLAGS).join(', ') || 'none yet'}); every ring reads it as off`);
-  const s = rolloutStatus({ rollout, flag, logs, now: o.now ?? new Date() });
+  const s = rolloutStatus({ rollout, flag, logs, now: o.now ?? new Date(), outside, outsideNames: others });
   for (const [i, r] of s.rings.entries()) out(`ring ${i} ${r.ring} (${r.instances.join(', ')}): ${r.state}: ${r.why}`);
+  for (const n of s.outsideOn) out(`outside the rollout: ${n} has ${flag} on, in no ring`);
   out(`next: ${s.next}`);
-  return logs.size === rollout.rings.flatMap((r) => r.instances).length ? 0 : 1;
+  return logs.size === inRings.size && !s.outsideUnread.length ? 0 : 1;
 }

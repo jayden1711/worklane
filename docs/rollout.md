@@ -71,6 +71,14 @@ worklane rollout status --flag <name>
 
 It prints each ring's state (`off`, `partial`, `soaking`, `promoted`, `roll back`, `out of order`) and why, then the
 **one** next step: which ring to turn on, what to wait for, or which rings to roll back, naming their instances.
+
+**Instances in no ring are read too.** Status also reads every other instance on the machine.
+
+- **One with the flag on** is listed as `outside the rollout`, and it's always in the roll-back step. Its repo turned
+  the flag on, but the rollout never put it there.
+- **One whose log can't be read** holds every step that would turn a ring on or call the flag done, because status
+  can't tell whether the flag is on there. It also exits 1.
+
 It opens every event log read-only and changes nothing.
 
 - **Exit 0:** the status.

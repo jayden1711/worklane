@@ -89,7 +89,15 @@ function flagState(events: readonly StoredEvent[], flag: string): { on: boolean;
  * Every ring's state for `flag`, in order, and the one next step. `logs`: each instance's events (missing: unread,
  * which holds the ring: nothing is promoted on a log no one could read).
  */
-export function rolloutStatus(o: { rollout: Rollout; flag: string; logs: ReadonlyMap<string, readonly StoredEvent[]>; now: Date }): { rings: RingStatus[]; next: string } {
+export function rolloutStatus(o: {
+  rollout: Rollout;
+  flag: string;
+  logs: ReadonlyMap<string, readonly StoredEvent[]>;
+  now: Date;
+  /** The machine's other instances (in no ring), by name, with their events; missing: unread. */
+  outside?: ReadonlyMap<string, readonly StoredEvent[]>;
+  outsideNames?: readonly string[];
+}): { rings: RingStatus[]; next: string; outsideOn: string[]; outsideUnread: string[] } {
   const { soak_hours, min_merges } = o.rollout.promote;
   const rings: RingStatus[] = [];
   let earlierPromoted = true;
@@ -131,15 +139,24 @@ export function rolloutStatus(o: { rollout: Rollout; flag: string; logs: Readonl
   }
   const set = (to: boolean, ring: RingStatus) => `set \`flags.${o.flag}: ${to}\` in the config.yaml of ${ring.instances.join(', ')} (a PR in each repo)`;
   const back = rings.findIndex((r) => r.state === 'roll back' || r.state === 'out of order');
+  // WHY (#1174 review, defect 3): an instance in no ring can have the flag on (its repo's own config PR); the rollout
+  // never put it there, so it is always rolled back, and one whose log can't be read holds every step that turns a
+  // ring on or calls the flag done.
+  const outsideNames = o.outsideNames ?? [...(o.outside?.keys() ?? [])];
+  const outsideOn = outsideNames.filter((n) => o.outside?.has(n) && flagState(o.outside.get(n)!, o.flag).on).sort();
+  const outsideUnread = outsideNames.filter((n) => !o.outside?.has(n)).sort();
+  const outsideBack = outsideOn.length ? `roll back outside the rollout (${outsideOn.join(', ')}: in no ring of rollout.json): set \`flags.${o.flag}: false\` in the config.yaml of ${outsideOn.join(', ')} (a PR in each repo)` : '';
   let next: string;
   if (back >= 0) {
     const on = rings.slice(back).filter((r) => r.onSince !== null || r.state === 'partial');
-    next = `roll back ring ${rings[back]!.ring} (${rings[back]!.why}): ${on.map((r) => set(false, r)).join('; then ')}`;
-  } else {
+    next = `${outsideBack ? `${outsideBack}; and ` : ''}roll back ring ${rings[back]!.ring} (${rings[back]!.why}): ${on.map((r) => set(false, r)).join('; then ')}`;
+  } else if (outsideBack) next = outsideBack;
+  else if (outsideUnread.length) next = `wait: can't read the event log of ${outsideUnread.join(', ')} (in no ring): nothing is turned on while the flag may be on there`;
+  else {
     const first = rings.find((r) => r.state !== 'promoted');
     if (!first) next = `every ring is promoted: ${o.flag} can become the default (remove the flag, docs/feature-flags.md)`;
     else if (first.state === 'off') next = `turn it on for ring ${first.ring}: ${set(true, first)}`;
     else next = `wait: ring ${first.ring} is ${first.state} (${first.why})`;
   }
-  return { rings, next };
+  return { rings, next, outsideOn, outsideUnread };
 }

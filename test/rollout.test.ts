@@ -124,13 +124,30 @@ test("rollout status reads an instance's real event log read-only: the flips and
   }
 });
 
+test('rollout: an instance in no ring with the flag on is always rolled back; one whose log is unread holds every turn-on (#1174 review, defect 3)', () => {
+  const st = (logs: Record<string, StoredEvent[]>, outside: Record<string, StoredEvent[]>, names = Object.keys(outside)) => rolloutStatus({ rollout: R, flag: 'f', logs: new Map(Object.entries(logs)), now: NOW, outside: new Map(Object.entries(outside)), outsideNames: names });
+  // Nothing on in the rings yet, but x (in no ring) has it on: roll x back, never "turn it on for ring engine".
+  let s = st(quiet, { x: [on(5)], y: [] });
+  assert.deepEqual(s.outsideOn, ['x']);
+  assert.equal(s.next, 'roll back outside the rollout (x: in no ring of rollout.json): set `flags.f: false` in the config.yaml of x (a PR in each repo)');
+  // With a ring to roll back too, both are named.
+  s = st({ ...quiet, e1: [on(20), ev('merge.stopped', {}, hoursAgo(2))] }, { x: [on(5)] });
+  assert.match(s.next, /^roll back outside the rollout \(x: .*; and roll back ring engine \(e1: auto-merge stopped\)/);
+  // An outside log that can't be read: no ring is turned on, nothing is called done.
+  s = st(quiet, {}, ['z']);
+  assert.deepEqual(s.outsideUnread, ['z']);
+  assert.match(s.next, /^wait: can't read the event log of z \(in no ring\)/);
+  // Outside instances with it off change nothing.
+  assert.equal(st(quiet, { y: [on(9), off(8)] }).next, status(quiet).next);
+});
+
 test('rollout status: prints each ring and the next step; exit 1 when the file or a log cannot be used; 2 a usage error; it never writes', () => {
   const dir = mkdtempSync(join(tmpdir(), 'rollout-'));
   const file = join(dir, 'rollout.json');
   writeFileSync(file, JSON.stringify({ rings: [{ name: 'engine', instances: ['e1'] }, { name: 'first', instances: ['p1'] }] }));
   const out: string[] = [];
   const err: string[] = [];
-  const run = (args: string[], eventsOf: (n: string) => StoredEvent[]) => rolloutCommand(args[0], args.slice(1), { out: (s) => out.push(s), err: (s) => err.push(s), eventsOf, now: NOW });
+  const run = (args: string[], eventsOf: (n: string) => StoredEvent[], instances: string[] = []) => rolloutCommand(args[0], args.slice(1), { out: (s) => out.push(s), err: (s) => err.push(s), eventsOf, instances: () => instances, now: NOW });
   try {
     assert.equal(run(['status', '--flag', 'f', '--file', file], () => []), 0);
     assert.deepEqual(out.slice(-3), ['ring 0 engine (e1): off: the flag is off in every instance of this ring', 'ring 1 first (p1): off: the flag is off in every instance of this ring', 'next: turn it on for ring engine: set `flags.f: true` in the config.yaml of e1 (a PR in each repo)']);
@@ -141,6 +158,18 @@ test('rollout status: prints each ring and the next step; exit 1 when the file o
     assert.equal(run(['status'], () => []), 2);
     assert.equal(run(['flip', '--flag', 'f'], () => []), 2, 'there is no command that flips a flag');
     assert.equal(run(['status', '--flag', 'f', '--force', 'x'], () => []), 2);
+    // A stray word, an option given twice, or one with no value: usage errors, never skipped.
+    for (const a of [['--flag', 'f', 'x', '--bogus', 'v'], ['--flag', 'f', '--flag', 'g'], ['--flag'], ['--flag', 'f', '--file']]) assert.equal(run(['status', ...a, ...(a.includes('--file') ? [] : ['--file', file])], () => []), 2, a.join(' '));
+    // The machine's instances in no ring are read too: one with the flag on is named, and rolled back.
+    out.length = 0;
+    assert.equal(run(['status', '--flag', 'f', '--file', file], (n) => (n === 'x' ? [on(3)] : []), ['e1', 'p1', 'x', 'y']), 0);
+    assert.ok(out.includes('outside the rollout: x has f on, in no ring'), out.join('\n'));
+    assert.match(out.at(-1)!, /^next: roll back outside the rollout \(x: in no ring of rollout\.json\)/);
+    // One in no ring whose log can't be read: exit 1, said, and nothing turned on.
+    err.length = 0;
+    assert.equal(run(['status', '--flag', 'f', '--file', file], (n) => (n === 'y' ? (() => { throw new Error('EACCES'); })() : []), ['e1', 'p1', 'y']), 1);
+    assert.match(err.join('\n'), /can't read y's event log \(in no ring\): EACCES/);
+    assert.match(out.at(-1)!, /^next: wait: can't read the event log of y \(in no ring\)/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
