@@ -174,6 +174,7 @@ test('must fail: R1231c N15 (R1181b 1): issue 1 never finishes while 599 runs of
   assert.deepEqual(openRunsOf(ev, t0 + 330 * 60_000), { open: 1, oldestMs: 330 * 60_000 });
 });
 mustFail('R1231c: the slowest tick 80 -> 1200 ms in the last 35 min, the median flat', series(N, (m) => ({ maxTickMs: m >= 295 ? 1200 : 80 })), /^drift: the slowest tick/);
+mustFail('R1231c (the quarter drift apart from the last 30 min): the slowest tick 80 -> 400 ms for minutes 240-299, 80 for the last 30', series(N, (m) => ({ maxTickMs: m >= 240 && m < 300 ? 400 : 80 })), /^drift: the slowest tick of an interval went from/);
 mustFail('R1181e (final-3 note 3): the log +8 MB in the last 30 min, 20 KB a task before', series(N, (m) => ({ eventsBytes: 1_000_000 + m * 20 * 1024 + (m >= N - 30 ? ((m - (N - 30)) * 8 * MB) / 29 : 0) })), LOG);
 
 // --- R1231c: the reviews' healthy twins the file lacked ---
