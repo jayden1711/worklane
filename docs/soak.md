@@ -13,12 +13,15 @@ verdict). Workflow: `.github/workflows/soak.yml`.
   is spent.
 - **A steady stream of work.** A new task is filed every 30 s (`SOAK_ISSUE_EVERY_S`). Each one goes claim → build →
   checks → evaluation → land, as a real task does.
-- **A sample every 60 s** (`SOAK_SAMPLE_S`) records:
+- **A tick on a fixed period**, 1 s (`SOAK_TICK_MS`), as production ticks on one (60 s there). Back to back, a tick
+  that slowed with the log would also slow the log's growth and hide its own drift.
+- **A sample every 60 s** (`SOAK_SAMPLE_S`), after a forced GC (the driver refuses to run without `--expose-gc`),
+  records:
   - heap and RSS;
   - open file handles (`/proc/self/fd`, or `/dev/fd`);
-  - the event log's size (its file and its WAL) and the WAL alone;
-  - the median tick time since the last sample;
-  - tasks landed;
+  - the event log's size (its file and its WAL), the WAL alone, and its event count;
+  - the median and the slowest tick since the last sample;
+  - distinct tasks landed, and tasks filed;
   - agent runs open, and the oldest one's age;
   - agent slots held.
 
@@ -26,50 +29,59 @@ verdict). Workflow: `.github/workflows/soak.yml`.
 
 | Finding | Limit (`SOAK_LIMITS`) |
 |---|---|
-| Heap grew from the first quarter (after a 10-minute warm-up): the highest of the last 3 samples, the last quarter's median, or the robust slope over the run | 128 MB |
-| RSS grew | 256 MB |
-| Open file handles grew | 32 |
-| An agent run open, at any sample, for longer than | 30 min |
-| Agent runs started and never finished, at the end | 0 |
-| Agent slots held beyond the runs open, at any sample after the warm-up (any at the end) | 0 |
-| Event log growth per landed task, over the run, its last quarter and its last 30 min | 256 KB |
+| Heap grew from the first quarter (after a 10-minute warm-up): the highest of the last 3 samples, the last quarter's median, or the robust slope over the run (no more than the rise seen); each read from the samples and from their upper envelope (each 10 samples' highest) | 128 MB |
+| RSS grew, the same way | 256 MB |
+| Open file handles grew, the same way | 32 |
+| Any one sample above the first quarter (memory held mid-run, then let go) | 4× the limit above |
+| Agent runs open, at any sample | 0 |
+| Agent slots held, at any sample | 0 |
+| A gap between samples | 3× their usual spacing, and at least 5 min |
+| One tick | 30 min |
+| Event log growth per landed task, over the run and over every 30-minute window that landed at least half the usual (and 5) | 256 KB |
+| Event log growth in a 30-minute window that landed fewer | 3× the usual window's |
 | WAL size at any sample (checkpoints falling behind) | 64 MB |
 | Median tick, last quarter vs first | 3× |
-| Tasks landed | at least 1, and at least half of those filed |
-| Tasks landed in the last quarter, while tasks were filed in it | at least 1 |
+| A tick's cost against the log's size (its slope, judged once the log gained 10k events) | 250 ms per 100k events |
+| Tasks landed | at least 1 |
+| Tasks filed and not landed, at any sample after the warm-up | 10 |
 | Minutes since the last landing, at the end, with tasks filed since | 5 |
 | Samples after the warm-up | at least 4, and the run at least 90% of the hours asked for |
 | Samples that counted open file handles | at least half |
+| A sample missing a field the verdict reads | none (it judges nothing, and fails) |
 
-Growth is read three ways against the first quarter's median, and the largest counts: the highest of the last 3
-samples, the last quarter's median, and a robust (Theil-Sen) slope over the run times its length. The driver forces a
-GC before each sample (`--expose-gc`), so a peak is memory held, not garbage. A late spike, a late step and a slow
-linear leak are each read whole. The driver samples after the coordinator's `idle()`, with no run in flight, so a run
-open at a sample is one that never finished, and a slot held then is leaked.
+Growth is read against the first quarter's median, and the largest reading counts. A late spike, a late step and a
+slow linear leak are each read whole. A rise that levels off within the limit is read as its real size, not its
+slope over the whole run. A sawtooth whose peaks rise is read by its peaks (the envelope).
 
-- **Work must keep landing.** A soak fails when no task landed in its last quarter while tasks were filed, or when
-  fewer than half the tasks filed landed.
-- **Too short fails.** A run with fewer than 4 samples after the warm-up fails, and so does one shorter than the hours
-  it was asked for.
+The driver samples after the coordinator's `idle()`, with no run in flight. So a run open at a sample is one that
+never finished, and a slot held then is leaked, however young either reads. The events carry no run id: a finish
+closes the newest open run of its issue and role, so an orphan left before a retry keeps its own age.
+
+- **Work must keep landing.** A backlog of more than 10 unlanded tasks fails, and so does no landing for the last
+  5 minutes while tasks were filed.
+- **Too short fails.** A run with fewer than 4 samples after the warm-up fails, and so does one shorter than 90% of
+  the hours it was asked for. The workflow also checks that the verdict is for the hours asked.
 - **Open file handles are judged over the samples that counted them.** A run where most samples couldn't count them
   fails.
 - **The WAL is read once a sample** (a minute), so a spike between two samples isn't seen. The log is judged per
   landed task, with no absolute cap.
 
-The verdict and every sample
-are written to `SOAK_REPORT_DIR` (`soak-verdict.json`, `soak-samples.json`).
+The verdict and every sample are written to `SOAK_REPORT_DIR` (`soak-verdict.json`, `soak-samples.json`).
 
 ## When it runs
 
-- **Every PR**, as a smoke test: the same test for 12 ticks (`SOAK_TICKS`), with a sample and a new task each tick.
-  A tick count rather than a time, so a slow runner gives the same number of samples. Its limits are wider, since a
-  minute is no time to judge a slope. It shows that the driver, the sampling and the verdict work.
+- **Every PR**, as a smoke test: the same test for 12 ticks (`SOAK_TICKS`), back to back, with a sample and a new task
+  each tick. A tick count rather than a time, so a slow runner gives the same number of samples. Its limits are
+  wider and it judges no log rate or tick slope, since 12 ticks are no time to judge them (they never reach a WAL
+  checkpoint). It shows that the driver, the sampling and the verdict work.
 - **Weekly and by hand**, the soak itself: the `soak` workflow, never on a pull request. It runs on GitHub's runners,
   which stop a job at 6 hours, so a soak is **at most 5.5 hours**. The schedule runs 5.5 h; `workflow_dispatch` takes
-  `hours` (from 1 to 5.5; anything else is refused). A run must leave a verdict with no failure to pass: a skipped or renamed test that writes none fails the job. The process has a 4 GiB heap cap, so a leak fails the
-  soak rather than the runner, and `timeout` ends it 15 minutes past its hours. The verdict goes to the run's summary,
-  and the report is kept as the `soak-report` artifact for 30 days. The workflow is required by nothing: not the
-  ruleset, not `.worklane/config.yaml`, and not the updater.
+  `hours` (from 1 to 5.5; anything else is refused). A run must leave a verdict with no failure, for the hours asked,
+  to pass: a skipped or renamed test that writes none fails the job. `test/soak.test.ts` pins the soak step's
+  script as written, and the job's and step's keys (no `if:`, no `continue-on-error`, no secrets in any form). The
+  process has a 4 GiB heap cap, so a leak fails the soak rather than the runner, and `timeout` ends it 15 minutes
+  past its hours. The verdict goes to the run's summary, and the report is kept as the `soak-report` artifact for 30
+  days. The workflow is required by nothing: not the ruleset, not `.worklane/config.yaml`, and not the updater.
 - **Not 8 hours, by the owner's decision (2026-11-07).** A continuous 8 h soak would need the trusted self-hosted
   runner, and `test/self-hosted-guard.test.ts` lets only push-guarded, required jobs run there. The soak stays on
   GitHub's runners.
@@ -81,4 +93,8 @@ are written to `SOAK_REPORT_DIR` (`soak-verdict.json`, `soak-samples.json`).
 - **It can't run on a pull request's code with more than read access**, or on a self-hosted runner.
 - **It can't see leaks in what it doesn't run:** real agents' processes, the dashboard, the updater, the hub, or a
   real GitHub's answers. It soaks the coordinator's own loop.
-- **It can't show a leak slower than its hours**, or one hidden in the 10-minute warm-up.
+- **It can't show a leak slower than its hours.** Nor can it show a rise inside the first quarter of the run that then
+  holds (about the first 80 minutes of a 5.5 h run, measured by R1181e) under 4× its limit: the first quarter is the
+  baseline. The 4 GiB heap cap bounds that heap.
+- **It is a heuristic over a sampled series.** Each review round found shapes it misjudged; issue #1231 proposes a
+  written attack spec as its acceptance bar. A tick that grows with the log (issue #1234) is expected to fail it today.
