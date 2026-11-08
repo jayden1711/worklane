@@ -7,20 +7,15 @@
 //      { <name>: { workflow: .github/workflows/<file> } } (the Actions workflow file that runs it, in this repo, in a
 //      workflow run for the very commit judged, as one of that run's own jobs);
 //   2. else the App GitHub's own branch protection (app_id) or ruleset (integration_id) requires for that name;
-//   3. else none: the check is judged by name, exactly as before pins (the owner's choice, 2026-10-19: an existing
+//   3. else none: the check is judged by name, as before pins (the owner's choice, 2026-10-19: an existing
 //      install keeps working), and doctor prints a paste-ready pin block for it (src/check-pin-block.ts).
-// A commit status never satisfies a pin: statuses carry no App. The owner's rule, 2026-10-19, with its round-5 and
-// round-6 tightenings (ownVerdict): a pinned check's own runs are grouped by workflow file (an Actions run, by its
-// workflow run's file; one whose workflow run wasn't read is a group of its own), and in each file's group both its
-// latest run (by workflow run, then check run) and its newest check run must pass, so a later run of that file
-// supersedes its earlier failed or cancelled runs, but one file never supersedes another, and a re-run that failed
-// after a newer run passed still blocks. A pin to an App that isn't Actions can't be split by file: that App's latest
-// check run of the name on the head (the highest id) decides, in whatever check suite, so a later pipeline or re-run of
-// that App supersedes its earlier ones (the owner's decision, round 8; round 6 had a failure in another suite block).
-// Every check of its name from any OTHER source must pass too (another App, another workflow, a run for another head,
-// a commit status). The ways this is looser than judging by name, both the owner's decisions: a pinned workflow
-// file's later run on the head supersedes its own earlier failed or cancelled runs, and a pinned non-Actions App's
-// later run supersedes its earlier ones. With a check being judged pinned, a commit-status read GitHub refuses at all
+// A commit status never satisfies a pin: statuses carry no App. The owner's rule, 2026-10-19, failing closed since
+// #925 (ownVerdict): every one of a pinned check's own runs on the head must pass (GitHub's latest check run per check
+// suite, so a re-run attempt of a job still replaces its earlier one), so no run, of the pinned file or App or of
+// anything else, supersedes an earlier one that failed, was cancelled or is still running. Every check of its name
+// from any OTHER source must pass too (another App, another workflow, a run for another head, a commit status). A name
+// judged by name is decided the same way (worstOf): any of its checks that isn't a pass blocks, never only its latest
+// (#925). With a check being judged pinned, a commit-status read GitHub refuses at all
 // (a 403 or 404 on page 1 too) waits; with none of them pinned, statuses are read as on main, whatever else is pinned
 // (the owner's decision, round 8; scoped to the judged names in round 10). Readiness and the main watch judge a pinned name through one function, pinnedVerdict, over the same
 // facts (GitHub's latest check run per check suite and name, the workflow run behind each Actions suite, and the
@@ -139,36 +134,25 @@ function worst<C extends Pick<CommitCheck, 'id' | 'status' | 'conclusion'>>(bad:
 }
 
 /**
- * What decides a pinned source on a commit, failing closed. Its runs are grouped: an Actions run by its workflow file
- * (one whose workflow run can't be read is a group of its own); every run of an App that isn't Actions in one group.
- * - A file's group: both the latest run (latestOwn) and the newest check run (the highest id: a re-run of an older
- *   workflow run is newer) must pass. One file never supersedes another, and a later re-run that failed blocks.
- * - The App group: its latest check run of the name on the head (the highest id) decides, in whatever check suite: a
- *   later pipeline or re-run of that App supersedes its earlier ones (the owner's decision, round 8).
- * - An Actions run whose workflow runs weren't read at all (`workflow` absent: a read made as for a bare name) can't
- *   be put in a file's group, and never in the App group (round 9: that would let `evil.yml` supersede `ci.yml`): the
- *   verdict waits on it (reported as still running), never a pass.
- * Returns the run that decides: a run that isn't a pass (worst), else the latest of all; undefined when there is none.
+ * #925: of one name's checks on a commit, the one that decides it: any that isn't a pass (worst), never only the
+ * latest, so an earlier red or unfinished one blocks whatever its source and however it is ordered; else undefined.
+ */
+export function worstOf<C extends Pick<CommitCheck, 'id' | 'status' | 'conclusion'>>(checks: readonly C[]): C | undefined {
+  return worst(checks.filter((c) => !(c.status === 'completed' && c.conclusion === 'success')));
+}
+
+/**
+ * What decides a pinned source on a commit, failing closed (#925): every one of its runs must pass, whatever workflow
+ * run or check suite it is in and however it is ordered against a passing one, so an earlier workflow run of the pinned
+ * file that failed, was cancelled or is still running blocks, as an earlier run of a pinned App does. The runs are
+ * GitHub's latest check run per check suite (a re-run attempt of a job replaces its earlier one there). An Actions run
+ * whose workflow runs weren't read at all (`workflow` absent: a read made as for a bare name) waits (reported as still
+ * running), never a pass. Returns the run that decides: a run that isn't a pass (worst), else the latest of all
+ * (latestOwn); undefined when there is none.
  */
 export function ownVerdict<C extends Pick<CommitCheck, 'id' | 'workflow' | 'status' | 'conclusion' | 'app'>>(own: readonly C[]): C | undefined {
-  const groups = new Map<string, C[]>();
-  const bad: C[] = [];
-  own.forEach((c, i) => {
-    if (c.app === ACTIONS_APP_ID && c.workflow === undefined) {
-      bad.push({ ...c, status: 'in_progress', conclusion: null });
-      return;
-    }
-    // Only a run of an App that isn't Actions is in the App group.
-    const key = c.workflow ? `file ${c.workflow.path}` : c.app === ACTIONS_APP_ID || c.workflow === null ? `unread ${c.id ?? `#${i}`}` : 'app';
-    groups.set(key, [...(groups.get(key) ?? []), c]);
-  });
-  const ok = (c: C) => c.status === 'completed' && c.conclusion === 'success';
-  for (const [key, g] of groups) {
-    const newest = [...g].sort((a, b) => (b.id ?? -1) - (a.id ?? -1))[0]!;
-    const decide = key === 'app' ? [newest] : [latestOwn(g)!, newest];
-    bad.push(...decide.filter((c) => !ok(c)));
-  }
-  return worst(bad) ?? latestOwn(own);
+  const bad = own.map((c) => (c.app === ACTIONS_APP_ID && c.workflow === undefined ? { ...c, status: 'in_progress', conclusion: null } : c));
+  return worstOf(bad) ?? latestOwn(own);
 }
 
 /**
