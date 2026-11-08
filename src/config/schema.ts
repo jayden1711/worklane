@@ -135,11 +135,44 @@ export function withRetiredFlags<T>(names: readonly string[], fn: () => T): T {
   }
 }
 
+/** What every parsed config's `flags` is: none. Frozen, so no write to a config turns a flag on. */
+export const NO_FLAGS: Readonly<Record<string, boolean>> = Object.freeze({});
+
+/** Names a test registers for the length of one call (withKnownFlags); null: none. Never set by engine code. */
+let knownForTest: readonly string[] | null = null;
+
+/** The flags this engine knows: FLAGS, and any a test registered for one call. */
+export function knownFlags(): readonly string[] {
+  return knownForTest ? [...Object.keys(FLAGS), ...knownForTest] : Object.keys(FLAGS);
+}
+
+/** The flags this engine retired: RETIRED_FLAGS, and any a test retired for one call. */
+export function retiredFlags(): readonly string[] {
+  return retiredForTest ? [...RETIRED_FLAGS, ...retiredForTest] : RETIRED_FLAGS;
+}
+
 /**
- * config.yaml `flags:`: known names, each true or false; absent is `{}` (every flag off). A retired name is accepted
- * and dropped; any other name makes the config invalid. Both lists are read when a config is parsed.
+ * Run `fn` (sync or async) with `names` also known: for the tests that turn a flag on through a coordinator, while the
+ * engine knows none. The same seam rule as withRetiredFlags: it lasts only while `fn` runs, and a test holds that
+ * nothing in src/ but this file names it.
  */
-export function flagsSchema(known: () => readonly string[] = () => Object.keys(FLAGS), retired: () => readonly string[] = () => (retiredForTest ? [...RETIRED_FLAGS, ...retiredForTest] : RETIRED_FLAGS)) {
+export async function withKnownFlags<T>(names: readonly string[], fn: () => T | Promise<T>): Promise<T> {
+  const before = knownForTest;
+  knownForTest = Object.freeze([...(before ?? []), ...names]);
+  try {
+    return await fn();
+  } finally {
+    knownForTest = before;
+  }
+}
+
+/**
+ * config.yaml `flags:`: known names, each true or false; absent is none. A retired name is accepted; any other name
+ * makes the config invalid. Both lists are read when a config is parsed. The parsed value is always NO_FLAGS: a flag
+ * is read only through src/flags.ts's flagOn, from the default branch's committed config at the commit the
+ * coordinator adopted (#1173 reviews R1173g, R1173h), never from a config object.
+ */
+export function flagsSchema(known: () => readonly string[] = knownFlags, retired: () => readonly string[] = retiredFlags) {
   return z
     .record(z.string().regex(FLAG_NAME, 'a flag name is lowercase letters, digits and underscores'), z.boolean())
     .default({})
@@ -150,10 +183,7 @@ export function flagsSchema(known: () => readonly string[] = () => Object.keys(F
         if (!k.includes(name) && !r.includes(name)) ctx.addIssue({ code: 'custom', path: [name], message: `no such flag: ${name} (the engine knows ${k.length ? k.join(', ') : 'none'}; docs/feature-flags.md)` });
       }
     })
-    .transform((flags) => {
-      const r = retired();
-      return Object.fromEntries(Object.entries(flags).filter(([name]) => !r.includes(name)));
-    });
+    .transform((): Readonly<Record<string, boolean>> => NO_FLAGS);
 }
 
 
