@@ -2,7 +2,7 @@
 // dist/web/licenses.txt that wasn't the signed one, and it was published.) Compared by git blob id: a file's raw bytes
 // hashed as `git hash-object --no-filters` does, against the id `git ls-tree` lists for that path in the commit. No
 // clean filter, no line-ending conversion: equal ids mean equal bytes. Modes are not compared (npm normalises them).
-import { execFileSync } from 'node:child_process';
+import { gitExecFileSync } from './git.cjs';
 import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
@@ -31,7 +31,7 @@ export function filesUnder(base, dir = base) {
 
 /** The commit's files under `prefixes`: path -> blob id. */
 export function committedFiles(commit, prefixes, cwd = process.cwd()) {
-  const raw = execFileSync('git', ['ls-tree', '-r', '-z', '--full-tree', commit, '--', ...prefixes], { cwd, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
+  const raw = gitExecFileSync(['ls-tree', '-r', '-z', '--full-tree', commit, '--', ...prefixes], { cwd, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
   const files = new Map();
   for (const rec of raw.split('\0').filter(Boolean)) {
     const [meta, path] = [rec.slice(0, rec.indexOf('\t')), rec.slice(rec.indexOf('\t') + 1)];

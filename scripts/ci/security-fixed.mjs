@@ -9,6 +9,7 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { gitExecFileSync } from '../lib/git.cjs';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 
@@ -62,7 +63,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
     console.error('GITHUB_REPOSITORY must name the repo (owner/name)');
     process.exit(2);
   }
-  const git = (...a) => execFileSync('git', a, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  const git = (...a) => gitExecFileSync(a, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
   const out = problems(rows, {
     isAncestor: (c) => {
       try {
