@@ -240,6 +240,7 @@ test('end to end, refused (exit 2): a gate sharing its line, a template name, no
     ['a renamed flag on the line after skip:', `const ${'system'}dCi = false;\n${known}\ntest('acceptance: r', { skip:\n  !${'system'}dCi && 'x' }, () => {});`, {}, /2 skip\(s\) that look like a systemd gate, 1 a gate/],
     ['a gate in src/, through a test helper', `import { hostOnly } from '../src/gates.js';\n${known}\ntest('acceptance: h', hostOnly, () => {});`, { 'src/gates.ts': `const ${flag} = true;\nexport const hostOnly = { ${gate()} && 'x' };\n` }, /src\/gates\.ts: a systemd gate outside a \*\.test\.ts file/],
     ['a gate in scripts/bench/', `${known}`, { 'scripts/bench/gates.ts': `const ${flag} = true;\nexport const hostOnly = { ${gate()} && 'x' };\n` }, /scripts\/bench\/gates\.ts: a systemd gate outside a \*\.test\.ts file/],
+    ['a gate in a fourth root tsconfig.json names (R1169i)', `${known}`, { 'tsconfig.json': JSON.stringify({ include: ['src/**/*.ts', 'test/**/*.ts', 'scripts/bench/**/*.ts', 'tools/**/*.ts'] }), 'tools/gates.ts': `const ${flag} = true;\nexport const hostOnly = { ${gate()} && 'x' };\n` }, /tools\/gates\.ts: a systemd gate outside a \*\.test\.ts file/],
   ];
   for (const [what, src, extra, re] of cases) {
     const r = fixture(src, extra);
@@ -291,8 +292,10 @@ test("every review's attack on this script, kept as a fixture, still exits as it
     for (const f of ['systemd-acceptance.mjs', 'systemd-acceptance-reporter.mjs']) writeFileSync(join(r, 'scripts', 'ci', f), readFileSync(join(repoRoot, 'scripts', 'ci', f)));
     writeFileSync(join(r, 'package.json'), '{"type":"module"}\n');
     writeFileSync(join(r, 'dist', 'test', 'isolate.js'), '');
-    for (const f of readdirSync(join(base, name))) {
+    for (const f of readdirSync(join(base, name), { recursive: true }).map(String).filter((x) => x.endsWith('.txt'))) {
       const text = readFileSync(join(base, name, f), 'utf8');
+      mkdirSync(join(r, 'test', f, '..'), { recursive: true });
+      mkdirSync(join(r, 'dist', 'test', f, '..'), { recursive: true });
       writeFileSync(join(r, 'test', f.replace(/\.txt$/, '')), text);
       writeFileSync(join(r, 'dist', 'test', f.replace(/\.ts\.txt$/, '.js')), text);
     }

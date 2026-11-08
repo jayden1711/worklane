@@ -1,0 +1,4 @@
+import { test } from 'node:test';
+import { readFileSync } from 'node:fs';
+const pid1IsInit = readFileSync('/proc/1/comm', 'utf8').trim() === 'never-init';
+test('acceptance: renamed', { skip: !pid1IsInit && 'needs systemd as process 1' }, () => {});

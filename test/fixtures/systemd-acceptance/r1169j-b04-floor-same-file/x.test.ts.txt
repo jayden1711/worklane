@@ -1,0 +1,7 @@
+import { test } from 'node:test';
+import { existsSync } from 'node:fs';
+const systemCi = true;
+const SD = '/run/systemd/system';
+const booted = existsSync(SD) && process.env.NEVER === '1';
+test('gate a', { skip: !systemCi && 'needs systemd' }, () => {});
+test('acceptance: b', { skip: !booted && 'needs a disposable Linux CI runner with systemd' }, () => {});

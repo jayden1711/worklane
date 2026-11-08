@@ -1,0 +1,4 @@
+import { test } from 'node:test';
+import { existsSync } from 'node:fs';
+function onRunner() { if (process.env.NEVER !== '1') { return false; } return existsSync('/run/systemd/system'); }
+test('acceptance: renamed', { skip: !onRunner() && 'needs systemd' }, () => {});

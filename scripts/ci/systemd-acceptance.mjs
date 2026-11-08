@@ -8,7 +8,8 @@
 // reading systemd's sign under another name, or any of that in src/ or a test helper, stops the job.
 //
 // Results come from node's own test events (systemd-acceptance-reporter.mjs, R1169f), never from TAP text a test
-// could print: each gate is matched by its built file, the line its test() call is on, and its name.
+// could print: each gate is matched by its built file, the line and column its test() call is on, and its name, and
+// the events arrive on a pipe (fd 3) no test process holds.
 //
 //   node scripts/ci/systemd-acceptance.mjs      (after the build: it runs dist/test/<file>.js)
 //
@@ -111,25 +112,119 @@ const unquoted = (e) => e.replace(/(['"`])(?:\\.|(?!\1)[^\\])*\1/g, "''");
 export const gateLikeCount = (text) => skipExprs(text).filter((e) => /(?<![\w$])[A-Za-z_$]*system[\w$]*ci(?![\w$])/i.test(unquoted(e))).length;
 
 /**
- * systemd's sign, however a path to it is built (R1169h): `/run/systemd`, `'systemd'` as a path part
- * (`join('/run', 'systemd', 'system')`, `['', 'run', 'systemd', ...].join('/')`), `is-system-running`, `sd_booted`.
+ * systemd's sign, however a path to it is built (R1169h, R1169j): `/run/systemd`, a `'run'` part then a `'systemd'`
+ * part (`join('/run', 'systemd', 'system')`, `['', 'run', 'systemd', ...].join('/')`), `is-system-running`, `sd_booted`,
+ * `/proc/1/comm` (systemd as process 1). A bare `'systemd'` string (a program name, data) isn't one.
  * Not `systemctl`: a test that checks for that program is not a booted-systemd gate.
  */
-const SIGN = /\/run\/systemd|(['"`])systemd\1|is-system-running|sd_booted/;
+/** The longest declaration read as a detector of systemd's sign (signNames). */
+const MAX_DETECTOR = 600;
+const SIGN = /\/run\/systemd|(['"`])\/?run\1[^;\n]{0,40}?(['"`])systemd\2|is-system-running|sd_booted|\/proc\/1\/comm/;
+
+/** `text` without its comments (strings kept: a path is a string), one pass. */
+function withoutComments(text) {
+  let out = '';
+  let quote = null;
+  for (let k = 0; k < text.length; k++) {
+    const c = text[k];
+    if (quote) {
+      out += c;
+      if (c === '\\') out += text[++k] ?? '';
+      else if (c === quote) quote = null;
+      continue;
+    }
+    if (c === "'" || c === '"' || c === '`') {
+      quote = c;
+      out += c;
+    } else if (c === '/' && text[k + 1] === '/') {
+      while (k < text.length && text[k] !== '\n') k++;
+      out += '\n';
+    } else if (c === '/' && text[k + 1] === '*') {
+      const end = text.indexOf('*/', k + 2);
+      k = end === -1 ? text.length : end + 1;
+      out += ' ';
+    } else out += c;
+  }
+  return out;
+}
+
+/** From `k` in `code`, to the end of a statement or block: brackets and strings balanced, ending at a `;` or line end at depth 0 (or the block's closing brace). */
+function scanBody(code, k, block) {
+  let depth = 0;
+  let quote = null;
+  const start = k;
+  for (; k < code.length && k - start < 20_000; k++) {
+    const c = code[k];
+    if (quote) {
+      if (c === '\\') k++;
+      else if (c === quote) quote = null;
+      continue;
+    }
+    if (c === "'" || c === '"' || c === '`') quote = c;
+    else if (c === '(' || c === '[' || c === '{') depth++;
+    else if (c === ')' || c === ']' || c === '}') {
+      depth--;
+      if (block && depth === 0) return code.slice(start, k + 1);
+      if (depth < 0) break;
+    } else if (!block && depth === 0 && (c === ';' || (c === '\n' && !/[=+\-*/%&|^?:,(<>!~]\s*$/.test(code.slice(start, k)) && !/^\s*[.?:)\]&|+\-*/,]/.test(code.slice(k + 1, k + 40))))) break;
+  }
+  return code.slice(start, k);
+}
+
+/** Each name `code` declares (`const`/`let`/`var`, a function, an arrow), with its whole initializer or body (scanBody). */
+function declarations(code) {
+  const out = [];
+  for (const m of code.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=;\n]*)?=(?![=>])/g)) out.push([m[1], scanBody(code, m.index + m[0].length, false)]);
+  for (const m of code.matchAll(/\bfunction\s*\*?\s*([A-Za-z_$][\w$]*)\s*\(/g)) {
+    const params = scanBody(code, m.index + m[0].length - 1, true);
+    const open = code.indexOf('{', m.index + m[0].length - 1 + params.length);
+    out.push([m[1], params + (open === -1 ? '' : scanBody(code, open, true))]);
+  }
+  return out;
+}
 
 /**
- * The names `text` declares from systemd's sign (a `const`/`let`/`var` whose statement reads it, or a function whose
- * body does) that a `skip:` uses: each must be systemCi. A name read from it that no skip uses (data, a path list)
- * isn't a gate.
+ * The names that stand for systemd's sign, per file (R1169j): in a file, a declaration whose initializer or body
+ * reads the sign, or reads a name that stands for it there (a constant holding the path, a function returning the
+ * check). Across files only through an import: a name a file exports that stands for it stands for it in a file
+ * that imports that name (a helper's `export const canRun = existsSync('/run/systemd/system')`). Comments don't
+ * count; strings do (a path is one). `texts`: path to text, every file of every build root.
  */
-export const detectorNames = (text) => {
-  const code = text.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:'"`\\])\/\/[^\n]*/g, '$1');
-  const declared = [
-    ...[...code.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=;]*)?=([^;]*)/g)].filter((m) => SIGN.test(m[2])).map((m) => m[1]),
-    ...[...code.matchAll(/\bfunction\s*\*?\s*([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*(?::[^{]*)?\{([^}]{0,500})/g)].filter((m) => SIGN.test(m[2])).map((m) => m[1]),
-  ];
-  const used = new Set(skipExprs(code).flatMap((e) => unquoted(e).match(/[A-Za-z_$][\w$]*/g) ?? []));
-  return [...new Set(declared)].filter((n) => used.has(n));
+export function signNames(texts) {
+  const files = [...texts].map(([p, t]) => {
+    const code = withoutComments(t);
+    const imported = new Set([...code.matchAll(/^\s*import\b[\s\S]*?\bfrom\b|\brequire\s*\(/gm)].length ? (code.match(/^\s*import\s*(?:type\s+)?\{[^}]*\}|^\s*import\s+[A-Za-z_$][\w$]*|\bconst\s*\{[^}]*\}\s*=\s*require\s*\(|\b(?:import|export)\s*\{[^}]*\}\s*from/gm) ?? []).flatMap((x) => x.match(/[A-Za-z_$][\w$]*/g) ?? []) : []);
+    return { p, code, decls: declarations(code), imported, tainted: new Set() };
+  });
+  // A detector is short and near the sign: a declaration of at most MAX_DETECTOR characters that reads it (hop 0), or
+  // reads a hop-0 name of its file or one it imports (hop 1). Further hops, or a long declaration (data, a fixture, a
+  // helper that only mentions one), aren't followed: a long chain is not an accidental rename.
+  const exportedBy = (f, name) => new RegExp(`\\bexport\\s+(?:const|let|var|function\\*?|async\\s+function)\\s+${name.replace(/\$/g, '\\$')}(?![\\w$])|\\bexport\\s*\\{[^}]*(?<![\\w$])${name.replace(/\$/g, '\\$')}(?![\\w$])|\\bexports\\.${name.replace(/\$/g, '\\$')}\\s*=`).test(f.code);
+  const short = (body) => body.length <= MAX_DETECTOR;
+  for (const f of files) for (const [name, body] of f.decls) if (short(body) && SIGN.test(body)) f.tainted.add(name);
+  const exported = new Set();
+  for (const f of files) {
+    const hop0 = [...f.tainted];
+    const re = hop0.length ? new RegExp(`(?<![\\w$])(?:${hop0.map((n) => n.replace(/\$/g, '\\$')).join('|')})(?![\\w$])`) : null;
+    if (re) for (const [name, body] of f.decls) if (short(body) && re.test(body)) f.tainted.add(name);
+    for (const n of f.tainted) if (exportedBy(f, n)) exported.add(n);
+  }
+  for (const f of files) {
+    const fromImports = [...f.imported].filter((n) => exported.has(n));
+    for (const n of fromImports) f.tainted.add(n);
+    const re = fromImports.length ? new RegExp(`(?<![\\w$])(?:${fromImports.map((n) => n.replace(/\$/g, '\\$')).join('|')})(?![\\w$])`) : null;
+    if (re) for (const [name, body] of f.decls) if (short(body) && re.test(body)) f.tainted.add(name);
+  }
+  return new Map(files.map((f) => [f.p, new Set([...f.tainted].filter((n) => n !== 'systemCi'))]));
+}
+
+/**
+ * The names in `text`'s `skip:` options that stand for systemd's sign (`signs`, signNames over every build root, or
+ * this file alone): each must be systemCi, so a check one step away (a constant, a helper, a function) stops the job.
+ */
+export const detectorNames = (text, signs = signNames([['', text]]).get('')) => {
+  const used = new Set(skipExprs(withoutComments(text)).flatMap((e) => unquoted(e).match(/[A-Za-z_$][\w$]*/g) ?? []));
+  return [...signs].filter((n) => used.has(n));
 };
 
 /** How many `skip:` options read systemd's sign inline (`skip: !existsSync('/run/systemd/system')`): each must be a read gate. */
@@ -144,7 +239,7 @@ const FORGES = /\bfrom\s+['"](?:node:)?vm['"]|\brequire\s*\(\s*['"](?:node:)?vm[
  * a flag read from systemd's sign isn't named systemCi, or when any of that is in a file under test/ that isn't a
  * `*.test.ts` (a helper module that registers tests, R1169d): the run is by file, so a gated test must be in one.
  */
-export function findAll(dir, prefix = 'test/') {
+export function findAll(dir, prefix = 'test/', signs = null) {
   const found = [];
   const files = readdirSync(dir, { recursive: true }).map((x) => String(x).split(sep).join('/')).filter((x) => /\.[cm]?[jt]sx?$/.test(x) && !x.endsWith('.d.ts')).sort();
   for (const f of files) {
@@ -152,7 +247,7 @@ export function findAll(dir, prefix = 'test/') {
     const names = systemdTests(text);
     const mentions = mentionCount(text);
     const like = gateLikeCount(text);
-    const odd = detectorNames(text).filter((n) => n !== 'systemCi');
+    const odd = detectorNames(text, signs?.get(`${prefix}${f}`) ?? undefined).filter((n) => n !== 'systemCi');
     const inline = inlineSignCount(text);
     if (!f.endsWith('.test.ts')) {
       if (names.length || mentions || like || odd.length || inline) throw new Error(`${prefix}${f}: a systemd gate outside a *.test.ts file (a helper that registers tests): write the gated test in the test file itself, as \`test(<name>, { skip: !systemCi ...\``);
@@ -219,7 +314,9 @@ export function problems(runs) {
         }
       }
     }
-    // The floor: a test here (not a gate) skipped for systemd, as a gate spelled some way this doesn't read would be.
+    // The floor: any other test in this file's run (the run selects only gate names, so that is a gate's namesake or a
+    // subtest) skipped with a reason naming systemd. It doesn't see a test the name filter left out: the static rules
+    // above are what find a gate spelled another way (R1169j).
     events.forEach((e, k) => {
       if (!matched.has(k) && typeof e.skip === 'string' && /systemd/i.test(e.skip)) out.push(`test/${file}: ${e.name}: SKIP ${e.skip} (a test skipped for systemd here, where systemd is)`);
     });
@@ -269,10 +366,15 @@ const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   let found;
   try {
-    found = findAll(join(root, 'test'));
+    // systemd's sign, followed through every file the build compiles (R1169j): a helper's export, a constant holding
+    // the path, a function returning the check.
+    const roots = buildRoots(root).filter((r) => existsSync(join(root, r)));
+    const texts = new Map(roots.flatMap((r) => readdirSync(join(root, r), { recursive: true }).map((x) => String(x).split(sep).join('/')).filter((x) => /\.[cm]?[jt]sx?$/.test(x) && !x.endsWith('.d.ts')).map((x) => [`${r}/${x}`, readFileSync(join(root, r, x), 'utf8')])));
+    const signs = signNames(texts);
+    found = findAll(join(root, 'test'), 'test/', signs);
     // Every other root the build compiles (tsconfig.json's include, read from it so a new root is never missed:
     // src/, scripts/bench/, R1169g) holds no gate: one there, re-exported through a test helper, would run nowhere.
-    for (const r of buildRoots(root).filter((x) => x !== 'test')) if (existsSync(join(root, r))) findAll(join(root, r), `${r}/`).forEach((f) => {
+    for (const r of roots.filter((x) => x !== 'test')) findAll(join(root, r), `${r}/`, signs).forEach((f) => {
       throw new Error(`${r}/${f.file}: a systemd gate outside test/: write the gated test in test/`);
     });
     // The built files are what runs: each gate's line is read there, and its names must be the source's.
@@ -293,14 +395,13 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
     process.exit(2);
   }
   console.log(`${names.length} systemd acceptance test(s):\n${found.flatMap((f) => f.names.map((n) => `  test/${f.file}: ${n}`)).join('\n')}`);
-  // One run per file; TAP to the log, node's own results to a file only this process names.
+  // One run per file; TAP to the log, node's own results on fd 3 (systemd-acceptance-reporter.mjs).
   const runs = [];
   const exits = [];
   {
     for (const f of found) {
       // node's own results arrive on fd 3, a pipe only this process and the runner's reporter hold (R1169g, R1169h).
       const args = [...PRELOAD, '--test', '--test-reporter=tap', '--test-reporter-destination=stdout', `--test-reporter=${REPORTER}`, '--test-reporter-destination=stdout', ...f.names.map((n) => `--test-name-pattern=^${escapeRe(n)}$`), `dist/test/${f.file.replace(/\.ts$/, '.js')}`];
-      // Never a child of another test run's reporter (NODE_TEST_CONTEXT): its results come here, to the file above.
       // Never a child of another test run (NODE_TEST_CONTEXT), and no NODE_OPTIONS (an --enable-source-maps there would
       // report TS lines, so every gate would read as not run).
       const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'NODE_TEST_CONTEXT' && k !== 'NODE_OPTIONS'));
