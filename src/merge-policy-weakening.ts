@@ -27,7 +27,7 @@
 // isn't text, a table it can't find or a git failure, the change waits. The engine's own source paths (ENGINE_ONLY)
 // stand aside in a managed app's repo, as the locks do there (src/review.ts lockedCategories).
 import { BRAND } from './brand.js';
-import { changedNames, changeFiles, exactMoves, filesAt, filesWithText, mergeBaseOf, mergedTree } from './coordinator/change-files.js';
+import { changedNames, changeFiles, exactMoves, filesAt, filesAtOnce, filesWithText, mergeBaseOf, mergedTree } from './coordinator/change-files.js';
 import { globRegExp } from './guardrails/glob.js';
 import { escapedPath, isNonUtf8Path, shownPath } from './path-text.js';
 import { engineSourceGlob, LOCKED_CATEGORIES, lockedCategories, type ChangeFile, type LockScope } from './review.js';
@@ -368,6 +368,13 @@ export interface WeakeningInput {
    * what it makes is never read. Absent: the change isn't a merge.
    */
   conflicts?: readonly string[];
+  /**
+   * #941: files the change may not touch, by path, with their text before the change (throws: over MAX_TABLE_FILE, not
+   * read): every file that registers a table (its mark's text, git grep over the whole tree), every changed JS or TS
+   * file, and the files those import by a relative path (contextAt). A registered table whose file the change leaves
+   * alone still has its uses read in every changed file. Absent: only the tables in the changed files (a pure test).
+   */
+  context?: { paths: ReadonlySet<string>; registering: ReadonlySet<string>; reached?: ReadonlySet<string>; text: (path: string) => string | null };
 }
 
 /** Each kind of weakening, in the words a reason uses, in the order reasons are given. */
@@ -837,6 +844,107 @@ export function tableSpan(text: string, table: string): [number, number] | null 
   throw new Error(`${table} never closes`);
 }
 
+/** A line's code that goes on to the next line: it ends with an operator, `=`, `(`, `,`, `?` or `:`. */
+const CONTINUES = /(?:[=(,?:+\-*/%|&^<>!~]|=>|\?\?)\s*$/;
+/** A line's code that goes on from the line before: it starts with `.`, `?`, `:`, `)`, `,` or a binary operator. */
+const CONTINUED = /^\s*(?:[.?:),+\-*/%|&^<>=]|\]|\?\.)/;
+const IDENT = /[A-Za-z_$][\w$]*/g;
+/** A module-level binding statement's start: `const`, `let` or `var` at column 0 (exported or not), then its name or pattern and `=`. */
+const TOP_BINDS = /^(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*|\{[^=]*\}|\[[^=]*\])\s*(?::[^=]*)?=(?![=>])/;
+const MAX_STATEMENT_LINES = 40;
+/** How many imports deep contextAt follows the changed files' relative imports. */
+const MAX_USE_ROUNDS = 2;
+
+/**
+ * #941: each line's statement in `text`, as the range of lines a line reader can tell are one statement: lines joined
+ * where one ends with an operator (or `=`, `(`, `,`, `?`, `:`) or the next starts with one (`.`, `?`, `:`, `)`, an
+ * operator), and an `import {` or `export {` list to its `}`. Comments and strings are left out first (codeLinesOf).
+ * At most MAX_STATEMENT_LINES lines. Lines a reader can't tell apart (a block, a call's arguments without a trailing
+ * operator) are separate: what can't be placed is read on its own line.
+ */
+/** statementsOf's results while one change is read (useRemoved clears it): each text is read once. */
+const statementCache = new Map<string, ReturnType<typeof readStatements>>();
+function statementsOf(text: string): ReturnType<typeof readStatements> {
+  let r = statementCache.get(text);
+  if (!r) statementCache.set(text, (r = readStatements(text)));
+  return r;
+}
+function readStatements(text: string): { code: string[]; span: (k: number) => [number, number] } {
+  const code = codeLinesOf(text).map(withoutComments);
+  const n = code.length;
+  const start = new Array<number>(n);
+  let list = false;
+  for (let k = 0; k < n; k++) {
+    const joined = k > 0 && k - start[k - 1]! < MAX_STATEMENT_LINES && (list || CONTINUES.test(code[k - 1]!) || CONTINUED.test(code[k]!));
+    start[k] = joined ? start[k - 1]! : k;
+    if (list) list = !code[k]!.includes('}');
+    else list = /^\s*(?:import\b[^=]*|export\s*(?:type\s*)?)\{[^}]*$/.test(code[k]!);
+  }
+  const end = new Array<number>(n);
+  for (let k = n - 1; k >= 0; k--) end[k] = k + 1 < n && start[k + 1] === start[k] ? end[k + 1]! : k;
+  return { code, span: (k) => [start[k]!, end[k]!] };
+}
+
+/**
+ * #941: the names that stand for each table in `tables`, in each of `texts` (by path). In every file, the table's own
+ * name. In a file, also every name it binds to one of its names (`const rules = CHECKS`, `const { a } = CHECKS`,
+ * `const run = () => CHECKS.length`), the binding's whole statement read (statementsOf), and every name such a binding
+ * anywhere gives that the file imports (`import`, `require` or `export {` naming it). So another file's own `rules`
+ * isn't the table's. `all`: every such name. Not followed: a re-export under another name
+ * (`export { rules as R }` is read as naming `rules` only), a property, a function declaration or a class field.
+ */
+export function useNames(texts: ReadonlyMap<string, string>, tables: readonly string[]): Map<string, { all: Set<string>; in: (path: string) => Set<string> }> {
+  const files = [...texts];
+  // Each file's statements, read only once one of the names is in its text (most files name no table).
+  const read = new Map<string, ReturnType<typeof statementsOf>>();
+  const statements = (p: string, t: string) => read.get(p) ?? read.set(p, statementsOf(t)).get(p)!;
+  const nameRe = (ns: Iterable<string>) => new RegExp(`(?<![\\w$])(?:${[...ns].map((x) => x.replace(/\$/g, '\\$')).join('|')})(?![\\w$])`);
+  const out = new Map<string, { all: Set<string>; in: (path: string) => Set<string> }>();
+  for (const table of tables) {
+    const per = new Map<string, Set<string>>();
+    const bound = new Set<string>();
+    for (let round = 0; round < 16; round++) {
+      let grew = false;
+      const sought = [table, ...bound];
+      for (const [p, text] of files) {
+        if (!sought.some((n) => text.includes(n))) continue;
+        const { code, span } = statements(p, text);
+        const here = per.get(p) ?? per.set(p, new Set([table])).get(p)!;
+        const re = nameRe(here);
+        for (let k = 0; k < code.length; k++) {
+          if (span(k)[0] !== k) continue;
+          const stmt = code.slice(k, span(k)[1] + 1).join('\n');
+          if (bound.size && /^\s*(?:import|export\s*\{)|\brequire\s*\(/.test(stmt)) {
+            for (const id of stmt.match(IDENT) ?? []) {
+              if (bound.has(id) && !here.has(id)) {
+                here.add(id);
+                grew = true;
+              }
+            }
+          }
+          // Only a module's own binding: a statement at column 0 that is a `const`, `let` or `var` (exported or not),
+          // its first binding. A local inside a function is not followed (each would make every line near it a use).
+          const m = TOP_BINDS.exec(stmt);
+          if (m) {
+            if (!re.test(stmt.slice(m[0].length))) continue;
+            for (const id of m[1]!.match(IDENT) ?? []) {
+              if (/^(?:const|let|var)$/.test(id)) continue;
+              if (!here.has(id)) {
+                here.add(id);
+                grew = true;
+              }
+              bound.add(id);
+            }
+          }
+        }
+      }
+      if (!grew) break;
+    }
+    out.set(table, { all: new Set([table, ...bound]), in: (path) => per.get(path) ?? new Set([table]) });
+  }
+  return out;
+}
+
 /** Each kind's first three places and how many there are: nothing kept per line. */
 type Found = Map<Kind, { first: string[]; n: number }>;
 
@@ -863,6 +971,91 @@ export function weakeningReasons(i: WeakeningInput, ...more: WeakeningInput[]): 
     out.push(`${WEAKENING_REASON}${KINDS[kind]} (${at.first.join('; ')}${at.n > at.first.length ? `; and ${at.n - at.first.length} more` : ''})`);
   }
   return out;
+}
+
+/** #941's scan (findings): each removed or changed line that takes a use away from a registered table. */
+function useRemoved(i: WeakeningInput, inChange: readonly (CheckTable & { marked?: boolean })[], hit: (kind: Kind, path: string, what?: string) => void) {
+  try {
+    useRemovedIn(i, inChange, hit);
+  } finally {
+    statementCache.clear();
+  }
+}
+function useRemovedIn(i: WeakeningInput, inChange: readonly (CheckTable & { marked?: boolean })[], hit: (kind: Kind, path: string, what?: string) => void) {
+  const ctx = i.context;
+  const textOf = (p: string): string | null => {
+    try {
+      return ctx?.paths.has(p) ? ctx.text(p) : i.files.some((f) => f.path === p) && MARKABLE.test(p) ? i.before(p) : null;
+    } catch {
+      return null;
+    }
+  };
+  // The tables: those the change's files register (and CHECK_TABLES), and those every other file registers.
+  const all = new Map<string, { path: string; table: string }>();
+  for (const t of inChange) if (!t.path.endsWith('.json')) all.set(`${t.path}\0${t.table}`, t);
+  for (const p of ctx?.paths ?? []) {
+    if (!MARKABLE.test(p) || !holds(p, i.scope)) continue;
+    let text: string | null;
+    try {
+      text = ctx!.text(p);
+    } catch (e) {
+      // A registering file it can't read: its tables' uses can't be followed (fail closed).
+      if (ctx!.registering.has(p)) hit('unreadable', p, String((e as Error).message ?? e));
+      continue;
+    }
+    if (text !== null) for (const t of registrationsOf(text).tables) all.set(`${p}\0${t.table}`, { path: p, table: t.table });
+  }
+  if (!all.size) return;
+  const texts = new Map<string, string>();
+  for (const p of new Set([...(ctx?.paths ?? []), ...i.files.map((f) => f.path)])) {
+    const t = textOf(p);
+    if (t !== null) texts.set(p, t);
+  }
+  // Names bound to a table are followed only in the changed files and what they import (context.reached): elsewhere,
+  // one can't reach a changed line.
+  const reach = ctx?.reached;
+  const names = useNames(reach ? new Map([...texts].filter(([p]) => reach.has(p) || i.files.some((f) => f.path === p))) : texts, [...new Set([...all.values()].map((t) => t.table))]);
+  const word = (n: string) => new RegExp(`(?<![\\w$])${n.replace(/\$/g, '\\$')}(?![\\w$])`);
+  // Each changed file's removed lines and, once, where each stood before the change (by its trimmed text).
+  const changed = i.files.filter((f) => !f.path.endsWith('.json') && (f.removedLines ?? []).some((l) => l.trim())).map((f) => {
+    const before = texts.get(f.path) ?? null;
+    const at = new Map<string, number[]>();
+    (before?.split('\n') ?? []).forEach((l, k) => {
+      const key = l.trim();
+      if (key) (at.get(key) ?? at.set(key, []).get(key)!).push(k);
+    });
+    return { f, before, at };
+  });
+  for (const t of all.values()) {
+    const own = new Set<string>();
+    try {
+      const b = i.files.some((f) => f.path === t.path) ? i.before(t.path) : null;
+      for (const l of (b === null ? null : tableLines(b, t.table)) ?? []) own.add(entry(l));
+    } catch {
+      // Its lines unreadable: the table checks above say so; here no line is its own.
+    }
+    for (const { f, before, at } of changed) {
+      // The names that stand for the table in this file (useNames); a file whose text and removed lines hold none of
+      // them can't take a use away.
+      const mine = [...names.get(t.table)!.in(f.path)];
+      const removed = f.removedLines!.filter((l) => l.trim() && !(f.path === t.path && own.has(entry(l))));
+      if (!removed.length || !mine.some((n) => (before ?? '').includes(n) || removed.some((l) => l.includes(n)))) continue;
+      const here = mine.map(word);
+      const named = (l: string) => here.some((re) => re.test(l));
+      const st = before === null ? null : statementsOf(before);
+      for (const l of removed) {
+        let use = named(l);
+        if (!use && st) {
+          // The removed line's place before the change (each line with its text: one is enough), and its statement.
+          for (const k of at.get(l.trim()) ?? []) {
+            const [a, b] = st.span(k);
+            if ((use = a !== b && st.code.slice(a, b + 1).some(named))) break;
+          }
+        }
+        if (use) hit('table-use-removed', f.path, `${t.table}: ${l.trim()}`);
+      }
+    }
+  }
 }
 
 /** One change's findings, by kind; over MAX_CHANGED_CHARS, only the finding that says so. */
@@ -1079,16 +1272,16 @@ function findings(i: WeakeningInput): Found {
       const built = BUILT_NAME.test(l);
       if ((names.test(l) && !own(l)) || built) hit('table-used', t.path, `${t.table}: ${l.trim()}`);
     }
-    // #941: a removed or changed line, in any changed file, that named the table outside its own lines: a use of it is
-    // gone. Every use moved to a decoy declared under a new name (in this file or imported from another), with the
-    // registered table and its mark left in place unused, reads to the line reader as the table unchanged; the lost
-    // uses are what show it. So it waits. A line of the table's own (an entry) is the shrink check's, above.
-    const ownBefore = new Set(was.map(entry));
-    for (const f of i.files) {
-      if (f.path.endsWith('.json')) continue;
-      for (const l of f.removedLines ?? []) if (names.test(l) && !(f.path === t.path && ownBefore.has(entry(l)))) hit('table-use-removed', f.path, `${t.table}: ${l.trim()}`);
-    }
   }
+
+  // #941: a use of a registered table taken away. Every use moved to a decoy declared under a new name (in the table's
+  // file or another, imported or not), with the registered table and its mark left in place unused, reads to the line
+  // reader as the table unchanged; the lost uses are what show it. So a removed or changed line, in any changed file
+  // but JSON, waits when it names the table or a name bound to it (useNames; one bound in another file counts in a file
+  // that binds or imports that name), or is part of a statement that does (statementsOf: `const rules =` with `CHECKS;`
+  // on the next line). A line of the table's own (an entry) is the shrink check's. Every registered table counts,
+  // its file in the change or not (context), so a use moved in another file waits too.
+  useRemoved(i, tables, hit);
 
   // In a registered table's file, an added line that could give the live table a binding the line reader never matches
   // waits (#886's rounds 4 to 6): with the table's old lines kept as dead text (in a comment or a template), the live
@@ -1181,7 +1374,8 @@ function measured(cwd: string, from: string, to: string, files: ChangeFile[], sc
   // The files that hold a mark's text before the change and at the tip (#869): git grep over each whole tree, so a
   // mark is found wherever it is; a git failure makes the change wait.
   const markable = (set: Set<string>) => new Set([...files.map((f) => f.path), ...(conflicts ?? [])].filter((p) => set.has(p) && MARKABLE.test(p) && !isNonUtf8Path(p)));
-  const marked = markable(new Set(filesWithText(cwd, from, [TABLE_MARK.trimEnd(), LINT_MARK])));
+  const markedAll = new Set(filesWithText(cwd, from, [TABLE_MARK.trimEnd(), LINT_MARK]));
+  const marked = markable(markedAll);
   const tipMarked = at ? markable(new Set(filesWithText(cwd, at.tip, [TABLE_MARK.trimEnd(), LINT_MARK]))) : new Set<string>();
   const paths = [...new Set([...CHECK_TABLES.map((t) => t.path), ...marked, ...tipMarked])].filter((p) => files.some((f) => f.path === p) && !isNonUtf8Path(p));
   // A file over the cap isn't read at all: the change waits.
@@ -1192,6 +1386,73 @@ function measured(cwd: string, from: string, to: string, files: ChangeFile[], sc
       return texts.get(p) ?? null;
     };
   };
-  const input: WeakeningInput = { files, deleted, moved, before: side(from), after: side(to), scope, marked, ...(conflicts ? { conflicts } : {}) };
+  const input: WeakeningInput = { files, deleted, moved, before: side(from), after: side(to), scope, marked, context: contextAt(cwd, from, files, markedAll), ...(conflicts ? { conflicts } : {}) };
   return at ? { ...input, tip: side(at.tip), tipMarked, meet: side(at.meet) } : input;
+}
+
+/**
+ * #941's context at `from` (WeakeningInput.context): the files that register a table (`markedAll`, their mark's text),
+ * the changed JS and TS files, and the files they import by a relative path, and those files' imports in turn, up to
+ * MAX_USE_ROUNDS deep (relativeImports): a name bound to a table in a file the change leaves alone reaches a changed
+ * file only through an import. Each file over MAX_TABLE_FILE throws when read.
+ */
+function contextAt(cwd: string, from: string, files: ChangeFile[], markedAll: ReadonlySet<string>): NonNullable<WeakeningInput['context']> {
+  const code = (p: string) => MARKABLE.test(p) && !isNonUtf8Path(p);
+  const registering = new Set([...markedAll].filter(code));
+  const texts = new Map<string, string>();
+  const tooBig = new Map<string, number>();
+  const tried = new Set<string>();
+  const read = (paths: string[]): string[] => {
+    const fresh = [...new Set(paths)].filter((p) => !tried.has(p));
+    for (const p of fresh) tried.add(p);
+    const got = filesAtOnce(cwd, from, fresh, MAX_TABLE_FILE);
+    for (const [p, t] of got.texts) texts.set(p, t);
+    for (const [p, n] of got.tooBig) tooBig.set(p, n);
+    return fresh.filter((p) => got.texts.has(p));
+  };
+  read([...registering]);
+  // The changed files and what they import, MAX_USE_ROUNDS deep: where a name bound to a table can reach a changed file.
+  const changed = files.map((f) => f.path).filter(code);
+  read(changed);
+  const reached = new Set(changed.filter((p) => texts.has(p)));
+  let frontier = [...reached];
+  for (let round = 0; round < MAX_USE_ROUNDS && frontier.length; round++) {
+    const next = [...new Set(frontier.flatMap((p) => relativeImports(p, texts.get(p)!)).filter(code))].filter((p) => !reached.has(p));
+    read(next);
+    frontier = next.filter((p) => texts.has(p));
+    for (const p of frontier) reached.add(p);
+  }
+  const paths = new Set([...texts.keys(), ...tooBig.keys()]);
+  return {
+    paths,
+    registering,
+    reached,
+    text: (p) => {
+      if (tooBig.has(p)) throw new Error(`${tooBig.get(p)} bytes, over ${MAX_TABLE_FILE}: not read`);
+      return texts.get(p) ?? null;
+    },
+  };
+}
+
+/** The files `text` (at `path`) may import by a relative specifier (`from './x.js'`, `require('../y')`, `import('./z')`), each extension a TS build maps to it. */
+export function relativeImports(path: string, text: string): string[] {
+  const dir = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
+  const out: string[] = [];
+  for (const m of text.matchAll(/(?:\bfrom\s*|\bimport\s*\(?\s*|\brequire\s*\(\s*)(['"])(\.{1,2}\/[^'"\n]{1,300})\1/g)) {
+    const parts: string[] = dir ? dir.split('/') : [];
+    let ok = true;
+    for (const seg of m[2]!.split('/')) {
+      if (seg === '.' || seg === '') continue;
+      if (seg === '..') ok = parts.pop() !== undefined && ok;
+      else parts.push(seg);
+    }
+    if (!ok || !parts.length) continue;
+    const p = parts.join('/');
+    const ext = /\.[cm]?[jt]sx?$/.exec(p)?.[0];
+    const stem = ext ? p.slice(0, -ext.length) : p;
+    const alts: Record<string, string[]> = { '.js': ['.js', '.ts', '.tsx', '.jsx'], '.mjs': ['.mjs', '.mts'], '.cjs': ['.cjs', '.cts'], '.jsx': ['.jsx', '.tsx'] };
+    if (!ext) out.push(...['.ts', '.tsx', '.js', '.mjs', '.cjs', '/index.ts', '/index.js'].map((e) => p + e));
+    else out.push(...(alts[ext] ?? [ext]).map((e) => stem + e));
+  }
+  return out;
 }

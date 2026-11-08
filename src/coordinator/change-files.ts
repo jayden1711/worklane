@@ -765,3 +765,39 @@ export function filesAt(cwd: string, rev: string, paths: string[], maxBytes = In
   }
   return { texts, tooBig };
 }
+
+/**
+ * filesAt with every blob read by one `git cat-file --batch` instead of one git per file (#941: the weakening hold's
+ * context reads many files per change). The same answer: each path's text at `rev` that is a blob of at most
+ * `maxBytes`, and the size of each that is larger. Throws when git fails or its output doesn't parse.
+ */
+export function filesAtOnce(cwd: string, rev: string, paths: string[], maxBytes = Infinity): { texts: Map<string, string>; tooBig: Map<string, number> } {
+  const texts = new Map<string, string>();
+  const tooBig = new Map<string, number>();
+  if (!paths.length) return { texts, tooBig };
+  const wanted: { path: string; sha: string }[] = [];
+  for (const rec of fields(must(runBytes(cwd, ['ls-tree', '-z', '-l', '--full-tree', rev, '--', ...paths])))) {
+    const tab = rec.indexOf(9);
+    const [, type, sha, size] = rec.subarray(0, Math.max(tab, 0)).toString('latin1').split(/ +/);
+    if (tab === -1 || type !== 'blob' || !sha || !/^[0-9a-f]{40,64}$/.test(sha)) continue;
+    const path = nameOf(rec.subarray(tab + 1));
+    if (Number(size) > maxBytes) tooBig.set(path, Number(size));
+    else wanted.push({ path, sha });
+  }
+  if (!wanted.length) return { texts, tooBig };
+  const r = gitSpawnSync(withGit(['cat-file', '--batch']), { cwd, encoding: 'buffer', maxBuffer: MAX_BUFFER, input: Buffer.from(wanted.map((w) => `${w.sha}\n`).join(''), 'latin1') });
+  if (r.error) throw r.error;
+  if (r.status !== 0) throw new Error(`git cat-file --batch failed: ${(r.stderr.toString('utf8') || `exit ${r.status}`).trim().slice(0, 500)}`);
+  let at = 0;
+  for (const w of wanted) {
+    const nl = r.stdout.indexOf(10, at);
+    const head = nl === -1 ? '' : r.stdout.subarray(at, nl).toString('latin1');
+    const m = /^([0-9a-f]+) blob (\d+)$/.exec(head);
+    if (!m || m[1] !== w.sha) throw new Error(`git cat-file --batch: unexpected header ${JSON.stringify(head.slice(0, 120))}`);
+    const n = Number(m[2]);
+    if (r.stdout.length < nl + 1 + n + 1) throw new Error('git cat-file --batch: output cut short');
+    texts.set(w.path, r.stdout.subarray(nl + 1, nl + 1 + n).toString('utf8'));
+    at = nl + 1 + n + 1;
+  }
+  return { texts, tooBig };
+}

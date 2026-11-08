@@ -8,6 +8,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { FileBacklog } from '../src/backlog/file.js';
+import { changeFiles, filesAt, filesAtOnce } from '../src/coordinator/change-files.js';
 import type { PullRequest } from '../src/backlog/types.js';
 import { loadConfig } from '../src/config/load.js';
 import { ReviewConfig } from '../src/config/schema.js';
@@ -140,21 +141,99 @@ test('the merge decision reads the tip whatever the fetch refspec: a clone that 
 // #941: a decoy under a new name with every use moved to it, the registered table and its mark left in place unused.
 const USE_REMOVED = "removes or changes a line that uses a check's or guard's table, so what the engine uses may no longer be that table";
 
+/**
+ * The hold as a real PR gives it its input (R1184a #1): only the files whose text changed are in the diff, and every
+ * other file is context, its text before the change, as weakeningOf's contextAt reads it.
+ */
+function weakensChanged(before: Record<string, string>, after: Record<string, string>): string[] {
+  const paths = [...new Set([...Object.keys(before), ...Object.keys(after)])];
+  const changed = paths.filter((p) => before[p] !== after[p]);
+  const lines = (t: string | undefined) => (t === undefined ? [] : t.split('\n'));
+  const files: ChangeFile[] = changed.map((path) => {
+    const [b, a] = [lines(before[path]), lines(after[path])];
+    const left = [...a];
+    const removed = b.filter((x) => {
+      const k = left.indexOf(x);
+      if (k === -1) return true;
+      left.splice(k, 1);
+      return false;
+    }).filter(Boolean);
+    const right = [...b];
+    const added = a.filter((x) => {
+      const k = right.indexOf(x);
+      if (k === -1) return true;
+      right.splice(k, 1);
+      return false;
+    }).filter(Boolean);
+    return { path, added: added.length, removed: removed.length, addedLines: added, removedLines: removed };
+  });
+  const registering = new Set(Object.keys(before).filter((p) => /\/\/ check-table: /.test(before[p]!)));
+  const context = { paths: new Set(Object.keys(before)), registering, text: (p: string) => before[p] ?? null };
+  return kinds(weakening.weakeningReasons({ files, deleted: new Set(changed.filter((p) => after[p] === undefined)), before: (p) => before[p] ?? null, after: (p) => after[p] ?? null, scope: undefined, context }));
+}
+
 test('decoy (#941): every use moved to a new table under another name waits, in the same file or imported from another', () => {
   // In the same file: a new declaration, the use switched to it; CHECKS and its mark are unchanged and unused.
   const same = BASE.replace("test('t', () => { for (const c of CHECKS) void c; });", "export const LIVE = ['a'];\ntest('t', () => { for (const c of LIVE) void c; });");
-  assert.ok(weakens({ [F]: BASE }, { [F]: same }).includes(USE_REMOVED), 'a decoy in the same file');
+  assert.ok(weakensChanged({ [F]: BASE }, { [F]: same }).includes(USE_REMOVED), 'a decoy in the same file');
   // Imported from a new file: the use switched to the import.
   const imported = BASE.replace("import { test } from 'node:test';", "import { test } from 'node:test';\nimport { LIVE } from './x-live.js';").replace('of CHECKS)', 'of LIVE)');
-  assert.ok(weakens({ [F]: BASE }, { [F]: imported, 'test/x-live.ts': "export const LIVE = ['a'];\n" }).includes(USE_REMOVED), 'a decoy imported from another file');
-  // A use in another file switched to a decoy: that file's removed line names the table too.
-  const user = "import { CHECKS } from './x-rules.test.js';\nexport const run = () => CHECKS.length;\n";
-  assert.ok(weakens({ [F]: BASE, 'src/x-user.ts': user }, { [F]: BASE, 'src/x-user.ts': "import { LIVE } from './x-live.js';\nexport const run = () => LIVE.length;\n", 'src/x-live.ts': "export const LIVE = ['a'];\n" }).includes(USE_REMOVED), 'a use in another file moved');
+  assert.ok(weakensChanged({ [F]: BASE }, { [F]: imported, 'test/x-live.ts': "export const LIVE = ['a'];\n" }).includes(USE_REMOVED), 'a decoy imported from another file');
 });
 
-test('decoy (#941), control: adding a use of the table, or changing a line that never named it, adds no such reason', () => {
+test("decoy (#941, R1184a #1): a use in another file moved to a decoy waits when the table's own file is unchanged (only changed files in the diff)", () => {
+  const user = "import { CHECKS } from './x-rules.test.js';\nexport const run = () => CHECKS.length;\n";
+  const moved = "import { LIVE } from './x-live.js';\nexport const run = () => LIVE.length;\n";
+  assert.deepEqual(weakensChanged({ [F]: BASE, 'src/x-user.ts': user }, { [F]: BASE, 'src/x-user.ts': moved, 'src/x-live.ts': "export const LIVE = ['a'];\n" }), [USE_REMOVED]);
+});
+
+test('decoy (#941, R1184a #2): a use through an alias, or with the name on a continuation line, moved to a decoy waits', () => {
+  // An alias kept, its user switched: `const rules = CHECKS;` stays, `rules.length` becomes `LIVE.length`.
+  const alias = `${BASE}const rules = CHECKS;\nexport const run = () => rules.length;\n`;
+  const aliasMoved = `${BASE}const rules = CHECKS;\nexport const LIVE = ['a'];\nexport const run = () => LIVE.length;\n`;
+  assert.ok(weakensChanged({ [F]: alias }, { [F]: aliasMoved }).includes(USE_REMOVED), 'an alias in the same file');
+  // The alias in another file, unchanged, and its importer switched.
+  const aliasFile = "import { CHECKS } from './x-rules.test.js';\nexport const rules = CHECKS;\n";
+  const importer = "import { rules } from './x-alias.js';\nexport const run = () => rules.length;\n";
+  const importerMoved = "import { LIVE } from './x-live.js';\nexport const run = () => LIVE.length;\n";
+  assert.deepEqual(weakensChanged({ [F]: BASE, 'src/x-alias.ts': aliasFile, 'src/x-user.ts': importer }, { [F]: BASE, 'src/x-alias.ts': aliasFile, 'src/x-user.ts': importerMoved, 'src/x-live.ts': "export const LIVE = ['a'];\n" }), [USE_REMOVED], 'an alias imported from an unchanged file');
+  // The table's name on a continuation line: `const rules =` rewritten, `  CHECKS;` unchanged below it.
+  const cont = `${BASE}const rules =\n  CHECKS;\nexport const run = () => rules.length;\n`;
+  const contMoved = cont.replace('const rules =\n', 'const rules = LIVE; const unused =\n').replace(BASE, `${BASE}const LIVE = ['a'];\n`);
+  assert.ok(weakensChanged({ [F]: cont }, { [F]: contMoved }).includes(USE_REMOVED), 'a continuation line');
+  // No binding at all: a call's argument on the next line (`() =>`, then `  CHECKS.length);`), the first line rewritten.
+  const arg = `${BASE}test('u', () =>\n  CHECKS.length);\n`;
+  const argMoved = arg.replace("test('u', () =>\n", "const LIVE = ['a'];\ntest('u', () => LIVE.length); void (() =>\n");
+  assert.ok(weakensChanged({ [F]: arg }, { [F]: argMoved }).includes(USE_REMOVED), "a call's argument on a continuation line");
+  // The same through a real repo's diff, with weakeningOf reading the context from git (contextAt).
+  const dir = exampleProject().dir;
+  const g = (...a: string[]) => execFileSync('git', a, { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  const commit = (files: Record<string, string>) => {
+    for (const [p, t] of Object.entries(files)) {
+      mkdirSync(dirname(join(dir, p)), { recursive: true });
+      writeFileSync(join(dir, p), t);
+    }
+    g('add', '-A');
+    g('commit', '-q', '-m', 'step');
+    return g('rev-parse', 'HEAD');
+  };
+  const base = commit({ [F]: BASE, 'src/x-alias.ts': aliasFile, 'src/x-user.ts': importer });
+  const head = commit({ 'src/x-user.ts': importerMoved, 'src/x-live.ts': "export const LIVE = ['a'];\n" });
+  const files = changeFiles(dir, base, head);
+  assert.deepEqual(files.map((f) => f.path).sort(), ['src/x-live.ts', 'src/x-user.ts'], 'the table file and the alias file are not in the diff');
+  assert.deepEqual(kinds(weakening.weakeningOf(dir, base, head, files, undefined, base)), [USE_REMOVED], 'through git');
+  // The context's one-batch reader gives filesAt's answer: each blob's text, the size of one over the cap, none for a path not there.
+  const asked = [F, 'src/x-alias.ts', 'src/x-user.ts', 'src/none.ts'];
+  for (const cap of [Infinity, 60]) assert.deepEqual(filesAtOnce(dir, head, asked, cap), filesAt(dir, head, asked, cap), `cap ${cap}`);
+});
+
+test('decoy (#941), control: adding a use of the table, changing a line that never named it, or another file\'s own name like an alias, adds no such reason', () => {
   const more = BASE.replace("test('t', () => { for (const c of CHECKS) void c; });", "test('t', () => { for (const c of CHECKS) void c; });\ntest('u', () => { void CHECKS.length; });");
-  assert.ok(!weakens({ [F]: BASE }, { [F]: more }).includes(USE_REMOVED));
+  assert.ok(!weakensChanged({ [F]: BASE }, { [F]: more }).includes(USE_REMOVED), 'an added use (the table-used rule reads added lines)');
   const other = `${BASE}const n = 1;\n`;
-  assert.ok(!weakens({ [F]: other }, { [F]: other.replace('const n = 1;', 'const n = 2;') }).includes(USE_REMOVED));
+  assert.deepEqual(weakensChanged({ [F]: other }, { [F]: other.replace('const n = 1;', 'const n = 2;') }), []);
+  // `rules` is bound to CHECKS in one file; another file's own `rules`, bound to something else, is not the table.
+  const alias = `${BASE}const rules = CHECKS;\nexport const run = () => rules.length;\n`;
+  const own = "const rules = ['x'];\nexport const n = rules.length;\n";
+  assert.deepEqual(weakensChanged({ [F]: alias, 'src/x-own.ts': own }, { [F]: alias, 'src/x-own.ts': own.replace('rules.length', 'rules.length + 1') }), []);
 });
