@@ -44,17 +44,38 @@ export const gateCount = (text) => (text.match(/\bskip:\s*!systemCi\b/g) ?? []).
 export const mentionCount = (text) => (text.match(/\bsystemCi\b/g) ?? []).length - (text.match(/\bconst\s+systemCi\s*=/g) ?? []).length;
 
 /**
+ * How many `skip:` options in `text` look like a systemd gate: their line, from `skip:` on, names a flag like
+ * `system…Ci` (`systemdCi`, `isSystemCi`, `SYSTEM_CI`; a string's words don't count, as "needs systemd" in a test that
+ * checks for systemctl itself). Each must be a gate systemdTests reads, so a flag renamed (R1169d:
+ * `skip: !systemdCi && ...`) stops the job instead of hiding its test.
+ */
+export const gateLikeCount = (text) => [...text.matchAll(/\bskip\s*:([^\n]{0,300})/g)].filter((m) => /(?<![\w$])[A-Za-z_$]*system[\w$]*ci(?![\w$])/i.test(m[1].replace(/(['"`])(?:\\.|(?!\1)[^\\])*\1/g, "''"))).length;
+
+/** The names `text` declares from systemd's own sign (`/run/systemd/system`): each must be systemCi. */
+export const detectorNames = (text) => [...text.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=[^;]*\/run\/systemd\/system/g)].map((m) => m[1]);
+
+/**
  * Every gated test under `dir` (test/), at any depth, by its path from `dir` ('/'-separated). Throws when a mention
- * of systemCi isn't a gate in a test() call this can read.
+ * of systemCi isn't a gate in a test() call this can read, when a skip that looks like a systemd gate isn't one, when
+ * a flag read from systemd's sign isn't named systemCi, or when any of that is in a file under test/ that isn't a
+ * `*.test.ts` (a helper module that registers tests, R1169d): the run is by file, so a gated test must be in one.
  */
 export function findAll(dir) {
   const found = [];
-  const files = readdirSync(dir, { recursive: true }).map((x) => String(x).split(sep).join('/')).filter((x) => x.endsWith('.test.ts')).sort();
+  const files = readdirSync(dir, { recursive: true }).map((x) => String(x).split(sep).join('/')).filter((x) => /\.[cm]?[jt]sx?$/.test(x) && !x.endsWith('.d.ts')).sort();
   for (const f of files) {
     const text = readFileSync(join(dir, f), 'utf8');
     const names = systemdTests(text);
     const mentions = mentionCount(text);
+    const like = gateLikeCount(text);
+    const odd = detectorNames(text).filter((n) => n !== 'systemCi');
+    if (!f.endsWith('.test.ts')) {
+      if (names.length || mentions || like || odd.length) throw new Error(`test/${f}: a systemd gate outside a *.test.ts file (a helper that registers tests): write the gated test in the test file itself, as \`test(<name>, { skip: !systemCi ...\``);
+      continue;
+    }
     if (names.length !== mentions) throw new Error(`test/${f}: ${mentions} use(s) of systemCi, ${names.length} a gate in a test() call this reads (write it as \`test(<name>, { skip: !systemCi ...\`)`);
+    if (like !== names.length) throw new Error(`test/${f}: ${like} skip(s) that look like a systemd gate, ${names.length} a gate this reads (the flag must be named systemCi: \`test(<name>, { skip: !systemCi ...\`)`);
+    if (odd.length) throw new Error(`test/${f}: ${odd.join(', ')} read(s) systemd's sign under another name than systemCi`);
     if (names.length) found.push({ file: f, names });
   }
   return found;
@@ -64,34 +85,53 @@ export function findAll(dir) {
 const tapName = (s) => s.replace(/\\([\\#n])/g, (_, c) => (c === 'n' ? '\n' : c));
 
 /**
+ * node's TAP output as a tree of results: each `ok`/`not ok` line at any depth (its indent, 4 spaces a level), with
+ * the results of its subtests (the deeper lines just before it) as its children.
+ */
+export function tapResults(tap) {
+  const all = [];
+  const pending = [];
+  for (const line of tap.split('\n')) {
+    const m = /^((?: {4})*)(not )?ok \d+ - (.*)$/.exec(line);
+    if (!m) continue;
+    const depth = m[1].length / 4;
+    const directive = /^(.*?) # (SKIP|TODO)\b(.*)$/i.exec(m[3]);
+    const node = { depth, name: tapName(directive ? directive[1] : m[3]), ok: !m[2], directive: directive ? `${directive[2].toUpperCase()}${directive[3]}` : null, children: pending[depth + 1] ?? [] };
+    pending.length = depth + 1;
+    (pending[depth] ??= []).push(node);
+    all.push(node);
+  }
+  return all;
+}
+
+/**
  * What's wrong with each gated test in `runs`, one entry per file: { file, names, tap }, where `tap` is node's TAP
- * output from running that file alone. Results are keyed by file and name, so no other file's result counts for
- * a test, and a name must have exactly one result in its file: a same-named test that passes can't hide the gated
- * one's skip. Each problem is a test that isn't there, failed, ran more than once, or was skipped (an option or
- * t.skip()) or marked todo. [] when every one ran once and passed.
+ * output from running that file alone. Results are keyed by file and name, at any depth (a gated test inside a
+ * describe() or a t.test() is a nested line, R1169c), so no other file's result counts for a test, and a name must
+ * have exactly one result in its file: a same-named test that passes, nested or not, can't hide the gated one's skip.
+ * Each problem is a test that isn't there, failed, ran more than once, was skipped (an option or t.skip()) or marked
+ * todo, or has a subtest that did any of that (R1169d: a passing parent whose real check skipped). [] when every one
+ * ran once and passed, all of it.
  */
 export function problems(runs) {
-  const key = (file, name) => `${file}\0${name}`;
-  const results = new Map();
-  for (const { file, tap } of runs) {
-    for (const line of tap.split('\n')) {
-      const m = /^(not )?ok \d+ - (.*)$/.exec(line);
-      if (!m) continue;
-      const directive = /^(.*?) # (SKIP|TODO)\b(.*)$/i.exec(m[2]);
-      const k = key(file, tapName(directive ? directive[1] : m[2]));
-      results.set(k, [...(results.get(k) ?? []), { ok: !m[1], directive: directive ? `${directive[2].toUpperCase()}${directive[3]}` : null }]);
-    }
-  }
-  return runs.flatMap(({ file, names }) => names.flatMap((n) => {
-    const rs = results.get(key(file, n)) ?? [];
-    const at = `test/${file}: ${n}`;
-    if (!rs.length) return [`${at}: didn't run`];
-    if (rs.length > 1) return [`${at}: ran ${rs.length} times (a gated test's name must be unique in its file: the run selects by name)`];
-    const [r] = rs;
-    if (!r.ok) return [`${at}: failed`];
-    if (r.directive) return [`${at}: ${r.directive.trim()} (it must run here: this is the one place it does)`];
-    return [];
-  }));
+  return runs.flatMap(({ file, names, tap }) => {
+    const results = tapResults(tap);
+    return names.flatMap((n) => {
+      const rs = results.filter((r) => r.name === n);
+      const at = `test/${file}: ${n}`;
+      if (!rs.length) return [`${at}: didn't run`];
+      if (rs.length > 1) return [`${at}: ran ${rs.length} times (a gated test's name must be unique in its file: the run selects by name)`];
+      const [r] = rs;
+      if (!r.ok) return [`${at}: failed`];
+      if (r.directive) return [`${at}: ${r.directive.trim()} (it must run here: this is the one place it does)`];
+      const below = [];
+      const walk = (x) => x.children.forEach((c) => (below.push(c), walk(c)));
+      walk(r);
+      const bad = below.find((c) => !c.ok || c.directive);
+      if (bad) return [`${at}: its subtest "${bad.name}" ${bad.ok ? bad.directive.trim() : 'failed'} (all of it must run here)`];
+      return [];
+    });
+  });
 }
 
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');

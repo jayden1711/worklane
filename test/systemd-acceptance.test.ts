@@ -16,6 +16,7 @@ type Script = {
   mentionCount: (text: string) => number;
   findAll: (dir: string) => { file: string; names: string[] }[];
   problems: (runs: { file: string; names: string[]; tap: string }[]) => string[];
+  gateLikeCount: (text: string) => number;
 };
 const sa = (await import(pathToFileURL(join(repoRoot, 'scripts', 'ci', 'systemd-acceptance.mjs')).href)) as Script;
 
@@ -26,7 +27,7 @@ const gate = (sp = ' ') => `skip:${sp}!${flag}`;
 const tmp = () => mkdtempSync(join(tmpdir(), 'sa-'));
 
 type Step = { run?: string; uses?: string; name?: string };
-type Job = { name?: string; if?: string; 'runs-on'?: unknown; container?: unknown; 'continue-on-error'?: unknown; steps?: Step[] };
+type Job = { name?: string; if?: string; 'runs-on'?: unknown; container?: unknown; 'continue-on-error'?: unknown; 'timeout-minutes'?: unknown; steps?: Step[] };
 
 test('every test gated on the systemd CI flag is found by its gate, and the 3 from #1165 are among them', () => {
   const found = sa.findAll(join(repoRoot, 'test'));
@@ -56,8 +57,8 @@ test('a gated test passes the run only by running and passing: a skip, a todo, a
   assert.deepEqual(run('ok 1 - acceptance: a # TODO later\nok 2 - acceptance: b \\# c\n'), ['test/f.test.ts: acceptance: a: TODO later (it must run here: this is the one place it does)']);
   assert.deepEqual(run('not ok 1 - acceptance: a\nok 2 - acceptance: b \\# c\n'), ['test/f.test.ts: acceptance: a: failed']);
   assert.deepEqual(run('ok 1 - acceptance: a\n'), ["test/f.test.ts: acceptance: b # c: didn't run"]);
-  // A subtest's line (indented) is not the test's own result.
-  assert.deepEqual(sa.problems([{ file: 'f.test.ts', names: ['acceptance: a'], tap: '    ok 1 - acceptance: a\n' }]), ["test/f.test.ts: acceptance: a: didn't run"]);
+  // A gated test inside a describe() is an indented line: its result, read at any depth (R1169c).
+  assert.deepEqual(sa.problems([{ file: 'f.test.ts', names: ['acceptance: a'], tap: '    ok 1 - acceptance: a\nok 1 - suite\n' }]), []);
 });
 
 test("a same-named test that passes can't hide a gated test's skip, in its own file or another (R1169b #1)", () => {
@@ -116,6 +117,7 @@ test("ci.yml's systemd-acceptance job: GitHub's VM on each push to main, never s
   assert.equal(job['runs-on'], 'ubuntu-24.04');
   assert.equal(job.container, undefined);
   assert.equal(job['continue-on-error'], undefined, 'its failure is a failure');
+  assert.ok(typeof job['timeout-minutes'] === 'number' && job['timeout-minutes'] <= 120, 'a hung test fails it within a bound (R1169d)');
   assert.doesNotMatch(JSON.stringify(job), /CI_SELF_HOSTED|self-hosted|trusted-/);
   const steps = job.steps ?? [];
   assert.equal(steps.at(-1)?.run, 'node scripts/ci/systemd-acceptance.mjs', 'the script is the last step, run as itself');
@@ -125,3 +127,44 @@ test("ci.yml's systemd-acceptance job: GitHub's VM on each push to main, never s
   assert.ok(i((s) => /tsc -p tsconfig\.json/.test(s.run ?? '')) > pins, 'built with the locked tsc after the pin check');
   assert.ok(i((s) => /scripts\/setup\/machine\.sh/.test(s.run ?? '')) < steps.length - 1, 'machine.sh before the tests');
 });
+
+test('a gated test nested in a describe() or a t.test() is read at its depth: a same-named pass elsewhere in the file can\'t hide its skip (R1169c)', () => {
+  const names = ['acceptance: x'];
+  // The gated test inside a describe() skips; an ungated top-level test of the same name passes after it.
+  const hidden = '    ok 1 - acceptance: x # SKIP needs systemd\nok 1 - suite\nok 2 - acceptance: x\n';
+  assert.deepEqual(sa.problems([{ file: 'a.test.ts', names, tap: hidden }]), [
+    "test/a.test.ts: acceptance: x: ran 2 times (a gated test's name must be unique in its file: the run selects by name)",
+  ]);
+  // Alone and nested, it fails on its skip as a top-level one would.
+  assert.deepEqual(sa.problems([{ file: 'a.test.ts', names, tap: '    ok 1 - acceptance: x # SKIP needs systemd\nok 1 - suite\n' }]), ['test/a.test.ts: acceptance: x: SKIP needs systemd (it must run here: this is the one place it does)']);
+});
+
+test("a gated test passes only when all of it ran: a subtest that skips, is a todo or fails fails it (R1169d #3)", () => {
+  const names = ['acceptance: parent'];
+  const run = (tap: string) => sa.problems([{ file: 'p.test.ts', names, tap }]);
+  assert.deepEqual(run('    ok 1 - the real check # SKIP no systemd\nok 1 - acceptance: parent\n'), ['test/p.test.ts: acceptance: parent: its subtest "the real check" SKIP no systemd (all of it must run here)']);
+  assert.deepEqual(run('        ok 1 - deeper # TODO later\n    ok 1 - step\nok 1 - acceptance: parent\n'), ['test/p.test.ts: acceptance: parent: its subtest "deeper" TODO later (all of it must run here)']);
+  assert.deepEqual(run('    not ok 1 - step\nok 1 - acceptance: parent\n'), ['test/p.test.ts: acceptance: parent: its subtest "step" failed (all of it must run here)']);
+  assert.deepEqual(run('    ok 1 - step\nok 1 - acceptance: parent\n'), [], 'its subtests all passed');
+  // Another test's subtests are not its own.
+  assert.deepEqual(run('    ok 1 - skipped # SKIP x\nok 1 - other\nok 2 - acceptance: parent\n'), []);
+});
+
+test('a systemd flag under another name, or a gate in a helper module, stops it, so no gated test is hidden (R1169d #1, #2)', () => {
+  // Renamed (the flag spelled with a d): its skip names a flag shaped like the gate, and no gate this reads.
+  let dir = tmp();
+  writeFileSync(join(dir, 'engine.test.ts'), `const ${'system'}dCi = false;\ntest('acceptance: renamed', { skip: !${'system'}dCi && 'x' }, () => {});\n`);
+  assert.throws(() => sa.findAll(dir), /test\/engine\.test\.ts: 1 skip\(s\) that look like a systemd gate, 0 a gate this reads/);
+  // A flag read from systemd's sign under another name.
+  dir = tmp();
+  writeFileSync(join(dir, 'engine.test.ts'), `const onVm = existsSync('${'/run/systemd'}/system');\ntest('acceptance: other', { skip: !onVm && 'x' }, () => {});\n`);
+  assert.throws(() => sa.findAll(dir), /onVm read\(s\) systemd's sign under another name/);
+  // A gated test registered from a helper module (not *.test.ts), as test/browser-helpers.ts registers tests.
+  dir = tmp();
+  writeFileSync(join(dir, 'sys-helpers.ts'), `export function acceptance() { test('acceptance: from a helper', { ${gate()} && 'x' }, () => {}); }\n`);
+  writeFileSync(join(dir, 'user.test.ts'), "import { acceptance } from './sys-helpers.js';\nacceptance();\n");
+  assert.throws(() => sa.findAll(dir), /test\/sys-helpers\.ts: a systemd gate outside a \*\.test\.ts file/);
+  // A test that checks for systemctl itself, with "systemd" only in its reason, is not a gate.
+  assert.equal(sa.gateLikeCount("{ skip: process.platform !== 'linux' || !which('systemctl') ? 'needs systemd' : false }"), 0);
+});
+
