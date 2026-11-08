@@ -1,9 +1,12 @@
 // The coordinator as a service: one per project per machine (a pid lock), never tied to a Claude session.
 // It recovers on start, ticks, and backs up the log hourly with verified read-back.
 import { PINS_FILE } from './experiments/store.js';
+import { INHERITED_CREDENTIAL_VARS } from './credential-env.js';
 import { AUTOMATIONS_FILE, AutomationsPolicy } from './automations/schema.js';
 import { githubGet } from './automations/github.js';
 import { execFileSync } from './os/child-process.js';
+import { GIT_GUARD_VAR } from './os/git.js';
+import { lockGitDir } from './os/git-dir-lock.js';
 import { readFileSync, statSync } from 'node:fs';
 import { checkRepoScope } from './github-scope.js';
 import { appBotIdentity, installationTokens } from './github-app.js';
@@ -39,7 +42,7 @@ import { CliRunner, type AgentRunner, type CommitIdentity } from './runner.js';
 import { CliAgentRunner, withCliAgents } from './cli-agents.js';
 import type { CliAgentName } from './providers.js';
 import { latestBaseline } from './baseline.js';
-import { instanceAutoMerge, instanceConfigProblems, instanceProblems, instancesDir, laneRuns, researchLanes, loadInstance, readPolicy, type Instance, type InstanceSettings, type PolicyFile } from './instance.js';
+import { instanceAutoMerge, instanceConfigProblems, instanceProblems, instancesDir, isInstalledKeyPath, laneRuns, researchLanes, loadInstance, readPolicy, type Instance, type InstanceSettings, type PolicyFile } from './instance.js';
 import { startConfig } from './config/live.js';
 import { instanceTargets, migrationGate, projectConfigFiles } from './migrations.js';
 import { settingsReader } from './settings.js';
@@ -49,7 +52,7 @@ import { setupPreviews } from './preview/wire.js';
 import { intakeForInstance, type IntakeWiring } from './intake/wire.js';
 import { prodRead } from './prodread.js';
 import { coordinatorHooksDir, writeCoordinatorHooks } from './push-guard.js';
-import { stableNodePath, type ProjectRunAs, type ServiceSpec } from './os/index.js';
+import { homeOf, stableNodePath, type ProjectRunAs, type ServiceSpec } from './os/index.js';
 import { ownEnv, type EnvSource } from './os/own-env.js';
 import { toolPath } from './tool-path.js';
 import { cachedRoles, repoPermission, type RoleOf } from './dashboard-auth.js';
@@ -139,7 +142,7 @@ export const instanceServiceLabel = (name: string) => `dev.${BRAND.cli}.instance
  */
 export function instanceEnv(i: Instance, base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...base };
-  for (const k of ['GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN']) delete env[k];
+  for (const k of INHERITED_CREDENTIAL_VARS) delete env[k];
   // The coordinator's git runs in checkouts agents can write to: none of the repo's hooks and no fsmonitor command,
   // whatever its config says. Its hooks are its own (writeCoordinatorHooks, in its instance home, this user's only):
   // the pre-push hook that refuses the default branch, and nothing else. Not written yet: no hooks at all.
@@ -149,6 +152,9 @@ export function instanceEnv(i: Instance, base: NodeJS.ProcessEnv = process.env):
   ];
   if (i.credentials.github.kind === 'gh-config-dir') {
     env.GH_CONFIG_DIR = i.credentials.github.path;
+    // #926: the guard (src/os/git.ts) reads no global config, where `gh auth setup-git` (credentials.sh) put gh's
+    // helper, and clears every helper a file names: git authenticates through gh's helper set here instead.
+    git.push(['credential.helper', ''], ['credential.helper', '!gh auth git-credential']);
   } else {
     // App mode: gh has no login to fall back on, and git gets each token from the App through a credential helper.
     env.GH_CONFIG_DIR = join(i.stateDir, 'no-gh-login');
@@ -162,6 +168,10 @@ export function instanceEnv(i: Instance, base: NodeJS.ProcessEnv = process.env):
   });
   if (i.credentials.claude) env.CLAUDE_CONFIG_DIR = i.credentials.claude.config_dir;
   env[`${BRAND.envPrefix}_INSTANCE`] = i.name;
+  // #926: every git this process runs (all through src/os/git.ts) is guarded: no global config, no command
+  // or host a config file names, and none run at all while a file sets one of those it can't set over.
+  // The mark is the checkout's path: a guarded git in one of its worktrees is pinned to it (src/os/git.ts pinRepo).
+  env[GIT_GUARD_VAR] = i.repo?.path ?? '1';
   // INVARIANT: no inherited variable decides where the coordinator's children (gh, git, claude) send credentials;
   // only root's network.json sets a proxy (src/network.ts). This env becomes the coordinator's process.env.
   return outboundEnv(env);
@@ -180,6 +190,22 @@ export function writeInstanceHooks(i: Pick<Instance, 'home' | 'config'>): string
  */
 export function instanceRuntime(i: { credentials: { agent_api_key?: string | undefined } }): { runtime: 'cli' | 'api_key'; apiKeyFile?: string } {
   return i.credentials.agent_api_key ? { runtime: 'api_key', apiKeyFile: i.credentials.agent_api_key } : { runtime: 'cli' };
+}
+
+/**
+ * The API key file an instance's runner hands to apiKeyHelper, which sends the file's text to the API (#949): only
+ * where credentials.sh <name> api-key installs it, `<agent home>/.config/<instance>-claude-key/api_key`, the home
+ * from the user database, never instance.yaml's agent_home. WHY: credentials.yaml is the coordinator user's to write,
+ * so any other path (an SSH key the agent user can read) would go to the API as the key. Throws: no coordinator starts.
+ */
+export function instanceApiKeyFile(i: { name: string; credentials: { agent_api_key?: string | undefined }; runAs: { user: string } | null }, lookup: (user: string) => string | null = homeOf): string | undefined {
+  const file = instanceRuntime(i).apiKeyFile;
+  if (file === undefined) return undefined;
+  if (!i.runAs) throw new Error(`credentials.yaml names an agent API key (${file}), but the instance's agents don't run as their own user (instance.yaml run_as), so it isn't used; the coordinator doesn't start`);
+  const home = lookup(i.runAs.user);
+  if (!home) throw new Error(`credentials.yaml names an agent API key, but the user database has no home for the agent user ${i.runAs.user}; the coordinator doesn't start`);
+  if (!isInstalledKeyPath(home, file, i.name)) throw new Error(`credentials.yaml's agent_api_key ${file} is not where credentials.sh ${i.name} api-key installs the key (${home}/.config/${i.name}-claude-key/api_key), so it isn't sent to the API; rerun credentials.sh ${i.name} api-key. The coordinator doesn't start`);
+  return file;
 }
 
 /** Run an instance's coordinator. Refuses to start without the instance's own credentials. */
@@ -204,6 +230,23 @@ export async function runInstanceCoordinator(name: string, opts: { once?: boolea
   const missing = instanceProblems(i);
   if (missing.length) {
     console.error(`instance ${name} not started:\n${missing.map((m) => `  ${m}`).join('\n')}`);
+    return 1;
+  }
+  // #926: agents run as another user in the checkout's group: its .git/ is this user's alone (but what their worktrees
+  // write), as checkout.sh leaves it, so an install from before is locked by its first start on this engine.
+  if (i.runAs) {
+    const unlocked = lockGitDir(i.repo.path);
+    if (unlocked.length) {
+      console.error(`instance ${name} not started: its checkout's .git/ can't be made this user's alone (#926):\n${unlocked.slice(0, 10).map((m) => `  ${m}`).join('\n')}\nrun scripts/setup/checkout.sh ${name} ${i.repo.repo} as root, which does it`);
+      return 1;
+    }
+  }
+  // The agents' API key file: only the installed path is ever sent (#949).
+  let agentKeyFile: string | undefined;
+  try {
+    agentKeyFile = instanceApiKeyFile(i);
+  } catch (e) {
+    console.error(`instance ${name} not started: ${(e as Error).message}`);
     return 1;
   }
   // Agents' guardrails: checked here so a missing install stops the instance at start, and again for every run.
@@ -310,7 +353,7 @@ export async function runInstanceCoordinator(name: string, opts: { once?: boolea
   const vendor = (agent: CliAgentName) => new CliAgentRunner(agent, { runAs: (lane) => lanes[lane]?.runAs, identity });
   // Approved plugins (src/plugins/run.ts): root's allowlist and store, checked before every run.
   const plugins = ({ role }: { role: string }) => pluginsForRun({ instance: i.name, instanceHome: i.home, role });
-  const claude = new CliRunner(instanceRuntime(i).runtime, process.env, 'claude', i.runAs ?? undefined, allLanes(i), identity, {}, () => guardrailSettings(i.home, i.name, i.repo.path), instanceRuntime(i).apiKeyFile, login, plugins, { instance: i.name, register: (role, ttlMs) => registerRun(i.name, role, ttlMs), end: (ticket) => endRun(i.name, ticket) }, i.repo.path, start.cfg.project.project.default_branch, start.note === null ? undefined : start.cfg.guardrails.secret_paths, worktreePlaces(i.repo.path, start.cfg.tests.worktree.root, agentTasksDir(i.repo.path, i.stateDir, i.runAs ?? undefined)));
+  const claude = new CliRunner(instanceRuntime(i).runtime, process.env, 'claude', i.runAs ?? undefined, allLanes(i), identity, {}, () => guardrailSettings(i.home, i.name, i.repo.path), agentKeyFile, login, plugins, { instance: i.name, register: (role, ttlMs) => registerRun(i.name, role, ttlMs), end: (ticket) => endRun(i.name, ticket) }, i.repo.path, start.cfg.project.project.default_branch, start.note === null ? undefined : start.cfg.guardrails.secret_paths, worktreePlaces(i.repo.path, start.cfg.tests.worktree.root, agentTasksDir(i.repo.path, i.stateDir, i.runAs ?? undefined)));
   return runSite(siteForInstance(i), { ...opts, instance: i.name, label: `instance ${name}`, lockScope, protection: watchApi, offsiteConfig: join(i.home, OFFSITE_FILE), ...(i.credentials.provider_keys ? { providerKeys: i.credentials.provider_keys } : {}), testRun, intake, roleOf, liveConfig, watchdog, incidents: incidentSink(i.name), accountSwitched: () => accountSwitchedAt(i.name), superfan: superfanView(i.name, i.stateDir), ...(i.runAs ? { experiments: { instance: i.name, pinsFile: join(i.home, PINS_FILE) } } : {}), automations: { file: join(i.home, AUTOMATIONS_FILE), policy: () => readPolicy(join(i.home, 'policy.yaml')).policy?.automations ?? AutomationsPolicy.parse(undefined) }, ...(mainWatch ? { mainWatch } : {}), ...(mergePosts ? { mergePosts } : {}), ...(ciMetrics ? { ciMetrics } : {}) }, withCliAgents(claude, { codex: vendor('codex'), gemini: vendor('gemini') }), expiry, tokens, i.runAs ?? undefined, gh.kind === 'app' ? gh.key_path : undefined, identity, () => instanceAutoMerge(name), settingsReader(join(i.home, 'policy.yaml')));
 }
 

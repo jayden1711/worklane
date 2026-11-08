@@ -6,6 +6,7 @@ import { accessSync, constants, existsSync, lstatSync, mkdirSync, mkdtempSync, r
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, isAbsolute, join, resolve as resolvePath } from 'node:path';
 import { BRAND } from '../brand.js';
+import { gitConfigRefusal, gitEnv, gitExecFileSync, gitSnapshot, gitSpawnSync, type GitSnapshot } from '../os/git.js';
 import { ignoredNames, presentNames, rawChanges, untrackedNames } from '../coordinator/change-files.js';
 import { notRootsProgram } from '../os/index.js';
 import { findTool } from '../tool-path.js';
@@ -114,7 +115,7 @@ export const GIT_HOOK_MARKER = `# managed by ${BRAND.cli}`;
  * config route to another hooks dir needs modelling; that file must be the engine's, and executable.
  */
 export function commitHookSkipped(top: string): string | null {
-  const r = spawnSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir', '--git-path', 'hooks/pre-commit'], { cwd: top, encoding: 'utf8', timeout: 5_000 });
+  const r = gitSpawnSync(['rev-parse', '--path-format=absolute', '--git-common-dir', '--git-path', 'hooks/pre-commit'], { cwd: top, encoding: 'utf8', timeout: 5_000 });
   const [common, runs] = r.error || r.status !== 0 ? [] : String(r.stdout).split('\n');
   if (!common || !runs) return "git can't say which pre-commit hook it runs here";
   const engine = join(common, 'hooks', 'pre-commit');
@@ -130,33 +131,39 @@ export function commitHookSkipped(top: string): string | null {
 
 function scanComparisons(top: string, binary: string | null | undefined, comparisonsOf: () => [string, () => Compared[]][]): ScanResult {
   if (!binary) return { status: 'unavailable', error: 'gitleaks not found on PATH' };
+  // Refuse an instance checkout's planted programs before any content reads (#926): for either layer.
+  const refused = gitConfigRefusal(top);
+  if (refused) return { status: 'unavailable', error: refused };
   const tmp = mkdtempSync(join(tmpdir(), 'scan-commit-'));
   try {
     const comparisons = comparisonsOf();
-    // WHY: the checkout's own rules, as the scan of its diff read them before; never a rules file the content brings.
-    const own = join(top, '.gitleaks.toml');
-    const config = join(tmp, 'gitleaks.toml');
-    writeFileSync(config, existsSync(own) ? readFileSync(own) : '[extend]\nuseDefault = true\n');
+    // WHY (#1128): never rules the agent can write. The project's own rules as committed on origin's default branch
+    // (its allowlists among them, which the owner merged), else the scanner's built-in rules; a working-tree or index
+    // `.gitleaks.toml` (the agent's to write) is never read.
+    const configs = [join(tmp, 'gitleaks.toml')];
+    writeFileSync(configs[0]!, committedRules(top) ?? BUILT_IN_RULES);
     // WHY (#971): never an ignore list: not one on disk, and not one the commit itself brings (see SCANNER_NAMES).
     const noIgnores = join(tmp, 'no-ignores');
     writeFileSync(noIgnores, '');
     // WHY: the report holds the secrets themselves (they are compared), so it lives in the scan's own temporary folder
     // and is deleted as soon as it is read; only rule names and paths leave this function.
     const scan = (root: string, scannerNamed: boolean): Map<string, string[]> => {
-      const report = `${root}.json`;
-      const r = spawnSync(binary, ['dir', '.', '--config', config, '--gitleaks-ignore-path', noIgnores, '--no-banner', '--report-format', 'json', '--report-path', report, '--exit-code', String(LEAKS_EXIT)], { cwd: root, encoding: 'utf8', timeout: 120_000 });
-      if (r.error) throw r.error;
       const keys = new Map<string, string[]>();
-      if (r.status === 0) return keys;
-      if (r.status !== LEAKS_EXIT) throw new Error(`gitleaks exited ${r.status}: ${(r.stderr || '').trim().split('\n').pop()}`);
-      try {
-        for (const f of JSON.parse(readFileSync(report, 'utf8')) as { RuleID: string; File: string; Secret: string }[]) {
-          let file = f.File.replace(/^\.\//, '');
-          if (scannerNamed) file = file.slice(SCANNER_DIR.length + 1);
-          keys.set(file, [...(keys.get(file) ?? []), `${f.RuleID}\0${f.Secret}`]);
+      for (const [n, config] of configs.entries()) {
+        const report = `${root}-${n}.json`;
+        const r = spawnSync(binary, ['dir', '.', '--config', config, '--gitleaks-ignore-path', noIgnores, '--no-banner', '--report-format', 'json', '--report-path', report, '--exit-code', String(LEAKS_EXIT)], { cwd: root, encoding: 'utf8', timeout: 120_000 });
+        if (r.error) throw r.error;
+        if (r.status === 0) continue;
+        if (r.status !== LEAKS_EXIT) throw new Error(`gitleaks exited ${r.status}: ${(r.stderr || '').trim().split('\n').pop()}`);
+        try {
+          for (const f of JSON.parse(readFileSync(report, 'utf8')) as { RuleID: string; File: string; Secret: string }[]) {
+            let file = f.File.replace(/^\.\//, '');
+            if (scannerNamed) file = file.slice(SCANNER_DIR.length + 1);
+            keys.set(file, [...(keys.get(file) ?? []), `${f.RuleID}\0${f.Secret}\0${n}`]);
+          }
+        } finally {
+          rmSync(report, { force: true });
         }
-      } finally {
-        rmSync(report, { force: true });
       }
       return keys;
     };
@@ -217,6 +224,27 @@ const ZERO = /^0+$/;
  * whether the scanner reads the file.
  */
 const TEXT_PREFIX = Buffer.alloc(65_536, 0x0a);
+/** The scanner's own rules, which no project file changes (#1128). */
+const BUILT_IN_RULES = '[extend]\nuseDefault = true\n';
+
+/** The most of a committed rules file the commit scan reads. */
+const RULES_MAX_BYTES = 1024 * 1024;
+
+/**
+ * The project's `.gitleaks.toml` as committed on origin's default branch (#1128): what `refs/remotes/origin/HEAD`
+ * names, else `main`, as the push gate reads its rules (scripts/push-gate-hook.mjs). Null when there is none, or it
+ * can't be read: the built-in rules still apply. Never the working tree's or the index's copy, which the agent writes.
+ */
+export function committedRules(top: string): Buffer | null {
+  const git = (args: string[]) => gitSpawnSync(args, { cwd: top, encoding: 'buffer', maxBuffer: RULES_MAX_BYTES + 1, timeout: 60_000 });
+  const head = git(['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD']);
+  const branch = head.status === 0 && head.stdout.toString('utf8').trim() ? head.stdout.toString('utf8').trim() : 'origin/main';
+  if (!/^origin\/[A-Za-z0-9._/-]+$/.test(branch)) return null;
+  const r = git(['cat-file', 'blob', `refs/remotes/${branch}:.gitleaks.toml`]);
+  if (r.error || r.status !== 0 || r.stdout.length > RULES_MAX_BYTES) return null;
+  return r.stdout;
+}
+
 /** Names the scanner reads as its own settings at the root of what it scans; such a file of the commit goes lower. */
 const SCANNER_NAMES = new Set(['.gitleaksignore', '.gitleaks.toml', '.gitleaksbaseline']);
 const SCANNER_DIR = 'scanner-named';
@@ -226,7 +254,7 @@ const text = (b: Buffer) => Buffer.from(b.toString('latin1').replace(/\0/g, ''),
 
 /** git in the checkout, for an object or a revision (never a list of changes: those come from the change reader). */
 function gitOut(top: string, args: string[], input?: string): Buffer {
-  const r = spawnSync('git', ['--no-replace-objects', ...args], { cwd: top, encoding: 'buffer', maxBuffer: 1024 * 1024 * 1024, timeout: 60_000, ...(input !== undefined ? { input: Buffer.from(input, 'utf8') } : {}) });
+  const r = gitSpawnSync(['--no-replace-objects', ...args], { cwd: top, encoding: 'buffer', maxBuffer: 1024 * 1024 * 1024, timeout: 60_000, ...(input !== undefined ? { input: Buffer.from(input, 'utf8') } : {}) });
   if (r.error) throw r.error;
   if (r.status !== 0) throw new Error(`git ${args[0]} failed: ${r.stderr.toString('utf8').trim().split('\n').pop() ?? `exit ${r.status}`}`);
   return r.stdout;
@@ -309,7 +337,7 @@ const emptyTree = (top: string) => gitOut(top, ['hash-object', '-t', 'tree', '--
 
 /** HEAD's commit id, or null on a branch with no commit yet. */
 function headId(top: string): string | null {
-  const r = spawnSync('git', ['--no-replace-objects', 'rev-parse', '--verify', '-q', 'HEAD^{commit}'], { cwd: top, encoding: 'utf8', timeout: 60_000 });
+  const r = gitSpawnSync(['--no-replace-objects', 'rev-parse', '--verify', '-q', 'HEAD^{commit}'], { cwd: top, encoding: 'utf8', timeout: 60_000 });
   if (r.error) throw r.error;
   return r.status === 0 ? r.stdout.trim() : null;
 }
@@ -408,7 +436,7 @@ export function checkReadPrograms(top: string, scope: CommitScanScope, depth = 0
   }
   // WHY: git's own reading of the monitor setting: a boolean is git's own daemon; anything else is a program's path.
   if (config.has('core.fsmonitor')) {
-    const r = spawnSync('git', ['config', '--type=bool', '--get', 'core.fsmonitor'], { cwd: top, encoding: 'utf8', timeout: 60_000 });
+    const r = gitSpawnSync(['config', '--type=bool', '--get', 'core.fsmonitor'], { cwd: top, encoding: 'utf8', timeout: 60_000 });
     if (r.error || r.status !== 0) throw new Error('the checkout\'s config names a file-system monitor program, which git runs while it reads changes');
   }
   if (scope.logReads && signer) throw new Error(`the checkout's config names a program git runs to check signatures (${signer}), and the line shows commits before it commits`);
@@ -480,7 +508,7 @@ function attributesNameLfs(top: string, config: Map<string, string[]>): boolean 
 
 /** `git var <name>`: the user's or the system's attributes file; null when git names none (GIT_ATTR_NOSYSTEM). */
 function gitVar(top: string, name: string): string | null {
-  const r = spawnSync('git', ['--no-replace-objects', 'var', name], { cwd: top, encoding: 'utf8', timeout: 60_000 });
+  const r = gitSpawnSync(['var', name], { cwd: top, encoding: 'utf8', timeout: 60_000 });
   if (r.error) throw r.error;
   if (r.status === 0) return r.stdout.trim() || null;
   // WHY: a git that names no such file exits with nothing said (no home, GIT_ATTR_NOSYSTEM); a git older than 2.42
@@ -488,7 +516,7 @@ function gitVar(top: string, name: string): string | null {
   if (!r.stderr.trim()) return null;
   if (!/unknown variable|usage: git var/i.test(r.stderr)) throw new Error(`git var ${name} failed, so the attributes file it names can't be checked`);
   if (name === 'GIT_ATTR_SYSTEM') return process.env.GIT_ATTR_NOSYSTEM ? null : '/etc/gitattributes';
-  const set = spawnSync('git', ['config', '--path', '--get', 'core.attributesFile'], { cwd: top, encoding: 'utf8', timeout: 60_000 });
+  const set = gitSpawnSync(['config', '--path', '--get', 'core.attributesFile'], { cwd: top, encoding: 'utf8', timeout: 60_000 });
   if (set.status === 0 && set.stdout.trim()) return set.stdout.trim();
   const xdg = process.env.XDG_CONFIG_HOME || (process.env.HOME ? join(process.env.HOME, '.config') : '');
   return xdg ? join(xdg, 'git', 'attributes') : null;
@@ -629,7 +657,36 @@ function headContent(top: string): (() => Compared[])[] {
  */
 export function scanRange(cwd: string, range: string, binary = findTool('gitleaks')): Promise<ScanResult> {
   if (!binary) return Promise.resolve({ status: 'unavailable', error: 'gitleaks not found on PATH' });
-  return scanAsync(binary, (report) => ['git', '--redact', '--no-banner', '--log-opts', range, '--report-format', 'json', '--report-path', report, '--exit-code', String(LEAKS_EXIT), '.'], cwd);
+  // As scanCommit: no gitleaks (and so no git) on a config the guard refuses (#926).
+  const refused = gitConfigRefusal(cwd);
+  if (refused) return Promise.resolve({ status: 'unavailable', error: refused });
+  // gitleaks walks the range with git: through one gitSnapshot whose shallow file was checked, so a cut written or
+  // removed while it runs changes nothing, and a cut inside the range is never "clean" (#927). Commit ids only there.
+  let snap: GitSnapshot;
+  let ids: string;
+  try {
+    const m = /^([^.].*?)\.\.([^.].*)$/.exec(range);
+    if (!m) throw new Error(`${range} is not a base..head range`);
+    const id = (r: string) => gitExecFileSync(['rev-parse', '--verify', '--end-of-options', `${r}^{commit}`], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+    const [base, head] = [id(m[1]!), id(m[2]!)];
+    snap = gitSnapshot(cwd);
+    const cut = (() => {
+      try {
+        return snap.cutInRange(base, head);
+      } catch (e) {
+        snap.dispose();
+        throw e;
+      }
+    })();
+    if (cut.length) {
+      snap.dispose();
+      return Promise.resolve({ status: 'unavailable', error: `the repo's history is cut inside ${range} (a shallow boundary at ${cut[0]!.slice(0, 12)}): it can't be scanned whole` });
+    }
+    ids = `${base}..${head}`;
+  } catch (e) {
+    return Promise.resolve({ status: 'unavailable', error: `can't read ${range} whole: ${String((e as Error).message).split('\n')[0]}` });
+  }
+  return scanAsync(binary, (report) => ['git', '--redact', '--no-banner', '--log-opts', ids, '--report-format', 'json', '--report-path', report, '--exit-code', String(LEAKS_EXIT), '.'], cwd, snap.env).finally(() => snap.dispose());
 }
 
 /** Scan one file without blocking (a dashboard upload). Findings name the rule, never the secret (--redact). */
@@ -638,11 +695,13 @@ export function scanFile(path: string, binary = findTool('gitleaks')): Promise<S
   return scanAsync(binary, (report) => ['dir', path, '--redact', '--no-banner', '--max-decode-depth', '2', '--report-format', 'json', '--report-path', report, '--exit-code', String(LEAKS_EXIT)], undefined);
 }
 
-function scanAsync(binary: string, args: (report: string) => string[], cwd: string | undefined): Promise<ScanResult> {
+function scanAsync(binary: string, args: (report: string) => string[], cwd: string | undefined, env?: NodeJS.ProcessEnv): Promise<ScanResult> {
   const dir = mkdtempSync(join(tmpdir(), 'scan-'));
   const report = join(dir, 'report.json');
   return new Promise((resolve) => {
-    const child = spawn(binary, args(report), { ...(cwd ? { cwd } : {}), stdio: ['ignore', 'ignore', 'pipe'] });
+    // gitleaks runs git itself (`git log -p`): with the git runner's settings, so a replace ref or a graft can't swap
+    // the commits it reads (#807).
+    const child = spawn(binary, args(report), { ...(cwd ? { cwd } : {}), stdio: ['ignore', 'ignore', 'pipe'], env: gitEnv(env) });
     let err = '';
     child.stderr.on('data', (d: Buffer) => (err = (err + d.toString()).slice(-2000)));
     const done = (r: ScanResult) => {

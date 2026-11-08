@@ -6,11 +6,11 @@
 // checkout's .claude/settings.json (keeping the project's own entries), for
 // local runs without an instance. Re-running is safe: our entries are
 // recognized by a marker and replaced, never duplicated.
-import { execFileSync } from './os/child-process.js';
+import { gitExecFileSync } from './os/git.js';
 import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, readlinkSync, renameSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { agentSettingsPath, GUARD_ON_FAILURE, HOOK_MARKER, installCommand, type HookEntry, type Settings } from './agent-settings.js';
+import { agentSettingsPath, GUARD_MATCHER, GUARD_ON_FAILURE, HOOK_MARKER, installCommand, type HookEntry, type Settings } from './agent-settings.js';
 import { BRAND } from './brand.js';
 import { loadConfig, type Config } from './config/load.js';
 import { instancesDir, policiesForRepo } from './instance.js';
@@ -174,7 +174,7 @@ export function mergeSettings(existing: Settings, enginePath: string, preApprove
   const hooks = { ...(s.hooks ?? {}) };
   const ours: Record<string, HookEntry> = {
     // onFailure "block": a guard that times out, can't start or crashes blocks the call (src/agent-settings.ts GUARD_ON_FAILURE).
-    PreToolUse: { matcher: 'Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch|Read|Grep|Glob', hooks: [{ type: 'command', command: hookCommand(enginePath, 'pre-tool-use'), timeout: 30, onFailure: GUARD_ON_FAILURE }] },
+    PreToolUse: { matcher: GUARD_MATCHER, hooks: [{ type: 'command', command: hookCommand(enginePath, 'pre-tool-use'), timeout: 30, onFailure: GUARD_ON_FAILURE }] },
     SessionStart: { hooks: [{ type: 'command', command: hookCommand(enginePath, 'session-start'), timeout: 30 }] },
     SessionEnd: { hooks: [{ type: 'command', command: hookCommand(enginePath, 'session-end'), timeout: 300 }] },
     // The post-edit check: feedback only, so it never fails the edit (see hookCommand).
@@ -202,7 +202,7 @@ function readJson(path: string): Settings {
 export function gitRemoteRepo(root: string): string | null {
   try {
     // WHY trim: git ends its answer with a newline; the shared parser (src/managed-apps.ts) takes a URL as given.
-    return githubRepoOf(execFileSync('git', ['remote', 'get-url', 'origin'], { cwd: root, encoding: 'utf8' }).trim());
+    return githubRepoOf(gitExecFileSync(['remote', 'get-url', 'origin'], { cwd: root, encoding: 'utf8' }).trim());
   } catch {
     return null;
   }
@@ -346,7 +346,7 @@ export function installGitHooks(root: string, cfg: Config, engineCli = fileURLTo
  * `branches` (the config's, when there is one) and whatever origin/HEAD names at push time.
  */
 export function installCheckoutPrePush(root: string, branches: string[], engineCli?: string, node: string = stableNodePath().path): string {
-  const common = execFileSync('git', ['rev-parse', '--git-common-dir'], { cwd: root, encoding: 'utf8' }).trim();
+  const common = gitExecFileSync(['rev-parse', '--git-common-dir'], { cwd: root, encoding: 'utf8' }).trim();
   // WHY (#468): the checkout's hook runs node by Homebrew's stable bin/node (or this node's own path), as the service does.
   return installPrePushHook(join(resolve(root, common), 'hooks'), { branches, node, ...(engineCli ? { engine: engineCli } : {}) });
 }
@@ -362,7 +362,7 @@ const shQuote = (s: string) => `'${s.replaceAll("'", "'\\''")}'`;
 export function installGitHook(root: string, engineCli?: string, node: string = stableNodePath().path): string {
   const running = fileURLToPath(new URL('./cli.js', import.meta.url));
   const entry = hookEntry(engineCli && /(^|[/\\])cli\.js$/.test(engineCli) ? engineCli : running);
-  const common = execFileSync('git', ['rev-parse', '--git-common-dir'], { cwd: root, encoding: 'utf8' }).trim();
+  const common = gitExecFileSync(['rev-parse', '--git-common-dir'], { cwd: root, encoding: 'utf8' }).trim();
   const hooksDir = join(resolve(root, common), 'hooks');
   mkdirSync(hooksDir, { recursive: true });
   const hook = join(hooksDir, 'pre-commit');

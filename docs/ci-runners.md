@@ -13,6 +13,8 @@ A self-hosted runner runs a job's code on this machine. A pull request's code is
 - on the one branch given at install, `main` by default (`GITHUB_REF`, and no pull request head or base ref), and
 - from a workflow file read from that branch (`GITHUB_WORKFLOW_REF`). A branch that edits a workflow and dispatches its own copy is refused too.
 
+One exception, set at install and never by a workflow: a runner installed with `--pull-requests same-repo` also takes pull requests into that branch from the repo's own branches, never a fork's ("The tests runner", below).
+
 Three layers enforce this. The first is the one that can't be got around from a workflow file:
 
 1. **The runner refuses.** Its job-started hook (`scripts/setup/ci-runner/job-hook.sh`) checks the variables above before the job's first step and fails the job if any doesn't hold. The runner sets them itself, and a workflow can't override `GITHUB_*` variables. None of a refused job's code runs here.
@@ -44,6 +46,40 @@ gh api repos/<owner>/<repo>/actions/permissions/workflow
 ```
 
 A repo under a personal account has no runner groups, so GitHub can't limit a runner to chosen workflows; the hook above does that. The branch named at install should be protected by a ruleset (pull requests and required checks), since whatever lands on it runs here.
+
+## The tests runner
+
+The unit test shards (`test-shard-22`, `test-shard-24`) and their summaries (the required `test (ubuntu-latest, 22)` and `(…, 24)` checks) can run on a second runner on the same machine: a registration, user (`wl-ci-<name>`), firewall table, rootless Docker and units of its own, with the label `trusted-tests`. It differs from the main-only runner in one rule: installed with `--pull-requests same-repo`, its hook also takes a `pull_request` into the branch whose head branch is in this repo itself. The runner writes the event GitHub sent to `GITHUB_EVENT_PATH` before the hook runs; the hook refuses the job unless that event names this repo as both the head's and the base's, the ref is `refs/pull/<n>/merge` for the same `<n>`, and the base is the branch. A fork's pull request never runs there, nor does `pull_request_target`.
+
+Why a runner of its own rather than the main-only one with a new rule: a same-repo branch hasn't been reviewed, and its workflow file is the branch's own copy. Everyone who can push a branch here can already push code that runs on this machine once merged, so the line held is "people with write access", not "reviewed code". Keeping those jobs on a separate user and label means a main-only runner never takes one, and nothing a pull request's job leaves behind (it can't leave much: one job per start, then the reset) can reach the main-only runner's user, Docker or directories. Every other boundary (the sandboxed unit, the firewall, no sudo, no secrets, the full-run lock, the slice's caps) is the same.
+
+A shard needs what the main-only runner refuses: root for its setup steps (apt, `machine.sh`, subordinate ids), servers on `127.0.0.1`, and Chrome. On the tests runner it runs in a container (`container:` in `ci.yml`, an official image pinned by digest) through the runner's rootless Docker: root inside it is the runner user outside, the container has a loopback of its own (none of the machine's; its traffic leaves through `slirp4netns` as the runner user, so the firewall still applies), and its Chrome is Chrome for Testing, pinned and checked. The tests themselves run as a non-root user inside it, as on GitHub's runners. Both runners' Docker daemons and their containers run at the unit's `Nice=` (`--nice`, 10 for this one) and under `worklane-ci.slice`'s CPU weight.
+
+Routing, in `ci.yml`, with its own switch: `vars.CI_SELF_HOSTED_TESTS == 'on'` and either a push to `main` or a `pull_request` into `main` with `github.event.pull_request.head.repo.full_name == github.repository`; everything else, forks' pull requests included, stays on GitHub's runners with the same check names. `scripts/ci/self-hosted-guard.mjs` accepts that pull request guard only in `runs-on`'s guarded form and only with the head term.
+
+What the shards need from inside the container, and where it comes from:
+
+- **Nested user namespaces** for a non-root user (bubblewrap as `nobody`, `unshare --map-auto` as the test user). Where `kernel.apparmor_restrict_unprivileged_userns` is 1 (Ubuntu 24.04's default), that is AppArmor's call. Under rootless Docker, a container's processes descend from `rootlesskit` and keep its AppArmor label, `worklane-ci-rootlesskit (unconfined)`: the profile `ci-runner.sh install` already loads, which allows user namespaces. So no profile for `/usr/bin/unshare` is needed on the machine, and none is added. (An earlier measurement under rootful Docker said otherwise: there a container is unconfined and the restriction applies.) The bubblewrap step checks both as the shard starts and fails, before any test, if either is missing.
+- **Subordinate ids inside the container's own range.** Rootless Docker maps the container's ids 0 to 65536. `useradd` would give the test user 165536 and up, outside them, where `newuidmap` is refused, so the setup creates it with none and gives it 2000 to 59999.
+- **A `/tmp` on a real local file system.** The image's root is overlay, where native file locks fail closed. `/tmp` is an anonymous volume, on the daemon's data root, one per job; the reset prunes it.
+- **An init that reaps orphans** (`--init`). The runner makes `tail -f /dev/null` the container's process 1, which reaps none, so a stopped process tree's children would stay as zombies that the tests see as still running.
+- **The test user for every step that runs a test file**, the backstop and the lint tests too (so the container's setup is the first step: it runs only `ci.yml`'s own commands), **with umask 022**. The container's `docker exec` gives 0, and the test user's login 002.
+- **What GitHub's image has and the tests use**: jq, git-lfs, python3 with pip, strace, fakeroot, and supplementary groups for the test user.
+
+**Measured, 2026-11-07, on GitHub's Ubuntu 24.04 VMs set up as the tests runner's host:** `machine.sh` (its bubblewrap profile only), Docker 29.8.2 rootless from `ci-runner.sh`'s pinned release with its rootlesskit profile, and the daemon as a systemd unit with the docker unit's settings. The job's container was started as the Actions runner starts one, and `ci.yml`'s own steps were run in it in order, read from the file. Every test file of the suite ran on Node 24, as a push to `main` runs them, in 4 shards: 6,094 tests, none failed, none hung (each shard's tests took 4 to 19 minutes). What still skips there and not on GitHub's runners: the 3 acceptance tests that need a booted systemd (a container has no systemd as process 1, and the runner chooses process 1). Not measured: Node 22, the machine itself (its firewall table and the runner unit's own sandbox), and two shards on one machine at once.
+
+**Still off.** Turning it on (`CI_SELF_HOSTED_TESTS`) is the owner's call, after installing the runner. With it on, the 3 systemd acceptance tests run nowhere: they run only in the shards.
+
+Install it beside (or without) the main-only runner:
+
+```
+bash scripts/setup/ci-runner.sh --print install <owner>/<repo> 2 --name <name>-tests --label trusted-tests --pull-requests same-repo --nice 10 --no-lock-jobs test-22,test-24 --cpus <list> --memory-max <size>
+sudo bash scripts/setup/ci-runner.sh install <owner>/<repo> 2 --name <name>-tests --label trusted-tests --pull-requests same-repo --nice 10 --no-lock-jobs test-22,test-24 --cpus <list> --memory-max <size>
+sudo bash scripts/setup/ci-runner.sh check <owner>/<repo> --name <name>-tests
+gh variable set CI_SELF_HOSTED_TESTS --repo <owner>/<repo> --body on
+```
+
+`--cpus` and `--memory-max` set `worklane-ci.slice`, which every CI runner on the machine shares: give the same values to every runner's install. `--no-lock-jobs test-22,test-24`: the summaries run no tests. `gh variable delete CI_SELF_HOSTED_TESTS --repo <owner>/<repo>` sends the shards back to GitHub's runners.
 
 ## What runs where
 

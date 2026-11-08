@@ -347,7 +347,7 @@ test('placeholder text is AA on every light background a field can have', () => 
  *  Keyed by place and by the exact class there, so a fixed line that something else moves onto doesn't stay excused. */
 const RING_OWED: Record<string, string> = {
   'web/src/components/FirstTask.tsx:8: focus:shadow-[0_0_0_1px_var(--blue)]': 'after #664 / #633 merge',
-  'web/src/pages/Board.tsx:268: focus:shadow-[0_0_0_1px_var(--blue)]': 'after #664 / #633 merge',
+  'web/src/pages/Board.tsx:270: focus:shadow-[0_0_0_1px_var(--blue)]': 'after #664 / #633 merge',
 };
 
 test('focus and selection rings use the ring token, not the accent', () => {

@@ -28,7 +28,7 @@
 // stand aside in a managed app's repo, as the locks do there (src/review.ts lockedCategories).
 import { BRAND } from './brand.js';
 import { changedNames, changeFiles, exactMoves, filesAt, filesWithText, mergeBaseOf, mergedTree } from './coordinator/change-files.js';
-import { globToRegExp } from './guardrails/glob.js';
+import { globRegExp } from './guardrails/glob.js';
 import { escapedPath, isNonUtf8Path, shownPath } from './path-text.js';
 import { engineSourceGlob, LOCKED_CATEGORIES, lockedCategories, type ChangeFile, type LockScope } from './review.js';
 
@@ -221,6 +221,8 @@ export const GUARD_FILES: readonly string[] = [
   'src/os/system-paths.ts',
   'src/os/own-env.ts',
   'src/os/child-process.ts',
+  // The git runner (#927): src/coordinator/change-files.ts reads through it, so it runs in a backstop's process too.
+  'src/os/git.ts',
 ];
 
 /** A package manager's settings: every one changes what install and each script run under (`script-shell=`, `ignore-scripts=`). */
@@ -326,7 +328,7 @@ const allHold = (scope: LockScope | undefined) => lockedCategories(scope) === LO
 const holds = (glob: string, scope: LockScope | undefined) => allHold(scope) || !ENGINE_ONLY(glob);
 
 const matcher = (globs: readonly string[], scope: LockScope | undefined) => {
-  const res = globs.filter((g) => holds(g, scope)).map((g) => globToRegExp(g));
+  const res = globs.filter((g) => holds(g, scope)).map((g) => globRegExp(g, 'deny'));
   return (p: string) => res.some((re) => re.test(p));
 };
 

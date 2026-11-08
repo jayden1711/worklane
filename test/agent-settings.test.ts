@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { agentSettingsPath, guardrailSettings, HOOK_MARKER, NO_ATTRIBUTION, projectSettingsRefusal, readAgentSettings, runSettings, SETTINGS_CHECK_KEY, type Settings } from '../src/agent-settings.js';
+import { agentSettingsPath, guardrailSettings, HOOK_MARKER, NO_ATTRIBUTION, projectSettingsRefusal, readAgentSettings, runSettings, SETTINGS_CHECK_KEY, settingsAppliedProblem, settingsCheckValue, type Settings, withRunCheck } from '../src/agent-settings.js';
 import { BRAND } from '../src/brand.js';
 import { doctor } from '../src/doctor.js';
 import { hookEntry, install, invokedEngine } from '../src/install.js';
@@ -13,7 +13,7 @@ import * as installer from '../src/install.js';
 import { childEnv } from '../src/os/index.js';
 import { projectStateDir } from '../src/guardrails/context.js';
 import { CliRunner } from '../src/runner.js';
-import { engineCli, exampleProject, STDIN_LINE } from './helpers.js';
+import { engineCli, exampleProject, repoRoot, STDIN_LINE } from './helpers.js';
 
 const INSTANCES = `${BRAND.envPrefix}_INSTANCES_DIR`;
 const isWindows = process.platform === 'win32';
@@ -215,6 +215,28 @@ test("the attribution pin can never replace the run's --settings check value: th
   const s = c.seen()!.settings! as Record<string, unknown>;
   assert.match(String(s[SETTINGS_CHECK_KEY]), /-settings-check-[0-9a-f]{16}$/, "the run's own check value, not the pin's");
   attributionOff(s as Settings);
+});
+
+test("#697: the check value withRunCheck spreads last passes the run's own check; the reversed order, built here, fails it; the runner builds --settings only through withRunCheck", (t) => {
+  // A pin that grew a value for the check key, as in the test above.
+  const pin = NO_ATTRIBUTION as unknown as Record<string, unknown>;
+  pin[SETTINGS_CHECK_KEY] = 'from-the-attribution-pin';
+  t.after(() => delete pin[SETTINGS_CHECK_KEY]);
+  const locked = { sandbox: { enabled: true }, [SETTINGS_CHECK_KEY]: 'from-the-lane' };
+  const check = settingsCheckValue();
+  // What claude's init event reports for a --settings it applied: its outputStyle, as output_style (the stand-in echoes it).
+  const initOf = (s: Record<string, unknown>) => ({ output_style: s[SETTINGS_CHECK_KEY] });
+  const real = withRunCheck(locked, check) as Record<string, unknown>;
+  assert.equal(settingsAppliedProblem(initOf(real), check, 'x'), null, "the runner's order: the run's own check value");
+  attributionOff(real as Settings);
+  // The reversed order, built inside the test (never by editing src/): the pin spread after the check key.
+  const reversed = (s: object, c: string) => ({ ...s, [SETTINGS_CHECK_KEY]: c, ...NO_ATTRIBUTION }) as Record<string, unknown>;
+  assert.equal(reversed(locked, check)[SETTINGS_CHECK_KEY], 'from-the-attribution-pin');
+  assert.match(settingsAppliedProblem(initOf(reversed(locked, check)), check, 'x') ?? '', /did not apply the --settings/, 'the same check the run makes refuses it');
+  // The runner decides the order nowhere else: its one --settings is withRunCheck's, and it spreads neither part itself.
+  const src = readFileSync(join(repoRoot, 'src', 'runner.ts'), 'utf8');
+  assert.match(src, /const settings = locked && check \? withRunCheck\(locked, check\) : undefined;/);
+  assert.doesNotMatch(src, /\.\.\.NO_ATTRIBUTION|\[SETTINGS_CHECK_KEY\]/, 'no spread of its own');
 });
 
 test("doctor checks an instance's agent hooks where they now live, and fails an older install's project-level hooks", (t) => {

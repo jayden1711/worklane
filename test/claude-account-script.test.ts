@@ -353,6 +353,29 @@ test("status <instance>: only that instance's records are found again; every oth
   assert.ok(!m.outputs(r).includes(OLD), 'never the token');
 });
 
+test("#822: status asks claude with the CLAUDE_CONFIG_DIR the instance's runs use, so the record names their login, not the user's default one", { skip: !posix }, () => {
+  const m = machine();
+  // alpha's runs use a config dir of their own (instance.yaml run_as.claude_config_dir), signed in to another account;
+  // the agent user's default ~/.claude holds a token claude refuses.
+  const home = join(m.T, 'homes', 'wl-alpha-agent');
+  const own = join(home, 'runs-login');
+  mkdirSync(own, { recursive: true, mode: 0o700 });
+  writeFileSync(join(own, '.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: OLD, expiresAt: Date.now() + 86_400_000 } }), { mode: 0o600 });
+  writeFileSync(join(own, '.claude.json'), JSON.stringify({ oauthAccount: { emailAddress: 'runs@example.com', organizationName: 'Runs' } }), { mode: 0o600 });
+  writeFileSync(m.cred('wl-alpha-agent'), JSON.stringify({ claudeAiOauth: { accessToken: 'not-a-login', expiresAt: 0 } }), { mode: 0o600 });
+  const inst = join(m.T, 'homes', 'wl-alpha', '.local', 'state', 'worklane', 'instances', 'alpha', 'instance.yaml');
+  writeFileSync(inst, readFileSync(inst, 'utf8').replace('  eval_user: wl-alpha-eval\n', `  eval_user: wl-alpha-eval\n  claude_config_dir: ${own}\n`));
+  const r = m.run(['status', '--json', 'alpha']);
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  const users = (JSON.parse(r.stdout) as { users: { user: string; logged_in: boolean; account: string | null; api_ok: boolean | null }[] }).users;
+  const agent = users.find((u) => u.user === 'wl-alpha-agent')!;
+  assert.equal(agent.logged_in, true, "the runs' login is signed in");
+  assert.equal(agent.account, 'runs@example.com', "the account the runs' config dir names");
+  assert.equal(agent.api_ok, true, "the login's proof call runs on that login too");
+  // The eval user has no config dir of its own: its runs, and its status, use <home>/.claude.
+  assert.equal(users.find((u) => u.user === 'wl-alpha-eval')!.account, 'old@example.com');
+});
+
 test('issue #463: a login the API refuses: status records the refusal with Claude\'s words, redacted (and fails), and the first-run step reads it', { skip: !posix }, () => {
   const m = machine();
   writeFileSync(join(m.T, 'refuse-api-wl-beta-agent'), '');

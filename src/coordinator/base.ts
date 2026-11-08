@@ -1,7 +1,7 @@
 // The coordinator's state and the helpers every part uses: its fields and constructor (the runner wrapper),
 // events, git, project commands, paths and task files, the governor, cost, asking, blocking and releasing.
 import type { Coordinator } from '../coordinator.js';
-import { execFileSync } from '../os/child-process.js';
+import { gitExecFileSync } from '../os/git.js';
 import { randomBytes } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 import { BRAND } from '../brand.js';
@@ -34,7 +34,7 @@ import { seen } from '../intake/store.js';
 import { stuckMode } from '../settings.js';
 import { stuckOption } from './stuck-guard.js';
 import { type CoordinatorDeps, LOCK_WAIT_RECORDED_MS, RETRY_CAP, sh, StoppedByOwner, type LiveEntry, Halted, ShuttingDown, UsagePaused, AuthPaused } from './shared.js';
-import { AUTH_CHECK, AUTH_OWNER_RECHECK_MS, AUTH_RECHECK_MS, authHoldsOf, authIncidentKey, authIncidentText, DEFAULT_LOGIN_KEY, type AuthHold } from '../claude-auth-failure.js';
+import { AUTH_CHECK, AUTH_OWNER_RECHECK_MS, AUTH_RECHECK_MS, authHoldsOf, authIncidentKey, authIncidentOwnerDetail, authIncidentText, DEFAULT_LOGIN_KEY, type AuthHold } from '../claude-auth-failure.js';
 import { takeAuthRecheck } from '../claude-auth-recheck.js';
 import { limitHit, pauseOf, resetWords, USAGE_INCIDENT, type LimitHit, type UsagePause } from '../usage-limit.js';
 import { cappedModel } from './model-routing.js';
@@ -307,7 +307,7 @@ export abstract class CoordinatorBase {
   }
 
   protected git(cwd: string, ...args: string[]) {
-    return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+    return gitExecFileSync(args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
   }
 
   protected emit<T extends Parameters<EventLog['append']>[0]>(type: T, payload: EventPayload<T>) {
@@ -410,7 +410,8 @@ export abstract class CoordinatorBase {
     const h = this.authHold(key)!;
     if (!was) {
       const t = authIncidentText(this.authHolds());
-      this.d.incidents?.raiseIncident('claude_auth', authIncidentKey(this.d.instance), t.detail, t.fix);
+      // #695: with the machine owners' detail, so theirs is never staler than the writers' (no wait for the watchdog).
+      this.d.incidents?.raiseIncident('claude_auth', authIncidentKey(this.d.instance), t.detail, t.fix, authIncidentOwnerDetail(this.authHolds()));
     }
     return h;
   }

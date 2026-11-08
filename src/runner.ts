@@ -9,7 +9,7 @@ import { makePlace } from './worktrees.js';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { join, posix } from 'node:path';
-import { agentSettingsFileOf, NO_ATTRIBUTION, projectSettingsRefusal, runSettings, SETTINGS_CHECK_KEY, settingsAppliedProblem, settingsCheckValue, type Settings } from './agent-settings.js';
+import { agentSettingsFileOf, projectSettingsRefusal, runSettings, settingsAppliedProblem, settingsCheckValue, type Settings, withRunCheck } from './agent-settings.js';
 import { BRAND } from './brand.js';
 import type { CliAgentName } from './providers.js';
 import { logRefusalOnce, providerHostRefusal } from './provider-hosts.js';
@@ -463,8 +463,16 @@ const EFFORT_FLAGS = new Set<string>(EFFORTS);
  * on the machine and sudo logs them to the journal, so the prompt goes on
  * stdin and the role's system prompt in a file (`systemPromptFile`).
  */
+/**
+ * Roles that load no setting source at all (#973): no project instructions (CLAUDE.md), settings or hooks from the
+ * checkout, only the engine's role prompt and its --settings. WHY: a planner's or plan reviewer's checkout is one
+ * setup steps have run in, and its instruction files need one review, not two: text there reached every planner.
+ */
+export const NO_PROJECT_SOURCE_ROLES: readonly string[] = ['planner', 'plan-reviewer'];
+
 export function cliArgs(req: RunRequest, settings?: object, systemPromptFile?: string, pluginDirs: readonly string[] = [], mcpConfigFile?: string): string[] {
-  const args = [...(settings ? ['--settings', JSON.stringify(settings)] : []), '-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--model', req.model, '--setting-sources', 'project', '--strict-mcp-config', '--permission-mode', 'dontAsk', '--max-turns', String(req.maxTurns), '--max-budget-usd', String(req.maxBudgetUsd)];
+  const sources = NO_PROJECT_SOURCE_ROLES.includes(req.role) ? '' : 'project';
+  const args = [...(settings ? ['--settings', JSON.stringify(settings)] : []), '-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--model', req.model, '--setting-sources', sources, '--strict-mcp-config', '--permission-mode', 'dontAsk', '--max-turns', String(req.maxTurns), '--max-budget-usd', String(req.maxBudgetUsd)];
   // WHY: not on a provider run: whether an open model's endpoint takes the effort parameter is unknown (#579).
   if (req.effort && EFFORT_FLAGS.has(req.effort) && !req.provider) args.push('--effort', req.effort);
   if (req.allowedTools.length) args.push('--allowedTools', ...req.allowedTools);
@@ -800,10 +808,10 @@ export class CliRunner implements AgentRunner {
     // Attribution off in every --settings a run gets, with or without instance guardrails (#576); a run passed none gets none.
     // INVARIANT (#626): every --settings carries a fresh check value, and the run stops unless claude's init event
     // reports it before any line but a system one, and never succeeds without it: claude drops a whole --settings
-    // over one invalid value, silently. The check key is spread last, so nothing above (NO_ATTRIBUTION included) can
-    // replace it.
+    // over one invalid value, silently. withRunCheck spreads the check key last, so nothing above (NO_ATTRIBUTION
+    // included) can replace it.
     const check = locked ? settingsCheckValue() : null;
-    const settings = locked && check ? { ...locked, ...NO_ATTRIBUTION, [SETTINGS_CHECK_KEY]: check } : undefined;
+    const settings = locked && check ? withRunCheck(locked, check) : undefined;
     const agentFile = guard ? agentSettingsFileOf(guard) : undefined;
     const settingsName = guard ? `the instance's agent settings${agentFile ? ` ${agentFile}` : ''}${withLogins ? ", with the lane's" : ''}` : laneSettings ? "the lane's settings" : "the run's own settings";
     // Requests refused for the network, from the same stream the record and the feed read.

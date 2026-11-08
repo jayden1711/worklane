@@ -7,7 +7,7 @@
 // design (src/setup/app-manifest.ts, scripts/setup/app-permissions.mjs); this only drafts text and builds a link.
 // Once the workflow ran on the default branch, its check is offered for required_checks as an ordinary config
 // change the person reviews and proposes (src/config-change.ts), never written here.
-import { spawnSync } from './os/child-process.js';
+import { commandSpawnSync } from './os/git.js';
 import { BRAND } from './brand.js';
 import { detectProject, NO_TESTS, type Detection } from './auto-config.js';
 import { GITHUB_WEB } from './github-hosts.js';
@@ -166,7 +166,8 @@ export interface StarterCiView extends StarterCi {
 
 type Run = (cmd: string, args: string[], cwd: string) => { status: number | null; stdout: string; stderr: string };
 const realRun: Run = (cmd, args, cwd) => {
-  const r = spawnSync(cmd, args, { cwd, encoding: 'utf8', timeout: 60_000 });
+  // A caller's git (the command named git) through the git runner (#807).
+  const r = commandSpawnSync(cmd, args, { cwd, encoding: 'utf8', timeout: 60_000 });
   return { status: r.error ? null : r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
 };
 

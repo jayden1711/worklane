@@ -5,7 +5,8 @@
 import { lstatSync, opendirSync, realpathSync, statSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { globToRegExp } from './glob.js';
+import { globRegExp, type GlobStyle } from './glob.js';
+import type { OtherCheckouts } from './checkouts.js';
 import type { SimpleCommand } from './shell.js';
 
 /**
@@ -163,8 +164,46 @@ function grepAccesses(input: Record<string, unknown>, cwd: string): Access[] {
   return out;
 }
 
+/** A parameter expansion in a word: `${...}` (no nesting), `$NAME`, or a special or positional parameter. */
+const PARAM = /\$(?:\{([^{}$`]*)\}|[A-Za-z_][A-Za-z0-9_]*|[0-9@*#?$!-])/g;
+
+/**
+ * The words a word with parameter expansions could be (#924): each expansion empty (an unset variable), each a name
+ * with no leading dot (as `*` reads, the shell's default), each `${X:-word}`-style expansion its word, and `$HOME` as
+ * `~`; null when it has none. An expansion the guard can't read (a `${` left open, or one holding `${`, `$(` or a
+ * backquote) is refused: it can't be checked.
+ */
+function paramWords(w: string): string[] | Access | null {
+  if (!w.includes('$')) return null;
+  const opened = (w.match(/\$\{/g) ?? []).length;
+  if (opened !== [...w.matchAll(PARAM)].filter((m) => m[0].startsWith('${')).length) {
+    return { kind: 'unchecked', why: `the shell word ${w} holds a parameter expansion the guard can't read, so it can't be checked for secret files` };
+  }
+  const word = (inner: string | undefined) => (inner === undefined ? null : (/^[A-Za-z_][A-Za-z0-9_]*:?[-=+?](.*)$/s.exec(inner)?.[1] ?? null));
+  const home = (m: string) => m === '$HOME' || m === '${HOME}';
+  const out = new Set<string>([
+    w.replace(PARAM, () => ''),
+    w.replace(PARAM, () => '*'),
+    w.replace(PARAM, (m, inner?: string) => word(inner) ?? ''),
+    w.replace(PARAM, (m) => (home(m) ? '~' : '')),
+  ]);
+  out.delete(w);
+  out.delete('');
+  return [...out];
+}
+
 /** A shell word as the places it names: itself, and what the shell would expand it to (braces, wildcards, classes). */
-function wordAccesses(w: string): Access[] {
+function wordAccesses(w: string, depth = 0): Access[] {
+  const params = paramWords(w);
+  if (params && !Array.isArray(params)) return [params];
+  // A default word may itself hold an expansion: one level more, then refused.
+  if (params?.some((p) => p.includes('$')) && depth > 0) return [{ kind: 'unchecked', why: `the shell word ${w} nests parameter expansions too deep to check for secret files` }];
+  const fromParams = (params ?? []).flatMap((p) => wordAccesses(p, depth + 1));
+  return [...fromParams, ...plainWordAccesses(w)];
+}
+
+/** wordAccesses for the word as written: itself, and its braces, wildcards and classes. */
+function plainWordAccesses(w: string): Access[] {
   const expands = /[*?[{]/.test(w);
   // WHY (#887 review): a long word the shell would expand can't be bounded cheaply, so it is refused before any work.
   // A long plain word is still checked: as a path once resolved (`././…` collapses), see Secrets.reached.
@@ -209,11 +248,13 @@ export interface SecretContext {
   projectRoot: string;
   /** For "~/" globs. */
   home?: string;
+  /** The repository's other checkouts (#939): a relative glob holds in each, its exceptions relative to that checkout. */
+  checkouts?: OtherCheckouts;
 }
 
 /** A glob's segments, each as a pattern for one name; null for `**` (any number of them). */
 type Segs = (RegExp | null)[];
-const segsOf = (segs: string[]): Segs => segs.map((s) => (s.includes('**') ? null : globToRegExp(s)));
+const segsOf = (segs: string[], style: GlobStyle): Segs => segs.map((s) => (s.includes('**') ? null : globRegExp(s, style)));
 
 /** Could a path strictly under `rel` (segments) match the glob segments `pat`? */
 function reachesUnder(pat: Segs, rel: string[]): boolean {
@@ -233,10 +274,10 @@ interface Filter {
 /** A filter glob; `shell`: as the shell expands a word (no `**`, and a wildcard never starts a dot-name). */
 function filterOf(glob: string, shell: boolean): Filter {
   const parts = glob.split('/').filter(Boolean);
-  if (!shell) return { re: globToRegExp(glob), segs: segsOf(parts) };
+  if (!shell) return { re: globRegExp(glob, 'deny'), segs: segsOf(parts, 'deny') };
   const flat = parts.map((s) => s.replace(/\*\*+/g, '*'));
-  const res = flat.map((s) => `${/^[*?]/.test(s) ? '(?!\\.)' : ''}${globToRegExp(s).source.slice(1, -1)}`);
-  return { re: new RegExp(`^${res.join('/')}$`, 's'), segs: segsOf(flat) };
+  const res = flat.map((s) => `${/^[*?]/.test(s) ? '(?!\\.)' : ''}${globRegExp(s, 'deny').source.slice(1, -1)}`);
+  return { re: new RegExp(`^${res.join('/')}$`, 's'), segs: segsOf(flat, 'deny') };
 }
 
 const posixRel = (from: string, to: string) => relative(from, to).split('\\').join('/');
@@ -322,9 +363,14 @@ interface Glob {
   literalStart: boolean;
   /** An absolute glob ("/..."): before #847 it was tested on the path as the call wrote it, `..` kept (see Secrets.written). */
   fromRoot: boolean;
+  /** A project glob ("./" or bare): it holds in every other checkout too, from `lit` under that checkout (#939). */
+  relative: boolean;
+  /** The literal directories it names; none for a glob that starts with `**` (its `at` is "/" wherever it holds). */
+  lit: string[];
 }
 
-function parseGlob(g: string, ctx: SecretContext): Glob | null {
+/** `style`: a secret glob is `deny`, an exception (a leading "!") `allow`. */
+function parseGlob(g: string, ctx: SecretContext, style: GlobStyle): Glob | null {
   const home = g.startsWith('~/');
   const base = home ? ctx.home : isAbsolute(g) ? '/' : ctx.projectRoot;
   if (base === undefined) return null;
@@ -332,7 +378,7 @@ function parseGlob(g: string, ctx: SecretContext): Glob | null {
   if (rest.endsWith('/')) rest += '**';
   const s = split(rest);
   const anywhere = !home && !s.literal.length && (s.rest[0] ?? '').includes('**');
-  return { base, homeOnly: home, re: globToRegExp(rest), at: anywhere ? '/' : resolve(base, ...s.literal), rest: segsOf(s.rest), literalStart: s.literal.length > 0, fromRoot: !home && isAbsolute(g) };
+  return { base, homeOnly: home, re: globRegExp(rest, style), at: anywhere ? '/' : resolve(base, ...s.literal), rest: segsOf(s.rest, style), literalStart: s.literal.length > 0, fromRoot: !home && isAbsolute(g), relative: !home && !isAbsolute(g), lit: anywhere ? [] : s.literal };
 }
 
 /**
@@ -355,12 +401,12 @@ export class Secrets {
   constructor(globs: string[], private readonly ctx: SecretContext, limits: { ms?: number; now?: () => number } = {}) {
     this.now = limits.now ?? (() => performance.now());
     this.deadline = this.now() + (limits.ms ?? WALK_MS);
-    const parse = (g: string) => {
-      const p = parseGlob(g, ctx);
+    const parse = (g: string, style: GlobStyle) => {
+      const p = parseGlob(g, ctx, style);
       return p ? [p] : [];
     };
-    this.pos = globs.filter((g) => !g.startsWith('!')).flatMap(parse);
-    this.neg = globs.filter((g) => g.startsWith('!')).flatMap((g) => parse(g.slice(1)));
+    this.pos = globs.filter((g) => !g.startsWith('!')).flatMap((g) => parse(g, 'deny'));
+    this.neg = globs.filter((g) => g.startsWith('!')).flatMap((g) => parse(g.slice(1), 'allow'));
   }
 
   /** `written`: the path as the call wrote it (Secrets.written), which an absolute glob is tested on instead of `abs`. */
@@ -375,7 +421,20 @@ export class Secrets {
    * glob (and its exclusions) is tested on the path as written instead, as before #847.
    */
   at(abs: string, dirToo = true, written?: string): boolean {
-    return this.pos.some((g) => Secrets.hit(g, abs, dirToo, written)) && !this.neg.some((g) => Secrets.hit(g, abs, false, written));
+    return (this.pos.some((g) => Secrets.hit(g, abs, dirToo, written)) && !this.neg.some((g) => Secrets.hit(g, abs, false, written))) || this.inOther(abs, dirToo);
+  }
+
+  /**
+   * Is `abs` a secret of another checkout it lies in (#939): one of the project globs, tested relative to that
+   * checkout's root, and none of their exceptions. Each checkout is worked out on its own, so an exception holds only
+   * in the checkout it is relative to.
+   */
+  private inOther(abs: string, dirToo: boolean): boolean {
+    const c = this.ctx.checkouts?.of(abs);
+    if (!c) return false;
+    const rel = posixRel(c, abs);
+    const hit = (g: Glob, dir: boolean) => g.relative && (g.re.test(rel) || (dir && g.re.test(`${rel}/`)));
+    return this.pos.some((g) => hit(g, dirToo)) && !this.neg.some((g) => hit(g, false));
   }
 
   private expanded(target: string): string {
@@ -400,11 +459,17 @@ export class Secrets {
    * lets that walk skip .git and node_modules, as the chat lane's walk does. A root inside another walked one adds
    * nothing, unless that one skips what this one must not.
    */
-  private walkRoots(dir: string): { root: string; skip: boolean }[] {
+  private walkRoots(dir: string): { root: string; skip: boolean }[] | 'too-many' {
     const roots = new Map<string, boolean>();
-    for (const g of this.pos) {
-      if (g.at !== dir && within(dir, g.at)) roots.set(g.at, false);
-      else if (within(g.at, dir) && reachesUnder(g.rest, posixRel(g.at, dir).split('/').filter(Boolean))) roots.set(dir, (roots.get(dir) ?? true) && !g.literalStart);
+    // A project glob holds in each other checkout too (#939): the one `dir` lies in, and each under it.
+    const others = this.ctx.checkouts ? this.ctx.checkouts.under(dir) : [];
+    if (others === 'too-many') return others;
+    const inside = this.ctx.checkouts?.of(dir);
+    const bases = [...new Set([...others, ...(inside ? [inside] : [])])];
+    const starts = this.pos.flatMap((g) => [{ g, at: g.at }, ...(g.relative && g.at !== '/' ? bases.map((b) => ({ g, at: resolve(b, ...g.lit) })) : [])]);
+    for (const { g, at } of starts) {
+      if (at !== dir && within(dir, at)) roots.set(at, false);
+      else if (within(at, dir) && reachesUnder(g.rest, posixRel(at, dir).split('/').filter(Boolean))) roots.set(dir, (roots.get(dir) ?? true) && !g.literalStart);
     }
     const all = [...roots].map(([root, skip]) => ({ root, skip }));
     const covered = (r: { root: string; skip: boolean }, o: { root: string; skip: boolean }) =>
@@ -436,7 +501,9 @@ export class Secrets {
     if (this.late()) return 'too-large';
     const wanted = (rel: string, isDir: boolean) => !filter || filter.some((f) => f.re.test(rel) || (isDir && f.re.test(`${rel}/`)));
     const holds = (rel: string) => !filter || filter.some((f) => reachesUnder(f.segs, rel.split('/').filter(Boolean)));
-    for (const { root, skip } of this.walkRoots(dir)) {
+    const roots = this.walkRoots(dir);
+    if (roots === 'too-many') return 'too-large';
+    for (const { root, skip } of roots) {
       // `inSecret`: reached through a symlink that leads into a secret, so a secret wherever its own path points.
       const stack: Entry[] = [];
       const first = entryAt(root);

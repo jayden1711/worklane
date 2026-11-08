@@ -12,9 +12,40 @@
 # all, and it says why: fail closed.
 # FETCH_STATUS_DIR: the status files' directory (the tests' stand-in); plugins.sh writes them in the default.
 preview_done() {
-  local name="$1" id="$2" st ent rc home tail mark got secrets="" dropped=0
+  local name="$1" id="$2" st
   st="${FETCH_STATUS_DIR:-/var/lib/worklane/plugins/fetch-status}/$name.json"
   [ "$(sudo jq -r '.id + " " + .state' "$st" 2>/dev/null)" = "$id done" ] && return 0
+  fetch_journal "$name"
+  echo "the preview of $id didn't finish: $(sudo jq -c . "$st" 2>/dev/null || echo 'no status')" >&2
+  return 1
+}
+
+# snapshot_done <instance> <id> <preview file>, right after `mcp-snapshot <id>`: waits for that snapshot's own mark, the
+# preview's snapshotWithSecrets (the broker sets it with a snapshot or with its error), and prints the status. On
+# "<id> failed", or no mark after SNAPSHOT_WAIT_TRIES (90) waits of 2 s, it prints the fetch unit's journal (as
+# preview_done does) and the status, and returns 1.
+# WHY (#679): until the snapshot's unit writes "running", the status file still says "<id> done" from the preview, so a
+# wait on the status alone could return at once and the next check read the preview's snapshotWithSecrets == false.
+snapshot_done() {
+  local name="$1" id="$2" p="$3" st i
+  st="${FETCH_STATUS_DIR:-/var/lib/worklane/plugins/fetch-status}/$name.json"
+  for ((i = 0; i < ${SNAPSHOT_WAIT_TRIES:-90}; i++)); do
+    if sudo jq -e '.snapshotWithSecrets == true' "$p" > /dev/null 2>&1; then
+      sudo jq -c . "$st" 2>/dev/null || true
+      return 0
+    fi
+    [ "$(sudo jq -r '.id + " " + .state' "$st" 2>/dev/null)" = "$id failed" ] && break
+    sleep 2
+  done
+  fetch_journal "$name"
+  echo "the snapshot of $id didn't finish: $(sudo jq -c . "$st" 2>/dev/null || echo 'no status')" >&2
+  return 1
+}
+
+# fetch_journal <instance>: the fetch unit's journal tail on stderr, without any line holding an MCP secret's value
+# (the INVARIANT above).
+fetch_journal() {
+  local name="$1" ent rc home tail mark got secrets="" dropped=0
   tail="$(sudo journalctl -u "worklane-plugin-fetch-$name.service" --no-pager 2>&1 | tail -n 30)" || true
   # One read of every secret value, as root, ending in a mark only a whole read prints: "none-<mark>" when there is no
   # secrets dir (none set yet), the values then "<mark>" when every file was read. No broker user (getent's 2): no
@@ -40,6 +71,5 @@ preview_done() {
   fi
   [ -z "$tail" ] || printf '%s\n' "$tail" >&2
   [ "${dropped:-0}" -eq 0 ] || echo "($dropped journal lines holding an MCP secret left out)" >&2
-  echo "the preview of $id didn't finish: $(sudo jq -c . "$st" 2>/dev/null || echo 'no status')" >&2
-  return 1
+  return 0
 }
