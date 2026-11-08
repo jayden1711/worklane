@@ -1,5 +1,5 @@
 // Decisions: held plans, refused hosts, and the owner's answers on issues.
-import { spawnSync } from '../os/child-process.js';
+import { gitSpawnSync } from '../os/git.js';
 import { randomBytes } from 'node:crypto';
 import { rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -69,7 +69,7 @@ export abstract class Decisions extends Recovery {
     }
     const review: ReviewConfig = this.d.cfg.review ?? DEFAULT_REVIEW;
     // The plan gate: always (the default) holds every plan for the owner; risky only one the merge policy's checks hold.
-    const reasons = gateReasons(this.d.cfg.project.plan_gate, planHoldReasons(plan, { review, moneyPaths: this.moneyPaths(review.money_path_source), scope: lockScopeOf(this.d), existsAtBase: (d) => spawnSync('git', ['cat-file', '-e', `${base}:${d}`], { cwd: this.d.repo }).status === 0 }));
+    const reasons = gateReasons(this.d.cfg.project.plan_gate, planHoldReasons(plan, { review, moneyPaths: this.moneyPaths(review.money_path_source), scope: lockScopeOf(this.d), existsAtBase: (d) => gitSpawnSync(['cat-file', '-e', `${base}:${d}`], { cwd: this.d.repo }).status === 0 }));
     await this.d.backlog.comment(n, planComment(plan, owner, reasons));
     const commentsAt = (await this.d.backlog.comments(n)).length;
     if (reasons.length) {
@@ -207,15 +207,15 @@ export abstract class Decisions extends Recovery {
     const file = `${BRAND.configDir}/guardrails.yaml`;
     this.git(this.d.repo, 'fetch', '-q', this.remote, this.branch);
     const base = this.git(this.d.repo, 'rev-parse', `${this.remote}/${this.branch}`);
-    const shown = spawnSync('git', ['show', `${base}:${file}`], { cwd: this.d.repo, encoding: 'utf8' });
+    const shown = gitSpawnSync(['show', `${base}:${file}`], { cwd: this.d.repo, encoding: 'utf8' });
     if (shown.status !== 0) return { pr: null, detail: `${file} isn't on ${this.branch}, so no change was proposed` };
     const next = withAllowedHost(shown.stdout, host);
     if (next === null) return { pr: null, detail: `${host} is already allowed on ${this.branch}` };
-    const blob = spawnSync('git', ['hash-object', '-w', '--stdin'], { cwd: this.d.repo, encoding: 'utf8', input: next }).stdout.trim();
+    const blob = gitSpawnSync(['hash-object', '-w', '--stdin'], { cwd: this.d.repo, encoding: 'utf8', input: next }).stdout.trim();
     const index = join(this.d.stateDir, `allow-${randomBytes(3).toString('hex')}.index`);
     const env = { ...process.env, GIT_INDEX_FILE: index, GIT_AUTHOR_NAME: this.identity.name, GIT_AUTHOR_EMAIL: this.identity.email, GIT_COMMITTER_NAME: this.identity.name, GIT_COMMITTER_EMAIL: this.identity.email };
     const g = (args: string[], input?: string) => {
-      const r = spawnSync('git', args, { cwd: this.d.repo, encoding: 'utf8', env, ...(input !== undefined ? { input } : {}) });
+      const r = gitSpawnSync(args, { cwd: this.d.repo, encoding: 'utf8', env, ...(input !== undefined ? { input } : {}) });
       if (r.status !== 0) throw new Error(`git ${args[0]} failed: ${(r.stderr || '').trim().slice(-300)}`);
       return r.stdout.trim();
     };

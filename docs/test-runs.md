@@ -217,6 +217,23 @@ Once per machine, as root, in this order:
 
 `sudo bash scripts/setup/gpu-devices.sh revert` removes the modprobe file, the modules-load file, the udev rule, the `nvidia-cdi-refresh.service` and `nvidia-persistenced.service` drop-ins, `worklane-gpu-devices.service` (disabled first) and the fixer, gives `nvidia-modprobe` its setuid bit back where there is one and updates the initramfs. The group stays (`sudo groupdel worklane-gpu-dev` removes it). After the next boot the nodes are `root:root 0666` again.
 
+## Machine faults
+
+A step that fails because the machine did is told apart from a failing test (`src/testrun/faults.ts`). Its check says
+what happened on its first line, a `testrun.fault` event records it (the tier, the fault, and the line that showed it),
+and the step is never run again by itself. Output is read only for a step that failed, so a passing test may print any
+of these words. The chaos tests (`test/chaos.test.ts`) inject each fault and hold this behaviour.
+
+| Fault | Seen as | What happens |
+|---|---|---|
+| `gpu_lost` | "No devices were found", an Xid 79, "GPU has fallen off the bus" | The run is a stopped GPU run (never repeated, as above). Its later GPU tiers aren't run (`not run: the GPU was lost in tier <name>`). Its CPU tiers still run. |
+| `host_key_changed` | "REMOTE HOST IDENTIFICATION HAS CHANGED", "Host key verification failed" | Reported; never retried. The engine never accepts a new host key: nothing in `src/` turns off `StrictHostKeyChecking`, uses `accept-new` or empties `known_hosts`, and a test holds that. |
+| `host_unreachable` | `ssh: connect to host … Connection timed out` (or no route, network unreachable, host down) | Reported; never retried. |
+| `disk_full` | "No space left on device", `ENOSPC`, `EDQUOT` | Reported; never retried. Below the free-disk floor no run starts at all (`src/disk-guard.ts`). |
+| `self_matching_wait` | a tier command that waits in an `until`/`while` loop on `pgrep -f …` or `ps … \| grep …` | **Not run.** The step runs under `sh -c "<command>"`, whose own command line holds the pattern, so the wait matches its own shell and never ends. Wait on a pidfile, a lock, or `pgrep -x <exact name>`. |
+
+**A reboot that hangs.** When the coordinator starts after a stop it didn't make (a crash, a power cycle), it records each run that was in flight as `interrupted`, wipes it, and runs a PR's fast run again once. A head whose fast run was cut off twice (`INTERRUPT_LIMIT`, `src/coordinator/test-runs.ts`) isn't run again by itself: its PRs get a failing check saying `cut off 2 times …: not rerun automatically; check the machine, then push again`. A GPU run is never run again after even one cut-off (above).
+
 ## Network
 
 A run's commands have none. Its own loopback works (a test's own servers), and its database is a Unix socket; nothing else. Root grants the network per instance and tier; a repo can only ask.
