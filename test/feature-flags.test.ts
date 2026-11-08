@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { appendFileSync, cpSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import type { EventLog } from '../src/events/log.js';
+import { EventLog } from '../src/events/log.js';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
 import { tmpdir } from 'node:os';
@@ -170,7 +170,7 @@ function onMain(f: Fixture, edit: (p: string) => void, msg: string): string {
 const cfgFile = (root: string) => join(root, '.worklane', 'config.yaml');
 const flips = (f: Fixture) => f.log.read(0, ['flag.flipped']).map((e) => { const p = e.payload as EventPayload<'flag.flipped'>; return [p.flag, p.from, p.to, p.sha]; });
 
-const adopt = (f: Fixture) => adoptFlags({ log: f.log, repo: f.repo, actor: 'i', check: () => [] });
+const adopt = (f: Fixture) => adoptFlags({ log: f.log, repo: f.repo, actor: 'i', branch: 'main', check: () => [] });
 const fetch = (f: Fixture) => git(f.repo, 'fetch', '-q', 'origin', '+refs/heads/main:refs/remotes/origin/main');
 
 test("adoptFlags: the default branch's head as the remote says, when its config is here and valid; each change of state recorded first; no change, no event", async () => {
@@ -263,7 +263,7 @@ test("a config this instance refuses (its check) turns no flag on: main's flags 
     await withKnownFlags([T], async () => {
       onMain(f, (p) => appendFileSync(cfgFile(p), `flags:\n  ${T}: true\n`), 'on');
       fetch(f);
-      adoptFlags({ log: f.log, repo: f.repo, actor: 'i', check: () => [{ file: 'config.yaml', path: '', message: 'this instance refuses it' }] });
+      adoptFlags({ log: f.log, repo: f.repo, actor: 'i', branch: 'main', check: () => [{ file: 'config.yaml', path: '', message: 'this instance refuses it' }] });
       assert.equal(flagOn(T), false);
       assert.deepEqual(flips(f), []);
       adopt(f);
@@ -283,12 +283,12 @@ test('a flag is never on without its record: a flag.flipped that fails to write 
       onMain(f, (p) => appendFileSync(cfgFile(p), `flags:\n  ${T}: true\n`), 'on');
       fetch(f);
       const failing = { read: (...a: Parameters<EventLog["read"]>) => f.log.read(...a), append: () => { throw new Error('disk full'); }, buffered: () => ({ count: 0, dropped: 0, failure: null }) } as unknown as EventLog;
-      assert.throws(() => adoptFlags({ log: failing, repo: f.repo, actor: 'i', check: () => [] }), /disk full/);
+      assert.throws(() => adoptFlags({ log: failing, repo: f.repo, actor: 'i', branch: 'main', check: () => [] }), /disk full/);
       assert.equal(flagOn(T), false);
       // R1173k K2: the buffered log dropped the record (id 0), or holds it in memory: the flag doesn't go on.
       for (const [why, id, count] of [['dropped', 0, 0], ['held in memory', 99, 1]] as const) {
         const lossy = { read: (...a: Parameters<EventLog["read"]>) => f.log.read(...a), append: () => ({ id }), buffered: () => ({ count, dropped: 0, failure: null }) } as unknown as EventLog;
-        adoptFlags({ log: lossy, repo: f.repo, actor: 'i', check: () => [] });
+        adoptFlags({ log: lossy, repo: f.repo, actor: 'i', branch: 'main', check: () => [] });
         assert.equal(flagOn(T), false, why);
       }
       adopt(f);
@@ -401,6 +401,136 @@ test("started on the checkout, then main is valid again on that same tree: recov
       assert.equal(f.log.read(0, ['config.recovered']).length, 1);
       assert.equal(flagOn(T), true, "main's config, at its commit");
       assert.deepEqual(flips(f), [[T, false, true, s2]]);
+    });
+  } finally {
+    clearFlags();
+    f.log.close();
+    rmSync(f.base, { recursive: true, force: true });
+  }
+});
+
+
+/** The disk is full, as test/disk-full.test.ts makes it: the database can't grow, and its pages are filled. */
+function fillLog(log: EventLog) {
+  const pages = (log.db.prepare('PRAGMA page_count').get() as { page_count: number }).page_count;
+  log.db.exec(`PRAGMA max_page_count = ${pages}`);
+  const put = log.db.prepare("INSERT INTO events (ts, type, actor, source, payload) VALUES ('2026-01-01T00:00:00Z', 'coordinator.tick', 'filler', 'coordinator', ?)");
+  for (const size of [4096, 512, 64, 8, 1]) {
+    try {
+      for (;;) put.run(JSON.stringify({ instance: 'filler', dispatched: 0, reconciled: 0, pad: 'x'.repeat(size) }));
+    } catch {
+      // full at this size: try a smaller one
+    }
+  }
+}
+const roomLog = (log: EventLog) => log.db.exec('PRAGMA max_page_count = 1073741823');
+
+test('R1173m 1: on a full disk (real SQLITE_FULL), a held flag.flipped never turns the flag on, on the first tick or the next; once written, it does', async () => {
+  const f = fixture();
+  const log = new EventLog(f.log.path, { buffer: {} });
+  try {
+    await withKnownFlags([T], async () => {
+      onMain(f, (p) => appendFileSync(cfgFile(p), `flags:\n  ${T}: true\n`), 'on');
+      fetch(f);
+      fillLog(log);
+      const a = () => adoptFlags({ log, repo: f.repo, actor: 'i', branch: 'main', check: () => [] });
+      a();
+      assert.equal(flagOn(T), false, 'the first tick: the record is held in memory');
+      a();
+      assert.equal(flagOn(T), false, 'the next tick: the held record reads as recorded, and still turns nothing on');
+      roomLog(log);
+      log.flush();
+      a();
+      assert.equal(flagOn(T), true, 'written: on');
+    });
+  } finally {
+    clearFlags();
+    log.close();
+    f.log.close();
+    rmSync(f.base, { recursive: true, force: true });
+  }
+});
+
+test('R1173m/n N2, N3: main turns a flag off and its record fails to write (not a full disk): the flag is off anyway', async () => {
+  const f = fixture();
+  try {
+    await withKnownFlags([T], async () => {
+      onMain(f, (p) => appendFileSync(cfgFile(p), `flags:\n  ${T}: true\n`), 'on');
+      fetch(f);
+      adopt(f);
+      assert.equal(flagOn(T), true);
+      onMain(f, (p) => writeFileSync(cfgFile(p), readFileSync(cfgFile(p), 'utf8').replace(`${T}: true`, `${T}: false`)), 'off');
+      fetch(f);
+      const busy = { read: (...a: Parameters<EventLog['read']>) => f.log.read(...a), append: () => { throw Object.assign(new Error('database is locked'), { code: 'ERR_SQLITE_ERROR', errcode: 5 }); }, buffered: () => ({ count: 0, dropped: 0, failure: null }) } as unknown as EventLog;
+      assert.throws(() => adoptFlags({ log: busy, repo: f.repo, actor: 'i', branch: 'main', check: () => [] }), /locked/);
+      assert.equal(flagOn(T), false, 'off before the record that failed');
+    });
+  } finally {
+    clearFlags();
+    f.log.close();
+    rmSync(f.base, { recursive: true, force: true });
+  }
+});
+
+test("R1173n M3: origin's HEAD moved to another branch: flags follow only this instance's configured default branch, so none is on", async () => {
+  const f = fixture();
+  try {
+    await withKnownFlags([T], async () => {
+      git(f.repo, 'checkout', '-q', '-b', 'agent');
+      appendFileSync(cfgFile(f.repo), `flags:\n  ${T}: true\n`);
+      git(f.repo, 'add', '-A');
+      git(f.repo, ...ID, 'commit', '-q', '-m', 'agent: on');
+      git(f.repo, 'push', '-q', 'origin', 'agent');
+      git(f.remote, 'symbolic-ref', 'HEAD', 'refs/heads/agent');
+      fetch(f);
+      git(f.repo, 'fetch', '-q', 'origin', 'agent');
+      adopt(f);
+      assert.equal(flagOn(T), false, "origin's HEAD isn't this instance's default branch");
+    });
+  } finally {
+    clearFlags();
+    f.log.close();
+    rmSync(f.base, { recursive: true, force: true });
+  }
+});
+
+test('a default branch that is not main (trunk): flags come from it when it is configured, never when another is', async () => {
+  const f = fixture();
+  try {
+    await withKnownFlags([T], async () => {
+      onMain(f, (p) => appendFileSync(cfgFile(p), `flags:\n  ${T}: true\n`), 'on');
+      git(f.remote, 'branch', '-m', 'main', 'trunk');
+      git(f.remote, 'symbolic-ref', 'HEAD', 'refs/heads/trunk');
+      git(f.repo, 'fetch', '-q', 'origin', '+refs/heads/trunk:refs/remotes/origin/trunk');
+      adoptFlags({ log: f.log, repo: f.repo, actor: 'i', branch: 'main', check: () => [] });
+      assert.equal(flagOn(T), false, 'configured main, origin says trunk: off');
+      adoptFlags({ log: f.log, repo: f.repo, actor: 'i', branch: 'trunk', check: () => [] });
+      assert.equal(flagOn(T), true, 'configured trunk: on');
+    });
+  } finally {
+    clearFlags();
+    f.log.close();
+    rmSync(f.base, { recursive: true, force: true });
+  }
+});
+
+test("R1173m: the coordinator adopts flags even when refreshing the config threw (a config.applied that can't be written)", { skip }, async () => {
+  const f = fixture();
+  try {
+    await withKnownFlags([T], async () => {
+      onMain(f, (p) => appendFileSync(cfgFile(p), `flags:\n  ${T}: true\n`), 'on');
+      const { c } = startOn(f);
+      await ticks(c);
+      assert.equal(flagOn(T), true);
+      // main turns it off and changes another setting, so the poll applies a new config and writes config.applied.
+      onMain(f, (p) => writeFileSync(cfgFile(p), readFileSync(cfgFile(p), 'utf8').replace(`${T}: true`, `${T}: false`) + '# changed\n'), 'off, and a change');
+      const append = f.log.append.bind(f.log);
+      (f.log as { append: unknown }).append = (type: string, ...rest: unknown[]) => {
+        if (type === 'config.applied') throw new Error('write refused');
+        return (append as (...a: unknown[]) => unknown)(type, ...rest);
+      };
+      await ticks(c);
+      assert.equal(flagOn(T), false, 'off, though the config step threw');
     });
   } finally {
     clearFlags();
