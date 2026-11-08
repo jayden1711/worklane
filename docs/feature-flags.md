@@ -14,14 +14,16 @@ new behaviour can be tried on one repo before it reaches the rest. Code: `src/co
   loader read it (the coordinator, the tool guard, the CLI, the dashboard, a branch). The one reader is
   `flagOn('<name>')`. It reads only a snapshot of the flags the default branch's committed config turns on, at one
   commit: the default branch's head, as the remote last said it was, when its config was valid.
-  - The coordinator's config step is the only writer. It names no commit: it asks the remote for the default
-    branch's head (`ls-remote`, never a local ref an agent could move), and adopts that commit's flags only when the
-    commit is here (fetched) and its config is valid, by the schema and by the instance's own checks. Otherwise the
-    last adopted flags stay, as the last good config does; at start, that is none. A test holds that nothing else in
-    `src/` names `adoptFlags`, and since it takes no commit, any caller could only adopt what the default branch
-    says now.
+  - The coordinator's config step is the only writer. Nothing it is passed picks the source: it asks `origin` for
+    its own default branch (its `HEAD`) and that branch's head, by its exact ref (`ls-remote`, never a local ref an
+    agent could move), and adopts that commit's flags only when the commit is here (fetched) and its config is valid,
+    by the schema and by the instance's own check (a required argument). Otherwise, **every flag is off**: a read
+    that failed (the remote unreachable, the commit not fetched, the config invalid or removed) never keeps one on,
+    and isn't cached, so the next tick reads again. A test holds that nothing else in `src/` names `adoptFlags`, and
+    since nothing it takes picks the source, any caller could only adopt what the default branch says now.
+  - A flag goes on only once its `flag.flipped` is durably written: a record the event log dropped or holds in
+    memory (a full disk) turns nothing on.
   - It reads `flags:` in plain code, not through the zod schema.
-  - It writes each `flag.flipped` before the flags change, so a flag is never on without its record.
   - A coordinator started on the checkout's config (main's invalid or missing) adopts nothing until main's config is
     valid: **every flag is off**. A branch, a hand edit, a written-to config object or a polluted prototype never
     turns one on.

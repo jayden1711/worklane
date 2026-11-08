@@ -170,7 +170,7 @@ function onMain(f: Fixture, edit: (p: string) => void, msg: string): string {
 const cfgFile = (root: string) => join(root, '.worklane', 'config.yaml');
 const flips = (f: Fixture) => f.log.read(0, ['flag.flipped']).map((e) => { const p = e.payload as EventPayload<'flag.flipped'>; return [p.flag, p.from, p.to, p.sha]; });
 
-const adopt = (f: Fixture) => adoptFlags({ log: f.log, repo: f.repo, remote: 'origin', branch: 'main', actor: 'i' });
+const adopt = (f: Fixture) => adoptFlags({ log: f.log, repo: f.repo, actor: 'i', check: () => [] });
 const fetch = (f: Fixture) => git(f.repo, 'fetch', '-q', 'origin', '+refs/heads/main:refs/remotes/origin/main');
 
 test("adoptFlags: the default branch's head as the remote says, when its config is here and valid; each change of state recorded first; no change, no event", async () => {
@@ -192,16 +192,21 @@ test("adoptFlags: the default branch's head as the remote says, when its config 
       adopt(f);
       assert.deepEqual(flips(f).slice(1), [['a_flag', true, false, s2], ['b_flag', false, true, s2]]);
       assert.deepEqual(flagState(), { sha: s2, on: ['b_flag'] });
-      // An invalid config at the head, or none: the last adopted stay (as the last good config does), recorded nothing.
+      // An invalid config at the head, or none: every flag off (R1173l D2: a failed read never keeps one on), recorded.
       onMain(f, (p) => appendFileSync(cfgFile(p), 'bogus_top: 1\n'), 'break');
       fetch(f);
       adopt(f);
-      assert.deepEqual(flagState(), { sha: s2, on: ['b_flag'] });
+      assert.deepEqual(flagState(), { sha: null, on: [] });
+      assert.deepEqual(flips(f).at(-1), ['b_flag', true, false, null]);
+      // Fixed again: read again (a failed read is never cached), on again.
+      const s4 = onMain(f, (p) => writeFileSync(cfgFile(p), readFileSync(cfgFile(p), 'utf8').replace('bogus_top: 1\n', '')), 'fix');
+      fetch(f);
+      adopt(f);
+      assert.deepEqual(flagState(), { sha: s4, on: ['b_flag'] });
       onMain(f, (p) => rmSync(join(p, '.worklane'), { recursive: true, force: true }), 'remove');
       fetch(f);
       adopt(f);
-      assert.deepEqual(flagState(), { sha: s2, on: ['b_flag'] }, 'R1173i note 1: a commit with no config adopts nothing');
-      assert.equal(flips(f).length, 3);
+      assert.deepEqual(flagState(), { sha: null, on: [] }, 'a commit with no config: off');
     });
     // A flag the engine stopped knowing that was on is recorded off.
     adopt(f);
@@ -226,16 +231,21 @@ test("adoptFlags reads the remote's head, never a local ref: an agent moving ref
       adopt(f);
       assert.equal(flagOn(T), false, "the local ref is not the remote's head");
       assert.deepEqual(flips(f), []);
-      // main turns it on, and then the remote can't be reached: what was adopted stays, nothing more.
-      const s1 = onMain(f, (p) => appendFileSync(cfgFile(p), `flags:\n  ${T}: true\n`), 'on');
+      // An agent's branch pushed to origin, named to sort before main's line (R1173l D1) or anything else (R1173k K1):
+      // only origin's default branch, by its exact ref, counts.
+      git(f.repo, 'push', '-q', 'origin', 'HEAD:refs/heads/a/refs/heads/main', 'HEAD:refs/heads/agent-task');
+      adopt(f);
+      assert.equal(flagOn(T), false, 'a pushed branch is never the source');
+      // main turns it on, and then the remote can't be reached: every flag off (fail-closed), recorded.
+      onMain(f, (p) => appendFileSync(cfgFile(p), `flags:\n  ${T}: true\n`), 'on');
       fetch(f);
       adopt(f);
       assert.equal(flagOn(T), true);
       renameSync(f.remote, `${f.remote}.gone`);
       try {
         adopt(f);
-        assert.deepEqual(flagState(), { sha: s1, on: [T] }, 'unreachable: the last adopted stay');
-        assert.equal(flips(f).length, 1);
+        assert.deepEqual(flagState(), { sha: null, on: [] }, 'unreachable: off');
+        assert.deepEqual(flips(f).at(-1), [T, true, false, null]);
       } finally {
         renameSync(`${f.remote}.gone`, f.remote);
       }
@@ -253,7 +263,7 @@ test("a config this instance refuses (its check) turns no flag on: main's flags 
     await withKnownFlags([T], async () => {
       onMain(f, (p) => appendFileSync(cfgFile(p), `flags:\n  ${T}: true\n`), 'on');
       fetch(f);
-      adoptFlags({ log: f.log, repo: f.repo, remote: 'origin', branch: 'main', actor: 'i', check: () => [{ file: 'config.yaml', path: '', message: 'this instance refuses it' }] });
+      adoptFlags({ log: f.log, repo: f.repo, actor: 'i', check: () => [{ file: 'config.yaml', path: '', message: 'this instance refuses it' }] });
       assert.equal(flagOn(T), false);
       assert.deepEqual(flips(f), []);
       adopt(f);
@@ -272,9 +282,17 @@ test('a flag is never on without its record: a flag.flipped that fails to write 
     await withKnownFlags([T], async () => {
       onMain(f, (p) => appendFileSync(cfgFile(p), `flags:\n  ${T}: true\n`), 'on');
       fetch(f);
-      const failing = { read: (...a: Parameters<EventLog["read"]>) => f.log.read(...a), append: () => { throw new Error('disk full'); } } as unknown as EventLog;
-      assert.throws(() => adoptFlags({ log: failing, repo: f.repo, remote: 'origin', branch: 'main', actor: 'i' }), /disk full/);
+      const failing = { read: (...a: Parameters<EventLog["read"]>) => f.log.read(...a), append: () => { throw new Error('disk full'); }, buffered: () => ({ count: 0, dropped: 0, failure: null }) } as unknown as EventLog;
+      assert.throws(() => adoptFlags({ log: failing, repo: f.repo, actor: 'i', check: () => [] }), /disk full/);
       assert.equal(flagOn(T), false);
+      // R1173k K2: the buffered log dropped the record (id 0), or holds it in memory: the flag doesn't go on.
+      for (const [why, id, count] of [['dropped', 0, 0], ['held in memory', 99, 1]] as const) {
+        const lossy = { read: (...a: Parameters<EventLog["read"]>) => f.log.read(...a), append: () => ({ id }), buffered: () => ({ count, dropped: 0, failure: null }) } as unknown as EventLog;
+        adoptFlags({ log: lossy, repo: f.repo, actor: 'i', check: () => [] });
+        assert.equal(flagOn(T), false, why);
+      }
+      adopt(f);
+      assert.equal(flagOn(T), true, 'recorded durably: on');
     });
   } finally {
     clearFlags();
