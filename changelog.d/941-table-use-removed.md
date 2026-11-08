@@ -1,0 +1,3 @@
+### Guardrail changes: what each one does
+
+- **A change that takes a use away from a registered check table waits for the owner (#941).** The weakening hold reads tables from lines. So a PR could add a new table under another name, move every use of the registered table to it, and leave the registered table and its mark unchanged and unused, and the hold saw nothing. Now a removed or changed line, in any changed file, that names a registered table outside the table's own lines makes the change wait. That covers a decoy declared in the same file, one imported from another file, and a use elsewhere moved to it. Adding a use, and changing lines that never named the table, still pass.

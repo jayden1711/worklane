@@ -136,3 +136,25 @@ test('the merge decision reads the tip whatever the fetch refspec: a clone that 
   assert.equal(d.auto, false, d.reasons.join(' | '));
   assert.ok(d.reasons.some((r) => r.startsWith(`${weakening.WEAKENING_REASON}removes or changes an entry in a check's rules`)), d.reasons.join(' | '));
 });
+
+// #941: a decoy under a new name with every use moved to it, the registered table and its mark left in place unused.
+const USE_REMOVED = "removes or changes a line that uses a check's or guard's table, so what the engine uses may no longer be that table";
+
+test('decoy (#941): every use moved to a new table under another name waits, in the same file or imported from another', () => {
+  // In the same file: a new declaration, the use switched to it; CHECKS and its mark are unchanged and unused.
+  const same = BASE.replace("test('t', () => { for (const c of CHECKS) void c; });", "export const LIVE = ['a'];\ntest('t', () => { for (const c of LIVE) void c; });");
+  assert.ok(weakens({ [F]: BASE }, { [F]: same }).includes(USE_REMOVED), 'a decoy in the same file');
+  // Imported from a new file: the use switched to the import.
+  const imported = BASE.replace("import { test } from 'node:test';", "import { test } from 'node:test';\nimport { LIVE } from './x-live.js';").replace('of CHECKS)', 'of LIVE)');
+  assert.ok(weakens({ [F]: BASE }, { [F]: imported, 'test/x-live.ts': "export const LIVE = ['a'];\n" }).includes(USE_REMOVED), 'a decoy imported from another file');
+  // A use in another file switched to a decoy: that file's removed line names the table too.
+  const user = "import { CHECKS } from './x-rules.test.js';\nexport const run = () => CHECKS.length;\n";
+  assert.ok(weakens({ [F]: BASE, 'src/x-user.ts': user }, { [F]: BASE, 'src/x-user.ts': "import { LIVE } from './x-live.js';\nexport const run = () => LIVE.length;\n", 'src/x-live.ts': "export const LIVE = ['a'];\n" }).includes(USE_REMOVED), 'a use in another file moved');
+});
+
+test('decoy (#941), control: adding a use of the table, or changing a line that never named it, adds no such reason', () => {
+  const more = BASE.replace("test('t', () => { for (const c of CHECKS) void c; });", "test('t', () => { for (const c of CHECKS) void c; });\ntest('u', () => { void CHECKS.length; });");
+  assert.ok(!weakens({ [F]: BASE }, { [F]: more }).includes(USE_REMOVED));
+  const other = `${BASE}const n = 1;\n`;
+  assert.ok(!weakens({ [F]: other }, { [F]: other.replace('const n = 1;', 'const n = 2;') }).includes(USE_REMOVED));
+});

@@ -383,6 +383,7 @@ const KINDS = {
   'table-grown': 'adds or changes an entry in an allowlist, exception or good-fixture list',
   'allow-file': "adds a line to an allowlist file or a package manager's settings file",
   'table-used': "changes a check's or guard's table outside its own list",
+  'table-use-removed': "removes or changes a line that uses a check's or guard's table, so what the engine uses may no longer be that table",
   'table-hidden': "adds a line that could hide a check's table from the line reader, an escaped name, a name on the next line or a global binding",
   'guard-lines': 'removes or changes a line of a guard or lint',
   marker: 'adds a line with a skip, only or lint or type-check suppression mark',
@@ -1077,6 +1078,15 @@ function findings(i: WeakeningInput): Found {
       // A name built at run time (`eval('ALL' + 'OWED')`, `Function(...)`) has no identifier to match: it waits too.
       const built = BUILT_NAME.test(l);
       if ((names.test(l) && !own(l)) || built) hit('table-used', t.path, `${t.table}: ${l.trim()}`);
+    }
+    // #941: a removed or changed line, in any changed file, that named the table outside its own lines: a use of it is
+    // gone. Every use moved to a decoy declared under a new name (in this file or imported from another), with the
+    // registered table and its mark left in place unused, reads to the line reader as the table unchanged; the lost
+    // uses are what show it. So it waits. A line of the table's own (an entry) is the shrink check's, above.
+    const ownBefore = new Set(was.map(entry));
+    for (const f of i.files) {
+      if (f.path.endsWith('.json')) continue;
+      for (const l of f.removedLines ?? []) if (names.test(l) && !(f.path === t.path && ownBefore.has(entry(l)))) hit('table-use-removed', f.path, `${t.table}: ${l.trim()}`);
     }
   }
 
