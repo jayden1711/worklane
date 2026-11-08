@@ -529,3 +529,22 @@ test("R1124o, 6c: output files of sort, uniq, tree and git's --output are writes
     'NODE_ENV=test npm test',
   ]) assert.notEqual(await decide(d, 'Bash', { command: line }), 'deny', line);
 });
+
+test('R1124p F2: every word of sort, uniq and tree is a write destination, however their options are spelt', { skip }, async () => {
+  const d = checkout();
+  for (const line of [
+    'sort -uo ~/.gitconfig /tmp/gc',
+    'sort -uo .git/hooks/pre-commit /tmp/noop',
+    'sort -uo.git/hooks/pre-commit /tmp/noop',
+    'sort --outp=$HOME/.gitconfig /tmp/gc',
+    'sort --out $HOME/.gitconfig /tmp/gc',
+    'uniq -f 1 /tmp/gc .git/config',
+    'uniq -s 0 /tmp/noop .git/hooks/pre-commit',
+    'uniq --skip-fields 1 /tmp/gc ~/.gitconfig',
+    'uniq -f 0 noop .git/hooks/pre-commit',
+    'tree -fo ~/.gitconfig /tmp',
+  ]) assert.equal(await decide(d, 'Bash', { command: line }), 'deny', line);
+  for (const line of ['sort -uo sorted.txt a.txt', 'sort -k2 -t: a.txt', 'uniq -f 1 a.txt b.txt', 'git log | sort | uniq -c', 'tree -L 2 src']) {
+    assert.notEqual(await decide(d, 'Bash', { command: line }), 'deny', line);
+  }
+});

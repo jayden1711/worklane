@@ -475,15 +475,13 @@ function writeArgs(c: SimpleCommand): string[] {
       });
     }
     if (n === 'dd') out.push(...a.filter((t) => t.startsWith('of=')).map((t) => t.slice(3)));
-    // R1124o D1: sort -o / --output and tree -o write their output file; uniq writes its second operand.
-    if (n === 'sort' || n === 'tree') {
-      a.forEach((t, i) => {
-        if ((t === '-o' || t === '--output') && a[i + 1]) out.push(a[i + 1]!);
-        else if (t.startsWith('--output=')) out.push(t.slice('--output='.length));
-        else if (/^-[^-]*o./.test(t) && n === 'sort') out.push(t.slice(t.indexOf('o') + 1));
-      });
+    // R1124o D1, R1124p F2: sort and tree write an output file (-o, a cluster such as -uo, an abbreviation such as
+    // --outp= or --out), and uniq writes its second operand, after options that take values (-f N, -s N). The guard
+    // doesn't parse their options: every word, every value after `=`, and every tail of a short option cluster is a
+    // write destination.
+    if (n === 'sort' || n === 'uniq' || n === 'tree') {
+      out.push(...a.flatMap((t) => [...pathParts(t), ...(/^-[^-]/.test(t) ? [...t.slice(2)].map((_, i) => t.slice(i + 2)) : [])]));
     }
-    if (n === 'uniq') out.push(...a.filter((t) => !t.startsWith('-') || t === '-').slice(1, 2));
     // R1124o D2: a git command's --output (log, show, diff, blame, format-patch) writes a file of its choosing.
     if (isGit(n)) {
       a.forEach((t, i) => {
