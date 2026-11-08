@@ -1,6 +1,5 @@
 // Schemas for a project's config folder. Unknown keys are errors (strict), so
 // a typo fails loudly instead of silently falling back to a default.
-import { flagsSchema } from '../flags.js';
 import { AutomationsRepo } from '../automations/schema.js';
 import { loosenedProblems } from '../delegation.js';
 import { z } from 'zod';
@@ -89,6 +88,36 @@ export const CommentPolicyConfig = z
 
 /** #727: config.yaml required_check_sources, by check name: an App id or an Actions workflow file. */
 const CHECK_SOURCES = z.record(z.string().min(1), z.union([z.strictObject({ app_id: z.number().int().positive() }), z.strictObject({ workflow: z.string().regex(/^\.github\/workflows\/[^/]+\.ya?ml$/) })]));
+
+// Feature flags (src/flags.ts, docs/feature-flags.md). WHY here: this module is in the agents' tool guard's import
+// tree (test/review.test.ts #785), and the schema of config.yaml needs nothing else; the log-reading half is src/flags.ts.
+export interface FlagInfo {
+  /** What turning it on changes, in a sentence. */
+  what: string;
+  /** The PR that added it. */
+  since: string;
+}
+
+/**
+ * The flags this engine knows. Add one with the change it guards; remove it once the change is the default everywhere
+ * (and say so in the changelog). A flag's name: lowercase letters, digits and underscores.
+ */
+export const FLAGS: Readonly<Record<string, FlagInfo>> = {};
+
+export const FLAG_NAME = /^[a-z][a-z0-9_]{0,63}$/;
+
+/** config.yaml `flags:`: known names only, each true or false; absent is `{}` (every flag off). */
+export function flagsSchema(known: readonly string[] = Object.keys(FLAGS)) {
+  return z
+    .record(z.string().regex(FLAG_NAME, 'a flag name is lowercase letters, digits and underscores'), z.boolean())
+    .default({})
+    .superRefine((flags, ctx) => {
+      for (const name of Object.keys(flags)) {
+        if (!known.includes(name)) ctx.addIssue({ code: 'custom', path: [name], message: `no such flag: ${name} (the engine knows ${known.length ? known.join(', ') : 'none'}; docs/feature-flags.md)` });
+      }
+    });
+}
+
 
 export const ProjectConfig = z.strictObject({
   version: z.literal(1),

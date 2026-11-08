@@ -8,36 +8,11 @@
 //   - Every flip is audited: the coordinator records a `flag.flipped` event (the flag, from, to, the config's commit)
 //     whenever a flag's state differs from the last one recorded, so a flip made while it was down is recorded too.
 // Pure but for recordFlagFlips, which reads and appends to the event log.
-import { z } from 'zod';
 import type { EventLog } from './events/log.js';
 import type { EventPayload } from './events/types.js';
+import { FLAGS } from './config/schema.js';
 
-export interface FlagInfo {
-  /** What turning it on changes, in a sentence. */
-  what: string;
-  /** The PR that added it. */
-  since: string;
-}
-
-/**
- * The flags this engine knows. Add one with the change it guards; remove it once the change is the default everywhere
- * (and say so in the changelog). A flag's name: lowercase letters, digits and underscores.
- */
-export const FLAGS: Readonly<Record<string, FlagInfo>> = {};
-
-export const FLAG_NAME = /^[a-z][a-z0-9_]{0,63}$/;
-
-/** config.yaml `flags:`: known names only, each true or false; absent is `{}` (every flag off). */
-export function flagsSchema(known: readonly string[] = Object.keys(FLAGS)) {
-  return z
-    .record(z.string().regex(FLAG_NAME, 'a flag name is lowercase letters, digits and underscores'), z.boolean())
-    .default({})
-    .superRefine((flags, ctx) => {
-      for (const name of Object.keys(flags)) {
-        if (!known.includes(name)) ctx.addIssue({ code: 'custom', path: [name], message: `no such flag: ${name} (the engine knows ${known.length ? known.join(', ') : 'none'}; docs/feature-flags.md)` });
-      }
-    });
-}
+export { FLAG_NAME, FLAGS, flagsSchema, type FlagInfo } from './config/schema.js';
 
 /** Whether a flag is on for this repo: only an explicit `true` counts; anything else is off. */
 export const flagOn = (flags: Readonly<Record<string, boolean>> | undefined, name: string): boolean => flags?.[name] === true;
