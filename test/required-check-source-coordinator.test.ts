@@ -54,7 +54,7 @@ test("the merge flow's checks of a commit keep a pinned check only from the App 
   const sha = 'c'.repeat(40);
   const lint: CommitCheck = { name: 'lint', source: 'check_run', status: 'completed', conclusion: 'success', id: 3, app: SPOOF_APP };
   f.backlog.setChecks(sha, [ci(SPOOF_APP), lint]);
-  const judged = () => (c as unknown as { headChecksOf(s: string): Promise<CommitCheck[]> }).headChecksOf(sha);
+  const judged = () => (c as unknown as { headChecksOf(s: string, at: { main: true }): Promise<CommitCheck[]> }).headChecksOf(sha, { main: true });
   assert.deepEqual(await judged(), [lint], 'the spoofed ci is dropped; lint, which nothing pins, is judged by name');
   f.backlog.setChecks(sha, [ci(CI_APP), lint]);
   assert.deepEqual(await judged(), [ci(CI_APP), lint]);
@@ -72,4 +72,14 @@ test("the merge flow's checks of a commit keep a pinned check only from the App 
   assert.deepEqual(await judged(), [own(7, 'success'), lint], 'every run passed: the latest is reported');
   f.backlog.setChecks(sha, [own(7, 'failure'), own(6, 'success'), lint]);
   assert.deepEqual(await judged(), [own(7, 'failure'), lint]);
+});
+
+test('readiness records each required check with the pin it was judged under (checks.judged): the main watch trusts a record only under that pin (#943, R1176d D2)', { skip }, async () => {
+  const t = await openPr({}, { edit: (cfg) => Object.assign(cfg.project, { required_check_sources: { ci: { app_id: CI_APP } } }) });
+  Object.assign(t.f.backlog, { checkApps: async () => ({}) });
+  t.f.backlog.setChecks(t.pr().headSha, [ci(CI_APP)]);
+  await t.c.tick();
+  const rec = t.f.log.read(0, ['checks.judged']).at(-1)?.payload as { head: string; checks: unknown[] } | undefined;
+  assert.equal(rec?.head, t.pr().headSha);
+  assert.deepEqual(rec?.checks, [{ name: 'ci', outcome: 'pass', pin: { app_id: CI_APP } }]);
 });

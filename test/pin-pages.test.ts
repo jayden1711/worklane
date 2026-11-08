@@ -43,7 +43,7 @@ async function ready(o: { runs: (page: number) => unknown[]; status?: (page: num
   // `bare`: nothing `ci` pinned (round 8: main's reads and main's verdict). Else `ci` is pinned to App 1111.
   const configured = { ...(o.bare ? {} : { ci: { app_id: PINNED_APP } }), ...(o.otherPinned === 'config' ? { other: { app_id: PINNED_APP } } : {}) };
   const pinned = new PinnedChecks({ backlog: new GitHubBacklog('o/r', () => t, f), branch: () => 'main', repo: () => 'o/r', configured: () => configured, required: () => ['ci'] });
-  const r = readiness({ required: ['ci'], checks: await pinned.of(HEAD), head: HEAD, evaluated: { head: HEAD, approved: true } });
+  const r = readiness({ required: ['ci'], checks: await pinned.of(HEAD, { main: true }), head: HEAD, evaluated: { head: HEAD, approved: true } });
   return r.ready ? 'ready' : r.reasons.join('; ');
 }
 
@@ -153,7 +153,7 @@ test("round 9: a rate-limited rules read never drops a ruleset's pin: after an a
     const out: string[] = [];
     for (let i = 0; i < answers.length; i++) {
       try {
-        const r = readiness({ required: ['ci'], checks: await pinned.of(HEAD), head: HEAD, evaluated: { head: HEAD, approved: true } });
+        const r = readiness({ required: ['ci'], checks: await pinned.of(HEAD, { main: true }), head: HEAD, evaluated: { head: HEAD, approved: true } });
         out.push(r.ready ? 'ready' : r.reasons.join('; '));
       } catch {
         out.push('waits'); // a read threw (a secondary limit pauses every call on the token): not ready this tick
@@ -181,7 +181,7 @@ test("round 9: an Actions-App pin whose workflow runs weren't read never passes:
   // into one App group and evil.yml's later pass decided.
   const ruleset = () => json([{ type: 'required_status_checks', parameters: { required_status_checks: [{ context: 'ci', integration_id: 15368 }] } }]);
   const actions = (id: number, suite: number, conclusion: string) => ({ id, name: 'ci', status: 'completed', conclusion, html_url: `https://github.com/o/r/actions/runs/${suite * 10}/job/${id}`, app: { id: 15368, slug: 'github-actions' }, check_suite: { id: suite } });
-  const wf = (suite: number, path: string) => ({ id: suite * 10, html_url: `https://github.com/o/r/actions/runs/${suite * 10}`, check_suite_id: suite, path, head_sha: HEAD, repository: { full_name: 'o/r' } });
+  const wf = (suite: number, path: string) => ({ id: suite * 10, html_url: `https://github.com/o/r/actions/runs/${suite * 10}`, check_suite_id: suite, path, head_sha: HEAD, repository: { full_name: 'o/r' }, head_repository: { full_name: 'o/r' }, event: 'push', head_branch: 'main', pull_requests: [] });
   const f = (async (url: string) => {
     const u = new URL(url);
     if (u.pathname === `/repos/o/r/commits/${HEAD}/check-runs`) return json({ check_runs: [actions(1, 10, 'failure'), actions(2, 20, 'success')] });
@@ -194,9 +194,9 @@ test("round 9: an Actions-App pin whose workflow runs weren't read never passes:
   const t = `tok-${++token}`;
   const pinned = new PinnedChecks({ backlog: new GitHubBacklog('o/r', () => t, f), branch: () => 'main', repo: () => 'o/r', configured: () => ({}), required: () => ['lint'] });
   // The judgement fix-forward makes: requiredOutcomes(ep.started.failed, checks), its checks read judging those names.
-  assert.deepEqual(requiredOutcomes(['ci'], await pinned.of(HEAD, { judging: ['ci'] })).map((c) => c.outcome), ['fail'], 'ci.yml failed: blocked (ff971e5e: pass)');
+  assert.deepEqual(requiredOutcomes(['ci'], await pinned.of(HEAD, { main: true }, { judging: ['ci'] })).map((c) => c.outcome), ['fail'], 'ci.yml failed: blocked (ff971e5e: pass)');
   // Read for `required` alone (round 10: no judged name pinned, main's reads), the unread Actions runs still never pass.
-  assert.deepEqual(requiredOutcomes(['ci'], await pinned.of(HEAD)).map((c) => c.outcome), ['pending'], 'an unread Actions run waits');
+  assert.deepEqual(requiredOutcomes(['ci'], await pinned.of(HEAD, { main: true })).map((c) => c.outcome), ['pending'], 'an unread Actions run waits');
 });
 
 test("round 10: a PR whose judged checks are all bare names gets main's verdict and reads, whatever other check is pinned (the ruleset or config.yaml)", async () => {
@@ -235,7 +235,7 @@ test('round 10: the rules read pages: a pin on page 2 is kept; a refused page 2 
     const pinned = new PinnedChecks({ backlog: new GitHubBacklog('o/r', () => t, f), branch: () => 'main', repo: () => 'o/r', configured: () => ({}), required: () => ['ci'], now: () => clock });
     const out: string[] = [];
     for (; tick < ticks; tick++) {
-      const r = readiness({ required: ['ci'], checks: await pinned.of(HEAD), head: HEAD, evaluated: { head: HEAD, approved: true } });
+      const r = readiness({ required: ['ci'], checks: await pinned.of(HEAD, { main: true }), head: HEAD, evaluated: { head: HEAD, approved: true } });
       out.push(r.ready ? 'ready' : r.reasons.join('; '));
       clock += 11 * 60_000;
     }
@@ -276,7 +276,7 @@ test("the owner's decision (a): a branch read refused for permission or 404 is '
     const t = `tok-${++token}`;
     const pinned = new PinnedChecks({ backlog: new GitHubBacklog('o/r', () => t, f), branch: () => 'main', repo: () => 'o/r', configured: () => (pinCi ? { ci: { app_id: OTHER_APP } } : {}), required: () => ['ci', 'lint'] });
     try {
-      const r = readiness({ required: ['ci', 'lint'], checks: await pinned.of(HEAD), head: HEAD, evaluated: { head: HEAD, approved: true } });
+      const r = readiness({ required: ['ci', 'lint'], checks: await pinned.of(HEAD, { main: true }), head: HEAD, evaluated: { head: HEAD, approved: true } });
       return r.ready ? 'ready' : r.reasons.join('; ');
     } catch {
       return 'waits';

@@ -3666,7 +3666,16 @@ test("review rules: a docs-only PR is ready and merges on the light checks; GitH
   const red = await openPr({ worker: docsWorker, 'evaluator-verdict': approve() }, { autoMerge: () => true, edit: light, body });
   red.f.backlog.setChecks(red.opened.head, [check('lint', 'success', 1), check('ci', 'failure', 2)]);
   red.f.backlog.setPr(red.opened.number, { mergeableState: 'blocked' });
+  // R1176e: the ruleset hold judges the PR's head as a PR head (its head ref), never as a main commit.
+  const rc = red.c as unknown as { headChecksOf(...a: unknown[]): Promise<unknown> };
+  const readHead = rc.headChecksOf.bind(rc);
+  const asked: unknown[] = [];
+  rc.headChecksOf = async (...a) => {
+    if (a[0] === red.opened.head) asked.push(a[1]);
+    return readHead(...a);
+  };
   await red.c.tick();
+  assert.deepEqual([...new Set(asked.map((x) => JSON.stringify(x)))], [JSON.stringify({ pr: { headRef: red.pr().head } })], 'judged as a PR head');
   assert.equal(reasonsOf(red).auto, false);
   assert.ok(reasonsOf(red).reasons.some((r) => /docs-only fast path: the ruleset's required check\(s\) ci \(fail\) did not pass on GitHub/.test(r)), reasonsOf(red).reasons.join('; '));
   assert.ok(!red.pr().merged);
