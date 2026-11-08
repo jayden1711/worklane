@@ -8,7 +8,7 @@ import type { EventLog } from '../events/log.js';
 import type { EventPayload } from '../events/types.js';
 import { computeLevel } from '../review.js';
 import type { ReviewConfig } from '../config/schema.js';
-import { riskAndDesignReasons, waitCategoriesOf } from '../merge-policy.js';
+import { riskAndDesignPaths, riskAndDesignReasons, waitCategoriesOf } from '../merge-policy.js';
 import { effectiveClass, prBodyHead, prBodyProblems, riskClassOf } from '../pr-rules.js';
 import { claimLines } from '../claim-labels.js';
 import { checkedPush } from '../push-check.js';
@@ -30,10 +30,38 @@ import { optimizePrLines } from '../optimize.js';
 const LANDING_FLOOR = ": held for the owner (direct land's merge-policy floor, checked again at landing)";
 /**
  * R1182i/j: the line on a landing-floor level that names exactly what the owner was asked about: a hash of the batch
- * (each entry's issue and head) and of every file the land commit changes, with its `git ls-tree` entry. An approval at landing covers
- * output only while this matches; the reasons' text (which names at most a few paths) never decides.
+ * (each entry's issue and head) and of every judged file a held reason is about (R1182n D1), with its `git ls-tree` entry.
+ * An approval at landing covers output only while this matches; the reasons' text (which names at most a few paths) never decides.
  */
 const LANDING_PRINT = 'landing floor, exactly this batch and these files: sha256 ';
+
+/** R1182n D2: what a landing-floor question may name in its comment (GitHub refuses one over 65536 characters). */
+export const QUESTION_LINE_MAX = 600;
+export const QUESTION_LINES_MAX = 40;
+export const QUESTION_CHARS_MAX = 24_000;
+
+/**
+ * The held reasons and judged files a landing-floor question names, bounded: each line at most QUESTION_LINE_MAX
+ * characters, every reason, then judged files while the total stays within QUESTION_CHARS_MAX and QUESTION_LINES_MAX,
+ * then how many more there are and `where` every one is named. The approval binds the full set (the print), not this.
+ */
+export function questionLines(held: string[], listed: string[], where: string): string[] {
+  const cut = (l: string) => (l.length > QUESTION_LINE_MAX ? `${l.slice(0, QUESTION_LINE_MAX)}… (cut; in full in ${where})` : l);
+  const out = held.slice(0, QUESTION_LINES_MAX).map(cut);
+  let chars = out.reduce((n, l) => n + l.length, 0);
+  let shown = 0;
+  for (const l of listed) {
+    const c = cut(l);
+    if (out.length >= QUESTION_LINES_MAX || chars + c.length > QUESTION_CHARS_MAX) break;
+    out.push(c);
+    chars += c.length;
+    shown++;
+  }
+  const reasonsLeft = held.length - Math.min(held.length, QUESTION_LINES_MAX);
+  if (reasonsLeft) out.push(`and ${reasonsLeft} more reasons, every one named in ${where}`);
+  if (shown < listed.length) out.push(`and ${listed.length - shown} more judged files (${listed.length} in all), every one named in ${where}`);
+  return out;
+}
 
 export abstract class Landing extends Decisions {
   // ---------------------------------------------------------------- landing
@@ -47,6 +75,12 @@ export abstract class Landing extends Decisions {
       if (!final && !out.some((x) => x.issue === p.issue)) out.push(p);
     }
     return out;
+  }
+
+  /** The base of the change proposed at `head` (what the evaluator reviewed), or null: none was proposed there. */
+  private proposedBase(issue: number, head: string): string | null {
+    const e = this.events(issue).filter((x) => x.type === 'change.proposed' && (x.payload as { head: string }).head === head).at(-1);
+    return (e?.payload as { base?: string } | undefined)?.base ?? null;
   }
 
   private filesOf(issue: number, head: string): string[] {
@@ -256,19 +290,35 @@ export abstract class Landing extends Decisions {
       const floor = this.landFloor(path, tip, head, applied);
       if (floor.held.length) {
         const why = `not pushed: what this land would push is below direct land's merge-policy floor (${floor.held.join('; ')})`;
-        // Every judged file by name, mode, type and object (no "and N more"), then the print of exactly that.
-        const reasons = [...floor.held.map((r) => `${r}${LANDING_FLOOR}`), ...floor.listed, `${LANDING_PRINT}${floor.print}`];
+        // The level names every judged file by name, mode, type and object (no "and N more"), then the print. The
+        // question names as many as fit in one issue comment, and says where the rest are (R1182n D2).
+        const held = floor.held.map((r) => `${r}${LANDING_FLOOR}`);
+        const reasons = [...held, ...floor.listed, `${LANDING_PRINT}${floor.print}`];
         for (const q of applied) {
           if (!floor.ask.includes(q)) {
             result(q.issue, 'deferred', null, `${why}; lands once the others in its batch are decided`);
             continue;
           }
-          // R1182h 3: the question first, then the final result. A failure before the question leaves the entry queued,
-          // so the next pass asks again; after it, the owner has a question to answer whatever else fails.
-          this.emit('review.level_set', { issue: q.issue, head: q.head, level: 'L3', reasons });
-          await this.ask('land', q.issue, ownerOf(q.issue), `Approve landing #${q.issue} (L3)?`, ['approve', 'reject'], floor.seen ? 'approve' : 'reject', [`head ${q.head.slice(0, 8)}`, ...reasons, ...(floor.seen ? [] : ["the land commit holds files no entry's own change has as they are (a pre-land step or gate wrote them)"])]);
-          result(q.issue, 'rejected', null, why);
-          await this.d.backlog.addLabels(q.issue, ['in-review', 'review:L3']);
+          // R1182h 3: the question first, then the final result. A failure before the question is recorded leaves the
+          // entry queued, so the next pass asks again; once it is recorded, the result is written whatever else fails
+          // (R1182n D2: a comment the backlog refuses), so the owner's answer to it is honoured.
+          const set = this.emit('review.level_set', { issue: q.issue, head: q.head, level: 'L3', reasons });
+          const detail = [`head ${q.head.slice(0, 8)}`, ...questionLines(held, floor.listed, `review.level_set event ${set.id} (#${q.issue} at ${q.head.slice(0, 8)})`), `${LANDING_PRINT}${floor.print}`, ...(floor.seen ? [] : ["the land commit holds files no entry's own change has as they are (a pre-land step or gate wrote them)"])];
+          let failed: string | null = null;
+          try {
+            await this.ask('land', q.issue, ownerOf(q.issue), `Approve landing #${q.issue} (L3)?`, ['approve', 'reject'], floor.seen ? 'approve' : 'reject', detail);
+          } catch (e) {
+            failed = (e as Error).message.slice(0, 300);
+          }
+          const recorded = this.d.log.read(set.id, ['decision.asked']).some((e) => (e.payload as EventPayload<'decision.asked'>).kind === 'land' && (e.payload as EventPayload<'decision.asked'>).issue === q.issue);
+          if (failed !== null) this.emit('coordinator.error', { instance: this.d.instance, where: 'landing floor question', kind: 'ask_failed', message: `#${q.issue}: ${recorded ? 'recorded, but not posted on the issue' : 'not recorded'}: ${failed}` });
+          if (!recorded) continue;
+          result(q.issue, 'rejected', null, failed === null ? why : `${why}; the question is recorded but could not be posted on the issue (${failed}): answer it on the dashboard or with \`${BRAND.cli} decide\``);
+          try {
+            await this.d.backlog.addLabels(q.issue, ['in-review', 'review:L3']);
+          } catch (e) {
+            this.emit('coordinator.error', { instance: this.d.instance, where: 'landing floor question', kind: 'labels_failed', message: `#${q.issue}: ${(e as Error).message.slice(0, 300)}` });
+          }
         }
         this.emit('land.batch', { id, issues: applied.map((q) => q.issue), tip, outcome: 'deferred', detail: why.slice(0, 500) });
         return;
@@ -362,8 +412,8 @@ export abstract class Landing extends Decisions {
   /**
    * landFloor's reading, byte for byte (R1182l): each revision's whole tree (treeEntries) and the land commit's changed
    * paths (changedPathBytes), both from change-files.ts and keyed by the path's own bytes. No path
-   * is ever given to git as a pathspec, so `:`-prefixed or magic names mean nothing. A path that isn't UTF-8 can't be
-   * an entry's own (entries' files are recorded as text), so it is output.
+   * is ever given to git as a pathspec, so `:`-prefixed or magic names mean nothing. An entry's own paths are read by
+   * their bytes too (its proposed change, R1182m). A path that isn't UTF-8 is never an entry's own, so it is output.
    */
   private landFloorExact(path: string, tip: string, head: string, applied: EventPayload<'land.queued'>[]): { held: string[]; ask: EventPayload<'land.queued'>[]; seen: boolean; listed: string[]; print: string } {
     const approved = applied.filter((q) => this.landApproved(q));
@@ -382,11 +432,17 @@ export abstract class Landing extends Decisions {
       return Buffer.from(t, 'utf8').equals(b) ? t : null;
     };
     const entryAt = (rev: string, hex: string) => treeOf(rev).get(hex) ?? '';
+    // R1182m: an entry's own paths by their bytes, read from git (the change proposed at its head, base..head), never
+    // its recorded names: those are decoded lossily, so `d\xff/x` and a literal `d�/x` would be one name. No
+    // change proposed at that head: nothing is its own (fails closed).
     const ownerOfPath = new Map<string, EventPayload<'land.queued'>>();
-    for (const q of applied) for (const f of this.filesOf(q.issue, q.head)) ownerOfPath.set(f, q);
+    for (const q of applied) {
+      const base = this.proposedBase(q.issue, q.head);
+      if (base !== null) for (const h of changedPathBytes(path, base, q.head)) ownerOfPath.set(h, q);
+    }
     const own = (hex: string) => {
-      const t = text(hex);
-      const q = t === null ? undefined : ownerOfPath.get(t);
+      // A path that isn't UTF-8 is never an entry's own: it is judged as output.
+      const q = text(hex) === null ? undefined : ownerOfPath.get(hex);
       return q && entryAt(head, hex) === entryAt(q.head, hex) ? q : undefined;
     };
     const judgedHex = changed.filter((h) => {
@@ -401,10 +457,18 @@ export abstract class Landing extends Decisions {
     const judged = files.filter((f) => judgedNames.has(f.path));
     const review: ReviewConfig = this.d.cfg.review ?? DEFAULT_REVIEW;
     const labels = [...new Set(applied.flatMap((q) => this.events(q.issue).filter((e) => e.type === 'issue.seen').flatMap((e) => (e.payload as { labels: string[] }).labels)))];
-    const reasons = (fs: typeof files) => (fs.length ? riskAndDesignReasons({ level: computeLevel({ files: fs, labels, moneyPaths: this.moneyPaths(review.money_path_source), scope: lockScopeOf(this.d) }, review), waitCategories: waitCategoriesOf(review), newTopLevel: [] }) : []);
-    const held = reasons(judged);
     const none = { held: [], ask: [], seen: true, listed: [], print: '' };
+    if (!judged.length) return none;
+    const level = computeLevel({ files: judged, labels, moneyPaths: this.moneyPaths(review.money_path_source), scope: lockScopeOf(this.d) }, review);
+    const held = riskAndDesignReasons({ level, waitCategories: waitCategoriesOf(review), newTopLevel: [] });
     if (!held.length) return none;
+    // R1182n D1: the print binds the files the held reasons are about (their categories' paths; a decoded name two
+    // paths share takes both). A judged file that raises nothing lands unasked on its own, so binding the approval to
+    // it protects nothing, and one that changes every pass (a build stamp) would make every approval stale. No file
+    // named (a reason that names none): every judged file is bound, which fails closed.
+    const raising = new Set(riskAndDesignPaths({ level, waitCategories: waitCategoriesOf(review) }));
+    const raisingHex = judgedHex.filter((h) => raising.has(Buffer.from(h, 'hex').toString('utf8')));
+    const bound = raisingHex.length ? raisingHex : judgedHex;
     const shown = (e: string) => {
       const m = /^(\d+) (\w+) ([0-9a-f]+)$/.exec(e);
       return m ? `${m[1]} ${m[2]} ${m[3]!.slice(0, 12)}` : 'deleted';
@@ -412,7 +476,7 @@ export abstract class Landing extends Decisions {
     const named = (hex: string) => text(hex) ?? `${Buffer.from(hex, 'hex').toString('utf8')} (not UTF-8; bytes ${hex})`;
     const listed = judgedHex.map((h) => `judged at landing: ${named(h)} (${shown(entryAt(head, h))})`);
     const print = createHash('sha256')
-      .update(JSON.stringify({ batch: applied.map((q) => `${q.issue}@${q.head}`).sort(), files: changed.map((h) => [h, entryAt(head, h)]).sort((a, b) => (a[0]! < b[0]! ? -1 : a[0]! > b[0]! ? 1 : 0)) }))
+      .update(JSON.stringify({ batch: applied.map((q) => `${q.issue}@${q.head}`).sort(), files: bound.map((h) => [h, entryAt(head, h)]).sort((a, b) => (a[0]! < b[0]! ? -1 : a[0]! > b[0]! ? 1 : 0)) }))
       .digest('hex');
     const covered = approved.some((q) => this.landingPrint(q) === print);
     const ask = unapproved.length ? unapproved : covered ? [] : approved;

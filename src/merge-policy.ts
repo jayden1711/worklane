@@ -232,6 +232,14 @@ export function riskAndDesignReasons(o: { level: LevelResult; waitCategories: st
 }
 
 /**
+ * The paths riskAndDesignReasons' path reasons name: each file in a category it waits on, and each dependency manifest
+ * (the same categories, read the same way). Its other reasons (a design flag, a new top-level module) name no file.
+ */
+export function riskAndDesignPaths(o: { level: LevelResult; waitCategories: string[] }): string[] {
+  return [...new Set([...[...waitingOn(o.waitCategories)].flatMap((c) => o.level.categories[c] ?? []), ...(o.level.categories.dependency ?? [])])];
+}
+
+/**
  * A planned task's PR: the high-risk and design-level paths it changes that its approved plan didn't list.
  * The same matchers as riskAndDesignReasons (the change's own categories), with the planned files taken out.
  */
