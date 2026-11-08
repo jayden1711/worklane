@@ -208,8 +208,7 @@ jobs:
           # The bootstrap's own pinned Node, in a scratch place off every PATH, removed once the tarball is made.
           v="$(sed -n 's/^NODE_VERSION=//p' "$ws/scripts/bootstrap.sh")"
           sum="$(sed -n 's/^NODE_SHA256_LINUX_X64=//p' "$ws/scripts/bootstrap.sh")"
-          curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 -o /tmp/node.tar.xz "https://nodejs.org/dist/$v/node-$v-linux-x64.tar.xz"
-          echo "$sum  /tmp/node.tar.xz" | sha256sum -c -
+          bash "$ws/scripts/ci/fetch-pinned.sh" "https://nodejs.org/dist/$v/node-$v-linux-x64.tar.xz" "$sum" /tmp/node.tar.xz
           mkdir -p /opt/pack-node && tar -xJf /tmp/node.tar.xz -C /opt/pack-node --strip-components 1
           mkdir -p /root/src && tar -C "$ws" --exclude=./.git -cf - . | tar -C /root/src -xf -
           (
@@ -1642,8 +1641,7 @@ jobs:
           { echo "F2=$f2"; echo "GH_FAKE2=$GH_FAKE2"; } >> "$GITHUB_ENV"
           # gitleaks, pinned and checked as bootstrap.sh has it: the checkout's pre-commit secret scan runs it on the setup commit.
           v="$(sed -n 's/^GITLEAKS_VERSION=//p' scripts/bootstrap.sh)" && sum="$(sed -n 's/^GITLEAKS_SHA256_LINUX_X64=//p' scripts/bootstrap.sh)"
-          curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 -o "$f2/gitleaks.tgz" "https://github.com/gitleaks/gitleaks/releases/download/v$v/gitleaks_${v}_linux_x64.tar.gz"
-          echo "$sum  $f2/gitleaks.tgz" | sha256sum -c -
+          bash scripts/ci/fetch-pinned.sh "https://github.com/gitleaks/gitleaks/releases/download/v$v/gitleaks_${v}_linux_x64.tar.gz" "$sum" "$f2/gitleaks.tgz"
           tar -xzf "$f2/gitleaks.tgz" -C "$f2" gitleaks && sudo install -m 0755 "$f2/gitleaks" /usr/local/bin/gitleaks
           for u in worklane-gamma worklane-dashboard-gamma; do
             sudo install -d "/etc/systemd/system/$u.service.d"

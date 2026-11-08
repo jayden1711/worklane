@@ -64,8 +64,7 @@ jobs:
         run: |
           f="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
           mkdir -p "$RUNNER_TEMP/bin" && cd "$RUNNER_TEMP/bin"
-          curl -sSfL --retry 5 --retry-all-errors --retry-delay 5 -o "$f" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${f}"
-          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  ${f}" | sha256sum -c -
+          bash "$GITHUB_WORKSPACE/scripts/ci/fetch-pinned.sh" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${f}" 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb "$f"
           tar -xzf "$f" gitleaks
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - run: npm run typecheck
