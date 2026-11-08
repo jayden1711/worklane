@@ -530,6 +530,45 @@ test("R1124o, 6c: output files of sort, uniq, tree and git's --output are writes
   ]) assert.notEqual(await decide(d, 'Bash', { command: line }), 'deny', line);
 });
 
+test("#983 option (b), R1124p F1: the checkout's own config names its hooks dir, so no GIT_CONFIG_GLOBAL an agent's shell sets, however spelt, skips the engine's pre-push or pre-commit hook", { skip }, () => {
+  const d = checkout();
+  const root = dirname(d);
+  const remote = join(root, 'r.git');
+  execFileSync('git', ['init', '-q', '--bare', remote]);
+  git(d, 'remote', 'add', 'origin', remote);
+  const empty = join(root, 'nohooks');
+  mkdirSync(empty);
+  const home = mkdtempSync(join(tmpdir(), 'home-'));
+  // Both places an agent could point git at hold a config that moves the hooks to an empty dir.
+  writeFileSync(join(home, '.gitconfig'), `[core]\n\thooksPath = ${empty}\n`);
+  writeFileSync(join(d, 'cfg'), `[core]\n\thooksPath = ${empty}\n`);
+  // An agent run's git environment (src/runner.ts agentEnv), run by a real bash.
+  const env = { PATH: process.env.PATH ?? '', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'credential.helper', GIT_CONFIG_VALUE_0: '', ...agentEnv(), HOME: home };
+  const landed = () => spawnSync('git', ['--git-dir', remote, 'rev-parse', '-q', '--verify', 'refs/heads/main'], { encoding: 'utf8' }).status === 0;
+  for (const line of [
+    'git push origin HEAD:refs/heads/main',
+    'printf -v GIT_CONFIG_GLOBAL cfg; git push origin HEAD:refs/heads/main',
+    'read -r GIT_CONFIG_GLOBAL <<< cfg; git push origin HEAD:refs/heads/main',
+    'mapfile -t GIT_CONFIG_GLOBAL <<< cfg; git push origin HEAD:refs/heads/main',
+    'declare -n R=GIT_CONFIG_GLOBAL; R=cfg; git push origin HEAD:refs/heads/main',
+    'declare +x GIT_CONFIG_GLOBAL; git push origin HEAD:refs/heads/main',
+    'typeset +x GIT_CONFIG_GLOBAL; git push origin HEAD:refs/heads/main',
+    'export GIT_CONFIG_GLOBAL=cfg; git push origin HEAD:refs/heads/main',
+    'unset GIT_CONFIG_GLOBAL; git push origin HEAD:refs/heads/main',
+  ]) {
+    const r = spawnSync('bash', ['-c', line], { cwd: d, encoding: 'utf8', env });
+    assert.match(r.stderr, /refusing to push refs\/heads\/main, the default branch/, `${line}: the engine's pre-push hook ran`);
+    assert.equal(landed(), false, `${line}: the default branch didn't land`);
+  }
+  // The commit side: with the hooks pointed elsewhere, a secret is still refused by the engine's own pre-commit scan.
+  writeFileSync(join(d, 'leak.js'), SECRET);
+  const was = head(d);
+  const c = spawnSync('bash', ['-c', 'printf -v GIT_CONFIG_GLOBAL cfg; git add leak.js && git commit -q -m leak'], { cwd: d, encoding: 'utf8', env });
+  assert.notEqual(c.status, 0, 'the commit is refused');
+  assert.match(c.stderr, /leak\.js/);
+  assert.equal(head(d), was, 'nothing was committed');
+});
+
 test('R1124p F2: every word of sort, uniq and tree is a write destination, however their options are spelt', { skip }, async () => {
   const d = checkout();
   for (const line of [

@@ -7,7 +7,7 @@
 // local runs without an instance. Re-running is safe: our entries are
 // recognized by a marker and replaced, never duplicated.
 import { gitExecFileSync } from './os/git.js';
-import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, readlinkSync, renameSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, readlinkSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { agentSettingsPath, GUARD_MATCHER, GUARD_ON_FAILURE, HOOK_MARKER, installCommand, type HookEntry, type Settings } from './agent-settings.js';
@@ -349,6 +349,20 @@ export function installCheckoutPrePush(root: string, branches: string[], engineC
   const common = gitExecFileSync(['rev-parse', '--git-common-dir'], { cwd: root, encoding: 'utf8' }).trim();
   // WHY (#468): the checkout's hook runs node by Homebrew's stable bin/node (or this node's own path), as the service does.
   return installPrePushHook(join(resolve(root, common), 'hooks'), { branches, node, ...(engineCli ? { engine: engineCli } : {}) });
+}
+
+/**
+ * #983 (the owner's option (b)): an instance checkout's own config names its hooks dir, by absolute path. That file is
+ * the coordinator's alone (checkout.sh's lock, #926), and git ranks a repository's config above the global one, so
+ * whatever GIT_CONFIG_GLOBAL, HOME or XDG_CONFIG_HOME an agent's shell sets, its git runs the engine's pre-commit and
+ * pre-push hooks here. Only `install --git-hooks-only` (checkout.sh) pins: a person's own repo keeps its own setting.
+ * src/os/git.ts (ownHooksPin) lets a guarded git read exactly this setting. Returns the hooks dir.
+ */
+export function pinCheckoutHooks(root: string): string {
+  const common = gitExecFileSync(['rev-parse', '--git-common-dir'], { cwd: root, encoding: 'utf8' }).trim();
+  const hooks = join(realpathSync(resolve(root, common)), 'hooks');
+  gitExecFileSync(['config', '--local', 'core.hooksPath', hooks], { cwd: root });
+  return hooks;
 }
 
 const shQuote = (s: string) => `'${s.replaceAll("'", "'\\''")}'`;

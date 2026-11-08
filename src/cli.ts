@@ -23,7 +23,7 @@ import { evaluate } from './guardrails/engine.js';
 import { globRegExp } from './guardrails/glob.js';
 import { findProjectRoot, hookProcess, readStdin } from './hook.js';
 import { agentSettingsPath, guardrailSettings } from './agent-settings.js';
-import { install, installCheckoutPrePush, installGitHook, invokedEngine, migrateLegacyHooks } from './install.js';
+import { install, installCheckoutPrePush, installGitHook, invokedEngine, migrateLegacyHooks, pinCheckoutHooks } from './install.js';
 import { recordPushBlocked } from './push-guard.js';
 import { currentUid, currentUser, fileAccess, homeDir, isRoot } from './os/index.js';
 import { toolPath, toolPrefix } from './tool-path.js';
@@ -366,6 +366,8 @@ async function main(argv: string[]): Promise<number> {
           // no config yet: the hook goes by origin/HEAD
         }
         console.log(`pre-push default-branch guard: ${installCheckoutPrePush(root, branches, invokedEngine())}`);
+        // #983: the checkout's own config names that hooks dir, so no global config an agent's git reads moves it.
+        console.log(`hooks dir pinned in the checkout's git config: ${pinCheckoutHooks(root)}`);
         return 0;
       }
       const gitHooks = flag(args, '--git-hooks');

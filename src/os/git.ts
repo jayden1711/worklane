@@ -275,21 +275,24 @@ function globalOptions(args: readonly string[]): string[] {
 /**
  * What a `git config --list --show-scope --show-origin --includes -z` listing sets that a guarded git refuses, as a
  * reason; null when nothing. A key set at command scope is the engine's own; core.hooksPath in a file is fine when
- * the command scope sets it over (the coordinator's own hooks dir).
+ * the command scope sets it over (the coordinator's own hooks dir), and in the repository's own config when it names
+ * that repository's own hooks dir (`base`: the directory git ran in, which a relative origin is read from).
  */
-export function configRefusal(listing: string): string | null {
+export function configRefusal(listing: string, base?: string): string | null {
   const t = listing.split('\0');
   const ours = new Set<string>();
-  const files: [string, string, string][] = [];
+  const files: [string, string, string, string][] = [];
   for (let i = 0; i + 2 < t.length; i += 3) {
-    const key = (t[i + 2]!.split('\n', 1)[0] ?? '').toLowerCase();
+    const [k, ...v] = t[i + 2]!.split('\n');
+    const key = (k ?? '').toLowerCase();
     if (t[i] === 'command') ours.add(key);
-    else files.push([key, t[i + 1]!, t[i]!]);
+    else files.push([key, t[i + 1]!, t[i]!, v.join('\n')]);
   }
-  for (const [key, origin, scope] of files) {
+  for (const [key, origin, scope, value] of files) {
     // System config is root's (/etc/gitconfig), global is read as the null device: only a repo's own is suspect.
     if (scope === 'system' || scope === 'global') continue;
     if (key === 'core.hookspath' && ours.has(key)) continue;
+    if (key === 'core.hookspath' && base !== undefined && ownHooksPin(scope, origin, value, base)) continue;
     const hit = REFUSED_KEYS.find(([re]) => re.test(key));
     if (hit) return `the git config ${shown(origin.replace(/^file:/, ''))} sets ${shown(key)}, ${hit[1]}; an instance's coordinator runs nothing a checkout's config names. Take it out of that file`;
   }
@@ -312,7 +315,23 @@ function preflight(file: string, args: readonly string[], cwd: string | URL | un
   });
   if (r.error) return `its git config couldn't be read (${r.error.message})`;
   if (r.status !== 0) return `its git config couldn't be read (${(r.stderr || '').trim().split('\n').pop() || `exit ${r.status}`})`;
-  return configRefusal(r.stdout);
+  return configRefusal(r.stdout, startDir(args, cwd));
+}
+
+/**
+ * #983: whether a core.hooksPath row is the pin `install --git-hooks-only` writes (src/install.ts pinCheckoutHooks):
+ * in local scope, so in the repository's common config file, naming by absolute path the `hooks` dir beside that
+ * file, the dir git runs hooks from when nothing names one. It adds no hooks a guarded git wouldn't run anyway.
+ */
+function ownHooksPin(scope: string, origin: string, value: string, base: string): boolean {
+  if (scope !== 'local' || !origin.startsWith('file:') || !isAbsolute(value)) return false;
+  const file = resolve(base, origin.slice('file:'.length));
+  if (!file.endsWith('/config') && !file.endsWith('\\config')) return false;
+  try {
+    return realpathSync(value) === realpathSync(join(dirname(file), 'hooks'));
+  } catch {
+    return false;
+  }
 }
 
 /**
