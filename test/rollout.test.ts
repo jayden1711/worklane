@@ -15,9 +15,13 @@ const NOW = new Date('2026-11-10T12:00:00.000Z');
 const hoursAgo = (h: number) => new Date(NOW.getTime() - h * 3_600_000).toISOString();
 let id = 0;
 const ev = (type: string, payload: Record<string, unknown>, ts: string): StoredEvent => ({ id: ++id, ts, type, actor: 'c', source: 'coordinator', payload }) as unknown as StoredEvent;
-const on = (h: number, flag = 'f') => ev('flag.flipped', { flag, from: false, to: true, sha: null }, hoursAgo(h));
-const off = (h: number, flag = 'f') => ev('flag.flipped', { flag, from: true, to: false, sha: null }, hoursAgo(h));
-const merges = (n: number, h: number) => Array.from({ length: n }, () => ev('merge.done', { number: 1 }, hoursAgo(h)));
+/** A config commit's flip (the engine's own off, with no commit, is ignored: R1174f 1). */
+const SHA = 'c'.repeat(40);
+const on = (h: number, flag = 'f') => ev('flag.flipped', { flag, from: false, to: true, sha: SHA }, hoursAgo(h));
+const off = (h: number, flag = 'f') => ev('flag.flipped', { flag, from: true, to: false, sha: SHA }, hoursAgo(h));
+let pr = 0;
+/** `n` merges, each of its own PR. */
+const merges = (n: number, h: number) => Array.from({ length: n }, () => ev('merge.done', { number: ++pr }, hoursAgo(h)));
 /** A coordinator seen ticking a few minutes ago: alive. */
 const tick = (h = 0.05) => ev('coordinator.tick', { instance: 'i', dispatched: 0, reconciled: 0 }, hoursAgo(h));
 /** On `h` hours ago, `n` merges `m` hours ago, and ticking now. */
@@ -35,15 +39,19 @@ test('rollout: ring 0 first; a ring is promoted only after soaking its hours wit
   assert.equal(s.next, 'turn it on for ring engine: set `flags.f: true` in the config.yaml of e1 (a PR in each repo)');
   s = status({ ...quiet, e1: [on(10), ...merges(1, 5), tick()] });
   assert.deepEqual(states(s), ['soaking', 'off', 'off']);
-  assert.match(s.next, /^wait: ring engine is soaking \(10 of 48 h, 1 of 3 merges\)/);
+  assert.match(s.next, /^wait: ring engine is soaking \(10 of 48 h; e1: 1 of 3 merges\)/);
   s = status({ ...quiet, e1: [on(50), ...merges(2, 5), tick()] });
   assert.equal(s.rings[0]!.state, 'soaking', 'the hours alone are not enough');
   s = status({ ...quiet, e1: healthy(50) });
   assert.deepEqual(states(s), ['promoted', 'off', 'off']);
   assert.equal(s.next, 'turn it on for ring first: set `flags.f: true` in the config.yaml of p1 (a PR in each repo)');
   // Each ring turned on after the one before it was promoted (its hours and merges both done).
+  // R1174f 3: min_merges in each instance, not across the ring: p3 with one merge holds the ring.
   s = status({ e1: healthy(300, 3, 250), p1: healthy(240, 4, 190), p2: healthy(100, 3, 50), p3: [on(99), ...merges(1, 50), tick()] });
-  assert.deepEqual(states(s), ['promoted', 'promoted', 'promoted'], "a ring's merges are counted across its instances");
+  assert.equal(s.rings[2]!.state, 'soaking');
+  assert.match(s.rings[2]!.why, /p3: 1 of 3 merges/);
+  s = status({ e1: healthy(300, 3, 250), p1: healthy(240, 4, 190), p2: healthy(100, 3, 50), p3: [on(99), ...merges(3, 50), tick()] });
+  assert.deepEqual(states(s), ['promoted', 'promoted', 'promoted'], 'each instance with its own merges');
   assert.match(s.next, /^every ring is promoted: f can become the default/);
 });
 
@@ -299,6 +307,68 @@ test("rollout status on a separate-users machine: each instance's log and repo f
     out.length = 0;
     assert.equal(rolloutCommand('status', ['--flag', 'f', '--file', file], { out: (s) => out.push(s), err: () => {}, now: NOW, deps: { ownDir: () => join(dir, 'root-own'), srvRoot: () => srv, homeOf: () => null, engine: () => ({ repos: ['example/engine'], problem: null }) } }), 1);
     assert.match(out.at(-1)!, /^next: wait: /);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('rollout: an engine-recorded off (no commit) and a replayed on change nothing; one PR counts once; a future tick is no sign of life; min_merges in each instance (R1174f 1, 3, A1-A5)', () => {
+  // A1: a replayed on (no off between) never starts a new on-period: the earlier red main and out-of-order start stay.
+  let s = status({ e1: healthy(300, 3, 250), p1: [on(100), ev('merge.main_result', { outcome: 'red' }, hoursAgo(90)), on(70), ...merges(3, 60), tick()], p2: [], p3: [] });
+  assert.equal(s.rings[1]!.state, 'roll back', s.rings[1]!.why);
+  s = status({ e1: healthy(300, 3, 250), p1: [on(280), on(100), ...merges(3, 60), tick()], p2: [], p3: [] });
+  assert.equal(s.rings[1]!.state, 'out of order', 'the first on counts');
+  // A2: the engine's own off (sha null), then on again: out of order and the bad sign stay; never "set true".
+  const nullOff = (h: number) => ev('flag.flipped', { flag: 'f', from: true, to: false, sha: null }, hoursAgo(h));
+  const p1 = [on(280), ev('config.invalid', { sha: 'b', errors: [] }, hoursAgo(200)), nullOff(199), on(150), ...merges(3, 60), tick()];
+  s = status({ e1: healthy(300, 3, 250), p1, p2: [], p3: [] });
+  assert.equal(s.rings[1]!.state, 'out of order');
+  const mid = status({ e1: healthy(300, 3, 250), p1: p1.slice(0, 3), p2: [], p3: [] });
+  assert.notEqual(mid.rings[1]!.state, 'off', "the engine's own off is not the repo turning it off");
+  assert.doesNotMatch(mid.next, /set `flags\.f: true`/);
+  // A3: an instance doing no work isn't promoted on the others' merges.
+  const idle = [ev('merge.stopped', { by: 'red_main' }, hoursAgo(120)), on(100), tick()];
+  s = status({ e1: healthy(400, 3, 350), p1: healthy(300, 3, 250), p2: healthy(100, 3, 60), p3: idle });
+  assert.equal(s.rings[2]!.state, 'soaking');
+  assert.match(s.rings[2]!.why, /p3: 0 of 3 merges/);
+  // A4: one PR recorded three times is one merge.
+  const dup = [on(60), ...[7, 7, 7].map((n) => ev('merge.done', { number: n }, hoursAgo(30))), tick()];
+  assert.match(status({ e1: healthy(300, 3, 250), p1: dup, p2: [], p3: [] }).rings[1]!.why, /p1: 1 of 3 merges/);
+  // A5: a last tick stamped a week ahead, then nothing: not alive.
+  s = status({ e1: [on(60), ...merges(3, 30), ev('coordinator.tick', { instance: 'e1', dispatched: 0, reconciled: 0 }, new Date(NOW.getTime() + 7 * 86_400_000).toISOString())], p1: [], p2: [], p3: [] });
+  assert.equal(s.rings[0]!.state, 'soaking');
+  assert.match(s.rings[0]!.why, /no coordinator tick in the last 30 min from e1/);
+});
+
+test('rollout status: a linked instance folder is on the list; a name both in the running user\'s dir and in its coordinator home is ambiguous and held (R1174f 2, A6, A7)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rollout-r1174f-'));
+  try {
+    const file = join(dir, 'rollout.json');
+    writeFileSync(file, JSON.stringify({ rings: [{ name: 'engine', instances: ['e1'] }, { name: 'first', instances: ['p1'] }] }));
+    const own = join(dir, 'own');
+    const elsewhere = join(dir, 'disk2');
+    instancesAt(own, { e1: 'example/engine', p1: 'o/p1' });
+    instancesAt(elsewhere, { x: 'o/x' });
+    for (const [d, n] of [[own, 'e1'], [own, 'p1']] as const) new EventLog(join(d, n, 'state', 'events.db')).close();
+    const lx = new EventLog(join(elsewhere, 'x', 'state', 'events.db'));
+    lx.append('flag.flipped', { flag: 'f', from: false, to: true, sha: SHA }, 'x');
+    lx.close();
+    symlinkSync(join(elsewhere, 'x'), join(own, 'x'));
+    const out: string[] = [];
+    const engine = () => ({ repos: ['example/engine'], problem: null });
+    rolloutCommand('status', ['--flag', 'f', '--file', file], { out: (l) => out.push(l), err: () => {}, now: NOW, deps: { ownDir: () => own, srvRoot: () => join(dir, 'no-srv'), homeOf: () => null, engine } });
+    assert.ok(out.includes('outside the rollout: x has f on, in no ring'), out.join('\n'));
+    // A7: e1 live in its coordinator home, and a stale e1 folder in the running user's dir: ambiguous, held.
+    const homes = join(dir, 'home');
+    const inst = join(homes, 'wl-e1', '.local', 'state', BRAND.cli, 'instances');
+    instancesAt(inst, { e1: 'example/engine' });
+    new EventLog(join(inst, 'e1', 'state', 'events.db')).close();
+    const err: string[] = [];
+    out.length = 0;
+    const code = rolloutCommand('status', ['--flag', 'f', '--file', file], { out: (l) => out.push(l), err: (l) => err.push(l), now: NOW, deps: { ownDir: () => own, srvRoot: () => join(dir, 'no-srv'), homeOf: (u) => join(homes, u), engine } });
+    assert.equal(code, 1);
+    assert.match(err.join('\n'), /two folders for e1: .*wl-e1's home.*remove the stale one/);
+    assert.doesNotMatch(out.at(-1)!, /^next: turn it on/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

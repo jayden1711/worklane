@@ -48,7 +48,8 @@ A ring is **promoted** when all of these hold:
 
 - the flag is on in **every** instance of the ring (on in some is `partial`);
 - it has been on for at least `soak_hours` (counted from the latest instance to turn it on);
-- the ring's instances merged at least `min_merges` PRs since then (`merge.done`);
+- **each** of the ring's instances merged at least `min_merges` PRs since then (`merge.done`, one per PR number), so an
+  instance that does no work isn't promoted on the others';
 - **every instance is alive:** its last `coordinator.tick` is at most `live_minutes` old. A coordinator that stopped
   ticking isn't soaking, so silence never reads as health;
 - **nothing went wrong** in any of them since it went on:
@@ -61,8 +62,12 @@ A ring is **promoted** when all of these hold:
 - every ring before it is promoted;
 - every instance's event log could be read.
 
-"Since it went on" is by the **log's own order**: what was written after the last flip that turned the flag on. The
-clock only measures the soak's hours, so a clock stepped back never hides a bad sign.
+"Since it went on" is by the **log's own order**: what was written after the flip that turned the flag on. The clock
+only measures the soak's hours, so a clock stepped back never hides a bad sign. A tick stamped in the future is no sign
+of life. Two kinds of flip don't count:
+- an off with no commit (`sha: null`) is the engine's own, written when it read no config from the default branch, not
+  a config change, so the ring keeps its history;
+- an on while it is already on is a replay, never a new on-period.
 
 Only then is the next ring turned on. **Out of order** is judged from the flip history, not today's state: a ring
 turned on before the ring before it was promoted (its hours done and its `min_merges`-th merge) stays out of order
@@ -90,9 +95,10 @@ worklane rollout status --flag <name>
 It prints each ring's state (`off`, `partial`, `soaking`, `promoted`, `roll back`, `out of order`, `unknown`) and why, then the
 **one** next step: which ring to turn on, what to wait for, or which rings to roll back, naming their instances.
 
-**Where it finds an instance:** in the running user's own instances folder, or in the instance's coordinator home
-(`wl-<name>`, `~/.local/state/worklane/instances/<name>`), where a separate-users machine keeps it. Run as root, it
-reads every home. The machine's instances are those in the running user's folder and the server instances under
+**Where it finds an instance:** in the instance's coordinator home (`wl-<name>`,
+`~/.local/state/worklane/instances/<name>`), where a separate-users machine keeps it, or in the running user's own
+instances folder. Run as root, it reads every home. A name in both, and not the same folder, is ambiguous: neither is
+read, and status says to remove the stale one. A folder that is a link to one is listed too. The machine's instances are those in the running user's folder and the server instances under
 `/srv/worklane`; a list that doesn't name every ring instance isn't the machine's whole list, and holds (exit 1).
 
 **Instances in no ring are read too.** Status also reads every other instance on the machine.

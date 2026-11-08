@@ -6,7 +6,7 @@
 // WHERE an instance is (#1174 review R1174c 2): this user's own instances dir, or, on a separate-users machine (each
 // instance's state in its own 0700 coordinator home, docs/separate-users.md), that home's. Run as root, it reads every
 // home; run as anyone else, each instance it can't read is unread, and holds.
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { parse } from 'yaml';
 import { BRAND } from './brand.js';
@@ -34,13 +34,21 @@ export interface RolloutDeps {
 
 const DEFAULT_DEPS: RolloutDeps = { homeOf: userHomeDir, ownDir: instancesDir, srvRoot: () => dirname(dirname(srvCheckoutPath('x', 'y'))), engine: engineRepos };
 
-/** Where instance `n`'s folder is: this user's instances dir, else its coordinator user's home's; null: neither. */
-export function instanceDirOf(n: string, d: RolloutDeps): string | null {
-  const own = join(d.ownDir(), n);
-  if (existsSync(join(own, 'instance.yaml'))) return own;
+/**
+ * Where instance `n`'s folder is: its coordinator user's home's (where a separate-users machine keeps it), else this
+ * user's instances dir. Both, and not the same folder: ambiguous, so neither (R1174f 2: a stale folder of the same
+ * name in the running user's dir was read instead of the live instance).
+ */
+export function instanceDirOf(n: string, d: RolloutDeps): { dir: string | null; why: string } {
   const home = d.homeOf(`wl-${n}`);
   const theirs = home ? join(home, '.local', 'state', BRAND.cli, 'instances', n) : null;
-  return theirs && existsSync(join(theirs, 'instance.yaml')) ? theirs : null;
+  const own = join(d.ownDir(), n);
+  const at = (p: string | null) => p !== null && existsSync(join(p, 'instance.yaml'));
+  const real = (p: string) => { try { return realpathSync(p); } catch { return p; } };
+  if (at(theirs) && at(own) && real(theirs!) !== real(own)) return { dir: null, why: `two folders for ${n}: ${theirs} (wl-${n}'s home) and ${own}; remove the stale one` };
+  if (at(theirs)) return { dir: theirs, why: '' };
+  if (at(own)) return { dir: own, why: '' };
+  return { dir: null, why: `no instance folder for ${n} here or in wl-${n}'s home` };
 }
 
 /** The repos an instance's instance.yaml names (null: can't tell). */
@@ -55,9 +63,18 @@ function reposOf(dir: string | null): string[] | null {
   }
 }
 
+const isDir = (p: string) => {
+  try {
+    return statSync(p).isDirectory();
+  } catch {
+    return false;
+  }
+};
+
 const entries = (dir: string): string[] => {
   try {
-    return readdirSync(dir, { withFileTypes: true }).filter((e) => e.isDirectory() && NAME.test(e.name)).map((e) => e.name);
+    // A folder, or a link to one (R1174f A6: a linked instance folder was left out of the list, so its flag went unseen).
+    return readdirSync(dir, { withFileTypes: true }).filter((e) => NAME.test(e.name) && (e.isDirectory() || (e.isSymbolicLink() && isDir(join(dir, e.name))))).map((e) => e.name);
   } catch {
     return [];
   }
@@ -92,11 +109,11 @@ export function rolloutCommand(sub: string | undefined, args: readonly string[],
     err(`can't use ${file ?? 'rollout.json'}: ${(e as Error).message.split('\n')[0]}`);
     return 1;
   }
-  const dirOf = (n: string) => instanceDirOf(n, d);
+  const dirOf = (n: string) => instanceDirOf(n, d).dir;
   const eventsOf = o.eventsOf ?? ((n: string) => {
-    const dir = dirOf(n);
-    if (!dir) throw new Error(`no instance folder for ${n} here or in wl-${n}'s home`);
-    return readEvents(join(dir, 'state', 'events.db'));
+    const r = instanceDirOf(n, d);
+    if (!r.dir) throw new Error(r.why);
+    return readEvents(join(r.dir, 'state', 'events.db'));
   });
   const logs = new Map<string, StoredEvent[]>();
   const inRings = rollout.rings.flatMap((r) => r.instances);

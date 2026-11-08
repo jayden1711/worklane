@@ -99,7 +99,7 @@ export interface InstanceRead {
   on: boolean;
   /** The ts of the flip that turned it on (the last one), or null. */
   since: string | null;
-  /** merge.done after that flip, by log order: their ts. */
+  /** merge.done after that flip, by log order: their ts, one per PR (R1174f A4: a PR recorded twice counts once). */
   merges: string[];
   /** The first bad sign after that flip, by log order. */
   bad: string | null;
@@ -119,6 +119,11 @@ export function readInstance(events: readonly StoredEvent[], flag: string, maxEr
   for (const [i, e] of events.entries()) {
     if (e.type !== 'flag.flipped' || (e.payload as { flag: string }).flag !== flag) continue;
     const to = (e.payload as { to: boolean }).to;
+    // R1174f 1: an off with no commit is the engine's own (it read no config from the default branch), not a config
+    // change: it says nothing about the flag there, so it changes nothing here. R1174f A1: an on while on is a replay,
+    // never a new on-period.
+    if (!to && (e.payload as { sha?: unknown }).sha === null) continue;
+    if (to && on) continue;
     if (!to && on && periodStart >= 0) {
       // The on-period that just ended: a bad sign in it is remembered (R1174d A3: off and on again erased it).
       const b = events.slice(periodStart + 1, i).map(badSign).find((x) => x !== null);
@@ -132,6 +137,7 @@ export function readInstance(events: readonly StoredEvent[], flag: string, maxEr
     } else since = null;
   }
   const merges: string[] = [];
+  const mergedPrs = new Set<unknown>();
   let bad: string | null = null;
   let errors = 0;
   let lastTick: string | null = null;
@@ -146,7 +152,11 @@ export function readInstance(events: readonly StoredEvent[], flag: string, maxEr
     }
     if (e.type === 'coordinator.stopped' && (e.payload as { clean?: boolean }).clean === true) running = false;
     if (!after) continue;
-    if (e.type === 'merge.done') merges.push(e.ts);
+    if (e.type === 'merge.done') {
+      const n = (e.payload as { number?: unknown }).number;
+      if (n === undefined || n === null || !mergedPrs.has(n)) merges.push(e.ts);
+      if (n !== undefined && n !== null) mergedPrs.add(n);
+    }
     if (e.type === 'coordinator.error' && ++errors > maxErrors) bad ??= `${errors} coordinator errors since it went on (limit ${maxErrors})`;
     bad ??= badSign(e);
   }
@@ -223,14 +233,21 @@ export function rolloutStatus(o: {
     else if (onCount < r.instances.length) st = { ...base, state: 'partial', why: `on in ${onCount} of ${r.instances.length} instances: turn it on in all of them, or off in all` };
     else {
       const hours = (o.now.getTime() - Date.parse(onSince!)) / 3_600_000;
-      const stale = onReads.filter((s) => s.lastTick === null || o.now.getTime() - Date.parse(s.lastTick) > live_minutes * 60_000).map((s) => s.n);
+      // A last tick stamped in the future (a clock ahead) is no sign of life (R1174f A5): alive is a tick in the last
+      // live_minutes, by this clock.
+      const age = (t: string) => o.now.getTime() - Date.parse(t);
+      const stale = onReads.filter((s) => s.lastTick === null || age(s.lastTick) > live_minutes * 60_000 || age(s.lastTick) < -60_000).map((s) => s.n);
+      // min_merges in EACH instance (R1174f 3: one that did no work was promoted on the others' merges).
+      const short = onReads.filter((s) => s.merges.length < min_merges).map((s) => `${s.n}: ${s.merges.length} of ${min_merges} merges`);
       const before = onReads.map((s) => s.badBefore).find((x) => x) ?? null;
       const earlier = before ? `; rolled back before: ${before}` : '';
       if (stale.length) st = { ...base, state: 'soaking', why: `no coordinator tick in the last ${live_minutes} min from ${stale.join(', ')}: a coordinator that isn't running isn't soaking${earlier}` };
-      else if (hours >= soak_hours && mergeTs.length >= min_merges) {
-        st = { ...base, state: 'promoted', why: `${Math.floor(hours)} h on, ${mergeTs.length} merges, nothing went wrong${earlier}` };
-        promotedAt = Math.max(Date.parse(onSince!) + soak_hours * 3_600_000, min_merges ? Date.parse(mergeTs[min_merges - 1]!) : Number.NEGATIVE_INFINITY);
-      } else st = { ...base, state: 'soaking', why: `${Math.floor(hours)} of ${soak_hours} h, ${mergeTs.length} of ${min_merges} merges${earlier}` };
+      else if (hours >= soak_hours && !short.length) {
+        st = { ...base, state: 'promoted', why: `${Math.floor(hours)} h on, ${mergeTs.length} merges (at least ${min_merges} in each instance), nothing went wrong${earlier}` };
+        // Promoted once its hours were done and every instance had its min_merges-th merge.
+        const lastNeeded = min_merges ? Math.max(...onReads.map((s) => Date.parse([...s.merges].sort()[min_merges - 1]!))) : Number.NEGATIVE_INFINITY;
+        promotedAt = Math.max(Date.parse(onSince!) + soak_hours * 3_600_000, lastNeeded);
+      } else st = { ...base, state: 'soaking', why: `${Math.floor(hours)} of ${soak_hours} h${short.length ? `; ${short.join(', ')}` : `, ${mergeTs.length} merges`}${earlier}` };
     }
     rings.push(st);
     prevPromotedAt = st.state === 'promoted' ? promotedAt : null;
