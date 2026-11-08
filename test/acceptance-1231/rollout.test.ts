@@ -2,7 +2,7 @@
 // healthy twins a fix must still pass. Each case asserts the SAFE outcome exactly, so a failing case is an attack that
 // works, or a fix that refuses too much. Sources (the attack files the reviews kept): R1174b and R1174c (their cases,
 // from the review comments), R1174d (r1174d-attacks.test.ts), R1174e's A9b, R1174f (r1174f-attacks.test.ts), R1174g
-// (r1174g-attacks.test.ts), R1174h (attacks-1174h/r1174h-attacks.test.ts). Revised per the spec review R1231a. Frozen
+// (r1174g-attacks.test.ts), R1174h (attacks-1174h/r1174h-attacks.test.ts). Revised per the spec reviews R1231a, R1231b. Frozen
 // once its spec review passes: a change to it then needs its own acceptance review (#1231).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -95,6 +95,8 @@ test('R1174d A2: a clock stepped back after the flip never hides a later merge.s
 
 test('R1174d A3: off, then on again, keeps a trace of the earlier rollback', () => {
   const s = status({ e1: [on(200), ev('merge.stopped', { by: 'red_main' }, hoursAgo(150)), off(149), ...healthy(60, 30)], p1: [], p2: [], p3: [] });
+  // R1231b: promoted (the accepted design), so a fix that freezes after any real rollback can't pass by the note.
+  assert.equal(s.rings[0]!.state, 'promoted');
   assert.match(s.rings[0]!.why, /rolled back before/);
 });
 
@@ -317,6 +319,75 @@ test('R1174h H3b: a later ring turned on while ring 0 soaked is out of order, it
 test('R1174h H4: a coordinator that stopped cleanly is not alive, however recent its last tick', () => {
   const e1 = [on(50), ...merges(3, 40), tick(0.4), ev('coordinator.stopped', { instance: 'e1', clean: true, ms: 1, pending: [] }, hoursAgo(0.33))];
   assert.equal(status({ e1, p1: [] }, R2).rings[0]!.state, 'soaking');
+});
+
+// --- R1231b: the cases its review found missing ---
+
+test('R1231b C1 / R1174f A1: a replayed on never hides a crash loop before it (P1, ring 0; P1b, ring 1)', () => {
+  const p1Shape = [started(101, 1), on(100), started(90, 2), started(85, 3), on(70), ...merges(3, 60), tick()];
+  let s = status({ e1: p1Shape, p1: [] }, R2);
+  assert.equal(s.rings[0]!.state, 'roll back');
+  assert.match(s.rings[0]!.why, /restarted without a clean stop/);
+  s = status({ e1: healthy(300, 250), p1: [started(101, 1), on(100), started(90, 2), started(85, 3), on(70), ...merges(3, 60), tick()], p2: [], p3: [] });
+  assert.equal(s.rings[1]!.state, 'roll back');
+});
+
+test("R1231b C2 / R1174f defect 1: the engine's own off and on again never launders a bad sign (P2, in order)", () => {
+  const s = status({ e1: [on(100), ev('config.invalid', { sha: 'b', errors: [] }, hoursAgo(90)), nullOff(89), on(80), ...merges(3, 60), tick()], p1: [] }, R2);
+  assert.equal(s.rings[0]!.state, 'roll back');
+  const errors = Array.from({ length: 3 }, () => ev('coordinator.error', { instance: 'e1', where: 'tick', kind: 'TypeError', message: 'x' }, hoursAgo(90)));
+  assert.equal(status({ e1: [on(100), ...errors, nullOff(89), on(80), ...merges(3, 60), tick()], p1: [] }, R2).rings[0]!.state, 'roll back', 'coordinator errors too');
+});
+
+test("R1231b C3: a crash restart, then the engine's own off, then on again, rolls back (P3)", () => {
+  const s = status({ e1: [started(101, 1), on(100), started(90, 2), nullOff(90), on(60), ...merges(3, 50), tick()], p1: [] }, R2);
+  assert.equal(s.rings[0]!.state, 'roll back');
+  assert.match(s.rings[0]!.why, /restarted without a clean stop/);
+});
+
+test("R1231b C4 / R1174d defect 1: ring 0's promotion waits for its min_merges-th merge, so a ring on before it is out of order (P4')", () => {
+  const R3 = RolloutFile.parse({ rings: [{ name: 'engine', instances: ['e1'] }, { name: 'first', instances: ['p1'] }, { name: 'second', instances: ['p2'] }] });
+  const s = status({ e1: [on(150), ...merges(2, 140), ...merges(1, 60), tick()], p1: healthy(100, 40), p2: [] }, R3);
+  assert.equal(s.rings[1]!.state, 'out of order');
+  assert.match(s.next, /^roll back ring first/);
+});
+
+test('R1231b C5 / R1174c defect 1: a rollback names a later ring whose log is unread (P5)', () => {
+  const s = status({ e1: [on(10), ev('merge.stopped', { by: 'red_main' }, hoursAgo(5)), tick()] }, R2);
+  assert.match(s.next, /^roll back ring engine/);
+  assert.match(s.next, /config\.yaml of p1 .*if it is on there/);
+});
+
+test("R1231b C6 / R1174b defect 3: an outside instance whose log can't be read holds every turn-on (P6)", () => {
+  const s = rolloutStatus({ rollout: R2, flag: 'f', logs: new Map([['e1', healthy(100, 50)], ['p1', []]]), now: NOW, ringZero: null, listing: null, outside: new Map(), outsideNames: ['x9'] });
+  assert.match(s.next, /^wait: can't read the event log of x9/);
+});
+
+test('R1231b C7 / R1174b defect 2: removing a ring instance is refused (ring 0, and one of two in a later ring), rollout.json kept, and instance-remove.sh refuses before any change', () => {
+  const reg = createRequire(import.meta.url)(join(repoRoot, 'scripts', 'setup', 'instance-records.cjs')) as { remove: (name: string, archive: string, prefix?: string) => unknown };
+  const root = mkdtempSync(join(tmpdir(), 'acc-remove-'));
+  try {
+    const file = join(root, 'etc', BRAND.cli, 'rollout.json');
+    mkdirSync(dirname(file), { recursive: true });
+    const body = JSON.stringify({ rings: [{ name: 'engine', instances: ['e1'] }, { name: 'p', instances: ['c', 'd'] }] });
+    writeFileSync(file, body);
+    for (const n of ['e1', 'c']) assert.throws(() => reg.remove(n, join(root, `${n}.archive.json`), root), /is in the canary rollout/, n);
+    assert.equal(readFileSync(file, 'utf8'), body, 'rollout.json unchanged');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+  const sh = readFileSync(join(repoRoot, 'scripts', 'setup', 'instance-remove.sh'), 'utf8');
+  const refusal = sh.indexOf('[ -z "$rollout_refusal" ] || refuse "$rollout_refusal"');
+  assert.ok(refusal > 0, 'the rollout refusal');
+  for (const change of ['records remove "$name"', 'systemctl disable --now']) assert.ok(sh.indexOf(change) > refusal, `refused before ${change}`);
+});
+
+test("healthy (R1231b TWIN): a later ring with ticks before its flip and one engine-off blip, then a full soak: promoted, and ring 2 is next", () => {
+  const R3 = RolloutFile.parse({ rings: [{ name: 'engine', instances: ['e1'] }, { name: 'first', instances: ['p1'] }, { name: 'second', instances: ['p2'] }] });
+  const p1 = [tick(400), tick(201), tick(200.5), on(200), nullOff(190), tick(189), on(180), ...merges(3, 100), tick()];
+  const s = status({ e1: healthy(300, 250), p1, p2: [] }, R3);
+  assert.deepEqual(states(s), ['promoted', 'promoted', 'off']);
+  assert.match(s.next, /^turn it on for ring second/);
 });
 
 // --- Healthy twins: a fix that refuses everything, or freezes a ring, fails these ---
