@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { appendFileSync, cpSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
+import { DatabaseSync } from 'node:sqlite';
 import { EventLog } from '../src/events/log.js';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
@@ -451,27 +452,6 @@ test('R1173m 1: on a full disk (real SQLITE_FULL), a held flag.flipped never tur
   }
 });
 
-test('R1173m/n N2, N3: main turns a flag off and its record fails to write (not a full disk): the flag is off anyway', async () => {
-  const f = fixture();
-  try {
-    await withKnownFlags([T], async () => {
-      onMain(f, (p) => appendFileSync(cfgFile(p), `flags:\n  ${T}: true\n`), 'on');
-      fetch(f);
-      adopt(f);
-      assert.equal(flagOn(T), true);
-      onMain(f, (p) => writeFileSync(cfgFile(p), readFileSync(cfgFile(p), 'utf8').replace(`${T}: true`, `${T}: false`)), 'off');
-      fetch(f);
-      const busy = { read: (...a: Parameters<EventLog['read']>) => f.log.read(...a), append: () => { throw Object.assign(new Error('database is locked'), { code: 'ERR_SQLITE_ERROR', errcode: 5 }); }, buffered: () => ({ count: 0, dropped: 0, failure: null }) } as unknown as EventLog;
-      assert.throws(() => adoptFlags({ log: busy, repo: f.repo, actor: 'i', branch: 'main', check: () => [] }), /locked/);
-      assert.equal(flagOn(T), false, 'off before the record that failed');
-    });
-  } finally {
-    clearFlags();
-    f.log.close();
-    rmSync(f.base, { recursive: true, force: true });
-  }
-});
-
 test("R1173n M3: origin's HEAD moved to another branch: flags follow only this instance's configured default branch, so none is on", async () => {
   const f = fixture();
   try {
@@ -552,5 +532,151 @@ test("the coordinator's tick audits flag state: a flag recorded on that this eng
     clearFlags();
     f.log.close();
     rmSync(f.base, { recursive: true, force: true });
+  }
+});
+
+/** A second connection holding the log's write lock (BEGIN IMMEDIATE): the log's next write fails with SQLITE_BUSY. */
+function lockLog(path: string): { release: () => void } {
+  const db = new DatabaseSync(path);
+  db.exec('PRAGMA busy_timeout = 0');
+  db.exec('BEGIN IMMEDIATE');
+  return { release: () => { db.exec('ROLLBACK'); db.close(); } };
+}
+const turnOff = (p: string) => writeFileSync(cfgFile(p), readFileSync(cfgFile(p), 'utf8').replace(`${T}: true`, `${T}: false`));
+const turnOn = (p: string) => writeFileSync(cfgFile(p), readFileSync(cfgFile(p), 'utf8').replace(`${T}: false`, `${T}: true`));
+
+test('R1173o 2: main turns a flag off while a second connection holds the real log locked (SQLITE_BUSY): off at once, recorded once the lock is gone', async () => {
+  const f = fixture();
+  const log = new EventLog(f.log.path, { buffer: {} });
+  try {
+    await withKnownFlags([T], async () => {
+      const s1 = onMain(f, (p) => appendFileSync(cfgFile(p), `flags:\n  ${T}: true\n`), 'on');
+      fetch(f);
+      const a = () => adoptFlags({ log, repo: f.repo, actor: 'i', branch: 'main', check: () => [] });
+      a();
+      assert.equal(flagOn(T), true);
+      const s2 = onMain(f, turnOff, 'off');
+      fetch(f);
+      const lock = lockLog(f.log.path);
+      try {
+        assert.throws(a, /locked/);
+        assert.equal(log.buffered().count, 0, 'SQLITE_BUSY is thrown, not held');
+        assert.equal(flagOn(T), false, 'off before the record that failed');
+      } finally {
+        lock.release();
+      }
+      a();
+      assert.equal(flagOn(T), false);
+      assert.deepEqual(flips(f), [[T, false, true, s1], [T, true, false, s2]]);
+    });
+  } finally {
+    clearFlags();
+    log.close();
+    f.log.close();
+    rmSync(f.base, { recursive: true, force: true });
+  }
+});
+
+test('R1173p 2: a flag turned off whose off record failed, then turned on again by main: the off and the new on are both recorded', async () => {
+  const f = fixture();
+  const log = new EventLog(f.log.path, { buffer: {} });
+  try {
+    await withKnownFlags([T], async () => {
+      const s1 = onMain(f, (p) => appendFileSync(cfgFile(p), `flags:\n  ${T}: true\n`), 'on');
+      fetch(f);
+      const a = () => adoptFlags({ log, repo: f.repo, actor: 'i', branch: 'main', check: () => [] });
+      a();
+      const s2 = onMain(f, turnOff, 'off');
+      fetch(f);
+      const lock = lockLog(f.log.path);
+      try {
+        assert.throws(a, /locked/);
+      } finally {
+        lock.release();
+      }
+      assert.equal(flagOn(T), false);
+      const s3 = onMain(f, turnOn, 'on again');
+      fetch(f);
+      a();
+      assert.equal(flagOn(T), true);
+      assert.deepEqual(flips(f), [[T, false, true, s1], [T, true, false, s2], [T, false, true, s3]], 'the off it ran, then the on');
+    });
+  } finally {
+    clearFlags();
+    log.close();
+    f.log.close();
+    rmSync(f.base, { recursive: true, force: true });
+  }
+});
+
+test('R1173p 1: main turns a flag off and the instance check throws (as reading policy.yaml can): every flag off, and recorded off', async () => {
+  for (const thrown of [Object.assign(new Error('EMFILE: too many open files'), { code: 'EMFILE' }), new Error('EISDIR: illegal operation on a directory, read')]) {
+    const f = fixture();
+    try {
+      await withKnownFlags([T], async () => {
+        const s1 = onMain(f, (p) => appendFileSync(cfgFile(p), `flags:\n  ${T}: true\n`), 'on');
+        fetch(f);
+        adopt(f);
+        assert.equal(flagOn(T), true);
+        onMain(f, turnOff, 'off');
+        fetch(f);
+        const a = () => adoptFlags({ log: f.log, repo: f.repo, actor: 'i', branch: 'main', check: () => { throw thrown; } });
+        a();
+        assert.equal(flagOn(T), false, `${thrown.message}: off`);
+        a();
+        assert.equal(flagOn(T), false, `${thrown.message}: still off while the check throws`);
+        assert.deepEqual(flips(f), [[T, false, true, s1], [T, true, false, null]]);
+      });
+    } finally {
+      clearFlags();
+      f.log.close();
+      rmSync(f.base, { recursive: true, force: true });
+    }
+  }
+});
+
+test("R1173p 1: the coordinator's tick, the instance check throwing: the flag goes off and stays off", { skip }, async () => {
+  const f = fixture();
+  try {
+    await withKnownFlags([T], async () => {
+      onMain(f, (p) => appendFileSync(cfgFile(p), `flags:\n  ${T}: true\n`), 'on');
+      let broken = false;
+      const check = () => { if (broken) throw new Error('EISDIR: illegal operation on a directory, read'); return []; };
+      const start = startConfig({ repo: f.repo, remote: 'origin', fallback: loadConfig(f.repo) });
+      const c = coordinator(f, new FakeRunner(() => ({ structured: { summary: 's' } })), { cfg: { ...start.cfg, project: { ...start.cfg.project, land_mode: 'direct' } }, liveConfig: { tree: start.tree, check } });
+      await ticks(c);
+      assert.equal(flagOn(T), true);
+      onMain(f, turnOff, 'off');
+      broken = true;
+      await ticks(c, 3);
+      assert.equal(flagOn(T), false);
+    });
+  } finally {
+    clearFlags();
+    f.log.close();
+    rmSync(f.base, { recursive: true, force: true });
+  }
+});
+
+test("R1173o 1: the coordinator's tick on a repo whose default branch is trunk adopts trunk's flag; configured main against a trunk HEAD adopts nothing", { skip }, async () => {
+  for (const configured of ['trunk', 'main']) {
+    const f = fixture();
+    try {
+      await withKnownFlags([T], async () => {
+        onMain(f, (p) => writeFileSync(cfgFile(p), readFileSync(cfgFile(p), 'utf8').replace('default_branch: main', 'default_branch: trunk') + `flags:\n  ${T}: true\n`), 'trunk, and on');
+        git(f.remote, 'branch', '-m', 'main', 'trunk');
+        git(f.remote, 'symbolic-ref', 'HEAD', 'refs/heads/trunk');
+        git(f.repo, 'fetch', '-q', 'origin', '+refs/heads/trunk:refs/remotes/origin/trunk');
+        const base = loadConfig(f.repo);
+        const cfg = { ...base, project: { ...base.project, land_mode: 'direct' as const, project: { ...base.project.project, default_branch: configured } } };
+        const c = coordinator(f, new FakeRunner(() => ({ structured: { summary: 's' } })), { cfg });
+        await ticks(c);
+        assert.equal(flagOn(T), configured === 'trunk', `configured ${configured}, origin's HEAD trunk`);
+      });
+    } finally {
+      clearFlags();
+      f.log.close();
+      rmSync(f.base, { recursive: true, force: true });
+    }
   }
 });

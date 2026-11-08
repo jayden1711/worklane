@@ -18,15 +18,18 @@ new behaviour can be tried on one repo before it reaches the rest. Code: `src/co
     its own default branch (its `HEAD`) and that branch's head, by its exact ref (`ls-remote`, never a local ref an
     agent could move), and adopts that commit's flags only when the commit is here (fetched) and its config is valid,
     by the schema and by the instance's own check (a required argument). Otherwise, **every flag is off**: a read
-    that failed (the remote unreachable, the commit not fetched, the config invalid or removed) never keeps one on,
-    and isn't cached, so the next tick reads again. A test holds that nothing else in `src/` names `adoptFlags`, and
+    that failed (the remote unreachable, the commit not fetched, the config invalid or removed, the read or the check
+    throwing) never keeps one on, and isn't cached, so the next tick reads again. A push between the config step's
+    fetch and its `ls-remote` gives a head not fetched yet: every flag is off for that tick, recorded, and back on
+    at the next. A test holds that nothing else in `src/` names `adoptFlags`, and
     since nothing it takes picks the source, any caller could only adopt what the default branch says now.
   - origin's default branch must be the instance's configured `default_branch`: if origin's `HEAD` points anywhere
     else (an unprotected branch), nothing is adopted and every flag is off.
   - A flag goes on only once its `flag.flipped` is durably written: while any record is held in memory (a full disk),
     or one was dropped, nothing turns on. A flag the default branch turned off goes off at once, before its record
-    is written, so a record that can't be written never keeps one on. The coordinator adopts flags even when
-    refreshing its config failed.
+    is written, so a record that can't be written never keeps one on. Such an off is written at the next tick that
+    can write it, before any later change, so a flag the default branch turns on again has both records. The
+    coordinator adopts flags even when refreshing its config failed.
   - It reads `flags:` in plain code, not through the zod schema.
   - A coordinator started on the checkout's config (main's invalid or missing) adopts nothing until main's config is
     valid: **every flag is off**. A branch, a hand edit, a written-to config object or a polluted prototype never
@@ -41,7 +44,9 @@ new behaviour can be tried on one repo before it reaches the rest. Code: `src/co
     repo that still names a flag the engine retired keeps working, at start too.
 - **Every flip is audited.** On each tick the coordinator compares each flag's state with the last one recorded in the
   event log. Each difference is one `flag.flipped` event: the flag, from, to, and the commit of the config it read.
-  A flip made while the coordinator was down is recorded at its first tick. A flag the engine stopped knowing that
+  A flip made while the coordinator was down is recorded at its first tick. A limit: the coordinator being down is
+  itself an off with no record, and so is an off whose record a process couldn't write before it stopped (a full
+  disk, then a crash); the log shows the flag on through that time. A flag the engine stopped knowing that
   was on is recorded off. The events are covered by the audit chain ([audit-log.md](audit-log.md)), and the config's
   git history shows who made the change.
 
