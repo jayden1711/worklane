@@ -126,11 +126,11 @@ export class Coordinator extends AutomationRuns {
     // The config as the default branch has it now, before anything below reads it (src/config/live.ts).
     await step('config', () => {
       this.refreshConfig();
-      // Feature flags (src/flags.ts): the default branch's head as the remote says, when its config is here and valid
-      // (by this instance's checks too); otherwise the last adopted stay. Adopted here only. Every flip is audited
-      // against the last state the log recorded, so one made while this coordinator was down is recorded at its first
-      // tick (#1173 reviews R1173f-j).
-      adoptFlags({ log: this.d.log, repo: this.d.repo, remote: this.remote, branch: this.branch, actor: this.d.instance, ...(this.d.liveConfig?.check ? { check: this.d.liveConfig.check } : {}) });
+      // Feature flags (src/flags.ts): origin's default branch's head, when its config is here and valid (by this
+      // instance's checks too); otherwise every flag is off. Adopted here only. Every flip is audited against the last
+      // state the log recorded, so one made while this coordinator was down is recorded at its first tick (#1173
+      // reviews R1173f-l).
+      adoptFlags({ log: this.d.log, repo: this.d.repo, actor: this.d.instance, check: this.d.liveConfig?.check ?? (() => []) });
     }, undefined);
     await step('settings', () => this.refreshSettings(), undefined);
     // The audit chain's checkpoint (src/audit-chain.ts, docs/audit-log.md): at most every 10 minutes. WHY early: a step

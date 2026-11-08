@@ -5,10 +5,11 @@
 //     WHY (#1173 reviews R1173g, R1173h): with flags on the config, every path that built one (the checkout's start,
 //     the tool guard, the CLI, the dashboard, loadConfigAt on a branch) was another way to read a flag on, a mutable
 //     object a write could turn one on in, and an inherited property a polluted prototype could.
-//   - One writer: the coordinator's config step calls adoptFlags. It takes no commit: it asks the remote for the
-//     default branch's head, and adopts that commit's flags only when the commit is here and its config is valid
-//     (#1173 review R1173j), so a caller can only ever adopt what the default branch says now. The flags are checked
-//     here in plain code, so a swapped schema can't loosen them. A test holds that nothing else names it.
+//   - One writer: the coordinator's config step calls adoptFlags. Nothing it is passed picks the source: it asks
+//     origin for its default branch's head, and adopts that commit's flags only when the commit is here and its
+//     config is valid, by the schema and the instance's check (#1173 reviews R1173j, R1173k); otherwise every flag is
+//     off (R1173l). So a caller can only ever adopt what the default branch says now. The flags are checked here in
+//     plain code, so a swapped schema can't loosen them. A test holds that nothing else names it.
 //   - Off by default, always: only an explicit `true` for a name in FLAGS. A name in neither FLAGS nor RETIRED_FLAGS
 //     makes the config invalid (the coordinator keeps running on the last good one); here it turns nothing on.
 //   - Every flip is audited: adoptFlags records a `flag.flipped` event (the flag, from, to, the commit) whenever a
@@ -67,32 +68,44 @@ export function flagsInText(text: string, known: readonly string[] = knownFlags(
   return { on: on.sort() };
 }
 
-/** A commit's config, validated as the coordinator would apply it (null: none there, or invalid): cached by commit. */
-const validAt = new Map<string, Config | null>();
+/** A commit's valid config (a failed read is never kept: R1173l D2, it is read again on the next tick). */
+const validAt = new Map<string, Config>();
 
-/** The default branch's head on the remote itself (ls-remote), never a local ref an agent could move. Null: unknown. */
-export function remoteHead(repo: string, remote: string, branch: string): string | null {
-  gitRemote(remote);
-  const r = gitSpawnSync(['ls-remote', '--exit-code', remote, `refs/heads/${branch}`], { cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000 });
-  const sha = r.status === 0 ? (r.stdout.split('\t')[0] ?? '').trim() : '';
-  return /^[0-9a-f]{40}$/.test(sha) ? sha : null;
+/** The remote's lines `<sha>\t<ref>` for `args`, or null. */
+function lsRemote(repo: string, args: string[]): string[] | null {
+  const r = gitSpawnSync(['ls-remote', ...args], { cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000, maxBuffer: 4 * 1024 * 1024 });
+  return r.status === 0 ? r.stdout.split('\n').filter(Boolean) : null;
 }
 
-/** The flags `sha`'s config turns on, when that commit is here and its config is valid (and passes `check`); else null. */
-function flagsAt(repo: string, sha: string, known: readonly string[], check?: (cfg: Config) => ConfigError[]): readonly string[] | null {
-  // A commit not here yet (the fetch hasn't brought it) is no answer: never cached, asked again next time.
+/**
+ * The default branch's head on origin, as origin says it is now: origin's own default branch (its HEAD), and the one
+ * line for exactly `refs/heads/<that branch>` (R1173l D1: the first line could be `refs/heads/a/refs/heads/main`).
+ * Nothing a caller passes picks the source (R1173k K1). Null: unknown.
+ */
+export function remoteHead(repo: string): { branch: string; sha: string } | null {
+  gitRemote('origin');
+  const sym = lsRemote(repo, ['--symref', 'origin', 'HEAD']);
+  const branch = /^ref: refs\/heads\/([^\t\s]+)\tHEAD$/.exec(sym?.find((l) => l.startsWith('ref: ')) ?? '')?.[1];
+  if (!branch) return null;
+  const ref = `refs/heads/${branch}`;
+  const exact = (lsRemote(repo, ['origin', ref]) ?? []).map((l) => l.split('\t')).filter((p) => p.length === 2 && p[1] === ref);
+  const sha = exact.length === 1 ? exact[0]![0]! : '';
+  return /^[0-9a-f]{40}$/.test(sha) ? { branch, sha } : null;
+}
+
+/** The flags `sha`'s config turns on, when that commit is here and its config is valid and passes `check`; else null. */
+function flagsAt(repo: string, sha: string, known: readonly string[], check: (cfg: Config) => ConfigError[]): readonly string[] | null {
   if (gitSpawnSync(['cat-file', '-e', `${sha}^{commit}`], { cwd: repo, stdio: 'ignore' }).status !== 0) return null;
-  if (!validAt.has(sha)) {
-    let cfg: Config | null = null;
+  let cfg = validAt.get(sha);
+  if (!cfg) {
     try {
       cfg = loadConfigAt(repo, sha);
     } catch {
-      // no config at that commit, or an invalid one: nothing to adopt from it
+      return null;
     }
     validAt.set(sha, cfg);
   }
-  const cfg = validAt.get(sha) ?? null;
-  if (!cfg || (check?.(cfg) ?? []).length) return null;
+  if (check(cfg).length) return null;
   const r = gitSpawnSync(['show', `${sha}:${BRAND.configDir}/config.yaml`], { cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 4 * 1024 * 1024 });
   if (r.status !== 0) return null;
   const read = flagsInText(r.stdout, known, retiredFlags());
@@ -110,29 +123,36 @@ export function recordedFlags(log: EventLog): Map<string, boolean> {
 }
 
 /**
- * The coordinator's config step, once a tick: adopt the flags the default branch's config turns on at its head, as
- * the remote says it is now (#1173 review R1173j D1, D2, D4: no caller names the commit, so none can hand in one a
- * local ref was moved to, or one never validated). The commit must be here (fetched) and its config valid, by the
- * schema and `check`; otherwise the last adopted flags stay, as the last good config does. Then record a flip for every
- * known flag whose state differs from the one last recorded (never recorded: off), and for a recorded flag the engine
- * no longer knows that was on, BEFORE the snapshot changes (R1173j D3: a flag is never on without its record).
+ * The coordinator's config step, once a tick: adopt the flags origin's default branch turns on at its head now, when
+ * that commit is here (fetched) and its config valid, by the schema and by `check` (the instance's own; required: a
+ * caller can't leave it out). Nothing a caller passes picks the remote, the branch or the commit (R1173k K1).
+ * - A head that can't be read, a commit not here, or a config not valid: every flag OFF (R1173l D2: a failed read
+ *   never keeps a flag on). Never cached, so the next tick reads again.
+ * - Each change from the state last recorded is a flag.flipped, written before the change; a flag goes ON only once
+ *   its record is durably written (R1173k K2, R1173l D3: a buffered or dropped record turns nothing on). Returns what
+ *   it recorded.
  */
-export function adoptFlags(o: { log: EventLog; repo: string; remote: string; branch: string; actor: string; check?: (cfg: Config) => ConfigError[] }): EventPayload<'flag.flipped'>[] {
+export function adoptFlags(o: { log: EventLog; repo: string; actor: string; check: (cfg: Config) => ConfigError[] }): EventPayload<'flag.flipped'>[] {
   const known = knownFlags();
-  const head = remoteHead(o.repo, o.remote, o.branch);
-  const read = head ? flagsAt(o.repo, head, known, o.check) : null;
-  const sha = read ? head : (snapshot?.sha ?? null);
-  const on = read ?? (snapshot ? snapshot.on.filter((n) => known.includes(n)) : []);
+  const head = remoteHead(o.repo);
+  const read = head ? flagsAt(o.repo, head.sha, known, o.check) : null;
+  const sha = read && head ? head.sha : null;
+  const on = read ?? [];
   const was = recordedFlags(o.log);
   const out: EventPayload<'flag.flipped'>[] = [];
+  let durable = true;
   for (const flag of [...new Set([...known, ...was.keys()])].sort()) {
     const from = was.get(flag) ?? false;
     const to = on.includes(flag);
     if (from === to) continue;
     const p = { flag, from, to, sha };
-    o.log.append('flag.flipped', p, o.actor);
+    const e = o.log.append('flag.flipped', p, o.actor);
+    if (e.id === 0 || o.log.buffered().count > 0) durable = false;
     out.push(p);
   }
-  snapshot = sha ? Object.freeze({ sha, on: Object.freeze([...on]) }) : null;
+  // Not durably recorded: no flag goes on that wasn't on; one that was on stays on only if the head still says so.
+  const before = snapshot?.on ?? [];
+  const now = durable ? on : on.filter((n) => before.includes(n));
+  snapshot = sha ? Object.freeze({ sha, on: Object.freeze([...now]) }) : null;
   return out;
 }
