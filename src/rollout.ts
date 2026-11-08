@@ -111,6 +111,8 @@ export interface InstanceRead {
   engineOff: boolean;
   /** The flip's stamp is before events logged ahead of it: a clock behind, so the soak can't be timed. */
   skewed: boolean;
+  /** When the stretch of config-on time began, at the earliest (for judging order against the ring before), or null. */
+  stretchSince: string | null;
 }
 
 export function readInstance(events: readonly StoredEvent[], flag: string, maxErrors: number): InstanceRead {
@@ -121,6 +123,9 @@ export function readInstance(events: readonly StoredEvent[], flag: string, maxEr
   let periodStart = -1;
   let badBefore: string | null = null;
   let engineOff = false;
+  // The stretch: from the on that began this run of config-on time, across the engine's own offs (R1231a, R1174f A2:
+  // an engine off then on again laundered an out-of-order start and a bad sign). Only an off with a commit ends it.
+  let stretchAt = -1;
   for (const [i, e] of events.entries()) {
     if (e.type !== 'flag.flipped' || (e.payload as { flag: string }).flag !== flag) continue;
     const to = (e.payload as { to: boolean }).to;
@@ -130,7 +135,9 @@ export function readInstance(events: readonly StoredEvent[], flag: string, maxEr
     // never a new on-period.
     if (to && on) continue;
     engineOff = !to && (e.payload as { sha?: unknown }).sha === null;
-    if (!to && on && periodStart >= 0) {
+    if (!to && !engineOff) stretchAt = -1;
+    if (to && stretchAt < 0) stretchAt = i;
+    if (!to && !engineOff && on && periodStart >= 0) {
       // The on-period that just ended: a bad sign in it is remembered (R1174d A3: off and on again erased it).
       const b = events.slice(periodStart + 1, i).map(badSign).find((x) => x !== null);
       if (b) badBefore = `${b} (in an earlier on-period, before ${e.ts})`;
@@ -156,7 +163,10 @@ export function readInstance(events: readonly StoredEvent[], flag: string, maxEr
   // A coordinator.started with no clean stop since the one before it: the process died (a crash loop shows as several).
   let running = false;
   for (const [i, e] of events.entries()) {
+    // Merges and the soak count from the last on (the engine ran with the flag off before it); bad signs from the
+    // stretch's start (an engine off and on again forgives nothing).
     const after = on && i > flipAt;
+    const inStretch = on && stretchAt >= 0 && i > stretchAt;
     if (e.type === 'coordinator.tick') {
       lastTick = e.ts;
       stoppedAfterTick = false;
@@ -167,8 +177,8 @@ export function readInstance(events: readonly StoredEvent[], flag: string, maxEr
       running = true;
     }
     if (e.type === 'coordinator.stopped' && (e.payload as { clean?: boolean }).clean === true) running = false;
-    if (!after) continue;
-    if (e.type === 'merge.done') {
+    if (!inStretch) continue;
+    if (after && e.type === 'merge.done') {
       const n = (e.payload as { number?: unknown }).number;
       // Merged after the flip, by its own merged_at when it has one (R1174h H2: a merge made before the flip and
       // recorded after it counted).
@@ -177,10 +187,13 @@ export function readInstance(events: readonly StoredEvent[], flag: string, maxEr
       if (!before && (n === undefined || n === null || !mergedPrs.has(n))) merges.push(e.ts);
       if (n !== undefined && n !== null) mergedPrs.add(n);
     }
-    if (e.type === 'coordinator.error' && ++errors > maxErrors) bad ??= `${errors} coordinator errors since it went on (limit ${maxErrors})`;
-    bad ??= badSign(e);
+    if (inStretch && e.type === 'coordinator.error' && ++errors > maxErrors) bad ??= `${errors} coordinator errors since it went on (limit ${maxErrors})`;
+    if (inStretch) bad ??= badSign(e);
   }
-  return { on, since: on ? since : null, merges, bad, lastTick: stoppedAfterTick ? null : lastTick, badBefore, engineOff: !on && engineOff, skewed };
+  // When the stretch began, for judging order against the ring before (R1174h H3b): the earlier of its flip's stamp
+  // and the stamp of the event logged just before it, since a flip logged after a silence may be stamped late.
+  const stretchTs = on && stretchAt >= 0 ? Math.min(Date.parse(events[stretchAt]!.ts), stretchAt > 0 ? Date.parse(events[stretchAt - 1]!.ts) : Infinity) : NaN;
+  return { on, since: on ? since : null, merges, bad, lastTick: stoppedAfterTick ? null : lastTick, badBefore, engineOff: !on && engineOff, skewed, stretchSince: Number.isFinite(stretchTs) ? new Date(stretchTs).toISOString() : null };
 }
 
 /** Each instance's last recorded state of `flag` (flag.flipped), in log order. */
@@ -237,7 +250,7 @@ export function rolloutStatus(o: {
     const onCount = onReads.length;
     const sinces = onReads.map((s) => s.since!).sort();
     const onSince = sinces.at(-1) ?? null;
-    const earliest = sinces[0] ?? null;
+    const earliest = onReads.map((s) => s.stretchSince ?? s.since!).sort()[0] ?? null;
     const mergeTs = onReads.flatMap((s) => s.merges).sort();
     const bad = onReads.filter((s) => s.bad).map((s) => `${s.n}: ${s.bad}`);
     const base = { ring: r.name, instances: r.instances, onSince, merges: mergeTs.length, bad: bad.slice(0, 5) };

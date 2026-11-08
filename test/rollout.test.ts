@@ -98,7 +98,7 @@ test('rollout: out of order is judged from the flip history: a ring turned on wi
   s = status({ e1: [on(100), ...merges(3, 30), tick()], p1: healthy(40, 0, 1), p2: [], p3: [] });
   assert.equal(s.rings[1]!.state, 'out of order', 'ring 0 was promoted at its 3rd merge, 30 h ago, after ring 1 went on');
   // Turned off there and on again after: judged afresh.
-  assert.equal(status({ e1: healthy(100, 3, 60), p1: [on(70), off(55), ...healthy(50, 3, 20)], p2: [], p3: [] }).rings[1]!.state, 'promoted');
+  assert.equal(status({ e1: healthy(100, 3, 60), p1: [on(70), off(55), tick(50.01), ...healthy(50, 3, 20)], p2: [], p3: [] }).rings[1]!.state, 'promoted');
 });
 
 test('rollout: silence is not health: no recent tick holds a ring; an unclean restart or too many coordinator errors since the flip roll it back (R1174d 3)', () => {
@@ -318,13 +318,13 @@ test('rollout: an engine-recorded off (no commit) and a replayed on change nothi
   assert.equal(s.rings[1]!.state, 'roll back', s.rings[1]!.why);
   s = status({ e1: healthy(300, 3, 250), p1: [on(280), on(100), ...merges(3, 60), tick()], p2: [], p3: [] });
   assert.equal(s.rings[1]!.state, 'out of order', 'the first on counts');
-  // A2: the engine's own off (sha null) is a real off (R1174g D1, R1174h H1): on again later starts a new soak, and the
-  // earlier bad sign is said; while it is off by itself, nothing says "set true".
+  // A2: the engine's own off (sha null) is a real off for the soak (R1174g D1, R1174h H1); while it is off by itself,
+  // nothing says "set true".
   const nullOff = (h: number) => ev('flag.flipped', { flag: 'f', from: true, to: false, sha: null }, hoursAgo(h));
   const p1 = [on(280), ev('config.invalid', { sha: 'b', errors: [] }, hoursAgo(200)), nullOff(199), on(150), ...merges(3, 60), tick()];
   s = status({ e1: healthy(300, 3, 250), p1, p2: [], p3: [] });
-  assert.equal(s.rings[1]!.state, 'promoted');
-  assert.match(s.rings[1]!.why, /rolled back before: the config went invalid/);
+  // R1231a, R1174f A2: and the engine's own off forgives nothing: the stretch began at 280 h, before ring 0 was promoted.
+  assert.equal(s.rings[1]!.state, 'out of order');
   const mid = status({ e1: healthy(300, 3, 250), p1: p1.slice(0, 3), p2: [], p3: [] });
   assert.notEqual(mid.rings[1]!.state, 'off', "the engine's own off is not the repo turning it off");
   assert.doesNotMatch(mid.next, /set `flags\.f: true`/);
