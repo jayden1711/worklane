@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { devNull, tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { BRAND } from '../src/brand.js';
 import { GuardrailsConfig, TestsConfig } from '../src/config/schema.js';
@@ -29,6 +29,21 @@ test('the hatch has the name the push gate hook reads, and the hook knows the ag
   assert.match(hook, new RegExp(`^const HATCH = '${H}';$`, 'm'));
   assert.match(hook, new RegExp(`^const AGENT_MARKER = '${BRAND.envPrefix}_AGENT';$`, 'm'));
   assert.equal(agentEnv({}, 'cli')[`${BRAND.envPrefix}_AGENT`], '1');
+});
+
+test("#983 (the owner's 6c): every agent run's git reads no user config: GIT_CONFIG_GLOBAL at the null device, whatever the base or extra says", () => {
+  assert.equal(agentEnv({}, 'cli').GIT_CONFIG_GLOBAL, devNull);
+  assert.equal(agentEnv({ GIT_CONFIG_GLOBAL: '/tmp/mine' }, 'cli').GIT_CONFIG_GLOBAL, devNull, 'from the base environment');
+  assert.equal(agentEnv({}, 'cli', { GIT_CONFIG_GLOBAL: '/tmp/mine' }).GIT_CONFIG_GLOBAL, devNull, 'from extra');
+  assert.equal(runAsEnv(agentEnv({}, 'cli'), { user: 'agent1', home: '/home/example' }).GIT_CONFIG_GLOBAL, devNull, 'as the agent user');
+  // Measured with git itself: a ~/.gitconfig an agent wrote sets nothing for a git started with that environment.
+  const home = mkdtempSync(join(tmpdir(), 'agent-home-'));
+  writeFileSync(join(home, '.gitconfig'), '[core]\n\thooksPath = /tmp/nohooks\n');
+  const env = { ...agentEnv({ PATH: process.env.PATH ?? '' }, 'cli'), HOME: home, XDG_CONFIG_HOME: join(home, '.config') };
+  const r = spawnSync('git', ['config', '--global', '--get', 'core.hooksPath'], { env, encoding: 'utf8' });
+  assert.equal(r.stdout.trim(), '', "the agent's own ~/.gitconfig is not read");
+  const w = spawnSync('git', ['config', '--global', 'core.hooksPath', '/tmp/x'], { env, encoding: 'utf8' });
+  assert.notEqual(w.status, 0, 'and git config --global can\'t write one');
 });
 
 test('an agent may not set, export or pass the hatch, in any wrapper', () => {

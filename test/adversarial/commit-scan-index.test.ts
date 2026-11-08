@@ -486,3 +486,46 @@ test('R1124k: a write destination the guard cannot spell out is refused; ordinar
     'echo [ > out.txt',
   ]) assert.notEqual(await decide(d, 'Bash', { command: line }), 'deny', line);
 });
+
+test("R1124o, 6c: output files of sort, uniq, tree and git's --output are writes; a git config key must be literal; git through an unknown program, and any change to git's config environment, is refused", { skip }, async () => {
+  const d = checkout();
+  for (const line of [
+    // D1
+    'sort -o .git/hooks/pre-commit /tmp/noop',
+    'uniq /tmp/noop .git/hooks/pre-commit',
+    'sort --output=$HOME/.gitconfig /tmp/gc',
+    'tree -o ~/.gitconfig /tmp',
+    // D2
+    'git log -1 --format=x --output=.git/config',
+    'git diff --output=.git/hooks/pre-commit HEAD',
+    // D3
+    'K=core.hooksPath; git config "$K" /tmp/h',
+    'git config "core.hooks$(echo Path)" /tmp/h',
+    'git config core.hooks{Path,} /tmp/h',
+    // D4
+    'arch -arm64 git config core.hooksPath /tmp/h',
+    'xcrun git push --no-verify',
+    // 6c: the runner's GIT_CONFIG_GLOBAL stays as set.
+    'GIT_CONFIG_GLOBAL=/tmp/g git commit -m x',
+    'export GIT_CONFIG_GLOBAL=/tmp/g',
+    'unset GIT_CONFIG_GLOBAL; git commit -m x',
+    'unset GIT_CONFIG_GLOBAL',
+    'env -u GIT_CONFIG_GLOBAL git status',
+    'env -i PATH=/usr/bin git commit -m x',
+    // D5: a writer in a read loop is still judged.
+    'while read -r f; do cp gc "$f"; done < list',
+  ]) assert.equal(await decide(d, 'Bash', { command: line }), 'deny', line);
+  for (const line of [
+    'sort -o sorted.txt a.txt',
+    'uniq a.txt b.txt',
+    'git log -1 --output=/tmp/log.txt',
+    'git config pull.rebase "$V"',
+    'apt-get install -y git curl',
+    'echo git push',
+    // D5: read loops that write nothing.
+    'while read -r l; do echo "$l"; done < list.txt',
+    'git ls-files | while read -r f; do grep -c TODO "$f"; done',
+    'read -r V < version.txt; echo "$V"',
+    'NODE_ENV=test npm test',
+  ]) assert.notEqual(await decide(d, 'Bash', { command: line }), 'deny', line);
+});

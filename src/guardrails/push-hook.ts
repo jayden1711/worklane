@@ -4,6 +4,7 @@
 // pushed can change. An agent that could set it, or point git at another hook, would choose the rules it is judged by.
 // Like the rest of the shell matcher this is best effort (shell.ts): the runner also drops the variable from every
 // agent's environment (runner.ts agentEnv), and the hook itself refuses the hatch inside an agent run.
+import { devNull } from 'node:os';
 import { resolve as resolvePath } from 'node:path';
 import { foldName, gitGuarded } from '../os/git.js';
 import { basename, envShort, envTakesNext, programsIn, shortCluster, splitCommands, type SimpleCommand } from './shell.js';
@@ -266,7 +267,7 @@ const GIT_READERS = new Set(['grep', 'log', 'show', 'diff', 'blame', 'status', '
  * message may say it) that writes no file, sets no variable and takes no config or helper program of its own.
  */
 function onlyReads(c: SimpleCommand): boolean {
-  if (c.writes.length || Object.keys(c.assignments).length || !c.argv.length) return false;
+  if (c.writes.length || writeArgs(c).length || Object.keys(c.assignments).length || !c.argv.length) return false;
   const git = gitCall(c);
   if (git) return git.configs.length === 0 && GIT_READERS.has(git.sub ?? '');
   // WHY: rg --pre runs a program of the caller's choosing on every file.
@@ -441,10 +442,16 @@ const pathReader = (c: SimpleCommand) => {
 const takesPathsFromInput = (c: SimpleCommand) =>
   [{ argv: c.argv }, ...programsIn(c)].some((p) => {
     const n = basename(p.argv[0] ?? '');
-    return n === 'xargs' || n === 'parallel' || n === 'read' || (n === 'find' && p.argv.some((t) => /^-(exec|execdir|ok|okdir|delete|fprint0?|fprintf|fls)$/.test(t)));
+    return n === 'xargs' || n === 'parallel' || (n === 'find' && p.argv.some((t) => /^-(exec|execdir|ok|okdir|delete|fprint0?|fprintf|fls)$/.test(t)));
   });
 /** The same, in the line's text: the shell matcher reads `xargs cp x` as the `cp x` it runs, so its words show none. */
-const PATHS_FROM_INPUT = /(^|[\s|;&(`!{])(xargs|parallel|read|mapfile|readarray)(\s|$)|(^|\s)-(exec|execdir|ok|okdir|delete|fprint0?|fprintf|fls)(\s|$)/;
+const PATHS_FROM_INPUT = /(^|[\s|;&(`!{])(xargs|parallel)(\s|$)|(^|\s)-(exec|execdir|ok|okdir|delete|fprint0?|fprintf|fls)(\s|$)/;
+/**
+ * R1124o D5: a line that reads names into variables (`while read -r f`, mapfile). Only its commands that may write
+ * (not a reader, echo, printf or read itself) have their words judged as paths read at run time.
+ */
+const READS_NAMES = /(^|[\s|;&(`!{])(read|mapfile|readarray)(\s|$)/;
+const namesOnly = (c: SimpleCommand) => pathReader(c) || /^(echo|printf|read|mapfile|readarray|true|false|:|test|\[)$/.test(basename(c.argv[0] ?? ''));
 /** The path-like parts of a word: itself, the value of --opt=value or of=value, and a short option's attached value. */
 const pathParts = (t: string) => [t, ...(t.includes('=') ? [t.slice(t.indexOf('=') + 1)] : []), ...(/^-[A-Za-z]./.test(t) && !t.includes('=') ? [t.slice(2)] : [])].filter(Boolean);
 
@@ -468,6 +475,22 @@ function writeArgs(c: SimpleCommand): string[] {
       });
     }
     if (n === 'dd') out.push(...a.filter((t) => t.startsWith('of=')).map((t) => t.slice(3)));
+    // R1124o D1: sort -o / --output and tree -o write their output file; uniq writes its second operand.
+    if (n === 'sort' || n === 'tree') {
+      a.forEach((t, i) => {
+        if ((t === '-o' || t === '--output') && a[i + 1]) out.push(a[i + 1]!);
+        else if (t.startsWith('--output=')) out.push(t.slice('--output='.length));
+        else if (/^-[^-]*o./.test(t) && n === 'sort') out.push(t.slice(t.indexOf('o') + 1));
+      });
+    }
+    if (n === 'uniq') out.push(...a.filter((t) => !t.startsWith('-') || t === '-').slice(1, 2));
+    // R1124o D2: a git command's --output (log, show, diff, blame, format-patch) writes a file of its choosing.
+    if (isGit(n)) {
+      a.forEach((t, i) => {
+        if ((t === '--output' || t === '--output-directory' || t === '-o') && a[i + 1]) out.push(a[i + 1]!);
+        else if (/^--output(-directory)?=/.test(t)) out.push(t.slice(t.indexOf('=') + 1));
+      });
+    }
     if ((n === 'sed' || n === 'perl') && a.some((t) => /^-[A-Za-z]*i/.test(t) || t.startsWith('--in-place'))) out.push(...a.filter((t) => !t.startsWith('-')));
   }
   return out;
@@ -524,12 +547,16 @@ function configWriteIn(command: string, commands: SimpleCommand[], cwd: string):
   const { followed, fallback } = writeDirs(commands, cwd, vars);
   const all = [...new Set([...followed, ...fallback])];
   const { home, roots } = configRoots();
-  const fromInput = commands.some(takesPathsFromInput) || PATHS_FROM_INPUT.test(command);
+  const anyInput = commands.some(takesPathsFromInput) || PATHS_FROM_INPUT.test(command);
+  const readsNames = READS_NAMES.test(command) || commands.some((c) => basename(c.argv[0] ?? '') === 'read');
+  /** Whether this command's words are paths it may write that it read at run time. */
+  const runtime = (c: SimpleCommand) => anyInput || (readsNames && !namesOnly(c));
   const targetsIn = (dirs: string[]) => [...(home ? [`${home}/.gitconfig`] : []), ...roots, ...roots.flatMap((r) => [r + '/git', r + '/git/config']), ...dirs.flatMap((d) => [`${d}/.git`, `${d}/.git/config`, `${d}/.git/hooks`])].map(foldName);
   const above = (p: string) => {
     const f = foldName(p);
     return [...(home ? [home] : []), ...roots].some((r) => foldName(r) === f || foldName(r).startsWith(f === '/' ? '/' : `${f}/`));
   };
+  let atRuntime = false;
   /** Why word `w` reaches git's config or hooks, judged in `dirs`; 'unreadable' when a glob in it isn't one. */
   const reaches = (w: string, sp: { s: string; unknown: boolean }[], dirs: string[], dest: boolean): string | null => {
     const targets = targetsIn(dirs);
@@ -546,13 +573,14 @@ function configWriteIn(command: string, commands: SimpleCommand[], cwd: string):
           if (targets.some((t) => re.test(t))) return w;
         }
       }
-      if (fromInput && paths.some(above)) return `${w} (a line that writes to paths it reads at run time reaches HOME there)`;
+      if (atRuntime && paths.some(above)) return `${w} (a line that writes to paths it reads at run time reaches HOME there)`;
     }
     return null;
   };
   for (const c of commands) {
-    const words = !pathReader(c) || fromInput ? c.argv.slice(1).flatMap(pathParts) : [];
-    const dests = new Set([...c.writes, ...placedInto(c), ...writeArgs(c), ...(fromInput ? words : [])]);
+    atRuntime = runtime(c);
+    const words = !pathReader(c) || atRuntime ? c.argv.slice(1).flatMap(pathParts) : [];
+    const dests = new Set([...c.writes, ...placedInto(c), ...writeArgs(c), ...(atRuntime ? words : [])]);
     for (const w of dests) {
       const sp = spellings(w, vars);
       const why = sp && !sp.some((x) => x.unmodelled) ? reaches(w, sp, all, true) : 'unreadable';
@@ -588,6 +616,12 @@ export function pushHookShellRefusal(command: string, commands: SimpleCommand[],
   const look = lookup ? { git: lookup.git, dirs: lineDirs(commands, lookup.cwd), env: lineEnv(commands), own: ownCommands(lookup.git, lookup.cwd, commandLists(commands)) } : null;
   const calls: Resolved[] = [];
   for (const c of commands) {
+    // R1124o D4: `git` as an argument of a program the guard doesn't know as a runner (arch, xcrun, script, …), with
+    // a push or a config change after it, is refused: that program may run it, and the guard can't read how.
+    if (!gitWordsIn(c).length && !pathReader(c) && !/^(echo|printf)$/.test(basename(c.argv[0] ?? ''))) {
+      const g = c.argv.findIndex((t, i) => i > 0 && isGit(t));
+      if (g > 0 && c.argv.slice(g + 1).some((t) => /^(push|config|send-pack)$/.test(t) || NO_VERIFY.test(t))) return bypass(`git run through ${basename(c.argv[0] ?? '')}, a program the guard doesn't know as a runner; run git by its own name`);
+    }
     const hookless = programsIn(c).map((p) => basename(p.argv[0] ?? '')).find((n) => HOOKLESS_PUSH_PROGRAM.test(n));
     if (hookless) return bypass(`${hookless} pushes without git's pre-push hook`);
     for (const words of gitWordsIn(c)) {
@@ -600,9 +634,18 @@ export function pushHookShellRefusal(command: string, commands: SimpleCommand[],
   for (const c of commands) {
     for (const [name, value] of assigned(c)) {
       if (/^GIT_CONFIG/i.test(name) && HOOK_CONFIG_NAMED.test(value)) return bypass(`${name} sets ${HOOK_CONFIG_NAMED.exec(value)![0]}`);
+      // #983 (owner's 6c): an agent's git reads its config environment only as the runner set it (GIT_CONFIG_GLOBAL
+      // at the null device, src/runner.ts agentEnv), so no line sets any of it.
+      // Setting GIT_CONFIG_GLOBAL to the null device, as the runner already has it, changes nothing.
+      if (/^GIT_CONFIG/i.test(name) && !(/^GIT_CONFIG_GLOBAL$/i.test(name) && value === devNull)) return bypass(`${name} changes the git config every agent git reads (the runner sets it)`);
       if (pushes && PUSH_ENV.test(name)) return bypass(`${name} gives this push a git config or hooks of its own`);
     }
     if (pushes && unsets(c)) return bypass(`${c.argv[0]} in a push's line can take git's config away`);
+    // #983 (6c): nor unsets it (unset, export -n, env -u), nor starts a program with an emptied environment (env -i),
+    // where a git would read the user's own config again.
+    if (unsets(c) && c.argv.slice(1).some((t) => /^GIT_CONFIG/i.test(t))) return bypass(`${c.argv[0]} ${c.argv.slice(1).join(' ')} takes away the git config the runner sets`);
+    const envOpts = envOptionsOf(c);
+    if (envOpts.some((t) => /^GIT_CONFIG/i.test(t)) || envOpts.some((t) => t === '-i' || t === '-' || t === '--ignore-environment' || /^-[^-]*i/.test(t))) return bypass("env clearing the environment, or GIT_CONFIG*, takes away the git config the runner sets");
   }
   // INVARIANT (R1124i, R1124j): no command of the line writes, places or names a git hooks dir or config file, in any
   // spelling or case the shell and the file system read as one.
@@ -654,7 +697,7 @@ const configRewrites = (t: string) => CONFIG_REWRITE.test(t) || !!configShort(t)
  * place, only reads. Otherwise one operand reads the name and a second is a value. An option git config might take
  * that isn't listed as quiet is a write. `word`: the option or subcommand that rewrites config.
  */
-function configUse(rest: string[]): { use: 'read' | 'write' | 'rewrite'; word?: string } {
+function configUse(rest: string[]): { use: 'read' | 'write' | 'rewrite'; word?: string; at?: number } {
   const rewrite = rest.find(configRewrites);
   if (rewrite) return { use: 'rewrite', word: rewrite };
   let read = false;
@@ -678,17 +721,27 @@ function configUse(rest: string[]): { use: 'read' | 'write' | 'rewrite'; word?: 
   const first = rest[i];
   if (first !== undefined && CONFIG_REWRITE_SUB.test(first)) return { use: 'rewrite', word: first };
   if (read || (first !== undefined && CONFIG_READ_SUB.test(first))) return { use: 'read' };
-  return { use: rest.length - i > 1 ? 'write' : 'read' };
+  return { use: rest.length - i > 1 ? 'write' : 'read', at: i };
+}
+
+/** The config key a `git config` write names (after its options, or after `set`/`unset` and their options). */
+function configKey(rest: string[], at: number): string | undefined {
+  const words = rest.slice(at);
+  const sub = words[0] === 'set' || words[0] === 'unset';
+  return (sub ? words.slice(1) : words).find((t) => !t.startsWith('-'));
 }
 
 /** Why a `git config` with these words (after the subcommand) may change the hooks or a name git runs; or null. */
 function configRefusal(rest: string[]): string | null {
-  const { use, word } = configUse(rest);
+  const { use, word, at } = configUse(rest);
   if (use === 'rewrite') return `git config ${word} can rewrite core.hooksPath, an include or an alias`;
   if (use === 'read') return null;
+  // R1124o D3: a key the guard can't spell out (a variable, a substitution, braces, a glob) may be core.hooksPath.
+  const key = configKey(rest, at ?? 0);
+  if (key === undefined || /[$`{}\\*?[\]]/.test(key)) return `git config ${key ?? ''}: a key the guard can't spell out; write the key literally`;
   if (rest.some((t) => HOOKS_PATH_KEY.test(t))) return 'git config core.hooksPath points git at other hooks';
-  const key = rest.find((t) => NAME_OR_INCLUDE_KEY.test(t));
-  return key ? `git config ${key} can make git read other config or run another command` : null;
+  const named = rest.find((t) => NAME_OR_INCLUDE_KEY.test(t));
+  return named ? `git config ${named} can make git read other config or run another command` : null;
 }
 
 /**

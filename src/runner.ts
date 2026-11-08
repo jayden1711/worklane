@@ -7,7 +7,7 @@ import { spawn, spawnSync } from './os/child-process.js';
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { makePlace } from './worktrees.js';
 import { fileURLToPath } from 'node:url';
-import { tmpdir } from 'node:os';
+import { devNull, tmpdir } from 'node:os';
 import { join, posix } from 'node:path';
 import { agentSettingsFileOf, projectSettingsRefusal, runSettings, settingsAppliedProblem, settingsCheckValue, type Settings, withRunCheck } from './agent-settings.js';
 import { BRAND } from './brand.js';
@@ -231,6 +231,10 @@ export function agentEnv(base: EnvSource, runtime: 'cli' | 'api_key', extra: Rec
     // gh: an empty config dir means no stored login.
     GH_CONFIG_DIR: mkdtempSync(join(tmpdir(), 'no-gh-')),
     ...extra,
+    // #983 (the owner's decision 6c): git reads no user config in an agent run (~/.gitconfig, ~/.config/git/config),
+    // whatever an agent writes there: the null device can't be written. After `extra`, so nothing passed in undoes it;
+    // the guard refuses any agent line that sets or unsets GIT_CONFIG* or empties the environment (push-hook.ts).
+    GIT_CONFIG_GLOBAL: devNull,
   });
   // INVARIANT: no redirecting variable, whatever `base` or `extra` holds; a proxy only from root's network.json
   // (src/network.ts). A provider run's endpoint is set by the runner after this, from agents.yaml's provider.
