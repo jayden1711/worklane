@@ -25,6 +25,12 @@ import { redactString } from '../events/redact.js';
 import { slotDeferringSince } from './wait-caps.js';
 import { optimizePrLines } from '../optimize.js';
 
+/**
+ * Whether a queued land is one the owner approved: an L3 is queued only by the owner's approve answer (decisions.ts),
+ * every other level straight from the review (coordinator.ts), so the level says it.
+ */
+const ownerApproved = (q: { level: string }) => q.level === 'L3';
+
 export abstract class Landing extends Decisions {
   // ---------------------------------------------------------------- landing
 
@@ -70,6 +76,21 @@ export abstract class Landing extends Decisions {
    * now (src/direct-land.ts). A protection refusal is recorded once until the answer changes (coordinator.error: health
    * and the dashboard show it). Either way the queue waits, and lands once it is lifted.
    */
+  /**
+   * The instance policy's auto-merge switch for direct landing (#808, the owner's (c), 2026-11-07): `auto_merge: off`
+   * stops automatic landing (L0 to L2), never what the owner approved (L3). Read at each use. A policy that can't be
+   * read (the switch throws) is off, fail closed. No instance policy at all (a local site, which passes no switch) has
+   * no `auto_merge` to turn off, so direct landing there is as before.
+   */
+  private directAutoOn(): boolean {
+    if (!this.d.autoMerge) return true;
+    try {
+      return this.d.autoMerge();
+    } catch {
+      return false;
+    }
+  }
+
   private async directLandBlocked(): Promise<string | null> {
     const stopped = this.autoMergeStopped();
     if (stopped) return `auto-merge is stopped: ${stopped}`;
@@ -88,8 +109,12 @@ export abstract class Landing extends Decisions {
     this.landing = true;
     try {
       if (this.d.cfg.project.land_mode === 'pr') for (const q of queue) await this.proposePr(q);
-      // Direct: not even the gates run while the branch is unprotected (asked again just before the push, too).
-      else if (!(await this.directLandBlocked())) await this.landBatch(this.buildBatch(queue));
+      // Direct: not even the gates run while the branch is unprotected (asked again just before the push, too). With
+      // the policy's auto-merge off, only what the owner approved (L3) lands; the rest waits queued (#808).
+      else if (!(await this.directLandBlocked())) {
+        const landing = this.directAutoOn() ? queue : queue.filter(ownerApproved);
+        if (landing.length) await this.landBatch(this.buildBatch(landing));
+      }
     } finally {
       this.landing = false;
     }
@@ -253,6 +278,11 @@ export abstract class Landing extends Decisions {
       const unprotected = await this.directLandBlocked();
       if (unprotected) {
         for (const q of applied) result(q.issue, 'deferred', null, `not pushed: ${unprotected}`);
+        return;
+      }
+      // Auto-merge turned off while the gates ran (#808): a batch holding anything the owner didn't approve waits whole.
+      if (!this.directAutoOn() && applied.some((q) => !ownerApproved(q))) {
+        for (const q of applied) result(q.issue, 'deferred', null, "not pushed: the instance policy's auto-merge is off, so only what the owner approved (L3) lands");
         return;
       }
       // A plain (non-force) push only succeeds if the tip hasn't moved: compare-and-swap.

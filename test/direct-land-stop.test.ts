@@ -65,14 +65,25 @@ const runner = () =>
   });
 
 async function run(stop: (f: ReturnType<typeof fixture>) => void) {
+  return runWith(stop, { autoMerge: () => true });
+}
+
+/**
+ * The same, with the instance policy's auto-merge switch as `o.autoMerge` (absent: off), and with `o.l3` the change
+ * raised to L3 so the owner is asked, then (`o.approve`) answers approve.
+ */
+async function runWith(stop: (f: ReturnType<typeof fixture>) => void, o: { autoMerge?: () => boolean; l3?: boolean; approve?: boolean }) {
   const f = fixture();
+  if (o.l3) f.cfg.review = ReviewConfig.parse({ version: 1, levels: { L0_auto: { when: [] }, L1_evaluator: { when: [] }, L2_notify: { when: [] }, L3_human: { when: ['app-non-money'] } } });
   stop(f);
   f.backlog.open({ title: 'Totals skip non-positive quantities', body: ISSUE, author: 'example-owner', labels: ['ready'] });
   const mainBefore = git(f.repo, 'ls-remote', 'origin', 'refs/heads/main').split('\t')[0];
-  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: runner(), repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, maxAttempts: 1, machine: { load: () => 1, disk: () => ({ freePct: 80, totalGb: 500 }) } });
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: runner(), repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, maxAttempts: 1, machine: { load: () => 1, disk: () => ({ freePct: 80, totalGb: 500 }) }, ...(o.autoMerge ? { autoMerge: o.autoMerge } : {}) });
   for (let i = 0; i < 3; i++) {
     await c.tick();
     await c.idle();
+    const asked = f.log.read(0, ['decision.asked']).at(-1)?.payload as { id: string } | undefined;
+    if (o.approve && asked && !f.log.read(0, ['decision.answered']).length) f.log.append('decision.answered', { id: asked.id, by: 'example-owner', answer: 'approve', role: 'owner' }, 'alice');
   }
   const mainAfter = git(f.repo, 'ls-remote', 'origin', 'refs/heads/main').split('\t')[0];
   const landed = f.log.read(0, ['land.result']).filter((e) => (e.payload as { outcome: string }).outcome === 'landed');
@@ -95,6 +106,30 @@ test('direct mode (#808): a logged stop from a red main whose file was deleted b
 
 test('direct mode, control: with no stop the same approved change lands', { skip }, async () => {
   const r = await run(() => {});
+  assert.equal(r.landed.length, 1, 'landed');
+  assert.notEqual(r.mainAfter, r.mainBefore, 'main moved');
+});
+
+// The owner's (c), 2026-11-07: policy.yaml auto_merge off stops automatic direct landing (L0 to L2) only; an L3 the
+// owner approved still lands.
+test("direct mode (#808 (c)): with the policy's auto-merge off, an automatic land (below L3) waits queued, never pushed", { skip }, async () => {
+  for (const [what, autoMerge] of [['off', () => false], ['unreadable', () => { throw new Error('policy.yaml unreadable'); }]] as const) {
+    const r = await runWith(() => {}, { autoMerge });
+    assert.equal(r.queued, 1, `${what}: queued`);
+    assert.equal(r.landed.length, 0, `${what}: never landed`);
+    assert.equal(r.mainAfter, r.mainBefore, `${what}: main untouched`);
+  }
+});
+
+test('direct mode (#808 (c)), control: a local site, with no instance policy and so no switch, lands as before', { skip }, async () => {
+  const r = await runWith(() => {}, {});
+  assert.equal(r.landed.length, 1, 'landed');
+  assert.notEqual(r.mainAfter, r.mainBefore, 'main moved');
+});
+
+test("direct mode (#808 (c)): with the policy's auto-merge off, an L3 the owner approved still lands", { skip }, async () => {
+  const r = await runWith(() => {}, { autoMerge: () => false, l3: true, approve: true });
+  assert.equal(r.f.log.read(0, ['decision.answered']).length, 1, 'the owner answered');
   assert.equal(r.landed.length, 1, 'landed');
   assert.notEqual(r.mainAfter, r.mainBefore, 'main moved');
 });
