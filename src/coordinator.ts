@@ -1076,6 +1076,8 @@ export class Coordinator extends AutomationRuns {
         // still don't apply to a direct land (#716 stays open for them); nor do its switches (policy.yaml auto_merge,
         // review.yaml merge.auto, the auto-merge stop): direct land checks only the emergency stop and the branch's
         // protection. #808 (PR #1183) brings the stop and the policy switch; whichever lands second corrects this.
+        // This is the worker's diff under the config at level time; landBatch checks the same floor again on the land
+        // commit itself, pre-land steps' output included, under the config and land mode at landing (R1182f).
         if (this.d.cfg.project.land_mode === 'direct' && lvl.level !== 'L3') {
           const review = this.d.cfg.review ?? DEFAULT_REVIEW;
           const held = riskAndDesignReasons({ level: lvl, waitCategories: waitCategoriesOf(review), newTopLevel: [] });
