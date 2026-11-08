@@ -27,7 +27,8 @@ test('the updater knows every root helper the setup scripts install from scripts
   for (const f of data) {
     const helper = updater.HELPERS.find((h) => h.src.replace(/\.[cm]?js$/, '.tables.json') === `scripts/machine/${f}`);
     assert.ok(helper, `${f}: the tables file of no listed helper`);
-    assert.ok(readFileSync(join(repoRoot, helper.src), 'utf8').includes(`// BEGIN tables from ${f}:`), `${helper.src} carries ${f}'s generated copy`);
+    // Read from this folder by its name, as the rest of this file reads it (not the whole repo).
+    assert.ok(readFileSync(join(machineDir, helper.src.slice('scripts/machine/'.length)), 'utf8').includes(`// BEGIN tables from ${f}:`), `${helper.src} carries ${f}'s generated copy`);
   }
   for (const h of updater.HELPERS) assert.match(h.dest, /^\/usr\/local\/libexec\/worklane-[a-z-]+$/);
 });
