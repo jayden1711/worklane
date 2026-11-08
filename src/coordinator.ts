@@ -8,6 +8,7 @@ import { gitExecFileSync, gitSpawnSync } from './os/git.js';
 import { createHash, randomBytes } from 'node:crypto';
 import { cpSync, mkdirSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { recordFlagFlips } from './flags.js';
 import { BRAND } from './brand.js';
 import { RECOMMENDATION_PREFIX } from './decision-ask.js';
 import { CANARY_LABEL, canaryTask, machineCanaryInstance } from './canary.js';
@@ -122,7 +123,12 @@ export class Coordinator extends AutomationRuns {
     this.checkConsole();
     void this.checkChat();
     // The config as the default branch has it now, before anything below reads it (src/config/live.ts).
-    await step('config', () => this.refreshConfig(), undefined);
+    await step('config', () => {
+      this.refreshConfig();
+      // Every flag flip is audited (src/flags.ts): against the last state the log recorded, so one made while this
+      // coordinator was down is recorded at its first tick.
+      recordFlagFlips({ log: this.d.log, flags: this.repoCfg.project.flags, sha: this.configSha, actor: this.d.instance });
+    }, undefined);
     await step('settings', () => this.refreshSettings(), undefined);
     await step('chat attachments', () => this.sweepChatAttachments(), undefined);
     await step('chat members', () => this.sweepChatMembers(), undefined);
@@ -510,6 +516,9 @@ export class Coordinator extends AutomationRuns {
    * assignment: every reader after it sees the new config) with the instance's settings over it. An invalid one is
    * never applied: the last good one stays, recorded once (and raised as an incident when there's a watchdog).
    */
+  /** The commit of the config last applied or confirmed from the default branch (null until one is). */
+  private configSha: string | null = null;
+
   refreshConfig(): void {
     this.liveCfg ??= new LiveConfig({ repo: this.d.repo, remote: this.remote, branch: this.branch, ...(this.d.liveConfig?.tree !== undefined ? { tree: this.d.liveConfig.tree } : {}), ...(this.d.liveConfig?.check ? { check: this.d.liveConfig.check } : {}) });
     gitSpawnSync(['fetch', '-q', this.remote, `+refs/heads/${this.branch}:refs/remotes/${this.remote}/${this.branch}`], { cwd: this.d.repo, stdio: 'ignore', timeout: 60_000 });
@@ -521,6 +530,7 @@ export class Coordinator extends AutomationRuns {
       this.d.incidents?.raiseIncident(CONFIG_INCIDENT, this.d.instance, `${BRAND.configDir}/ on ${this.branch} at ${r.sha.slice(0, 8)} is invalid; running on the last good config: ${errors.join('; ').slice(0, 800)}`, `Fix ${BRAND.configDir}/ on ${this.branch}; it is applied on the next tick.`);
       return;
     }
+    if (r.sha && /^[0-9a-f]{40}$/.test(r.sha)) this.configSha = r.sha;
     if (r.kind === 'confirmed') {
       // Started on a valid config: an incident left open by an earlier process (or engine) is stale.
       this.configLoads();

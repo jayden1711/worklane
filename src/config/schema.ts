@@ -1,5 +1,6 @@
 // Schemas for a project's config folder. Unknown keys are errors (strict), so
 // a typo fails loudly instead of silently falling back to a default.
+import { flagsSchema } from '../flags.js';
 import { AutomationsRepo } from '../automations/schema.js';
 import { loosenedProblems } from '../delegation.js';
 import { z } from 'zod';
@@ -98,6 +99,8 @@ export const ProjectConfig = z.strictObject({
   }),
   mode: z.enum(['local', 'shared']).default('local'),
   backlog: z.enum(['github', 'file']).default('github'),
+  /** Feature flags for risky engine changes (src/flags.ts, docs/feature-flags.md): known names only, every one off unless true here. */
+  flags: flagsSchema(),
   runner: z.enum(['local', 'ci', 'remote-machine']).default('local'),
   agent_runtime: z
     .strictObject({
