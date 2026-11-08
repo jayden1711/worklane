@@ -18,6 +18,7 @@ import { scanRange } from '../scan/secrets.js';
 import { fullRunLock } from '../slots.js';
 import { baselineGate, latestBaseline } from '../baseline.js';
 import { createWorktree, removeWorktree } from '../worktrees.js';
+import { changedPathBytes, treeEntries } from './change-files.js';
 import { Decisions } from './decisions.js';
 import { evalLines, pushRefusal, DEFAULT_REVIEW, lockScopeOf } from './shared.js';
 import { SANDBOX_UNAVAILABLE } from '../os/index.js';
@@ -359,46 +360,22 @@ export abstract class Landing extends Decisions {
   }
 
   /**
-   * landFloor's reading, byte for byte (R1182l): each revision's whole tree from `git ls-tree -r -z --full-tree`, and
-   * the land commit's changed paths from `git diff --raw -z --no-renames`, both keyed by the path's own bytes. No path
+   * landFloor's reading, byte for byte (R1182l): each revision's whole tree (treeEntries) and the land commit's changed
+   * paths (changedPathBytes), both from change-files.ts and keyed by the path's own bytes. No path
    * is ever given to git as a pathspec, so `:`-prefixed or magic names mean nothing. A path that isn't UTF-8 can't be
    * an entry's own (entries' files are recorded as text), so it is output.
    */
   private landFloorExact(path: string, tip: string, head: string, applied: EventPayload<'land.queued'>[]): { held: string[]; ask: EventPayload<'land.queued'>[]; seen: boolean; listed: string[]; print: string } {
     const approved = applied.filter((q) => this.landApproved(q));
     const unapproved = applied.filter((q) => !approved.includes(q));
-    const run = (args: string[]): Buffer => {
-      const r = gitSpawnSync(args, { cwd: path, maxBuffer: 1 << 30 });
-      if (r.status !== 0) throw new Error(`git ${args[0]} failed: ${String(r.stderr ?? '').trim().slice(0, 200)}`);
-      return r.stdout as Buffer;
-    };
-    const records = (b: Buffer): Buffer[] => {
-      const out: Buffer[] = [];
-      let at = 0;
-      for (let i = b.indexOf(0, at); i >= 0; i = b.indexOf(0, at)) {
-        out.push(b.subarray(at, i));
-        at = i + 1;
-      }
-      return out;
-    };
+    // Both reads through the one helper that lists changed names (src/coordinator/change-files.ts), byte for byte.
     const trees = new Map<string, Map<string, string>>();
     const treeOf = (rev: string): Map<string, string> => {
       let t = trees.get(rev);
-      if (!t) {
-        t = new Map();
-        for (const rec of records(run(['ls-tree', '-r', '-z', '--full-tree', rev]))) {
-          const tab = rec.indexOf(9);
-          if (tab < 0) throw new Error(`an ls-tree record of ${rev.slice(0, 8)} with no path`);
-          t.set(rec.subarray(tab + 1).toString('hex'), rec.subarray(0, tab).toString('latin1'));
-        }
-        trees.set(rev, t);
-      }
+      if (!t) trees.set(rev, (t = treeEntries(path, rev)));
       return t;
     };
-    // `:<modes> <objects> <status>` then the path, each NUL-ended; with --no-renames, one path per change.
-    const diff = records(run(['diff', '--raw', '-z', '--no-renames', '--no-ext-diff', '--no-textconv', tip, head]));
-    const changed: string[] = [];
-    for (let i = 0; i + 1 < diff.length; i += 2) changed.push(diff[i + 1]!.toString('hex'));
+    const changed = changedPathBytes(path, tip, head);
     const text = (hex: string): string | null => {
       const b = Buffer.from(hex, 'hex');
       const t = b.toString('utf8');
