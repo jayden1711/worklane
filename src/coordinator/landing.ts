@@ -1,6 +1,6 @@
 // Landing: the land queue and batches, the gates before landing, opening PRs, and what follows a landing (deploy).
 import { gitSpawnSync } from '../os/git.js';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { BRAND } from '../brand.js';
 import { type DoneWhenList } from '../backlog/types.js';
 import { claim, release } from '../claims.js';
@@ -27,6 +27,12 @@ import { optimizePrLines } from '../optimize.js';
 
 /** How a reason the landing floor held is recorded on the entry's level (and found again in an approval of it). */
 const LANDING_FLOOR = ": held for the owner (direct land's merge-policy floor, checked again at landing)";
+/**
+ * R1182i/j: the line on a landing-floor level that names exactly what the owner was asked about: a hash of the batch
+ * (each entry's issue and head) and of every file the land commit changes, with its `git ls-tree` entry. An approval at landing covers
+ * output only while this matches; the reasons' text (which names at most a few paths) never decides.
+ */
+const LANDING_PRINT = 'landing floor, exactly this batch and these files: sha256 ';
 
 export abstract class Landing extends Decisions {
   // ---------------------------------------------------------------- landing
@@ -249,7 +255,8 @@ export abstract class Landing extends Decisions {
       const floor = this.landFloor(path, tip, head, applied);
       if (floor.held.length) {
         const why = `not pushed: what this land would push is below direct land's merge-policy floor (${floor.held.join('; ')})`;
-        const reasons = floor.held.map((r) => `${r}${LANDING_FLOOR}`);
+        // Every judged file by name, mode, type and object (no "and N more"), then the print of exactly that.
+        const reasons = [...floor.held.map((r) => `${r}${LANDING_FLOOR}`), ...floor.listed, `${LANDING_PRINT}${floor.print}`];
         for (const q of applied) {
           if (!floor.ask.includes(q)) {
             result(q.issue, 'deferred', null, `${why}; lands once the others in its batch are decided`);
@@ -321,11 +328,12 @@ export abstract class Landing extends Decisions {
     });
   }
 
-  /** The reasons the owner approved at landing for this entry (a question the landing floor asked), as held. */
-  private landingApproved(q: EventPayload<'land.queued'>): string[] {
-    if (!this.landApproved(q)) return [];
+  /** The print (LANDING_PRINT) of what the owner approved at landing for this entry, or null: none approved there. */
+  private landingPrint(q: EventPayload<'land.queued'>): string | null {
+    if (!this.landApproved(q)) return null;
     const set = this.events(q.issue).filter((e) => e.type === 'review.level_set' && (e.payload as EventPayload<'review.level_set'>).head === q.head).at(-1)!;
-    return (set.payload as EventPayload<'review.level_set'>).reasons.filter((r) => r.endsWith(LANDING_FLOOR)).map((r) => r.slice(0, -LANDING_FLOOR.length));
+    const line = (set.payload as EventPayload<'review.level_set'>).reasons.find((r) => r.startsWith(LANDING_PRINT));
+    return line === undefined ? null : line.slice(LANDING_PRINT.length);
   }
 
   /**
@@ -333,10 +341,12 @@ export abstract class Landing extends Decisions {
    * on the land commit's own diff, tip..head, always. A file is an entry's own while it is exactly as at that entry's
    * head: the same object, mode and type (`git ls-tree`); one changed by an approved entry is judged approved. Any other
    * file (a pre-land step's or a gate's output, or an own file they rewrote) is output, which no review-time approval
-   * covers. `ask`: the entries the owner must decide: every unapproved one; with none, every entry, unless each output
-   * reason is one the owner approved at landing (on one of them). `seen`: no output (every judged file is an entry's own).
+   * covers. `ask`: the entries the owner must decide: every unapproved one; with none, every entry, unless the owner
+   * approved, at landing and on one of them, exactly this batch and land commit (`print`, R1182i/j: same paths
+   * with other content, another path hidden behind "and N more", or another batch never match). `listed`: every judged
+   * file (each held path, none behind "and N more"), as the question names it. `seen`: no output (every judged file is an entry's own).
    */
-  private landFloor(path: string, tip: string, head: string, applied: EventPayload<'land.queued'>[]): { held: string[]; ask: EventPayload<'land.queued'>[]; seen: boolean } {
+  private landFloor(path: string, tip: string, head: string, applied: EventPayload<'land.queued'>[]): { held: string[]; ask: EventPayload<'land.queued'>[]; seen: boolean; listed: string[]; print: string } {
     const approved = applied.filter((q) => this.landApproved(q));
     const unapproved = applied.filter((q) => !approved.includes(q));
     const entry = (rev: string, p: string) => {
@@ -360,11 +370,19 @@ export abstract class Landing extends Decisions {
     const labels = [...new Set(applied.flatMap((q) => this.events(q.issue).filter((e) => e.type === 'issue.seen').flatMap((e) => (e.payload as { labels: string[] }).labels)))];
     const reasons = (fs: typeof files) => (fs.length ? riskAndDesignReasons({ level: computeLevel({ files: fs, labels, moneyPaths: this.moneyPaths(review.money_path_source), scope: lockScopeOf(this.d) }, review), waitCategories: waitCategoriesOf(review), newTopLevel: [] }) : []);
     const held = reasons(judged);
-    if (!held.length) return { held: [], ask: [], seen: true };
-    const fromOutput = reasons(output);
-    const covered = fromOutput.every((r) => approved.some((q) => this.landingApproved(q).includes(r)));
+    const none = { held: [], ask: [], seen: true, listed: [], print: '' };
+    if (!held.length) return none;
+    const shown = (e: string) => {
+      const m = /^(\d+) (\w+) ([0-9a-f]+)\t/.exec(e);
+      return m ? `${m[1]} ${m[2]} ${m[3]!.slice(0, 12)}` : 'deleted';
+    };
+    const listed = judged.map((f) => `judged at landing: ${f.path} (${shown(entry(head, f.path))})`);
+    const print = createHash('sha256')
+      .update(JSON.stringify({ batch: applied.map((q) => `${q.issue}@${q.head}`).sort(), files: files.map((f) => [f.path, entry(head, f.path)]).sort((a, b) => (a[0]! < b[0]! ? -1 : a[0]! > b[0]! ? 1 : 0)) }))
+      .digest('hex');
+    const covered = approved.some((q) => this.landingPrint(q) === print);
     const ask = unapproved.length ? unapproved : covered ? [] : approved;
-    return ask.length ? { held, ask, seen: output.length === 0 } : { held: [], ask: [], seen: true };
+    return ask.length ? { held, ask, seen: output.length === 0, listed, print } : none;
   }
 
   /**
