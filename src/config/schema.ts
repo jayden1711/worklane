@@ -99,22 +99,41 @@ export interface FlagInfo {
 }
 
 /**
- * The flags this engine knows. Add one with the change it guards; remove it once the change is the default everywhere
- * (and say so in the changelog). A flag's name: lowercase letters, digits and underscores.
+ * The flags this engine knows. Add one with the change it guards. Once the change is the default everywhere, move its
+ * name to RETIRED_FLAGS (never just delete it). A flag's name: lowercase letters, digits and underscores. This file is
+ * in the agents' tool guard's import tree, so a change here is L3 (the owner reviews it).
  */
 export const FLAGS: Readonly<Record<string, FlagInfo>> = {};
 
+/**
+ * Flags this engine retired: still accepted in a config.yaml, whatever their value, and always off (dropped from the
+ * parsed flags), so a repo that still names one keeps working across the engine upgrade that retired it. WHY (#1173
+ * review): at start the service reads the checkout's config with loadConfig, with no last good config to fall back
+ * on, so a removed name that made the config invalid stopped the engine. A name never leaves this list. Mutable only
+ * so a test can retire a name for one load.
+ */
+export const RETIRED_FLAGS: string[] = [];
+
 export const FLAG_NAME = /^[a-z][a-z0-9_]{0,63}$/;
 
-/** config.yaml `flags:`: known names only, each true or false; absent is `{}` (every flag off). */
-export function flagsSchema(known: readonly string[] = Object.keys(FLAGS)) {
+/**
+ * config.yaml `flags:`: known names, each true or false; absent is `{}` (every flag off). A retired name is accepted
+ * and dropped; any other name makes the config invalid. Both lists are read when a config is parsed.
+ */
+export function flagsSchema(known: () => readonly string[] = () => Object.keys(FLAGS), retired: () => readonly string[] = () => RETIRED_FLAGS) {
   return z
     .record(z.string().regex(FLAG_NAME, 'a flag name is lowercase letters, digits and underscores'), z.boolean())
     .default({})
     .superRefine((flags, ctx) => {
+      const k = known();
+      const r = retired();
       for (const name of Object.keys(flags)) {
-        if (!known.includes(name)) ctx.addIssue({ code: 'custom', path: [name], message: `no such flag: ${name} (the engine knows ${known.length ? known.join(', ') : 'none'}; docs/feature-flags.md)` });
+        if (!k.includes(name) && !r.includes(name)) ctx.addIssue({ code: 'custom', path: [name], message: `no such flag: ${name} (the engine knows ${k.length ? k.join(', ') : 'none'}; docs/feature-flags.md)` });
       }
+    })
+    .transform((flags) => {
+      const r = retired();
+      return Object.fromEntries(Object.entries(flags).filter(([name]) => !r.includes(name)));
     });
 }
 

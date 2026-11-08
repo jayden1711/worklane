@@ -515,14 +515,14 @@ export class Coordinator extends AutomationRuns {
 
   private liveCfg: LiveConfig | null = null;
 
+  /** The commit of the config last applied or confirmed from the default branch (null until one is). */
+  private configSha: string | null = null;
+
   /**
    * Follow the default branch's config: fetch it, and when its config changed, swap the new one in whole (one
    * assignment: every reader after it sees the new config) with the instance's settings over it. An invalid one is
    * never applied: the last good one stays, recorded once (and raised as an incident when there's a watchdog).
    */
-  /** The commit of the config last applied or confirmed from the default branch (null until one is). */
-  private configSha: string | null = null;
-
   refreshConfig(): void {
     this.liveCfg ??= new LiveConfig({ repo: this.d.repo, remote: this.remote, branch: this.branch, ...(this.d.liveConfig?.tree !== undefined ? { tree: this.d.liveConfig.tree } : {}), ...(this.d.liveConfig?.check ? { check: this.d.liveConfig.check } : {}) });
     gitSpawnSync(['fetch', '-q', this.remote, `+refs/heads/${this.branch}:refs/remotes/${this.remote}/${this.branch}`], { cwd: this.d.repo, stdio: 'ignore', timeout: 60_000 });

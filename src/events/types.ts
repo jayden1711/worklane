@@ -164,9 +164,9 @@ export const EventSchemas = {
    * The default branch's config (read from git at `sha`, src/config/live.ts) replaced the running one; `changed`: the
    * sections that differ. `restart_needed`: settings read only at start, kept at their running value until a restart.
    */
+  'config.applied': z.strictObject({ sha: z.string(), changed: z.array(z.string()), restart_needed: z.array(z.strictObject({ path: z.string(), running: z.unknown(), wanted: z.unknown() })) }),
   /** A feature flag's state changed for this repo (src/flags.ts): from the last recorded state, at the config's commit. */
   'flag.flipped': z.strictObject({ flag: z.string().max(64), from: z.boolean(), to: z.boolean(), sha: z.string().nullable() }),
-  'config.applied': z.strictObject({ sha: z.string(), changed: z.array(z.string()), restart_needed: z.array(z.strictObject({ path: z.string(), running: z.unknown(), wanted: z.unknown() })) }),
   /** The default branch's config at `sha` failed validation: never applied, the last good one stays; `errors`: why. */
   'config.invalid': z.strictObject({ sha: z.string(), errors: z.array(z.string()) }),
   /** The default branch's config is valid again (fixed, or reverted to the running one) after an invalid one. */
