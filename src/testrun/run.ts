@@ -24,6 +24,7 @@ import type { Plan } from './affected.js';
 import { importsPlan, selectMode, testsArg } from './select.js';
 import { runLockPath } from '../os/system-paths.js';
 import { gpuPlanned, gpuRecord, gpuStopped, gpuSummaryLine, type GpuOptIn } from './gpu.js';
+import { FAULT_LINE, outputFault, selfMatchingWait } from './faults.js';
 import { networkRecord, networkSummaryLine, SETUP_TIER } from './network.js';
 import { cacheKey } from './cache.js';
 import { fetchSpec } from './fetch.js';
@@ -245,6 +246,8 @@ export async function runTestRun(d: TestRunDeps, req: TestRunRequest, o: { signa
   let gpuRun = false;
   let gpuOpt: GpuOptIn | null = null;
   let stoppedGpu = false;
+  /** The tier in which the GPU was lost (faults.ts gpu_lost): no later GPU tier runs. */
+  let gpuLostIn: string | null = null;
   // The step in progress, for a failure that doesn't name its own.
   let stage = 'slot';
   try {
@@ -332,6 +335,17 @@ export async function runTestRun(d: TestRunDeps, req: TestRunRequest, o: { signa
         results.push({ tier: t.name, ok: false, durationMs: 0, summary: 'needs the change\'s files ({changed_files}) and the run was given none', logRef: '' });
         continue;
       }
+      // A wait that matches its own shell never ends (src/testrun/faults.ts): refused before it runs.
+      const waiter = selfMatchingWait(command);
+      // After the GPU was lost, a GPU tier could only fail or hang the machine: not run.
+      const notRun = waiter !== null ? FAULT_LINE.self_matching_wait : t.gpu && gpuLostIn !== null ? `not run: the GPU was lost in tier ${gpuLostIn}` : null;
+      if (notRun !== null) {
+        const tr: TierResult = { tier: t.name, ok: false, durationMs: 0, summary: waiter !== null ? `${notRun}: \`${waiter}\`` : notRun, logRef: '' };
+        results.push(tr);
+        if (waiter !== null) emit('testrun.fault', { id, tier: t.name, fault: 'self_matching_wait', evidence: waiter });
+        emit('testrun.tier', { id, tier: t.name, ok: false, duration_ms: 0, summary: tr.summary.slice(0, 2000), log_ref: '', cpu_s: null, mem_peak_mb: null });
+        continue;
+      }
       // A file the command calls that this old head doesn't have: not run (it could only fail), and the check says why.
       const missing = behind ? missingReferencedPath(d.repo, req.sha, behind, t.command) : null;
       if (behind && missing) {
@@ -347,6 +361,16 @@ export async function runTestRun(d: TestRunDeps, req: TestRunRequest, o: { signa
       writeFileSync(join(d.logDir, logRef), r.out, { mode: 0o600 });
       const gpu = gpuRecord(t.gpu, r.gpu ?? null);
       if (gpuStopped(r.gpu ?? null, r, !!o.signal?.aborted)) stoppedGpu = true;
+      // A machine fault in a failed step's output (src/testrun/faults.ts): said first on the check, recorded, and never
+      // run again by itself. A GPU lost under a granted GPU makes this a stopped GPU run (never repeated).
+      const fault = r.code !== 0 && !o.signal?.aborted ? outputFault(r.out) : null;
+      if (fault) {
+        emit('testrun.fault', { id, tier: t.name, fault: fault.fault, evidence: fault.evidence });
+        if (fault.fault === 'gpu_lost' && r.gpu?.granted) {
+          stoppedGpu = true;
+          gpuLostIn = t.name;
+        }
+      }
       // WHY: the sandbox's unit stopped at its RuntimeMaxSec exits non-zero like any failure; only systemd-run's result
       // says it was the tier's own cap, and the check names the tier and that cap (a GPU command's may be the GPU's: its
       // max is root's max_minutes exactly, else what was left of timeout_s once the helper got the lock). The helper reads
@@ -357,7 +381,7 @@ export async function runTestRun(d: TestRunDeps, req: TestRunRequest, o: { signa
       const cap = g && gpuCapped ? timedOutLine(`tier ${t.name}`, g.maxS, `the GPU runs' max_minutes in root's testrun-gpu.json, after ${g.waitedS} s waiting for the GPU`) : timedOutLine(`tier ${t.name}`, t.timeout_s, 'its timeout_s in tests.yaml test_run');
       const out = r.timedOut ? `${cap}\n${lastLines(r.out)}` : r.code === null ? `cancelled\n${lastLines(r.out)}` : lastLines(r.out);
       const net = networkRecord(t.network, r.network ?? null);
-      const said = [...(selects ? [selection.line] : []), ...(gpu ? [gpuSummaryLine(gpu)] : []), ...(t.network ? [networkSummaryLine(net, d.instance ?? '<name>', t.name)] : [])];
+      const said = [...(fault ? [`${FAULT_LINE[fault.fault]}: ${fault.evidence}`] : []), ...(selects ? [selection.line] : []), ...(gpu ? [gpuSummaryLine(gpu)] : []), ...(t.network ? [networkSummaryLine(net, d.instance ?? '<name>', t.name)] : [])];
       const tr: TierResult = { tier: t.name, ok: r.code === 0, durationMs: Math.max(0, now() - start), summary: said.length ? `${said.join('\n')}\n${out}` : out, logRef, ...(gpu ? { gpu } : {}), network: net.network };
       const old = behind && !tr.ok ? oldHeadFailure(command, r.code, r.out) : null;
       if (behind && old) tr.predates = { configCommit: behind, what: old, notRun: false };
