@@ -1,11 +1,12 @@
 // #1231's acceptance bar for the soak (#1181): every attack the reviews found, as a must-fail case (a bad run whose
 // verdict must report a failure), with healthy twins whose verdict must report none. Sources (the reviews' attack
-// files): R1181b and R1181d (their cases in the PR's history, from the review comments), R1181f
+// files): R1181b, R1181c (attacks-1181c/verdict.mjs) and R1181d (their cases, from the review comments), R1181f
 // (attacks-1181f/attacks-r1181f.test.mjs), R1181g (r1181g/probe.mjs), R1181h (attacks-1181h/attack-1181h.test.mjs),
 // R1181e's false fail (r1181e/overread.mjs), and the workflow bypasses of R1181c, R1181f 7 and R1181h 4.
 // Not cases, by the reviews' own ranking: R1181d A15 / R1181f E1 (a run 4.96 h of 5.5 h: the 90% rule), and R1181h H4
 // (one held sample at the very end fails: the envelope reads the last ~30 samples, a stated limit).
-// Frozen: a change to this file needs its own acceptance review (#1231).
+// Each must-fail case names the failure it expects (R1231a's lesson: "any failure" lets a fix that refuses everything
+// pass); the healthy twins catch such a fix. Frozen once its spec review passes: a change then needs its own review.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -24,47 +25,61 @@ const series = (n: number, f: (m: number) => Record<string, unknown> = () => ({}
 type Opts = Parameters<typeof soakVerdict>[2];
 const RUN = { expectedMs: 5.5 * 3600_000 - 60_000, sampleMs: 60_000, issueEveryMs: 60_000 } as unknown as Opts;
 const failures = (x: SoakSample[], o: Opts = RUN) => soakVerdict(x, SOAK_LIMITS, o).failures;
-const mustFail = (name: string, x: SoakSample[], o: Opts = RUN) => test(`must fail: ${name}`, () => assert.notDeepEqual(failures(x, o), [], `passed a bad run: ${JSON.stringify(soakVerdict(x, SOAK_LIMITS, o).measured)}`));
+const mustFail = (name: string, x: SoakSample[], want: RegExp, o: Opts = RUN) =>
+  test(`must fail: ${name}`, () => {
+    const f = failures(x, o);
+    assert.notDeepEqual(f, [], `passed a bad run: ${JSON.stringify(soakVerdict(x, SOAK_LIMITS, o).measured)}`);
+    assert.ok(f.some((m) => want.test(m)), `failed, but not for ${want}: ${f.join(' | ')}`);
+  });
+const LEAK_HEAP = /^leak: the heap/;
+const LEAK_RSS = /^leak: RSS/;
+const LEAK_FDS = /^leak: open file handles|^open file handles not counted/;
+const OPEN = /^never finished|^leaked slots|^stuck/;
+const WORK = /^too little work|^stalled/;
+const LOG = /^log growth/;
+const HANG = /^hang/;
+const DRIFT = /^drift/;
+const SHORT = /^too short/;
 const mustPass = (name: string, x: SoakSample[], o: Opts = RUN) => test(`must pass: ${name}`, () => assert.deepEqual(failures(x, o), []));
 const ramp = (m: number, from: number, size: number) => (m < 90 ? 0 : ((m - 90) / (N - 91)) * size) + from;
 const saw = (m: number) => m % 10 >= 3 && m % 10 < 7;
 
 // --- R1181b (round 1) ---
-mustFail('R1181b: heap +1.5 GB in the last 35 min', series(N, (m) => (m >= 295 ? { heapUsed: 1600 * MB, rss: 1800 * MB } : {})));
-mustFail('R1181b: a linear 165 MB heap leak', series(N, (m) => ({ heapUsed: 80 * MB + (Math.max(0, m - 10) * 165 * MB) / 320 })));
-mustFail('R1181b: landing stops at task 15', series(N, (m) => ({ tasksDone: Math.min(15, m), filed: 2 * m + 1, eventsBytes: 1_000_000 + Math.min(15, m) * 1000 })));
-mustFail('R1181b: a run of 2 h of the 5.5 h asked', series(120));
-mustFail('R1181b: all samples in the warm-up', series(6));
-mustFail('R1181b: open file handles uncounted in most samples', series(N, (m) => ({ fds: m % 3 ? null : 40 })));
-mustFail('R1181b: a 240-handle leak with one sample uncounted', series(N, (m) => ({ fds: m === 100 ? null : 40 + Math.floor((m * 240) / 330) })));
+mustFail('R1181b: heap +1.5 GB in the last 35 min', series(N, (m) => (m >= 295 ? { heapUsed: 1600 * MB, rss: 1800 * MB } : {})), LEAK_HEAP);
+mustFail('R1181b: a linear 165 MB heap leak', series(N, (m) => ({ heapUsed: 80 * MB + (Math.max(0, m - 10) * 165 * MB) / 320 })), LEAK_HEAP);
+mustFail('R1181b: landing stops at task 15', series(N, (m) => ({ tasksDone: Math.min(15, m), filed: 2 * m + 1, eventsBytes: 1_000_000 + Math.min(15, m) * 1000 })), WORK);
+mustFail('R1181b: a run of 2 h of the 5.5 h asked', series(120), SHORT);
+mustFail('R1181b: all samples in the warm-up', series(6), SHORT);
+mustFail('R1181b: open file handles uncounted in most samples', series(N, (m) => ({ fds: m % 3 ? null : 40 })), LEAK_FDS);
+mustFail('R1181b: a 240-handle leak with one sample uncounted', series(N, (m) => ({ fds: m === 100 ? null : 40 + Math.floor((m * 240) / 330) })), LEAK_FDS);
 
 // --- R1181d A1-A14 ---
-mustFail('R1181d A1: heap +1.5 GB in the last 4 samples', series(N, (m) => (m >= N - 4 ? { heapUsed: 1600 * MB } : {})));
-mustFail('R1181d A2: RSS +3 GB in the last 4 samples', series(N, (m) => (m >= N - 4 ? { rss: 3200 * MB } : {})));
-mustFail('R1181d A3: heap +250 MB over the last 5 samples', series(N, (m) => (m >= N - 5 ? { heapUsed: 330 * MB } : {})));
-mustFail('R1181d A4: heap linear +148 MB', series(N, (m) => ({ heapUsed: 80 * MB + (Math.max(0, m - 10) * 148 * MB) / (N - 11) })));
-mustFail('R1181d A5: RSS linear +295 MB', series(N, (m) => ({ rss: 200 * MB + (Math.max(0, m - 10) * 295 * MB) / (N - 11) })));
-mustFail('R1181d A6: fds +300 in the last 4 samples', series(N, (m) => (m >= N - 4 ? { fds: 340 } : {})));
-mustFail('R1181d A7: fds linear +37', series(N, (m) => ({ fds: 40 + Math.floor((Math.max(0, m - 10) * 37) / (N - 11)) })));
-mustFail('R1181d A8: a leaked slot with an orphaned run under 30 min', [...series(N - 1), sample((N - 1) * 60_000, { openRuns: 1, oldestOpenRunMs: 25 * 60_000, slotsHeld: 1 })]);
-mustFail('R1181d A9: two leaked slots with two orphaned runs', [...series(N - 1), sample((N - 1) * 60_000, { openRuns: 2, oldestOpenRunMs: 29 * 60_000, slotsHeld: 2 })]);
-mustFail('R1181d A10: a slot leaked mid-run, a run stuck 4 h closed a minute before the end', series(N, (m) => (m >= 60 && m < N - 1 ? { slotsHeld: 2, openRuns: 1, oldestOpenRunMs: (m - 60) * 60_000 } : {})));
-mustFail('R1181d A11: landing stops 78 min before the end', series(N, (m) => ({ tasksDone: Math.min(m, 252), filed: m + 1 })));
-mustFail('R1181d A12: landing stops for the last third at the half-share edge', series(N, (m) => ({ tasksDone: 2 * Math.min(m, 252), filed: 2 * m + 1, eventsBytes: 1_000_000 + 2 * Math.min(m, 252) * 1000 })));
-mustFail('R1181d A13: the log grows 50 MB in the last 30 min', series(N, (m) => ({ eventsBytes: 1_000_000 + m * 60 * 1024 + (m >= N - 30 ? ((m - (N - 30)) * 50 * MB) / 29 : 0) })));
-mustFail('R1181d A14: the per-task log rate 100 then 350 KB', (() => { let b = 1_000_000; return series(N, (m) => ({ eventsBytes: (b += m < N / 2 ? 100 * 1024 : 350 * 1024) })); })());
+mustFail('R1181d A1: heap +1.5 GB in the last 4 samples', series(N, (m) => (m >= N - 4 ? { heapUsed: 1600 * MB } : {})), LEAK_HEAP);
+mustFail('R1181d A2: RSS +3 GB in the last 4 samples', series(N, (m) => (m >= N - 4 ? { rss: 3200 * MB } : {})), LEAK_RSS);
+mustFail('R1181d A3: heap +250 MB over the last 5 samples', series(N, (m) => (m >= N - 5 ? { heapUsed: 330 * MB } : {})), LEAK_HEAP);
+mustFail('R1181d A4: heap linear +148 MB', series(N, (m) => ({ heapUsed: 80 * MB + (Math.max(0, m - 10) * 148 * MB) / (N - 11) })), LEAK_HEAP);
+mustFail('R1181d A5: RSS linear +295 MB', series(N, (m) => ({ rss: 200 * MB + (Math.max(0, m - 10) * 295 * MB) / (N - 11) })), LEAK_RSS);
+mustFail('R1181d A6: fds +300 in the last 4 samples', series(N, (m) => (m >= N - 4 ? { fds: 340 } : {})), LEAK_FDS);
+mustFail('R1181d A7: fds linear +37', series(N, (m) => ({ fds: 40 + Math.floor((Math.max(0, m - 10) * 37) / (N - 11)) })), LEAK_FDS);
+mustFail('R1181d A8: a leaked slot with an orphaned run under 30 min', [...series(N - 1), sample((N - 1) * 60_000, { openRuns: 1, oldestOpenRunMs: 25 * 60_000, slotsHeld: 1 })], OPEN);
+mustFail('R1181d A9: two leaked slots with two orphaned runs', [...series(N - 1), sample((N - 1) * 60_000, { openRuns: 2, oldestOpenRunMs: 29 * 60_000, slotsHeld: 2 })], OPEN);
+mustFail('R1181d A10: a slot leaked mid-run, a run stuck 4 h closed a minute before the end', series(N, (m) => (m >= 60 && m < N - 1 ? { slotsHeld: 2, openRuns: 1, oldestOpenRunMs: (m - 60) * 60_000 } : {})), OPEN);
+mustFail('R1181d A11: landing stops 78 min before the end', series(N, (m) => ({ tasksDone: Math.min(m, 252), filed: m + 1 })), WORK);
+mustFail('R1181d A12: landing stops for the last third at the half-share edge', series(N, (m) => ({ tasksDone: 2 * Math.min(m, 252), filed: 2 * m + 1, eventsBytes: 1_000_000 + 2 * Math.min(m, 252) * 1000 })), WORK);
+mustFail('R1181d A13: the log grows 50 MB in the last 30 min', series(N, (m) => ({ eventsBytes: 1_000_000 + m * 60 * 1024 + (m >= N - 30 ? ((m - (N - 30)) * 50 * MB) / 29 : 0) })), LOG);
+mustFail('R1181d A14: the per-task log rate 100 then 350 KB', (() => { let b = 1_000_000; return series(N, (m) => ({ eventsBytes: (b += m < N / 2 ? 100 * 1024 : 350 * 1024) })); })(), LOG);
 
 // --- R1181f ---
-mustFail('R1181f S1: a heap sawtooth, peaks rising to +2.5 GB, the last 3 in a trough', series(N, (m) => ({ heapUsed: 80 * MB + (saw(m) ? (m / N) * 2500 * MB : 0) })));
-mustFail('R1181f S2: an fd sawtooth, peaks rising to +400', series(N, (m) => ({ fds: 40 + (saw(m) ? Math.round((m / N) * 400) : 0) })));
-mustFail('R1181f G1: heap +2 GB held 130 min mid-run, let go', series(N, (m) => ({ heapUsed: m >= 100 && m < 230 ? 2080 * MB : 80 * MB })));
-mustFail('R1181f SL1: a slot held 4 h next to one young orphaned run', series(N, (m) => (m >= 30 && m < N - 30 ? { openRuns: 1, slotsHeld: 1, oldestOpenRunMs: ((m - 30) % 25) * 60_000 } : {})));
-mustFail('R1181f SL2: two slots and two young orphaned runs for 4 h', series(N, (m) => (m >= 30 && m < N - 30 ? { openRuns: 2, slotsHeld: 2, oldestOpenRunMs: ((m - 30) % 29) * 60_000 } : {})));
-mustFail('R1181f W1: 49% of filed tasks never land', series(N, (m) => ({ filed: 2 * m + 1, tasksDone: Math.ceil((2 * m + 1) * 0.51) })));
-mustFail('R1181f L1: a 45 MB log burst over 30 min at hour 2', series(N, (m) => ({ eventsBytes: 1_000_000 + m * 100 * 1024 + (m >= 120 ? Math.min(30, m - 120) * 1.5 * MB : 0) })));
-mustFail('R1181f L2: 2.5 MB a sample for minutes 110-140', (() => { let b = 1_000_000; return series(N, (m) => ({ eventsBytes: (b += m >= 110 && m < 140 ? 2.5 * MB : 10 * 1024) })); })());
-mustFail('R1181f T1: no sample from minute 100 to 300, one 200-minute tick', [...series(100), ...series(N).slice(300).map((x, i) => sample((300 + i) * 60_000, { tickMs: i === 0 ? 200 * 60_000 : 50, maxTickMs: i === 0 ? 200 * 60_000 : 80, tasksDone: 100 + i, filed: 101 + i }))]);
-mustFail('R1181f D1: a tick linear in the log (138 ms + 0.0125 ms an event), a tick a second', series(N, (m) => ({ events: m * 60, tickMs: 138 + 0.0125 * m * 60 })));
+mustFail('R1181f S1: a heap sawtooth, peaks rising to +2.5 GB, the last 3 in a trough', series(N, (m) => ({ heapUsed: 80 * MB + (saw(m) ? (m / N) * 2500 * MB : 0) })), LEAK_HEAP);
+mustFail('R1181f S2: an fd sawtooth, peaks rising to +400', series(N, (m) => ({ fds: 40 + (saw(m) ? Math.round((m / N) * 400) : 0) })), LEAK_FDS);
+mustFail('R1181f G1: heap +2 GB held 130 min mid-run, let go', series(N, (m) => ({ heapUsed: m >= 100 && m < 230 ? 2080 * MB : 80 * MB })), LEAK_HEAP);
+mustFail('R1181f SL1: a slot held 4 h next to one young orphaned run', series(N, (m) => (m >= 30 && m < N - 30 ? { openRuns: 1, slotsHeld: 1, oldestOpenRunMs: ((m - 30) % 25) * 60_000 } : {})), OPEN);
+mustFail('R1181f SL2: two slots and two young orphaned runs for 4 h', series(N, (m) => (m >= 30 && m < N - 30 ? { openRuns: 2, slotsHeld: 2, oldestOpenRunMs: ((m - 30) % 29) * 60_000 } : {})), OPEN);
+mustFail('R1181f W1: 49% of filed tasks never land', series(N, (m) => ({ filed: 2 * m + 1, tasksDone: Math.ceil((2 * m + 1) * 0.51) })), WORK);
+mustFail('R1181f L1: a 45 MB log burst over 30 min at hour 2', series(N, (m) => ({ eventsBytes: 1_000_000 + m * 100 * 1024 + (m >= 120 ? Math.min(30, m - 120) * 1.5 * MB : 0) })), LOG);
+mustFail('R1181f L2: 2.5 MB a sample for minutes 110-140', (() => { let b = 1_000_000; return series(N, (m) => ({ eventsBytes: (b += m >= 110 && m < 140 ? 2.5 * MB : 10 * 1024) })); })(), LOG);
+mustFail('R1181f T1: no sample from minute 100 to 300, one 200-minute tick', [...series(100), ...series(N).slice(300).map((x, i) => sample((300 + i) * 60_000, { tickMs: i === 0 ? 200 * 60_000 : 50, maxTickMs: i === 0 ? 200 * 60_000 : 80, tasksDone: 100 + i, filed: 101 + i }))], HANG);
+mustFail('R1181f D1: a tick linear in the log (138 ms + 0.0125 ms an event), a tick a second', series(N, (m) => ({ events: m * 60, tickMs: 138 + 0.0125 * m * 60 })), DRIFT);
 test('must fail: R1181f SL3: an orphaned run re-paired by its retries still reads open, with its own age, and fails the soak', () => {
   const t0 = Date.parse('2026-11-08T00:00:00.000Z');
   const ev = (type: string, m: number) => ({ type, ts: new Date(t0 + m * 60_000).toISOString(), payload: { issue: 7, role: 'worker' } });
@@ -77,18 +92,18 @@ test('must fail: R1181f SL3: an orphaned run re-paired by its retries still read
 });
 
 // --- R1181g ---
-for (const t of [5, 10, 25]) mustFail(`R1181g: every tick ${t} min (a coordinator slow on every tick)`, Array.from({ length: Math.floor(330 / t) + 1 }, (_, i) => sample(i * t * 60_000, { tasksDone: i, filed: i + 1, maxTickMs: t * 60_000 - 1000, events: i * 10, eventsBytes: 1_000_000 + i * 60 * 1024 })));
+for (const t of [5, 10, 25]) mustFail(`R1181g: every tick ${t} min (a coordinator slow on every tick)`, Array.from({ length: Math.floor(330 / t) + 1 }, (_, i) => sample(i * t * 60_000, { tasksDone: i, filed: i + 1, maxTickMs: t * 60_000 - 1000, events: i * 10, eventsBytes: 1_000_000 + i * 60 * 1024 })), HANG);
 
 // --- R1181h ---
-mustFail('R1181h V1: heap high through the first quarter, then +1.1 GB over 4 h', series(N, (m) => ({ heapUsed: m < 90 ? 1100 * MB : ramp(m, 80 * MB, 1100 * MB) })));
-mustFail('R1181h V1b: heap +300 MB through the first quarter, then +420 MB', series(N, (m) => ({ heapUsed: m < 90 ? 380 * MB : ramp(m, 80 * MB, 420 * MB) })));
-mustFail('R1181h V1c: RSS high through the first quarter, then +750 MB', series(N, (m) => ({ rss: m < 90 ? 700 * MB : ramp(m, 200 * MB, 750 * MB) })));
-mustFail('R1181h V1d: fds 100 through the first quarter, then 40 to 130', series(N, (m) => ({ fds: m < 90 ? 100 : Math.round(ramp(m, 40, 90)) })));
-mustFail('R1181h V2: a 29-minute tick in every interval', Array.from({ length: 12 }, (_, i) => sample(i * 30 * 60_000, { tasksDone: 2 * i, filed: 2 * i + 1, maxTickMs: 29 * 60_000, eventsBytes: 1_000_000 + 2 * i * 60 * 1024 })));
-mustFail('R1181h V2c: a 10-minute tick after every minute of work', Array.from({ length: 31 }, (_, i) => sample(i * 11 * 60_000, { tasksDone: 2 * i, filed: 2 * i + 1, maxTickMs: 10 * 60_000, eventsBytes: 1_000_000 + 2 * i * 60 * 1024 })));
-mustFail('R1181h D2: one tick in three grows with the log to 20 s, the median flat', series(N, (m) => ({ events: m * 60, maxTickMs: 80 + m * 60 })));
-mustFail('R1181h V3: ten tasks filed at the start never land', series(N, (m) => ({ filed: m + 10, tasksDone: m, oldestUnlandedMs: m * 60_000 })));
-mustFail('R1181h W2: knobs set elsewhere: one task in 5.5 h, a sample every 30 min', Array.from({ length: 12 }, (_, i) => sample(i * 1800_000, { tasksDone: 1, filed: 1, events: 50 + i, eventsBytes: 1_000_000 + i * 1000 })), { expectedMs: 5.5 * 3600_000 - 1800_000 } as unknown as Opts);
+mustFail('R1181h V1: heap high through the first quarter, then +1.1 GB over 4 h', series(N, (m) => ({ heapUsed: m < 90 ? 1100 * MB : ramp(m, 80 * MB, 1100 * MB) })), LEAK_HEAP);
+mustFail('R1181h V1b: heap +300 MB through the first quarter, then +420 MB', series(N, (m) => ({ heapUsed: m < 90 ? 380 * MB : ramp(m, 80 * MB, 420 * MB) })), LEAK_HEAP);
+mustFail('R1181h V1c: RSS high through the first quarter, then +750 MB', series(N, (m) => ({ rss: m < 90 ? 700 * MB : ramp(m, 200 * MB, 750 * MB) })), LEAK_RSS);
+mustFail('R1181h V1d: fds 100 through the first quarter, then 40 to 130', series(N, (m) => ({ fds: m < 90 ? 100 : Math.round(ramp(m, 40, 90)) })), LEAK_FDS);
+mustFail('R1181h V2: a 29-minute tick in every interval', Array.from({ length: 12 }, (_, i) => sample(i * 30 * 60_000, { tasksDone: 2 * i, filed: 2 * i + 1, maxTickMs: 29 * 60_000, eventsBytes: 1_000_000 + 2 * i * 60 * 1024 })), HANG);
+mustFail('R1181h V2c: a 10-minute tick after every minute of work', Array.from({ length: 31 }, (_, i) => sample(i * 11 * 60_000, { tasksDone: 2 * i, filed: 2 * i + 1, maxTickMs: 10 * 60_000, eventsBytes: 1_000_000 + 2 * i * 60 * 1024 })), HANG);
+mustFail('R1181h D2: one tick in three grows with the log to 20 s, the median flat', series(N, (m) => ({ events: m * 60, maxTickMs: 80 + m * 60 })), DRIFT);
+mustFail('R1181h V3: ten tasks filed at the start never land', series(N, (m) => ({ filed: m + 10, tasksDone: m, oldestUnlandedMs: m * 60_000 })), WORK);
+mustFail('R1181h W2: knobs set elsewhere: one task in 5.5 h, a sample every 30 min', Array.from({ length: 12 }, (_, i) => sample(i * 1800_000, { tasksDone: 1, filed: 1, events: 50 + i, eventsBytes: 1_000_000 + i * 1000 })), HANG, { expectedMs: 5.5 * 3600_000 - 1800_000 } as unknown as Opts);
 
 // --- Healthy twins: the verdict must pass these ---
 mustPass('a steady 5.5 h run', series(N));
@@ -107,6 +122,26 @@ test('must pass: R1181h H1: RSS +205 MB linear (80% of its limit) under noise, 5
   }
   assert.deepEqual(bad, []);
 });
+
+
+// --- R1181c (attacks-1181c/verdict.mjs) ---
+for (const stop of [250, 251, 260, 300, 320]) mustFail(`R1181c: landing (2/min) stops at minute ${stop} of 330`, series(N, (m) => ({ tasksDone: 2 * Math.min(m, stop), filed: 2 * m + 1 })), WORK);
+for (const k of [35, 10, 6, 5, 4]) mustFail(`R1181c: heap +1.5 GB in the last ${k} min`, series(N, (m) => (m >= N - k ? { heapUsed: 1600 * MB } : {})), LEAK_HEAP);
+for (const g of [140, 146, 150]) mustFail(`R1181c: a linear heap +${g} MB after the warm-up`, series(N, (m) => ({ heapUsed: 80 * MB + (Math.max(0, m - 10) * g * MB) / 320 })), LEAK_HEAP);
+mustFail('R1181c: the tick 50 -> 1000 ms in the last 35 min', series(N, (m) => ({ tickMs: m >= 295 ? 1000 : 50, maxTickMs: m >= 295 ? 1200 : 80 })), DRIFT);
+test('must fail: R1181c: a run stuck while a retry of the same issue starts and finishes reads open, with its own age', () => {
+  const t0 = Date.parse('2026-11-08T00:00:00.000Z');
+  const ev = (type: string, min: number) => ({ type, ts: new Date(t0 + min * 60_000).toISOString(), payload: { issue: 1, role: 'worker' } });
+  assert.deepEqual(openRunsOf([ev('run.started', 0), ev('run.started', 100), ev('run.finished', 101)], t0 + 330 * 60_000), { open: 1, oldestMs: 330 * 60_000 });
+});
+
+// --- R1181e's healthy shapes (r1181e/healthy.mjs): rises that level off within the limit, steps within it ---
+for (const p of [0.3, 0.5, 0.8]) mustPass(`R1181e: heap +120 MB over ${p * 100}% of the run, flat after`, series(N, (m) => ({ heapUsed: 80 * MB + 120 * MB * Math.min(1, Math.max(0, m - 10) / (p * (N - 10))) })));
+for (const p of [0.3, 0.5]) mustPass(`R1181e: RSS +240 MB over ${p * 100}% of the run, flat after`, series(N, (m) => ({ rss: 200 * MB + 240 * MB * Math.min(1, Math.max(0, m - 10) / (p * (N - 10))) })));
+for (const t of [165, 250]) mustPass(`R1181e: a heap step of +120 MB at minute ${t}`, series(N, (m) => ({ heapUsed: 80 * MB + (m >= t ? 120 * MB : 0) })));
+for (const t of [100, 250]) mustPass(`R1181e: an fd step of +20 at minute ${t}`, series(N, (m) => ({ fds: 40 + (m >= t ? 20 : 0) })));
+mustPass('a tick 1.5x slower, steady', series(N, () => ({ tickMs: 75, maxTickMs: 120 })));
+mustPass('R1181h V1d twin: fds 100 through the first quarter, then 40 flat', series(N, (m) => ({ fds: m < 90 ? 100 : 40 })));
 
 // --- The workflow: the bypasses of R1181c 2, R1181f 7 and R1181h 4 ---
 test('must hold: the soak workflow can be green only on a soak run as asked (R1181c 2, R1181f 7, R1181h 4)', () => {
