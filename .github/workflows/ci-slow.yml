@@ -804,6 +804,18 @@ jobs:
           node-version: '24'
           cache: npm
       - run: npm ci && npm run build && npm run build:web
+      # #958 (the owner's decision, 2026-11-08): a guarded run loads nothing planted in its checkout, a parent folder or
+      # the agent's home (hooks, settings, MCP, CLAUDE.md, rules, skills, agents, commands), on the real claude the
+      # machine installs, with the runner's own argv. A dummy key against a local stand-in for the API: no secret, so it
+      # runs on a pull request too. scripts/ci/setting-sources-probe.mjs says what it plants and its controls.
+      - name: "#958: a guarded run's real claude (--setting-sources '') loads nothing planted in its checkout, parent folder or home"
+        run: |
+          v="$(sed -n 's/^CLAUDE_VERSION=//p' scripts/bootstrap.sh)"
+          cc="$(mktemp -d)"
+          npm install -g --prefix "$cc" --no-audit --no-fund "@anthropic-ai/claude-code@$v" > /dev/null
+          "$cc/bin/claude" --version
+          node scripts/ci/setting-sources-probe.mjs "$cc/bin/claude"
+          rm -rf "$cc"
       - name: the machine (machine.sh) and this commit's engine, root-owned, as engine.sh installs it
         run: |
           sudo apt-get update -q && sudo apt-get install -y -q acl
