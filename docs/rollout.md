@@ -22,13 +22,18 @@ The rings name instances, so they live on the machine, never in a repository:
     { "name": "first", "instances": ["<a project's instance>"] },
     { "name": "second", "instances": ["<another project's instance>"] }
   ],
-  "promote": { "soak_hours": 48, "min_merges": 3 }
+  "promote": { "soak_hours": 48, "min_merges": 3, "live_minutes": 30, "max_errors": 2 }
 }
 ```
 
-- **Ring 0 is the engine's own repository.** The rings go in order, and an instance is in one ring only.
+- **Ring 0 is the engine's own repository, and nothing else.** Status checks it: each ring 0 instance's
+  `instance.yaml` names one of the engine's own repos (`engineRepos()`), and no instance of the engine's repo is
+  outside ring 0. Wrong, or can't tell: no ring is turned on, and status exits 1. The rings go in order, and an
+  instance is in one ring only.
+- **The file is root's alone.** Status reads it as root's other policy files are read: a link, a non-regular file, or
+  one another user can write is refused. `--file <path>` reads a copy as it is, to try one out, and says so.
 - **Ring and instance names** are lowercase letters, digits and dashes, never a path.
-- **`promote`** defaults to 48 hours and 3 merges.
+- **`promote`** defaults to 48 hours, 3 merges, a tick in the last 30 minutes, and at most 2 coordinator errors.
 - **An instance in a ring is never removed, and a rename keeps the file right**
   (`scripts/setup/instance-records.cjs`):
   - **Removal is refused** (`instance-remove.sh`, before it changes anything) while the instance is in a ring. Taking it
@@ -44,15 +49,28 @@ A ring is **promoted** when all of these hold:
 - the flag is on in **every** instance of the ring (on in some is `partial`);
 - it has been on for at least `soak_hours` (counted from the latest instance to turn it on);
 - the ring's instances merged at least `min_merges` PRs since then (`merge.done`);
+- **every instance is alive:** its last `coordinator.tick` is at most `live_minutes` old. A coordinator that stopped
+  ticking isn't soaking, so silence never reads as health;
 - **nothing went wrong** in any of them since it went on:
   - no `merge.stopped`;
   - no `merge.main_result` red or timed out;
   - no `config.invalid`;
   - no `testrun.fault`;
+  - no unclean stop, and no restart without a clean stop before it (a crash, or a crash loop);
+  - no more than `max_errors` `coordinator.error`;
 - every ring before it is promoted;
-- every instance's event log could be read. An unread log promotes nothing.
+- every instance's event log could be read.
 
-Only then is the next ring turned on. A ring turned on before the one before it was promoted is **out of order**.
+"Since it went on" is by the **log's own order**: what was written after the last flip that turned the flag on. The
+clock only measures the soak's hours, so a clock stepped back never hides a bad sign.
+
+Only then is the next ring turned on. **Out of order** is judged from the flip history, not today's state: a ring
+turned on before the ring before it was promoted (its hours done and its `min_merges`-th merge) stays out of order
+once that ring is promoted, until the flag goes off there and on again. A ring that was rolled back, then turned on
+again, says so in its `why` ("rolled back before").
+
+A ring with an instance whose log can't be read is **unknown**, never off. It holds every step that turns a ring on,
+and a rollback names it too.
 
 ## Rollback
 
@@ -69,8 +87,13 @@ As root, or as a user who can read each ring's event log:
 worklane rollout status --flag <name>
 ```
 
-It prints each ring's state (`off`, `partial`, `soaking`, `promoted`, `roll back`, `out of order`) and why, then the
+It prints each ring's state (`off`, `partial`, `soaking`, `promoted`, `roll back`, `out of order`, `unknown`) and why, then the
 **one** next step: which ring to turn on, what to wait for, or which rings to roll back, naming their instances.
+
+**Where it finds an instance:** in the running user's own instances folder, or in the instance's coordinator home
+(`wl-<name>`, `~/.local/state/worklane/instances/<name>`), where a separate-users machine keeps it. Run as root, it
+reads every home. The machine's instances are those in the running user's folder and the server instances under
+`/srv/worklane`; a list that doesn't name every ring instance isn't the machine's whole list, and holds (exit 1).
 
 **Instances in no ring are read too.** Status also reads every other instance on the machine.
 
@@ -82,16 +105,22 @@ It prints each ring's state (`off`, `partial`, `soaking`, `promoted`, `roll back
 It opens every event log read-only and changes nothing.
 
 - **Exit 0:** the status.
-- **Exit 1:** the rollout file or an instance's log couldn't be read (it still prints what it could).
+- **Exit 1:** the rollout file, an instance's log or the machine's instance list couldn't be used, or ring 0 isn't the
+  engine's own repo (it still prints what it could).
 - **Exit 2:** a usage error.
 
-`--file <path>` reads another rollout file.
+`--file <path>` reads another rollout file as it is (not checked as root's), and says so.
 
 ## What it can never do
 
 - **It can't turn a flag on or off.** There is no such command, and the status only says which PR to make.
 - **It can't name a project in this repository.** The rings live in root's file on the machine.
-- **It can't promote a ring it couldn't read**, or one whose earlier ring isn't promoted.
+- **It can't promote a ring it couldn't read**, one whose earlier ring isn't promoted, or one whose coordinator isn't
+  ticking.
+- **It can't see an instance the machine's list doesn't name** beyond the running user's folder and `/srv/worklane`:
+  a desktop instance in another user's home is read only when it's in a ring.
+- **It can't keep an admin's edit of `rollout.json` safe from a rename at the same moment:** the rename rewrites the
+  file whole (atomically for readers), and the machine lock doesn't cover a hand edit.
 - **It can't see harm the event log doesn't record:** a slower agent, or a worse plan that still merged green. The
   soak time and the merge count are there so a person looks before the next ring.
 - **It can't stage an engine version.** That's the canary's and the updater's job.
