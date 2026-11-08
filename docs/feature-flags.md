@@ -1,7 +1,7 @@
 # Feature flags
 
 A risky change to the engine ships behind a flag. It stays off in every project until that project turns it on, so a
-new behaviour can be tried on one repo before it reaches the rest. Code: `src/flags.ts`. Tests:
+new behaviour can be tried on one repo before it reaches the rest. Code: `src/flags.ts` (the schema half in `src/config/schema.ts`). Tests:
 `test/feature-flags.test.ts`.
 
 ## The rules
@@ -41,8 +41,8 @@ Once it's merged, the next tick applies it and records `flag.flipped` (`from: fa
    that still names the removed flag gets `config_invalid` until it deletes the line, and the log records the flag
    off.
 
-The engine knows no flags yet. The first ones come with the shadow runs and the canary rollout
-([testing-in-production.md](testing-in-production.md), items e and f).
+The engine knows no flags yet. The first one comes with the first risky change that needs one. The canary rollout
+([testing-in-production.md](testing-in-production.md), item f) stages any registered flag ring by ring.
 
 ## What flags can never do
 
