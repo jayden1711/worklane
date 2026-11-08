@@ -5,9 +5,10 @@
 //     WHY (#1173 reviews R1173g, R1173h): with flags on the config, every path that built one (the checkout's start,
 //     the tool guard, the CLI, the dashboard, loadConfigAt on a branch) was another way to read a flag on, a mutable
 //     object a write could turn one on in, and an inherited property a polluted prototype could.
-//   - One writer: the coordinator's config step calls adoptFlags with the commit of the default branch whose config is
-//     running (null: none, so every flag is off). The flags are read from git at that commit and checked here in
-//     plain code, so a swapped schema can't loosen them. A test holds that nothing else calls it.
+//   - One writer: the coordinator's config step calls adoptFlags. It takes no commit: it asks the remote for the
+//     default branch's head, and adopts that commit's flags only when the commit is here and its config is valid
+//     (#1173 review R1173j), so a caller can only ever adopt what the default branch says now. The flags are checked
+//     here in plain code, so a swapped schema can't loosen them. A test holds that nothing else names it.
 //   - Off by default, always: only an explicit `true` for a name in FLAGS. A name in neither FLAGS nor RETIRED_FLAGS
 //     makes the config invalid (the coordinator keeps running on the last good one); here it turns nothing on.
 //   - Every flip is audited: adoptFlags records a `flag.flipped` event (the flag, from, to, the commit) whenever a
@@ -18,6 +19,8 @@ import type { EventLog } from './events/log.js';
 import type { EventPayload } from './events/types.js';
 import { FLAG_NAME, knownFlags, retiredFlags } from './config/schema.js';
 import { gitSpawnSync } from './os/git.js';
+import { gitRemote } from './git-remote.js';
+import { loadConfigAt, type Config, type ConfigError } from './config/load.js';
 
 export { FLAG_NAME, FLAGS, RETIRED_FLAGS, flagsSchema, type FlagInfo } from './config/schema.js';
 
@@ -64,18 +67,36 @@ export function flagsInText(text: string, known: readonly string[] = knownFlags(
   return { on: on.sort() };
 }
 
-const byCommit = new Map<string, readonly string[]>();
+/** A commit's config, validated as the coordinator would apply it (null: none there, or invalid): cached by commit. */
+const validAt = new Map<string, Config | null>();
 
-/** The flags the config committed at `sha` turns on (none when it has no config.yaml or a bad `flags:`). */
-function flagsAt(repo: string, sha: string, known: readonly string[]): readonly string[] {
-  const key = `${repo}\u0000${sha}\u0000${known.join(',')}`;
-  const hit = byCommit.get(key);
-  if (hit) return hit;
+/** The default branch's head on the remote itself (ls-remote), never a local ref an agent could move. Null: unknown. */
+export function remoteHead(repo: string, remote: string, branch: string): string | null {
+  gitRemote(remote);
+  const r = gitSpawnSync(['ls-remote', '--exit-code', remote, `refs/heads/${branch}`], { cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000 });
+  const sha = r.status === 0 ? (r.stdout.split('\t')[0] ?? '').trim() : '';
+  return /^[0-9a-f]{40}$/.test(sha) ? sha : null;
+}
+
+/** The flags `sha`'s config turns on, when that commit is here and its config is valid (and passes `check`); else null. */
+function flagsAt(repo: string, sha: string, known: readonly string[], check?: (cfg: Config) => ConfigError[]): readonly string[] | null {
+  // A commit not here yet (the fetch hasn't brought it) is no answer: never cached, asked again next time.
+  if (gitSpawnSync(['cat-file', '-e', `${sha}^{commit}`], { cwd: repo, stdio: 'ignore' }).status !== 0) return null;
+  if (!validAt.has(sha)) {
+    let cfg: Config | null = null;
+    try {
+      cfg = loadConfigAt(repo, sha);
+    } catch {
+      // no config at that commit, or an invalid one: nothing to adopt from it
+    }
+    validAt.set(sha, cfg);
+  }
+  const cfg = validAt.get(sha) ?? null;
+  if (!cfg || (check?.(cfg) ?? []).length) return null;
   const r = gitSpawnSync(['show', `${sha}:${BRAND.configDir}/config.yaml`], { cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 4 * 1024 * 1024 });
-  const read = r.status === 0 ? flagsInText(r.stdout, known, retiredFlags()) : { on: [] };
-  const on = Object.freeze('on' in read ? read.on : []);
-  byCommit.set(key, on);
-  return on;
+  if (r.status !== 0) return null;
+  const read = flagsInText(r.stdout, known, retiredFlags());
+  return 'on' in read ? Object.freeze(read.on) : null;
 }
 
 /** The flags' states as the log last recorded them (flag.flipped, in order); a flag never recorded is off. */
@@ -89,16 +110,19 @@ export function recordedFlags(log: EventLog): Map<string, boolean> {
 }
 
 /**
- * The coordinator's config step, once a tick: adopt the flags the default branch's config turns on at `sha` (the
- * commit whose config is running; null: none), and record a flip for every known flag whose state differs from the
- * one last recorded (never recorded: off), and for a recorded flag the engine no longer knows that was on. Returns
- * what it recorded. `sha` must be a full commit id.
+ * The coordinator's config step, once a tick: adopt the flags the default branch's config turns on at its head, as
+ * the remote says it is now (#1173 review R1173j D1, D2, D4: no caller names the commit, so none can hand in one a
+ * local ref was moved to, or one never validated). The commit must be here (fetched) and its config valid, by the
+ * schema and `check`; otherwise the last adopted flags stay, as the last good config does. Then record a flip for every
+ * known flag whose state differs from the one last recorded (never recorded: off), and for a recorded flag the engine
+ * no longer knows that was on, BEFORE the snapshot changes (R1173j D3: a flag is never on without its record).
  */
-export function adoptFlags(o: { log: EventLog; repo: string; sha: string | null; actor: string }): EventPayload<'flag.flipped'>[] {
+export function adoptFlags(o: { log: EventLog; repo: string; remote: string; branch: string; actor: string; check?: (cfg: Config) => ConfigError[] }): EventPayload<'flag.flipped'>[] {
   const known = knownFlags();
-  const sha = o.sha !== null && /^[0-9a-f]{40}$/.test(o.sha) ? o.sha : null;
-  const on = sha ? flagsAt(o.repo, sha, known) : [];
-  snapshot = sha ? Object.freeze({ sha, on }) : null;
+  const head = remoteHead(o.repo, o.remote, o.branch);
+  const read = head ? flagsAt(o.repo, head, known, o.check) : null;
+  const sha = read ? head : (snapshot?.sha ?? null);
+  const on = read ?? (snapshot ? snapshot.on.filter((n) => known.includes(n)) : []);
   const was = recordedFlags(o.log);
   const out: EventPayload<'flag.flipped'>[] = [];
   for (const flag of [...new Set([...known, ...was.keys()])].sort()) {
@@ -109,5 +133,6 @@ export function adoptFlags(o: { log: EventLog; repo: string; sha: string | null;
     o.log.append('flag.flipped', p, o.actor);
     out.push(p);
   }
+  snapshot = sha ? Object.freeze({ sha, on: Object.freeze([...on]) }) : null;
   return out;
 }

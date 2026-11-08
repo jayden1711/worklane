@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { appendFileSync, cpSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, cpSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import type { EventLog } from '../src/events/log.js';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
 import { tmpdir } from 'node:os';
@@ -168,27 +170,41 @@ function onMain(f: Fixture, edit: (p: string) => void, msg: string): string {
 const cfgFile = (root: string) => join(root, '.worklane', 'config.yaml');
 const flips = (f: Fixture) => f.log.read(0, ['flag.flipped']).map((e) => { const p = e.payload as EventPayload<'flag.flipped'>; return [p.flag, p.from, p.to, p.sha]; });
 
-test('adoptFlags: reads the flags at a commit from git, and audits each change of state from the last one recorded; no change, no event', async () => {
+const adopt = (f: Fixture) => adoptFlags({ log: f.log, repo: f.repo, remote: 'origin', branch: 'main', actor: 'i' });
+const fetch = (f: Fixture) => git(f.repo, 'fetch', '-q', 'origin', '+refs/heads/main:refs/remotes/origin/main');
+
+test("adoptFlags: the default branch's head as the remote says, when its config is here and valid; each change of state recorded first; no change, no event", async () => {
   const f = fixture();
   try {
     await withKnownFlags(['a_flag', 'b_flag'], async () => {
+      assert.deepEqual(adopt(f), [], 'main names none, never recorded: nothing to say');
       const s1 = onMain(f, (p) => appendFileSync(cfgFile(p), 'flags:\n  a_flag: true\n'), 'a on');
-      const s2 = onMain(f, (p) => writeFileSync(cfgFile(p), readFileSync(cfgFile(p), 'utf8').replace('a_flag: true', 'b_flag: true')), 'b on, a off');
-      git(f.repo, 'fetch', '-q', 'origin');
-      assert.deepEqual(adoptFlags({ log: f.log, repo: f.repo, sha: null, actor: 'i' }), [], 'none adopted, never recorded: nothing to say');
-      adoptFlags({ log: f.log, repo: f.repo, sha: s1, actor: 'i' });
+      assert.deepEqual(adopt(f), [], 'not fetched yet: the commit is not here, nothing is adopted');
+      assert.equal(flagOn('a_flag'), false);
+      fetch(f);
+      adopt(f);
       assert.equal(flagOn('a_flag'), true);
       assert.deepEqual(flips(f), [['a_flag', false, true, s1]]);
-      adoptFlags({ log: f.log, repo: f.repo, sha: s1, actor: 'i' });
+      adopt(f);
       assert.equal(flips(f).length, 1, 'the same state again: no event');
-      adoptFlags({ log: f.log, repo: f.repo, sha: s2, actor: 'i' });
+      const s2 = onMain(f, (p) => writeFileSync(cfgFile(p), readFileSync(cfgFile(p), 'utf8').replace('a_flag: true', 'b_flag: true')), 'b on, a off');
+      fetch(f);
+      adopt(f);
       assert.deepEqual(flips(f).slice(1), [['a_flag', true, false, s2], ['b_flag', false, true, s2]]);
       assert.deepEqual(flagState(), { sha: s2, on: ['b_flag'] });
-      adoptFlags({ log: f.log, repo: f.repo, sha: 'not-a-sha', actor: 'i' });
-      assert.equal(flagOn('b_flag'), false, 'a bad commit id adopts none');
+      // An invalid config at the head, or none: the last adopted stay (as the last good config does), recorded nothing.
+      onMain(f, (p) => appendFileSync(cfgFile(p), 'bogus_top: 1\n'), 'break');
+      fetch(f);
+      adopt(f);
+      assert.deepEqual(flagState(), { sha: s2, on: ['b_flag'] });
+      onMain(f, (p) => rmSync(join(p, '.worklane'), { recursive: true, force: true }), 'remove');
+      fetch(f);
+      adopt(f);
+      assert.deepEqual(flagState(), { sha: s2, on: ['b_flag'] }, 'R1173i note 1: a commit with no config adopts nothing');
+      assert.equal(flips(f).length, 3);
     });
     // A flag the engine stopped knowing that was on is recorded off.
-    adoptFlags({ log: f.log, repo: f.repo, sha: null, actor: 'i' });
+    adopt(f);
     assert.deepEqual([...recordedFlags(f.log)].sort(), [['a_flag', false], ['b_flag', false]]);
   } finally {
     clearFlags();
@@ -197,10 +213,88 @@ test('adoptFlags: reads the flags at a commit from git, and audits each change o
   }
 });
 
-/** Start like the service: startConfig, then a coordinator on its config, tree and commit. */
+test("adoptFlags reads the remote's head, never a local ref: an agent moving refs/remotes/origin/main, or a failed fetch, adopts nothing (#1173 review R1173j D1, D2, D4)", async () => {
+  const f = fixture();
+  try {
+    await withKnownFlags([T], async () => {
+      // An agent's commit in the coordinator's clone, with the flag on, and the remote-tracking ref moved to it.
+      git(f.repo, 'checkout', '-q', '-b', 'agent');
+      appendFileSync(cfgFile(f.repo), `flags:\n  ${T}: true\n`);
+      git(f.repo, 'add', '-A');
+      git(f.repo, ...ID, 'commit', '-q', '-m', 'agent: flag on');
+      git(f.repo, 'update-ref', 'refs/remotes/origin/main', git(f.repo, 'rev-parse', 'HEAD').trim());
+      adopt(f);
+      assert.equal(flagOn(T), false, "the local ref is not the remote's head");
+      assert.deepEqual(flips(f), []);
+      // main turns it on, and then the remote can't be reached: what was adopted stays, nothing more.
+      const s1 = onMain(f, (p) => appendFileSync(cfgFile(p), `flags:\n  ${T}: true\n`), 'on');
+      fetch(f);
+      adopt(f);
+      assert.equal(flagOn(T), true);
+      renameSync(f.remote, `${f.remote}.gone`);
+      try {
+        adopt(f);
+        assert.deepEqual(flagState(), { sha: s1, on: [T] }, 'unreachable: the last adopted stay');
+        assert.equal(flips(f).length, 1);
+      } finally {
+        renameSync(`${f.remote}.gone`, f.remote);
+      }
+    });
+  } finally {
+    clearFlags();
+    f.log.close();
+    rmSync(f.base, { recursive: true, force: true });
+  }
+});
+
+test("a config this instance refuses (its check) turns no flag on: main's flags count only from a config the coordinator would apply (#1173 review R1173j)", async () => {
+  const f = fixture();
+  try {
+    await withKnownFlags([T], async () => {
+      onMain(f, (p) => appendFileSync(cfgFile(p), `flags:\n  ${T}: true\n`), 'on');
+      fetch(f);
+      adoptFlags({ log: f.log, repo: f.repo, remote: 'origin', branch: 'main', actor: 'i', check: () => [{ file: 'config.yaml', path: '', message: 'this instance refuses it' }] });
+      assert.equal(flagOn(T), false);
+      assert.deepEqual(flips(f), []);
+      adopt(f);
+      assert.equal(flagOn(T), true, 'the same config, no refusal: on');
+    });
+  } finally {
+    clearFlags();
+    f.log.close();
+    rmSync(f.base, { recursive: true, force: true });
+  }
+});
+
+test('a flag is never on without its record: a flag.flipped that fails to write leaves the snapshot as it was (#1173 review R1173j D3)', async () => {
+  const f = fixture();
+  try {
+    await withKnownFlags([T], async () => {
+      onMain(f, (p) => appendFileSync(cfgFile(p), `flags:\n  ${T}: true\n`), 'on');
+      fetch(f);
+      const failing = { read: (...a: Parameters<EventLog["read"]>) => f.log.read(...a), append: () => { throw new Error('disk full'); } } as unknown as EventLog;
+      assert.throws(() => adoptFlags({ log: failing, repo: f.repo, remote: 'origin', branch: 'main', actor: 'i' }), /disk full/);
+      assert.equal(flagOn(T), false);
+    });
+  } finally {
+    clearFlags();
+    f.log.close();
+    rmSync(f.base, { recursive: true, force: true });
+  }
+});
+
+test('the known-flags seam refuses outside a test run (#1173 review R1173j: a computed name reached it from src/)', () => {
+  const schema = join(repoRoot, 'dist', 'src', 'config', 'schema.js');
+  const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT;
+  const r = spawnSync(process.execPath, ['--input-type=module', '-e', `import { withKnownFlags } from ${JSON.stringify(schema)}; withKnownFlags(['x'], () => 1).then(() => console.log('RAN'), (e) => console.log('REFUSED: ' + e.message));`], { encoding: 'utf8', env });
+  assert.match(r.stdout, /^REFUSED: withKnownFlags is for tests only/, r.stderr);
+});
+
+/** Start like the service: startConfig, then a coordinator on its config and tree. */
 function startOn(f: Fixture) {
   const start = startConfig({ repo: f.repo, remote: 'origin', fallback: loadConfig(f.repo) });
-  const c = coordinator(f, new FakeRunner(() => ({ structured: { summary: 's' } })), { cfg: { ...start.cfg, project: { ...start.cfg.project, land_mode: 'direct' } }, liveConfig: { tree: start.tree, sha: start.sha } });
+  const c = coordinator(f, new FakeRunner(() => ({ structured: { summary: 's' } })), { cfg: { ...start.cfg, project: { ...start.cfg.project, land_mode: 'direct' } }, liveConfig: { tree: start.tree } });
   return { start, c };
 }
 const ticks = async (c: { tick: () => Promise<unknown>; idle: () => Promise<unknown> }, n = 1) => {
@@ -222,7 +316,6 @@ test("a checkout's config never turns a flag on: started on it (main invalid or 
         onMain(f, breakMain, 'break main');
         const { start, c } = startOn(f);
         assert.match(start.note ?? '', /started with the checkout's/);
-        assert.equal(start.sha, null);
         await ticks(c, 2);
         assert.equal(flagOn(T), false);
         assert.deepEqual(flips(f), []);
@@ -235,7 +328,7 @@ test("a checkout's config never turns a flag on: started on it (main invalid or 
   }
 });
 
-test("started on main's config, a flag main turns on is on at once and audited at the start's commit, even when main breaks or loses its config before the first tick (#1173 review R1173h A4, A4b, A5)", { skip }, async () => {
+test("the coordinator's tick adopts main's flag with its record; main broken or its config removed before the first tick adopts nothing until it is valid again (#1173 reviews R1173h A4, A4b, A5)", { skip }, async () => {
   for (const [what, breakMain] of [['invalid', (p: string) => appendFileSync(cfgFile(p), 'bogus_top: 1\n')], ['removed', (p: string) => rmSync(join(p, '.worklane'), { recursive: true, force: true })]] as const) {
     const f = fixture();
     try {
@@ -243,17 +336,27 @@ test("started on main's config, a flag main turns on is on at once and audited a
         const s0 = onMain(f, (p) => appendFileSync(cfgFile(p), `flags:\n  ${T}: true\n`), 'turn it on');
         const { start, c } = startOn(f);
         assert.equal(start.note, null);
-        assert.equal(start.sha, s0);
-        onMain(f, breakMain, `main ${what}`);
-        await ticks(c, 2);
-        assert.equal(flagOn(T), true, `${what}: running on the last good config, at ${s0}`);
-        assert.deepEqual(flips(f), [[T, false, true, s0]], `${what}: audited`);
-        if (what === 'invalid') {
-          // A4b: main fixed with it off: applied, recorded off at that commit.
-          const s2 = onMain(f, (p) => writeFileSync(cfgFile(p), readFileSync(cfgFile(p), 'utf8').replace('bogus_top: 1\n', '').replace(`${T}: true`, `${T}: false`)), 'fix, off');
-          await ticks(c);
-          assert.equal(flagOn(T), false);
-          assert.deepEqual(flips(f).slice(1), [[T, true, false, s2]]);
+        await ticks(c);
+        assert.equal(flagOn(T), true, `${what}: main's head, adopted at the first tick`);
+        assert.deepEqual(flips(f), [[T, false, true, s0]]);
+        clearFlags();
+        const f2 = fixture();
+        try {
+          onMain(f2, (p) => appendFileSync(cfgFile(p), `flags:\n  ${T}: true\n`), 'turn it on');
+          const { c: c2 } = startOn(f2);
+          onMain(f2, breakMain, `main ${what}`);
+          await ticks(c2, 2);
+          assert.equal(flagOn(T), false, `${what} before the first tick: nothing adopted (fail-closed)`);
+          assert.deepEqual(flips(f2), [], `${what}: nothing recorded`);
+          if (what === 'invalid') {
+            const s2 = onMain(f2, (p) => writeFileSync(cfgFile(p), readFileSync(cfgFile(p), 'utf8').replace('bogus_top: 1\n', '')), 'fix');
+            await ticks(c2);
+            assert.equal(flagOn(T), true);
+            assert.deepEqual(flips(f2), [[T, false, true, s2]]);
+          }
+        } finally {
+          f2.log.close();
+          rmSync(f2.base, { recursive: true, force: true });
         }
       });
     } finally {
@@ -264,7 +367,7 @@ test("started on main's config, a flag main turns on is on at once and audited a
   }
 });
 
-test('started on the checkout, then main is valid again on that same tree: recovered, and main\'s flag turns on with its record (#1173 reviews R1173g, R1173h A12)', { skip }, async () => {
+test("started on the checkout, then main is valid again on that same tree: recovered, and main's flag turns on with its record (#1173 reviews R1173g, R1173h A12)", { skip }, async () => {
   const f = fixture();
   try {
     await withKnownFlags([T], async () => {

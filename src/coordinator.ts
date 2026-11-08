@@ -126,11 +126,11 @@ export class Coordinator extends AutomationRuns {
     // The config as the default branch has it now, before anything below reads it (src/config/live.ts).
     await step('config', () => {
       this.refreshConfig();
-      // Feature flags (src/flags.ts): the default branch's committed config at configSha, the commit whose config is
-      // running (null: a checkout's, so every flag is off), read from git and adopted here only. Every flip is audited
+      // Feature flags (src/flags.ts): the default branch's head as the remote says, when its config is here and valid
+      // (by this instance's checks too); otherwise the last adopted stay. Adopted here only. Every flip is audited
       // against the last state the log recorded, so one made while this coordinator was down is recorded at its first
-      // tick (#1173 reviews R1173f-h).
-      adoptFlags({ log: this.d.log, repo: this.d.repo, sha: this.configSha, actor: this.d.instance });
+      // tick (#1173 reviews R1173f-j).
+      adoptFlags({ log: this.d.log, repo: this.d.repo, remote: this.remote, branch: this.branch, actor: this.d.instance, ...(this.d.liveConfig?.check ? { check: this.d.liveConfig.check } : {}) });
     }, undefined);
     await step('settings', () => this.refreshSettings(), undefined);
     // The audit chain's checkpoint (src/audit-chain.ts, docs/audit-log.md): at most every 10 minutes. WHY early: a step
@@ -518,12 +518,6 @@ export class Coordinator extends AutomationRuns {
   private liveCfg: LiveConfig | null = null;
 
   /**
-   * The default branch's commit whose config is running: the start's when it started on that branch's config, then
-   * each one applied, confirmed or recovered (null: a checkout's config is running). Feature flags are read at it.
-   */
-  private configSha: string | null = this.d.liveConfig?.sha ?? null;
-
-  /**
    * Follow the default branch's config: fetch it, and when its config changed, swap the new one in whole (one
    * assignment: every reader after it sees the new config) with the instance's settings over it. An invalid one is
    * never applied: the last good one stays, recorded once (and raised as an incident when there's a watchdog).
@@ -539,7 +533,6 @@ export class Coordinator extends AutomationRuns {
       this.d.incidents?.raiseIncident(CONFIG_INCIDENT, this.d.instance, `${BRAND.configDir}/ on ${this.branch} at ${r.sha.slice(0, 8)} is invalid; running on the last good config: ${errors.join('; ').slice(0, 800)}`, `Fix ${BRAND.configDir}/ on ${this.branch}; it is applied on the next tick.`);
       return;
     }
-    if (r.sha && /^[0-9a-f]{40}$/.test(r.sha)) this.configSha = r.sha;
     if (r.kind === 'confirmed') {
       // Started on a valid config: an incident left open by an earlier process (or engine) is stale.
       this.configLoads();
