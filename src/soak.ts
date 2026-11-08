@@ -1,8 +1,8 @@
 // The soak test's verdict (docs/soak.md; the run is test/soak.test.ts, scheduled by .github/workflows/soak.yml). A
 // coordinator works for hours with stand-in agents; every SAMPLE it records what it holds. Pure: samples in, findings
 // out. What fails a soak:
-//   - a leak: the last quarter's median heap, RSS or open file handles above the first quarter's (after the warm-up)
-//     by more than the limit;
+//   - a leak: the median heap, RSS or open file handles of the last quarter, or of the end (its last END_SAMPLES), above
+//     the first quarter's (after the warm-up) by more than the limit;
 //   - a stuck run: an agent run started and not finished for longer than stuck_minutes, at the end;
 //   - log growth: the event log growing more per finished task than log_bytes_per_task, or its WAL past wal_bytes
 //     (checkpoints stopped);
@@ -80,6 +80,9 @@ const median = (xs: number[]): number => {
   return s.length % 2 ? s[m]! : (s[m - 1]! + s[m]!) / 2;
 };
 
+/** The end a leak is judged by too: its last this many samples (or the last quarter's, if fewer). */
+export const END_SAMPLES = 10;
+
 const MB = (n: number) => `${(n / 2 ** 20).toFixed(1)} MB`;
 
 /** What failed the soak (empty: it passed), and what it measured. */
@@ -91,10 +94,14 @@ export function soakVerdict(samples: readonly SoakSample[], limits: SoakLimits =
   const q = Math.max(1, Math.floor(use.length / 4));
   const first = use.slice(0, q);
   const last = use.slice(-q);
-  const grew = (f: (s: SoakSample) => number) => median(last.map(f)) - median(first.map(f));
+  // Growth is judged twice against the first quarter: by the last quarter, and by the END (its last END_SAMPLES).
+  // WHY (#1181 review): quarter medians alone missed a late step (a leak in the last half hour moves no quarter's
+  // median) and read a linear leak at about three quarters of its size; the end sees both.
+  const end10 = use.slice(-Math.min(END_SAMPLES, q));
+  const grew = (f: (s: SoakSample) => number) => Math.max(median(last.map(f)), median(end10.map(f))) - median(first.map(f));
   const heap = grew((s) => s.heapUsed);
   const rss = grew((s) => s.rss);
-  if (heap > limits.heapGrowthBytes) failures.push(`leak: the heap grew ${MB(heap)} from the first quarter to the last (limit ${MB(limits.heapGrowthBytes)})`);
+  if (heap > limits.heapGrowthBytes) failures.push(`leak: the heap grew ${MB(heap)} from the first quarter to the last or the end (limit ${MB(limits.heapGrowthBytes)})`);
   if (rss > limits.rssGrowthBytes) failures.push(`leak: RSS grew ${MB(rss)} (limit ${MB(limits.rssGrowthBytes)})`);
   const counted = use.every((s) => s.fds !== null);
   const fds = counted ? grew((s) => s.fds!) : null;
