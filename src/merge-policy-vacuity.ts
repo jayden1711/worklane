@@ -108,19 +108,26 @@ const list = (p: string[]) => `${p.slice(0, 3).map(shownPath).join(', ')}${p.len
 
 /**
  * No vacuity section (the owner's decision: it waits too). Nothing says what is app code, so every changed file the
- * tamper guard's own test globs don't match, that has runtime code and is still there at the head, counts; any one
- * holds the PR, saying how to add the section. A head it can't read holds as well.
+ * tamper guard's own test globs don't match and that has runtime code counts; any one holds the PR, saying how to add
+ * the section. One still at the head is code it changes. One the head no longer has (deleted, or renamed to a data
+ * name, a test path or a `.d.ts`; `changed` holds a rename's old path too) is code it takes away, and holds the same
+ * way (R1179d, as #1015 for the section's case): nothing measured what that breaks. A head it can't read holds as well.
  */
 function noSection(changed: string[], atHead: (path: string) => string | null): VacuityCheck {
   const testRes = FALLBACK_TEST_GLOBS.map((g) => globToRegExp(g));
   let code: string[];
+  let gone: string[];
   try {
-    code = changed.filter((p) => !testRes.some((re) => re.test(p)) && !NO_RUNTIME_CODE.test(p) && atHead(p) !== null);
+    const runtime = changed.filter((p) => !testRes.some((re) => re.test(p)) && !NO_RUNTIME_CODE.test(p));
+    const there = new Map(runtime.map((p) => [p, atHead(p) !== null]));
+    code = runtime.filter((p) => there.get(p));
+    gone = runtime.filter((p) => !there.get(p));
   } catch (e) {
     return { reasons: [`design: vacuity: could not be checked: ${(e as Error).message.split('\n')[0]!.slice(0, 300)}`] };
   }
-  if (!code.length) return { reasons: [] };
-  return { reasons: [`design: vacuity: tests.yaml has no vacuity section, so nothing shows its tests run the code it changes (${list(code)}); \`${BRAND.cli} doctor\` shows the section to add`] };
+  if (code.length) return { reasons: [`design: vacuity: tests.yaml has no vacuity section, so nothing shows its tests run the code it changes (${list(code)}); \`${BRAND.cli} doctor\` shows the section to add`] };
+  if (gone.length) return { reasons: [`design: vacuity: tests.yaml has no vacuity section, and it takes away code (${list(gone)}: deleted, or renamed out of code), so nothing measured what that breaks; \`${BRAND.cli} doctor\` shows the section to add`] };
+  return { reasons: [] };
 }
 
 /** The tests.yaml lines that turn the coverage run on: a paste-ready snippet (doctor and the drafted tests.yaml say it). */

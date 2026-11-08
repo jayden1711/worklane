@@ -102,7 +102,11 @@ test('vacuity: what counts as changed app code: types-only and config, data, doc
 
 test('vacuity: no vacuity section in tests.yaml: changed code waits, naming the missing section; tests, docs and config alone do not (the owner\'s decision)', () => {
   assert.deepEqual(check({ files: { 'src/a.js': 'x', 'lib/b.py': 'y' }, cfg: undefined }).reasons, [`design: vacuity: tests.yaml has no vacuity section, so nothing shows its tests run the code it changes (src/a.js, lib/b.py); \`${BRAND.cli} doctor\` shows the section to add`]);
-  assert.deepEqual(check({ files: { 'test/a.test.js': 'x', 'src/a.test.ts': 'x', 'README.md': 'x', 'src/c.json': 'x', 'src/gone.js': null }, cfg: undefined }), { reasons: [] }, 'the tamper guard\'s own test globs, no-runtime files and deleted files');
+  assert.deepEqual(check({ files: { 'test/a.test.js': 'x', 'src/a.test.ts': 'x', 'README.md': 'x', 'src/c.json': 'x', 'src/gone.json': null }, cfg: undefined }), { reasons: [] }, "the tamper guard's own test globs, and no-runtime files, there or taken away");
+  // R1179d: code the head no longer has (deleted, or renamed to a data name, a test path or a .d.ts) holds too.
+  const GONE = (p: string) => [`design: vacuity: tests.yaml has no vacuity section, and it takes away code (${p}: deleted, or renamed out of code), so nothing measured what that breaks; \`${BRAND.cli} doctor\` shows the section to add`];
+  assert.deepEqual(check({ files: { 'src/gone.js': null }, cfg: undefined }).reasons, GONE('src/gone.js'), 'deleted');
+  for (const to of ['src/price.json', 'test/price.test.js', 'src/price.d.ts']) assert.deepEqual(check({ files: { 'src/price.js': null, [to]: 'x' }, cfg: undefined }).reasons, GONE('src/price.js'), `renamed to ${to}`);
 });
 
 test('vacuity: fail closed: a head it cannot read holds the PR, never reads as one with nothing to check', () => {
