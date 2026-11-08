@@ -1071,9 +1071,11 @@ export class Coordinator extends AutomationRuns {
         // a wait category (L3's, ci-config, the locked agent-instructions and self-modification, the odd paths, the
         // repo's merge.wait_categories); direct land skips mergeDecision, so the same function (riskAndDesignReasons)
         // raises such a change, and one that changes a dependency manifest, to L3 here. It does NOT bring the rest of
-        // mergeDecision to direct mode: the evaluator's binding design flag, a new top-level module, a claimed
-        // protected path, the weakening and vacuity holds (#783, #784), the size limits and its other doubt reasons
-        // still don't apply to a direct land (#716 stays open for them).
+        // mergeDecision to direct mode: the evaluator's binding design flag, a new top-level module, the worker's
+        // protected claim, the weakening and vacuity holds (#783, #784), the size limits and its other doubt reasons
+        // still don't apply to a direct land (#716 stays open for them); nor do its switches (policy.yaml auto_merge,
+        // review.yaml merge.auto, the auto-merge stop): direct land checks only the emergency stop and the branch's
+        // protection. #808 (PR #1183) brings the stop and the policy switch; whichever lands second corrects this.
         if (this.d.cfg.project.land_mode === 'direct' && lvl.level !== 'L3') {
           const review = this.d.cfg.review ?? DEFAULT_REVIEW;
           const held = riskAndDesignReasons({ level: lvl, waitCategories: waitCategoriesOf(review), newTopLevel: [] });
