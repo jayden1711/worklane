@@ -120,7 +120,7 @@ test("a checkout's config never turns a flag on: when main's config is invalid o
     // HEAD's config names a flag this engine doesn't know, so it is no valid config either: the start falls back to the
     // working tree's, here one with the flag on (as a registered flag would be).
     const start = startConfig({ repo: f.repo, remote: 'origin', fallback: { ...f.cfg, project: { ...f.cfg.project, flags: { some_flag: true } } } });
-    assert.match(start.note ?? '', /is invalid, started with the checkout's (committed config \(HEAD\)|working tree).*feature flags off/);
+    assert.match(start.note ?? '', /is invalid, started with the checkout's (committed config \(HEAD\)|working tree)[\s\S]*; its feature flags are off \(only the default branch's config turns one on\)$/);
     assert.deepEqual(start.cfg.project.flags, {}, "the checkout's flags never count");
   } finally {
     f.log.close();
