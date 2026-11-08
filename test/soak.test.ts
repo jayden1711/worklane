@@ -13,7 +13,7 @@ import { SOAK_LIMITS, openRunsOf, soakVerdict, type SoakSample } from '../src/so
 import { commitAll, coordinator, easyIssue, fixture, readAll, skip } from './repro-state-graph/harness.js';
 
 const MB = 2 ** 20;
-const sample = (at: number, o: Partial<SoakSample> = {}): SoakSample => ({ at, rss: 200 * MB, heapUsed: 80 * MB, fds: 40, eventsBytes: 1_000_000 + at, walBytes: MB, tickMs: 50, tasksDone: Math.floor(at / 60_000), openRuns: 0, oldestOpenRunMs: 0, slotsHeld: 0, ...o });
+const sample = (at: number, o: Partial<SoakSample> = {}): SoakSample => ({ at, rss: 200 * MB, heapUsed: 80 * MB, fds: 40, eventsBytes: 1_000_000 + at, walBytes: MB, tickMs: 50, tasksDone: Math.floor(at / 60_000), filed: Math.floor(at / 60_000) + 1, openRuns: 0, oldestOpenRunMs: 0, slotsHeld: 0, ...o });
 /** Samples every minute for `minutes`, with `f` changing each by its minute. */
 const series = (minutes: number, f: (m: number) => Partial<SoakSample> = () => ({})) => Array.from({ length: minutes }, (_, m) => sample(m * 60_000, f(m)));
 
@@ -34,7 +34,7 @@ test('soak verdict: each failure it is there for (a leak of heap, RSS or handles
   assert.match(fails(series(120, (m) => ({ eventsBytes: 1_000_000 + m * 400 * 1024 }))), /log growth: the event log grew \d+ KB per finished task/);
   assert.match(fails(series(120, (m) => ({ walBytes: m === 60 ? 80 * MB : MB }))), /the WAL reached 80\.0 MB/);
   assert.match(fails(series(120, (m) => ({ tickMs: m < 60 ? 50 : 400 }))), /^drift: the median tick went from 50 ms to 400 ms/);
-  assert.match(fails(series(120, () => ({ tasksDone: 0 }))), /too little work: 0 task\(s\)/);
+  assert.match(fails(series(120, () => ({ tasksDone: 0 }))), /too little work: 0 task\(s\) finished/);
   assert.match(fails(series(3)), /only 3 sample\(s\)/);
   // The warm-up is left out: a heap that fills its caches in the first minutes, then holds, is no leak.
   assert.deepEqual(soakVerdict(series(40, (m) => ({ heapUsed: m < 9 ? 20 * MB : 300 * MB }))).failures, []);
@@ -73,6 +73,18 @@ test('soak verdict: a late leak and a linear one just over the limit both fail; 
   // A heap that rises and falls back (a GC) by the end, and one that only rises within the limit, still pass.
   assert.deepEqual(soakVerdict(series(330, (m) => (m >= 200 && m < 280 ? { heapUsed: 400 * MB } : {}))).failures, []);
   assert.deepEqual(soakVerdict(series(330, (m) => ({ heapUsed: 80 * MB + Math.max(0, m - 10) * (60 * MB) / 320 }))).failures, []);
+});
+
+test('soak verdict: a coordinator that stops landing work fails, however fast its ticks (#1181 review, 3)', () => {
+  // Landing stops at task 15 while a task is filed every 30 s for 5.5 h.
+  const stopped = series(330, (m) => ({ tasksDone: Math.min(15, m), filed: 2 * m + 1, eventsBytes: 1_000_000 + Math.min(15, m) * 1000 }));
+  const f = soakVerdict(stopped).failures.join(' | ');
+  assert.match(f, /stalled: no task landed in the last quarter \(\d+ filed in it; 15 landed in all\)/);
+  assert.match(f, /too little work: 15 of 659 task\(s\) filed landed \(at least 50%\)/);
+  // Slower than filing, but still landing to the end and over half of it: no stall.
+  assert.deepEqual(soakVerdict(series(330, (m) => ({ tasksDone: m, filed: Math.ceil(m * 1.6) + 1 }))).failures, []);
+  // Nothing filed in the last quarter (the driver stopped filing): nothing to land, no stall.
+  assert.deepEqual(soakVerdict(series(330, (m) => ({ tasksDone: Math.min(200, m), filed: Math.min(200, m) + 1 }))).failures, []);
 });
 
 /** Open file handles of this process, where the platform shows them. */
@@ -144,6 +156,7 @@ test('soak: the real coordinator works for a while with stand-in agents; nothing
           walBytes: wal,
           tickMs: ticks[ticks.length >> 1] ?? 0,
           tasksDone: events.filter((e) => e.type === 'land.result' && (e.payload as { outcome: string }).outcome === 'landed').length,
+          filed: n,
           openRuns: runs.open,
           oldestOpenRunMs: runs.oldestMs,
           slotsHeld: slotStatus(f.slotsDir).agents.length,

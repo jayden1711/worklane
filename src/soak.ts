@@ -8,7 +8,8 @@
 //     (checkpoints stopped);
 //   - drift: the last quarter's median tick slower than tick_drift times the first quarter's;
 //   - leaked slots: agent slots still held at the end with no run going;
-//   - too little work: fewer finished tasks than min_tasks (a soak that did nothing proves nothing).
+//   - too little work: fewer finished tasks than min_tasks, or than min_landed_share of the tasks filed; stalled: none
+//     landed in the last quarter while tasks were filed (a soak that did nothing, or stopped, proves nothing).
 
 export interface SoakSample {
   /** Milliseconds since the soak started. */
@@ -23,6 +24,8 @@ export interface SoakSample {
   tickMs: number;
   /** Tasks finished (landed) so far. */
   tasksDone: number;
+  /** Tasks filed so far (the driver files one every SOAK_ISSUE_EVERY_S). */
+  filed: number;
   /** Agent runs started and not finished, with the oldest one's age. */
   openRuns: number;
   oldestOpenRunMs: number;
@@ -40,6 +43,8 @@ export interface SoakLimits {
   walBytes: number;
   tickDrift: number;
   minTasks: number;
+  /** At least this share of the tasks filed must have landed (the rest may be in flight). */
+  minLandedShare: number;
 }
 
 export const SOAK_LIMITS: SoakLimits = {
@@ -52,6 +57,7 @@ export const SOAK_LIMITS: SoakLimits = {
   walBytes: 64 * 2 ** 20,
   tickDrift: 3,
   minTasks: 1,
+  minLandedShare: 0.5,
 };
 
 /**
@@ -117,8 +123,14 @@ export function soakVerdict(samples: readonly SoakSample[], limits: SoakLimits =
   const t1 = median(last.map((s) => s.tickMs));
   if (t0 > 0 && t1 > t0 * limits.tickDrift) failures.push(`drift: the median tick went from ${Math.round(t0)} ms to ${Math.round(t1)} ms (limit ${limits.tickDrift}×)`);
   if (end.tasksDone < limits.minTasks) failures.push(`too little work: ${end.tasksDone} task(s) finished (at least ${limits.minTasks})`);
+  // WHY (#1181 review): a coordinator that stopped landing after a few tasks passed on min_tasks alone, its ticks fast
+  // and its log still. Work must keep landing to the end, and a share of what was filed must have landed.
+  const lastLanded = end.tasksDone - last[0]!.tasksDone;
+  const lastFiled = end.filed - last[0]!.filed;
+  if (lastFiled > 0 && lastLanded <= 0) failures.push(`stalled: no task landed in the last quarter (${lastFiled} filed in it; ${end.tasksDone} landed in all)`);
+  if (end.filed && end.tasksDone < end.filed * limits.minLandedShare) failures.push(`too little work: ${end.tasksDone} of ${end.filed} task(s) filed landed (at least ${Math.round(limits.minLandedShare * 100)}%)`);
   return {
     failures,
-    measured: { hours: +(end.at / 3_600_000).toFixed(2), samples: samples.length, tasks_done: end.tasksDone, heap_growth: MB(heap), rss_growth: MB(rss), fd_growth: fds ?? 'not counted', log_per_task: `${Math.round(perTask / 1024)} KB`, wal_max: MB(wal), tick_ms_first: Math.round(t0), tick_ms_last: Math.round(t1), open_runs_end: end.openRuns, slots_held_end: end.slotsHeld },
+    measured: { hours: +(end.at / 3_600_000).toFixed(2), samples: samples.length, tasks_done: end.tasksDone, tasks_filed: end.filed, heap_growth: MB(heap), rss_growth: MB(rss), fd_growth: fds ?? 'not counted', log_per_task: `${Math.round(perTask / 1024)} KB`, wal_max: MB(wal), tick_ms_first: Math.round(t0), tick_ms_last: Math.round(t1), open_runs_end: end.openRuns, slots_held_end: end.slotsHeld },
   };
 }
