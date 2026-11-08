@@ -349,44 +349,60 @@ function braces(w: string, cap = 64): string[] | null {
 
 const UNKNOWN = '\u0000';
 /**
- * Every spelling a shell word may become as a path: `~` and `~user` as HOME, $HOME and $XDG_CONFIG_HOME as theirs, a
- * variable set in the line as its value, and any other variable or command substitution as each folder git reads
- * user config from, or nothing (`unknown`). Null when its braces make too many words to follow.
+ * An expansion the guard doesn't model (R1124k F1): a command substitution or arithmetic (`$(…)`, backquotes), or a
+ * parameter expansion with an operator (`${F%x}`, `${F/x/}`, `${F:-x}`, `${#F}`, `${!F}`). Its value is unknown.
  */
-function spellings(w: string, vars: Map<string, string>): { s: string; unknown: boolean }[] | null {
+const UNMODELLED = /\$\(|`|\$\{[#!]|\$\{[^}]*[^A-Za-z0-9_}][^}]*\}/;
+
+/**
+ * Every spelling a shell word may become as a path: `~` and `~user` as HOME, $HOME and $XDG_CONFIG_HOME as theirs, a
+ * variable set in the line as its value, and any other variable, substitution or operator expansion as each folder
+ * git reads user config from, or nothing (`unknown`). `unmodelled`: it holds an expansion the guard doesn't model
+ * (UNMODELLED, or a line variable whose value does). Null when it makes too many words to follow.
+ */
+function spellings(w: string, vars: Map<string, string | null>): { s: string; unknown: boolean; unmodelled: boolean }[] | null {
   const { home, xdg } = configRoots();
   const words = braces(w);
   if (!words) return null;
-  const out: { s: string; unknown: boolean }[] = [];
+  const out: { s: string; unknown: boolean; unmodelled: boolean }[] = [];
   for (const word of words) {
+    let unmodelled = UNMODELLED.test(word);
     let s = home ? word.replace(/(^|[=:])~[^/:]*(?=\/|:|$)/g, `$1${home}`) : word;
-    s = s.replace(/\$\(([^()]|\([^()]*\))*\)|`[^`]*`/g, UNKNOWN);
-    s = s.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)[^}]*\}|\$([A-Za-z_][A-Za-z0-9_]*)/g, (_, a?: string, b?: string) => {
+    s = s.replace(/\$\(([^()]|\([^()]*\))*\)|`[^`]*`|\$\{[#!][^}]*\}|\$\{[A-Za-z_][A-Za-z0-9_]*[^A-Za-z0-9_}][^}]*\}/g, UNKNOWN);
+    s = s.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g, (_, a?: string, b?: string) => {
       const name = (a ?? b)!;
-      return name === 'HOME' && home ? home : name === 'XDG_CONFIG_HOME' && xdg ? xdg : (vars.get(name) ?? UNKNOWN);
+      if (name === 'HOME' && home) return home;
+      if (name === 'XDG_CONFIG_HOME' && xdg) return xdg;
+      const v = vars.get(name);
+      if (v === null) unmodelled = true;
+      return v ?? UNKNOWN;
     });
     let alts = [s];
     for (let i = 0; i < 3 && alts.some((x) => x.includes(UNKNOWN)); i++) alts = alts.flatMap((x) => [home ?? '', xdg ?? '', ''].map((v) => x.replace(UNKNOWN, v)));
     if (alts.some((x) => x.includes(UNKNOWN))) return null;
-    out.push(...alts.map((x) => ({ s: x, unknown: s.includes(UNKNOWN) })));
+    out.push(...alts.map((x) => ({ s: x, unknown: s.includes(UNKNOWN), unmodelled })));
   }
   return out;
 }
 
-/** Variables the line sets (a prefix, `env`, export or a bare NAME=value), their values spelt as spellings reads them. */
-function lineVars(commands: SimpleCommand[]): Map<string, string> {
+/**
+ * Variables the line sets (a prefix, `env`, export or a bare NAME=value), their values spelt as spellings reads them;
+ * null for a value holding an expansion the guard doesn't model (R1124k F1: `F=$(printf …)`).
+ */
+function lineVars(commands: SimpleCommand[]): Map<string, string | null> {
   const { home } = configRoots();
-  const vars = new Map<string, string>();
-  for (const c of commands) for (const [n, v] of assigned(c)) vars.set(n, home ? v.replace(/^~(?=\/|$)/, home).replace(/\$\{?HOME\}?/g, home) : v);
+  const vars = new Map<string, string | null>();
+  for (const c of commands) for (const [n, v] of assigned(c)) vars.set(n, UNMODELLED.test(v) ? null : home ? v.replace(/^~(?=\/|$)/, home).replace(/\$\{?HOME\}?/g, home) : v);
   return vars;
 }
 
 /**
- * The directories a line's relative paths may resolve in (R1124i): the call's, and each `cd`/`pushd` target with ~, HOME
- * and the line's variables spelt out. After a change it can't follow (popd, an option, a substitution), HOME and the
- * user's config folders are among them, so a move made after `cd ~/.config` is judged in ~/.config.
+ * The directories a line's relative paths may resolve in (R1124i): `followed`, the call's and each `cd`/`pushd` target
+ * with ~, HOME and the line's variables spelt out; and after a change it can't follow (popd, an option, a substitution),
+ * `fallback`: HOME and the user's config folders, where a write destination is judged too (a move made after
+ * `cd ~/.config` is judged in ~/.config). Ordinary arguments are judged in `followed` only (R1124k F2: `make config`).
  */
-function writeDirs(commands: SimpleCommand[], cwd: string, vars: Map<string, string>): string[] {
+function writeDirs(commands: SimpleCommand[], cwd: string, vars: Map<string, string | null>): { followed: string[]; fallback: string[] } {
   const { home, roots } = configRoots();
   let dirs = [clean(cwd)];
   let lost = false;
@@ -404,15 +420,14 @@ function writeDirs(commands: SimpleCommand[], cwd: string, vars: Map<string, str
       continue;
     }
     const sp = spellings(args[0]!, vars);
-    if (!sp || sp.some((x) => x.unknown) || /[*?[]/.test(args[0]!)) lost = true;
-    dirs = [...new Set([...dirs, ...(sp ?? []).flatMap((x) => dirs.map((d) => clean(resolvePath(d, x.s))))])];
+    if (!sp || sp.some((x) => x.unknown || x.unmodelled) || /[*?[]/.test(args[0]!)) lost = true;
+    dirs = [...new Set([...dirs, ...(sp ?? []).filter((x) => !x.unknown).flatMap((x) => dirs.map((d) => clean(resolvePath(d, x.s))))])];
     if (dirs.length > 32) {
       dirs = dirs.slice(0, 32);
       lost = true;
     }
   }
-  if (lost) dirs = [...new Set([...dirs, ...(home ? [home] : []), ...roots, ...roots.map((r) => `${r}/git`)])];
-  return dirs;
+  return { followed: dirs, fallback: lost ? [...new Set([...(home ? [home] : []), ...roots, ...roots.map((r) => `${r}/git`)])] : [] };
 }
 
 /** Programs that only read the paths they are given (their redirects are judged as writes either way). */
@@ -434,38 +449,122 @@ const PATHS_FROM_INPUT = /(^|[\s|;&(`!{])(xargs|parallel|read|mapfile|readarray)
 const pathParts = (t: string) => [t, ...(t.includes('=') ? [t.slice(t.indexOf('=') + 1)] : []), ...(/^-[A-Za-z]./.test(t) && !t.includes('=') ? [t.slice(2)] : [])].filter(Boolean);
 
 /**
- * R1124i, R1124j: the word of the line that writes, or can reach, git's hooks or config, or why the guard can't tell;
- * or null. Every write and placement, and every path-like word of a command that doesn't only read, is spelt every
- * way the shell may (braces, ~, HOME, the line's variables, cd), resolved in every directory the line may be in, and
- * compared folded. A glob is matched against each config file and folder. A line that writes to paths it reads at run
- * time (xargs, find -exec, read) is refused when any of its words reaches HOME or a folder above it.
+ * R1124k: the words a command writes to, besides its redirects: a move, copy or link's every operand (a link's source
+ * is what a write through the link reaches), tee's files, curl's and wget's output file, dd's of=, and the files of an
+ * in-place sed or perl.
+ */
+function writeArgs(c: SimpleCommand): string[] {
+  const out: string[] = [];
+  for (const p of [{ argv: c.argv }, ...programsIn(c)]) {
+    const n = basename(p.argv[0] ?? '');
+    const a = p.argv.slice(1);
+    if (PLACES.has(n) || n === 'tee') out.push(...a.filter((t) => !t.startsWith('-')), ...a.filter((t) => t.startsWith('--target-directory=')).map((t) => t.slice('--target-directory='.length)));
+    if (PLACES.has(n)) a.forEach((t, i) => t === '-t' && a[i + 1] && out.push(a[i + 1]!));
+    if (n === 'curl' || n === 'wget') {
+      a.forEach((t, i) => {
+        if (/^(-o|-O|--output|--output-document)$/.test(t) && a[i + 1]) out.push(a[i + 1]!);
+        else if (/^--output(-document)?=/.test(t)) out.push(t.slice(t.indexOf('=') + 1));
+        else if (/^-[oO]./.test(t)) out.push(t.slice(2));
+      });
+    }
+    if (n === 'dd') out.push(...a.filter((t) => t.startsWith('of=')).map((t) => t.slice(3)));
+    if ((n === 'sed' || n === 'perl') && a.some((t) => /^-[A-Za-z]*i/.test(t) || t.startsWith('--in-place'))) out.push(...a.filter((t) => !t.startsWith('-')));
+  }
+  return out;
+}
+
+/**
+ * A glob as bash reads it, folded, as a regular expression, or null when it isn't one: `*`, `?` and a bracket match
+ * within a name, and none matches a name's leading dot (R1124k F2: `rm -rf *` names no .git). An unbalanced `[` is a
+ * plain character, as in bash.
+ */
+function globRe(p: string): RegExp | null {
+  const f = foldName(p);
+  let re = '^';
+  let start = true;
+  for (let i = 0; i < f.length; i++) {
+    const ch = f[i]!;
+    if (ch === '/') {
+      re += '/';
+      start = true;
+      continue;
+    }
+    const noDot = start ? '(?!\\.)' : '';
+    if (ch === '*') re += `${noDot}[^/]*`;
+    else if (ch === '?') re += `${noDot}[^/]`;
+    else if (ch === '[' && f.indexOf(']', i + 2) > 0 && !f.slice(i, f.indexOf(']', i + 2)).includes('/')) {
+      const j = f.indexOf(']', i + 2);
+      re += `${noDot}[${f.slice(i + 1, j).replace(/^!/, '^').replace(/\\/g, '\\\\')}]`;
+      i = j;
+    } else re += ch.replace(/[.+^${}()|[\]\\*?]/g, '\\$&');
+    start = false;
+  }
+  try {
+    return new RegExp(`${re}$`);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * R1124i, R1124j, R1124k: the word of the line that writes, or can reach, git's hooks or config, or why the guard can't
+ * tell; or null.
+ * - A write destination (writeArgs, redirects, placements; in a line that writes to paths it reads at run time, every
+ *   word) is spelt every way the shell may (braces, ~, HOME, the line's variables), resolved in every directory the
+ *   line may be in, and compared folded. One the guard can't spell out (an expansion it doesn't model, too many
+ *   variables, an unreadable glob) is refused: write it with a literal path.
+ * - Any other path-like word of a command that doesn't only read is judged the same way where it can be spelt out, in
+ *   the directories the line's `cd`s are followed to; one that can't be is left alone (R1124k F2).
+ * - A line that runs `eval`, or writes to paths it reads at run time (xargs, find -exec, read) with a word that reaches
+ *   HOME or a folder above it, is refused.
  */
 function configWriteIn(command: string, commands: SimpleCommand[], cwd: string): string | null {
+  if (commands.some((c) => [{ argv: c.argv }, ...programsIn(c)].some((p) => basename(p.argv[0] ?? '') === 'eval'))) return "eval (it builds commands, and their writes, from text the guard can't read)";
   const vars = lineVars(commands);
-  const dirs = writeDirs(commands, cwd, vars);
+  const { followed, fallback } = writeDirs(commands, cwd, vars);
+  const all = [...new Set([...followed, ...fallback])];
   const { home, roots } = configRoots();
   const fromInput = commands.some(takesPathsFromInput) || PATHS_FROM_INPUT.test(command);
-  const targets = [...(home ? [`${home}/.gitconfig`] : []), ...roots, ...roots.flatMap((r) => [r + '/git', r + '/git/config']), ...dirs.flatMap((d) => [`${d}/.git`, `${d}/.git/config`, `${d}/.git/hooks`])].map(foldName);
+  const targetsIn = (dirs: string[]) => [...(home ? [`${home}/.gitconfig`] : []), ...roots, ...roots.flatMap((r) => [r + '/git', r + '/git/config']), ...dirs.flatMap((d) => [`${d}/.git`, `${d}/.git/config`, `${d}/.git/hooks`])].map(foldName);
   const above = (p: string) => {
     const f = foldName(p);
     return [...(home ? [home] : []), ...roots].some((r) => foldName(r) === f || foldName(r).startsWith(f === '/' ? '/' : `${f}/`));
   };
-  const globRe = (p: string) => new RegExp(`^${foldName(p).replace(/[.+^${}()|\\]/g, '\\$&').replace(/\*/g, '[^/]*').replace(/\?/g, '[^/]')}$`);
-  for (const c of commands) {
-    const dests = new Set([...c.writes, ...placedInto(c)]);
-    const words = [...dests, ...(fromInput || !pathReader(c) ? c.argv.slice(1).flatMap(pathParts) : [])];
-    for (const w of words) {
-      const sp = spellings(w, vars);
-      if (!sp) return `${w}: a word the guard can't spell out every way`;
-      for (const { s, unknown } of sp) {
-        const paths = s.startsWith('/') ? [clean(s)] : dirs.map((d) => clean(resolvePath(d, s)));
-        if (shaped(s) || paths.some(shaped)) return w;
-        // A destination put in place as a folder git reads config from. WHY: only a destination (an argument such as
-        // `apt-get install git` names no folder); a lone unknown variable stands for any folder, so shapes judge it.
-        if (dests.has(w) && !(unknown && /^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$/.test(w)) && paths.some(holdsGitConfig)) return w;
-        if (/[*?[]/.test(s) && paths.some((p) => targets.some((t) => globRe(p).test(t)))) return w;
-        if (fromInput && paths.some(above)) return `${w} (a line that writes to paths it reads at run time reaches HOME there)`;
+  /** Why word `w` reaches git's config or hooks, judged in `dirs`; 'unreadable' when a glob in it isn't one. */
+  const reaches = (w: string, sp: { s: string; unknown: boolean }[], dirs: string[], dest: boolean): string | null => {
+    const targets = targetsIn(dirs);
+    for (const { s, unknown } of sp) {
+      const paths = s.startsWith('/') ? [clean(s)] : dirs.map((d) => clean(resolvePath(d, s)));
+      if (shaped(s) || paths.some(shaped)) return w;
+      // A destination put in place as a folder git reads config from. WHY: only a destination (an argument such as
+      // `apt-get install git` names no folder); a lone unknown variable stands for any folder, so shapes judge it.
+      if (dest && !(unknown && /^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$/.test(w)) && paths.some(holdsGitConfig)) return w;
+      if (/[*?[]/.test(s)) {
+        for (const p of paths) {
+          const re = globRe(p);
+          if (!re) return 'unreadable';
+          if (targets.some((t) => re.test(t))) return w;
+        }
       }
+      if (fromInput && paths.some(above)) return `${w} (a line that writes to paths it reads at run time reaches HOME there)`;
+    }
+    return null;
+  };
+  for (const c of commands) {
+    const words = !pathReader(c) || fromInput ? c.argv.slice(1).flatMap(pathParts) : [];
+    const dests = new Set([...c.writes, ...placedInto(c), ...writeArgs(c), ...(fromInput ? words : [])]);
+    for (const w of dests) {
+      const sp = spellings(w, vars);
+      const why = sp && !sp.some((x) => x.unmodelled) ? reaches(w, sp, all, true) : 'unreadable';
+      if (why === 'unreadable') return `${w}: a write destination the guard can't spell out (a substitution, a parameter operator, too many variables or an unreadable glob); write to a literal path`;
+      if (why) return why;
+    }
+    for (const w of words) {
+      if (dests.has(w)) continue;
+      const sp = spellings(w, vars);
+      if (!sp) continue;
+      const why = reaches(w, sp, followed, false);
+      if (why && why !== 'unreadable') return why;
     }
   }
   return null;

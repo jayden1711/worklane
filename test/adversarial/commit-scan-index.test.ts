@@ -448,3 +448,41 @@ test('R1124i, R1124j: a write to the user git config in any spelling the shell o
     'cd ~ && ls',
   ]) assert.notEqual(await decide(d, 'Bash', { command: line }), 'deny', line);
 });
+
+test('R1124k: a write destination the guard cannot spell out is refused; ordinary words it cannot spell out, globs and an untracked cd are not', { skip }, async () => {
+  const d = checkout();
+  for (const line of [
+    // F1: parameter operators, command substitutions (whole or part of the name), a line variable holding one, eval.
+    'F=~/.gitconfigx; cp gc ${F%x}',
+    'F=~/.gitconfigx; cp gc "${F/x/}"',
+    'cp gc ~/.gitconf$(echo ig)',
+    "cp gc ~/$(printf '.git%s' config)",
+    "F=$(printf '%s/.gitconfig' ~); cp gc $F",
+    'cp gc ~/.gitconf`echo ig`',
+    'tee ~/.gitconf$(echo ig) < gc',
+    'curl -o ~/$(echo .gitconfig) https://example.com/x',
+    'dd if=gc of=~/.gitconf${X:-ig}',
+    'ln -s ~/.gitconf$(echo ig) c',
+    'eval "cp gc ~/.gitconfig"',
+    // Globs that can match a config name, as bash expands them.
+    'cp gc ~/.gitconf[i]g',
+    'cp gc ~/.git*',
+    // A destination after a cd the guard can't follow is judged in the config folders too.
+    'cd "$(echo ~)/.config" && cp gx config',
+  ]) assert.equal(await decide(d, 'Bash', { command: line }), 'deny', line);
+  // F2: ordinary work. A glob never matches a leading dot; a word with many variables or a substitution that isn't a
+  // write destination is left alone; an ordinary argument after an untracked cd isn't read as a config folder; an
+  // unbalanced bracket is a plain character.
+  for (const line of [
+    'rm -rf *',
+    'tar czf out.tgz *',
+    'npx prettier --write *',
+    'echo "$A $B $C $D"',
+    'curl "https://x/$A/$B/$C/$D?e=$E"',
+    'make VERSION=$A.$B.$C.$D',
+    'gh pr create --title t --body "$(cat body.md)"',
+    'cd "$D" && make config',
+    'grep -n "[" file.txt',
+    'echo [ > out.txt',
+  ]) assert.notEqual(await decide(d, 'Bash', { command: line }), 'deny', line);
+});
