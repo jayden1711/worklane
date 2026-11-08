@@ -22,10 +22,10 @@
 //   that sets env, widens allow rules, or sets anything but hooks and
 //   permission rules refuses the run (projectSettingsRefusal).
 import { randomBytes } from 'node:crypto';
-import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
+import { existsSync, lstatSync, readdirSync, readFileSync, readlinkSync, realpathSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import { BRAND } from './brand.js';
-import { changedNames, ignoredNames, untrackedNames } from './coordinator/change-files.js';
+import { changedNames, ignoredNames, lookAwayNames, untrackedNames } from './coordinator/change-files.js';
 import { gitSpawnSync } from './os/git.js';
 
 /** Leading env assignment that marks our hook commands (the shell ignores it otherwise). */
@@ -232,7 +232,12 @@ export function uncommittedAgentFilesRefusal(cwd: string): string | null {
     const differs = changedNames(root, ['HEAD']).filter((p) => inClaudeDir(p) || instructions(p));
     const untracked = untrackedNames(root).filter((p) => (inClaudeDir(p) || instructions(p)) && !placeholder(p));
     const ignored = ignoredNames(root, ['.claude']).filter((p) => inClaudeDir(p) && !placeholder(p));
-    changed = [...new Set([...differs, ...untracked, ...ignored, ...linkedClaudeDirs(root, cwd), ...loadedInstructionsChanged(root, cwd)])];
+    const head = headEntries(root);
+    const links = linkedClaudeDirs(root, cwd, head, placeholder);
+    // Every tracked agent file (and each committed link's target) against HEAD's bytes, whatever the index says, and
+    // the index flags that make git look away from one (D4: --skip-worktree, --assume-unchanged).
+    const agent = (p: string) => inClaudeDir(p) || instructions(p) || links.targets.some((t) => p === t || p.startsWith(`${t}/`));
+    changed = [...new Set([...differs, ...untracked, ...ignored, ...links.refused, ...trackedDiffer(root, head, agent), ...hiddenFromGit(root, agent), ...loadedInstructionsChanged(root, cwd)])];
   } catch (e) {
     return `the checkout's agent settings and instructions couldn't be compared with its last commit (${(e as Error).message})`;
   }
@@ -254,9 +259,103 @@ function foldersDown(root: string, cwd: string): string[] {
   return parts.reduce<string[]>((acc, part) => [...acc, acc.at(-1) ? `${acc.at(-1)}/${part}` : part], ['']);
 }
 
-/** Each `.claude` from the top down to `cwd` that is a link or not a folder, and each link under one (D1). */
-function linkedClaudeDirs(root: string, cwd: string): string[] {
+/** HEAD's tree, every entry: path to its mode and object (`ls-tree -r -z`, read by the one name reader's rules). */
+function headEntries(root: string): Map<string, { mode: string; sha: string }> {
+  const r = gitSpawnSync(['ls-tree', '-r', '-z', '--full-tree', 'HEAD'], { cwd: root, encoding: 'buffer', maxBuffer: 256 * 1024 * 1024 });
+  if (r.status !== 0) throw new Error(`git ls-tree HEAD failed: ${r.stderr.toString('utf8').trim().slice(0, 300)}`);
+  const out = new Map<string, { mode: string; sha: string }>();
+  for (const rec of r.stdout.toString('utf8').split('\0')) {
+    const tab = rec.indexOf('\t');
+    if (tab === -1) continue;
+    const [mode, , sha] = rec.slice(0, tab).split(' ');
+    out.set(rec.slice(tab + 1), { mode: mode!, sha: sha! });
+  }
+  return out;
+}
+
+/** A blob's bytes at HEAD. */
+function blob(root: string, sha: string): Buffer {
+  const r = gitSpawnSync(['cat-file', 'blob', sha], { cwd: root, encoding: 'buffer', maxBuffer: 64 * 1024 * 1024 });
+  if (r.status !== 0) throw new Error(`git cat-file ${sha} failed`);
+  return r.stdout;
+}
+
+/**
+ * Each of HEAD's entries `agent` picks whose file on disk isn't HEAD's (D4): the bytes, or a link's target text, read
+ * directly, so an index flag or a refresh can't make git look away. Missing on disk: deleted. A submodule is skipped.
+ */
+function trackedDiffer(root: string, head: Map<string, { mode: string; sha: string }>, agent: (p: string) => boolean): string[] {
   const out: string[] = [];
+  for (const [p, e] of head) {
+    if (!agent(p) || e.mode === '160000') continue;
+    let st;
+    try {
+      st = lstatSync(join(root, p));
+    } catch {
+      out.push(p);
+      continue;
+    }
+    if (e.mode === '120000') {
+      if (!st.isSymbolicLink() || readlinkSync(join(root, p)) !== blob(root, e.sha).toString('utf8')) out.push(p);
+    } else if (!st.isFile() || !blob(root, e.sha).equals(readFileSync(join(root, p)))) out.push(p);
+  }
+  return out;
+}
+
+/** Each tracked path `agent` picks that git is told to look away from (skip-worktree, assume-unchanged: lookAwayNames). */
+function hiddenFromGit(root: string, agent: (p: string) => boolean): string[] {
+  return lookAwayNames(root).filter(agent);
+}
+
+/**
+ * Each `.claude` from the top down to `cwd`, and each link under one, that may hold what HEAD doesn't (D1, D5).
+ * `refused`: a `.claude` that isn't a folder (an empty file is a sandbox mount point: allowed), and a link that HEAD
+ * doesn't hold as the same link, or whose target is outside the checkout, isn't there, or holds what HEAD doesn't
+ * (changed, untracked or ignored files, not counting empty placeholders, or a link of its own refused the same way).
+ * `targets`: each committed link's target in the checkout, whose tracked files are then compared too.
+ */
+function linkedClaudeDirs(root: string, cwd: string, head: Map<string, { mode: string; sha: string }>, placeholder: (p: string) => boolean): { refused: string[]; targets: string[] } {
+  const refused: string[] = [];
+  const targets: string[] = [];
+  const realRoot = realpathSync(root);
+  const visited = new Set<string>();
+  let seen = 0;
+  const inside = (rel: string) => rel && !rel.startsWith('..') && !rel.startsWith(sep);
+  // A link at `p`: allowed only as HEAD holds it, its target inside, and that target holding nothing HEAD doesn't.
+  const link = (p: string) => {
+    const e = head.get(p);
+    let target: string;
+    try {
+      if (e?.mode !== '120000' || readlinkSync(join(root, p)) !== blob(root, e.sha).toString('utf8')) throw new Error('not as committed');
+      target = relative(realRoot, realpathSync(join(root, p)));
+    } catch {
+      refused.push(p);
+      return;
+    }
+    if (!inside(target)) {
+      refused.push(p);
+      return;
+    }
+    const t = target.split(sep).join('/');
+    targets.push(t);
+    if (lstatSync(join(root, t)).isDirectory()) {
+      const extra = [...untrackedNames(root, [t]).filter((x) => !placeholder(x)), ...ignoredNames(root, [t]).filter((x) => !placeholder(x))];
+      if (extra.length) refused.push(p);
+      walk(t);
+    }
+  };
+  const walk = (dir: string) => {
+    const real = realpathSync(join(root, dir));
+    if (visited.has(real)) return;
+    visited.add(real);
+    for (const e of readdirSync(join(root, dir), { withFileTypes: true })) {
+      const p = `${dir}/${e.name}`;
+      if (p === '.claude/worktrees') continue;
+      if (++seen > MAX_CLAUDE_DIR_ENTRIES) throw new Error(`over ${MAX_CLAUDE_DIR_ENTRIES} entries under .claude`);
+      if (e.isSymbolicLink()) link(p);
+      else if (e.isDirectory()) walk(p);
+    }
+  };
   for (const folder of foldersDown(root, cwd)) {
     const rel = folder ? `${folder}/.claude` : '.claude';
     let st;
@@ -265,24 +364,12 @@ function linkedClaudeDirs(root: string, cwd: string): string[] {
     } catch {
       continue;
     }
-    if (!st.isDirectory()) {
-      // An empty regular file is a sandbox mount point (D2): nothing loads from it.
-      if (!(st.isFile() && st.size === 0)) out.push(rel);
-      continue;
-    }
-    let seen = 0;
-    const walk = (dir: string) => {
-      for (const e of readdirSync(join(root, dir), { withFileTypes: true })) {
-        const p = `${dir}/${e.name}`;
-        if (p === '.claude/worktrees') continue;
-        if (++seen > MAX_CLAUDE_DIR_ENTRIES) throw new Error(`over ${MAX_CLAUDE_DIR_ENTRIES} entries under ${rel}`);
-        if (e.isSymbolicLink()) out.push(p);
-        else if (e.isDirectory()) walk(p);
-      }
-    };
-    walk(rel);
+    if (st.isSymbolicLink()) link(rel);
+    else if (st.isDirectory()) walk(rel);
+    // An empty regular file is a sandbox mount point (D2): nothing loads from it.
+    else if (!(st.isFile() && st.size === 0)) refused.push(rel);
   }
-  return out;
+  return { refused, targets };
 }
 
 /**

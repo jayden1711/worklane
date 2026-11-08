@@ -232,6 +232,17 @@ export function untrackedNames(cwd: string, paths: string[] = []): string[] {
   return names(must(runBytes(cwd, ['ls-files', '--others', '--exclude-standard', '-z', ...(paths.length ? ['--', ...paths] : [])])));
 }
 
+/**
+ * The tracked files of a worktree git is told to look away from (#958, R1185c D4): `ls-files -v -z`, the ones tagged
+ * `S` (skip-worktree) or with a lower-case tag (assume-unchanged), each read by nameOf. A change to one never shows in
+ * a diff or a status.
+ */
+export function lookAwayNames(cwd: string): string[] {
+  return fields(must(runBytes(cwd, ['ls-files', '-v', '-z'])))
+    .filter((b) => b.length > 2 && (b[0] === 0x53 || (b[0]! >= 0x61 && b[0]! <= 0x7a)))
+    .map((b) => nameOf(b.subarray(2)));
+}
+
 /** The ignored untracked files of a worktree (`ls-files --others --ignored --exclude-standard -z`), each read by nameOf; `paths` as for untrackedNames. */
 export function ignoredNames(cwd: string, paths: string[] = []): string[] {
   return names(must(runBytes(cwd, ['ls-files', '--others', '--ignored', '--exclude-standard', '-z', ...(paths.length ? ['--', ...paths] : [])])));
