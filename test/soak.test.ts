@@ -94,13 +94,14 @@ test('soak: the real coordinator works for a while with stand-in agents; nothing
   });
   const c = coordinator(f, runner);
   const samples: SoakSample[] = [];
-  const start = Date.now();
+  // Elapsed time on the monotonic clock (#582): an NTP step never moves it. A run's age (below) is against the log's own wall-clock times.
+  const start = performance.now();
   let lastIssue = -Infinity;
   let lastSample = -Infinity;
   let ticks: number[] = [];
   try {
-    while (Date.now() - start < ms && tickCount++ < smokeTicks) {
-      const at = Date.now() - start;
+    while (performance.now() - start < ms && tickCount++ < smokeTicks) {
+      const at = performance.now() - start;
       if (at - lastIssue >= issueEveryMs) {
         f.backlog.open(easyIssue(`Add soak-${++n}.js`, `soak-${n}.js`));
         lastIssue = at;
@@ -144,7 +145,7 @@ test('soak: the real coordinator works for a while with stand-in agents; nothing
   if (out) {
     mkdirSync(out, { recursive: true });
     writeFileSync(join(out, 'soak-samples.json'), JSON.stringify(samples));
-    writeFileSync(join(out, 'soak-verdict.json'), JSON.stringify({ hours: (Date.now() - start) / 3600_000, issues: n, ...v }, null, 2));
+    writeFileSync(join(out, 'soak-verdict.json'), JSON.stringify({ hours: (performance.now() - start) / 3600_000, issues: n, ...v }, null, 2));
   }
   f.log.close();
   rmSync(f.base, { recursive: true, force: true });
