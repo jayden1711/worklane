@@ -183,11 +183,16 @@ test('audit verify / checkpoint: exit 0 verified, 1 FAILED with why, 2 a usage e
 test("a coordinator tick writes the chain's checkpoint beside its events database, and it verifies", { skip }, async () => {
   const f = coordFixture();
   try {
+    // WHY an event first: a quiet first tick may write none before its checkpoint step, and an empty log has nothing to
+    // checkpoint (CI on Linux: the tick wrote no event before the step).
+    f.log.append('dashboard.audit', { login: 'someone', role: 'owner', via: 'session', instance: null, action: 'clear', detail: {} }, 'someone', 'human');
     const c = coordinator(f, new FakeRunner(() => ({ structured: { summary: 's' } })));
     await c.tick();
     await c.idle();
     const file = chainFileFor(f.log.path);
-    assert.equal(readCheckpoints(file).checkpoints.length, 1, 'the first tick checkpoints');
+    const { checkpoints } = readCheckpoints(file);
+    assert.equal(checkpoints.length, 1, 'the first tick checkpoints');
+    assert.ok(checkpoints[0]!.event >= 1, 'covering the events written before it');
     assert.equal(verify({ db: f.log.db, file }).ok, true);
   } finally {
     f.log.close();

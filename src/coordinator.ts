@@ -125,6 +125,9 @@ export class Coordinator extends AutomationRuns {
     // The config as the default branch has it now, before anything below reads it (src/config/live.ts).
     await step('config', () => this.refreshConfig(), undefined);
     await step('settings', () => this.refreshSettings(), undefined);
+    // The audit chain's checkpoint (src/audit-chain.ts, docs/audit-log.md): at most every 10 minutes. WHY early: a step
+    // added after dispatch would yield before the tick returns, which changes when a dispatched run's end is seen.
+    await step('audit chain', () => this.checkpointAudit(), undefined);
     await step('chat attachments', () => this.sweepChatAttachments(), undefined);
     await step('chat members', () => this.sweepChatMembers(), undefined);
     // A usage-limit pause whose reset has passed ends here, before anything below would start a run.
@@ -166,8 +169,6 @@ export class Coordinator extends AutomationRuns {
     await step('superfan', () => this.checkSuperfan(), undefined);
     const dispatched = await step('dispatch', () => this.dispatch(), 0);
     await step('pool', () => this.maybeRefillPool(), undefined);
-    // The audit chain's checkpoint (src/audit-chain.ts, docs/audit-log.md): at most every 10 minutes.
-    await step('audit chain', () => this.checkpointAudit(), undefined);
     if (this.stopped) return;
     this.emit('coordinator.tick', { instance: this.d.instance, dispatched, reconciled });
   }
