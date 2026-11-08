@@ -711,6 +711,53 @@ function looseGit(c: SimpleCommand): LooseGit | null {
 
 const setsGitEnv = (c: SimpleCommand) => Object.keys(c.assignments).some((k) => /^GIT_/i.test(k)) || c.argv.some((t) => /^GIT_[A-Za-z0-9_]*\+?=/i.test(t));
 
+/** help.autocorrect values with which git runs no corrected command (as src/guardrails/push-hook.ts reads them). */
+const AUTOCORRECT_OFF = /^(0+|never|show)$/i;
+
+/** git's global options that take the next word as their value (git.c handle_options), before an alias's command. */
+const ALIAS_VALUED = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--exec-path', '--super-prefix', '--config-env', '--attr-source', '--list-cmds']);
+/** git's global options that take no value. */
+const ALIAS_FLAGS = new Set(['-p', '-P', '--paginate', '--no-pager', '--bare', '--no-replace-objects', '--literal-pathspecs', '--glob-pathspecs', '--noglob-pathspecs', '--icase-pathspecs', '--no-optional-locks', '--no-advice', '--html-path', '--man-path', '--info-path']);
+
+/**
+ * An alias's value split into words as git splits it (alias.c split_cmdline): whitespace separates words outside
+ * quotes; '…' and "…" quote (a backslash escapes one character outside single quotes). null: an unbalanced quote, which
+ * git refuses too.
+ */
+function aliasWords(value: string): string[] | null {
+  const out: string[] = [];
+  let word = '';
+  let has = false;
+  let quote: '"' | "'" | null = null;
+  for (let i = 0; i < value.length; i++) {
+    const ch = value[i]!;
+    if (quote === "'") {
+      if (ch === "'") quote = null;
+      else word += ch;
+    } else if (ch === '\\') {
+      if (i + 1 >= value.length) return null;
+      word += value[++i];
+      has = true;
+    } else if (quote === '"') {
+      if (ch === '"') quote = null;
+      else word += ch;
+    } else if (ch === '"' || ch === "'") {
+      quote = ch;
+      has = true;
+    } else if (/\s/.test(ch)) {
+      if (has || word) out.push(word);
+      word = '';
+      has = false;
+    } else {
+      word += ch;
+      has = true;
+    }
+  }
+  if (quote) return null;
+  if (has || word) out.push(word);
+  return out;
+}
+
 /**
  * Why a git command run by another name may commit: an alias that is a commit or a shell command. It is looked up in
  * every directory the line may run it in (`dirs`, or why those can't be known); a lookup that fails refuses.
@@ -720,6 +767,7 @@ function aliasRefusal(loose: SimpleCommand[], p: PlanEnv, dirs: Set<string> | st
     const g = looseGit(c);
     if (!g?.sub || g.sub.startsWith('-') || GIT_BUILTINS.has(g.sub)) continue;
     if (g.configs.some((k) => /^alias\./i.test(k))) return `git ${g.sub} with an alias given on its command line`;
+    if (g.configs.some((k) => /^help\.autocorrect$/i.test(k))) return `git ${g.sub} with help.autocorrect given on its command line`;
     if (loose.some((x) => looseGit(x)?.sub === 'config')) return `git ${g.sub} in a line that also changes git config`;
     if (loose.some(setsGitEnv)) return `git ${g.sub} in a line that sets git's environment`;
     if (typeof dirs === 'string') return `git ${g.sub} after ${dirs}`;
@@ -729,11 +777,30 @@ function aliasRefusal(loose: SimpleCommand[], p: PlanEnv, dirs: Set<string> | st
         if (depth > 10) return `git ${g.sub}: an alias loop`;
         const r = p.git(dir, [...g.dirs.flatMap((d) => ['-C', d]), 'config', '--get', `alias.${sub}`]);
         // WHY: git config exits 1 for "no such key"; anything else (an error, a timeout) is not an answer.
-        if (r.status === 1) break;
+        if (r.status === 1) {
+          if (GIT_BUILTINS.has(sub)) break;
+          // R1124f D3: no alias and no command by that name. With help.autocorrect on, git runs the command it
+          // corrects the name to (`git comit -n` commits, the hook skipped), as the push rule reads it (push-hook.ts).
+          const fix = p.git(dir, [...g.dirs.flatMap((d) => ['-C', d]), 'config', '--get', 'help.autocorrect']);
+          if (fix.status !== 0 && fix.status !== 1) return `git ${g.sub}: its help.autocorrect lookup failed`;
+          if (fix.status === 0 && !AUTOCORRECT_OFF.test(fix.stdout.trim())) return `git ${g.sub} isn't a git command, and help.autocorrect is on (${fix.stdout.trim().slice(0, 40)}), so git may run the commit it corrects it to`;
+          break;
+        }
         if (r.status !== 0) return `git ${g.sub}: its alias lookup failed`;
         const value = r.stdout.trim();
         if (value.startsWith('!')) return `git ${g.sub} is an alias for a shell command`;
-        sub = value.split(/\s+/)[0] ?? '';
+        // R1124f D2: as git reads an alias (split_cmdline: quotes and backslashes), past the global options it may
+        // start with; a word git would read some other way, or an option this can't step over, refuses (fail closed).
+        const words = aliasWords(value);
+        if (words === null) return `git ${g.sub}: its alias can't be read as git reads it (an unbalanced quote)`;
+        let at = 0;
+        while (at < words.length && words[at]!.startsWith('-')) {
+          const w = words[at]!;
+          if (ALIAS_VALUED.has(w)) at += 2;
+          else if (ALIAS_FLAGS.has(w) || [...ALIAS_VALUED].some((o) => o.startsWith('--') && w.startsWith(`${o}=`))) at += 1;
+          else return `git ${g.sub}: its alias starts with the git option ${w}, which the guard doesn't step over`;
+        }
+        sub = words[at] ?? '';
         if (sub === 'commit') return `git ${g.sub} is an alias for git commit`;
         if (GIT_BUILTINS.has(sub)) break;
       }

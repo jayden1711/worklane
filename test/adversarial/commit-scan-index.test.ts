@@ -278,3 +278,39 @@ test('R1124f D1: index entries whose names land on one file when written out (no
     assert.equal(head(d), was, `${what}: nothing was committed`);
   }
 });
+
+test("R1124f D2: an alias for commit is read as git reads it, quotes and global options first, so `git <alias> -n` is refused", { skip }, async () => {
+  for (const value of ['-p commit', '"commit"', "'commit'", '--no-pager "commit"', '-c user.name=x commit', 'com"mit"']) {
+    const d = checkout();
+    // Set as a person sets it (an agent's own alias write is refused already).
+    git(d, 'config', 'alias.ci', value);
+    assert.equal(await decide(d, 'Bash', { command: 'git ci -n -m x' }), 'deny', value);
+  }
+  // An option the guard doesn't step over, or an unbalanced quote: refused too (fail closed).
+  for (const value of ['--weird commit', '"commit']) {
+    const d = checkout();
+    git(d, 'config', 'alias.ci', value);
+    assert.equal(await decide(d, 'Bash', { command: 'git ci -m x' }), 'deny', value);
+  }
+  // The control: an alias for another command is no commit.
+  const d = checkout();
+  git(d, 'config', 'alias.lg', '-p log --oneline');
+  assert.notEqual(await decide(d, 'Bash', { command: 'git lg -n 3' }), 'deny', 'an alias for log');
+});
+
+test('R1124f D3: with help.autocorrect on, a misspelt command git corrects to commit is refused; with it off, it is no commit', { skip }, async () => {
+  for (const value of ['1', '10', 'immediate', 'prompt']) {
+    const d = checkout();
+    git(d, 'config', 'help.autocorrect', value);
+    assert.equal(await decide(d, 'Bash', { command: 'git comit -n -m x' }), 'deny', `help.autocorrect ${value}`);
+  }
+  // Given on the command line: refused as an alias given there is.
+  assert.equal(await decide(checkout(), 'Bash', { command: 'git -c help.autocorrect=1 comit -n -m x' }), 'deny', 'on the command line');
+  // The controls: autocorrect off runs nothing (git says it isn't a command), and a real commit isn't refused for it.
+  for (const value of ['0', 'never', 'show']) {
+    const d = checkout();
+    git(d, 'config', 'help.autocorrect', value);
+    assert.notEqual(await decide(d, 'Bash', { command: 'git comit -m x' }), 'deny', `help.autocorrect ${value}`);
+    assert.notEqual(await decide(d, 'Bash', { command: 'git commit -m x' }), 'deny', `a real commit, help.autocorrect ${value}`);
+  }
+});
