@@ -94,7 +94,7 @@ jobs:
           f=chrome-linux64.zip
           # Inline, not the repo's fetch helper: this step runs as root in the self-hosted container, so nothing from the checkout.
           # The file is moved to its name only once its pin matched (--strict): a check that failed leaves nothing to use.
-          curl -sSfL --proto '=https' --tlsv1.2 --connect-timeout 20 --max-time 60 --retry 5 --retry-all-errors --retry-delay 5 --retry-max-time 120 -o "/tmp/$f.part" "https://storage.googleapis.com/chrome-for-testing-public/${CHROME_VERSION}/linux64/$f"
+          curl -sSfL --proto '=https' --tlsv1.2 --connect-timeout 20 --speed-limit 1024 --speed-time 60 --retry 5 --retry-all-errors --retry-delay 5 --retry-max-time 120 -o "/tmp/$f.part" "https://storage.googleapis.com/chrome-for-testing-public/${CHROME_VERSION}/linux64/$f"
           echo "${CHROME_SHA256}  /tmp/$f.part" | sha256sum -c - --strict && mv -f -- "/tmp/$f.part" "/tmp/$f"
           unzip -q "/tmp/$f" -d /opt && rm -f "/tmp/$f"
           # Each deb.deps line is "a (>= v) | b | c": the first alternative this release can install, or its t64
@@ -167,7 +167,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/bin" && cd "$RUNNER_TEMP/bin"
           # Inline, not the repo's fetch helper: in the self-hosted container this step runs as root, so nothing from the checkout.
           # The file is moved to its name only once its pin matched (--strict): a check that failed leaves nothing to use.
-          curl -sSfL --proto '=https' --tlsv1.2 --connect-timeout 20 --max-time 60 --retry 5 --retry-all-errors --retry-delay 5 --retry-max-time 120 -o "$f.part" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${f}"
+          curl -sSfL --proto '=https' --tlsv1.2 --connect-timeout 20 --speed-limit 1024 --speed-time 60 --retry 5 --retry-all-errors --retry-delay 5 --retry-max-time 120 -o "$f.part" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${f}"
           echo "${sum}  $f.part" | sha256sum -c - --strict && mv -f -- "$f.part" "$f"
           case "$f" in *.zip) unzip -q "$f" gitleaks.exe ;; *) tar -xzf "$f" gitleaks ;; esac
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"

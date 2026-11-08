@@ -44,7 +44,7 @@ const HELPER_LINE = new RegExp(
  * (-sSfL first: self-hosted-guard.test.ts asks for it), to `<out>.part`, from an https URL.
  */
 const INLINE_CURL = new RegExp(
-  String.raw`^\s*curl -sSfL --proto '=https' --tlsv1\.2 --connect-timeout 20 --max-time 60 --retry 5 --retry-all-errors --retry-delay 5 --retry-max-time 120 ` +
+  String.raw`^\s*curl -sSfL --proto '=https' --tlsv1\.2 --connect-timeout 20 --speed-limit 1024 --speed-time 60 --retry 5 --retry-all-errors --retry-delay 5 --retry-max-time 120 ` +
     String.raw`-o "(${PATH})\.part" "https://${PATH}"\s*$`,
 );
 /**
@@ -55,10 +55,11 @@ const INLINE_CURL = new RegExp(
 const INLINE_CHECK = new RegExp(String.raw`^\s*echo "(?:${VAR}|[0-9a-f]{64})  (${PATH})\.part" \| sha256sum -c - --strict && mv -f -- "(${PATH})\.part" "(${PATH})"\s*$`);
 
 /** Downloaders other than curl: none may run in a workflow or a script (a probe to /dev/null aside, below). */
-const OTHER_FETCH = /\bwget\b|\bgh\s+release\s+download\b|\bInvoke-WebRequest\b|\biwr\b|\bInvoke-RestMethod\b|\birm\b|\bWebClient\b|\bDownloadFile\b|\bHttpClient\b|\bStart-BitsTransfer\b|\baria2c\b|\bcurl\.exe\b|=\s*["']?curl\b/i;
+const OTHER_FETCH = /\bwget\b|\bgh\s+release\s+download\b|\bInvoke-WebRequest\b|\biwr\b|\bInvoke-RestMethod\b|\birm\b|\bWebClient\b|\bDownloadFile\b|\bHttpClient\b|\bStart-BitsTransfer\b|\baria2c\b|\bcurl\.exe\b|=\s*["']?curl\b|\bgh\s+api\b[^\n]*(?:releases\/|octet-stream)|\b(?:command\s+-v|which|type\s+-[pP])\s+curl\b/i;
 
 /** A run script's lines, with backslash-continued lines joined. */
-const logicalLines = (run: string) => run.replace(/\\\n\s*/g, ' ').split('\n');
+// R1228f D2: bash removes a backslash-newline outright (no space), keeping the next line's indentation.
+const logicalLines = (run: string) => run.replace(/\\\n/g, '').split('\n');
 
 /** One shell command, and whether a pipe takes its output (`a | b`: a's). */
 export interface Cmd {
@@ -126,8 +127,23 @@ export const runsCurl = (cmd: string) => /(?:^|\$\(|`|\b(?:then|do|if|exec|comma
  * splits them, so an `-o /dev/null` inside a quoted header is no output (R1228d D3).
  */
 export function curlOutput(cmd: string): 'file' | 'stdout' | 'none' {
-  // From curl on: a capture's quotes ("$(curl … "$1")") would otherwise make one word of it.
-  const t = words(cmd.slice(cmd.search(/\bcurl\b/))).slice(1);
+  // Read two ways and the worse counts (R1228f D1): with the shell's quoting, from curl on (a capture's quotes,
+  // "$(curl … "$1")", would otherwise make one word of it), and with quotes taken off from the start of curl's word
+  // ("curl" -o f …, or bash -c "curl -o f …", where the shell's quoting hides the flags).
+  const rank = { none: 0, stdout: 1, file: 2 } as const;
+  const a = transfersOutput(words(cmd.slice(cmd.search(/\bcurl\b/))).slice(1));
+  const b = transfersOutput(curlTokens(cmd).slice(1));
+  return rank[a] >= rank[b] ? a : b;
+}
+
+/** curl's words with every quote taken off, from the start of the word curl is in. */
+export const curlTokens = (cmd: string): string[] => cmd.slice(Math.max(0, cmd.search(/\S*\bcurl\b/))).replace(/["']/g, ' ').split(/\s+/).filter(Boolean).slice(0).map((w, i) => (i === 0 ? 'curl' : w));
+
+/** The URL-looking words of a curl command, both ways it is read (an --url= value too). */
+export const curlUrls = (cmd: string): string[] =>
+  [...words(cmd.slice(cmd.search(/curl/))), ...curlTokens(cmd)].filter((w) => /^(?:--url=)?https?:\/\//i.test(w)).map((w) => w.replace(/^--url=/, ''));
+
+function transfersOutput(t: readonly string[]): 'file' | 'stdout' | 'none' {
   let file = false;
   let stdout = false;
   let named = false;
@@ -192,11 +208,25 @@ export function runProblems(run: string, rootStep = false): string[] {
       if (!c || c[1] !== m[1] || c[2] !== m[1] || c[3] !== m[1]) out.push(`an inline download not checked at once against its pin, then moved into place: ${l.trim()}`);
       continue;
     }
-    for (const c of commands(l)) {
-      if (!runsCurl(c)) continue;
+    for (const { cmd: c, piped } of shellCommands(l)) {
+      // R1228f D1: every mention of curl, whatever its spelling (/usr/bin/curl, \curl, "curl", sudo -E, env -i, nice,
+      // timeout -s, bash -c, xargs), is judged; not only the spellings runsCurl knows.
+      if (!/curl/.test(c)) continue;
       if (readsConfig(c)) out.push(`a curl that reads a config file (-K): ${c}`);
-      const urls = words(c.slice(c.search(/\bcurl\b/))).filter((w) => /^https?:\/\//i.test(w));
-      if (curlOutput(c) !== 'none' && urls.some((u) => /^https:/i.test(u) || !LOCAL.test(u))) out.push(`a curl that keeps what a URL returns (use ${HELPER}): ${c}`);
+      if (WORKFLOW_PROBES.includes(c)) continue;
+      const urls = curlUrls(c);
+      const o = curlOutput(c);
+      const ws = words(c.slice(c.search(/curl/)));
+      const redirected = ws.some((w, i) => /^&?>>?/.test(w) && (w.replace(/^&?>>?/, '') || ws[i + 1]) !== '/dev/null');
+      const kept = o === 'file' || (o === 'stdout' && (piped || /\$\(\s*\S*curl\b/.test(c) || redirected));
+      // Kept from any URL but a loopback one, written out (a URL in a variable included: R1228d W2).
+      if (kept && !(urls.length && urls.every((u) => LOCAL.test(u)))) out.push(`a curl that keeps what a URL returns (use ${HELPER}): ${c}`);
+      else if (o !== 'none' && urls.some((u) => /^https:/i.test(u) || !LOCAL.test(u))) out.push(`a curl that keeps what a URL returns (use ${HELPER}): ${c}`);
+    }
+    // R1228f D4: a run that executes a shell file runs only one the lint reads (under scripts/ or .github/).
+    for (const c of commands(l)) {
+      const m = /^(?:bash|sh|source|\.)\s+("?)([^\s"]+\.(?:sh|bash))\1(?:\s|$)/.exec(c) ?? /^("?)(\.\/[^\s"]+\.(?:sh|bash))\1(?:\s|$)/.exec(c);
+      if (m && !/(^|\/)(scripts|\.github)\//.test(m[2]!)) out.push(`a shell file the download lint doesn't read (put it under scripts/ or .github/): ${c}`);
     }
   }
   return out;
@@ -223,6 +253,26 @@ const rootContainer = (job: { container?: unknown }) => {
   if (c === undefined || c === null || c === '') return false;
   return !/--user\b|(^|\s)-u\s/.test(JSON.stringify(c));
 };
+
+/**
+ * Workflow curls that keep what a URL in a variable returns and are allowed to: each reads a local stand-in (the fake
+ * GitHub, the dashboard under test), never the network. Exact text, so an edit to one, or a new one, is checked.
+ */
+const WORKFLOW_PROBES: string[] = [
+  // ci-slow's wizard and hub checks: the page the local dashboard serves, its sign-in round trip.
+  String.raw`curl -s -o "$t/page.html" -w '%{http_code}\n' "$(tail -n 1 "$F/$log")"`,
+  String.raw`csrf="$(curl -s -H "Cookie: $c" "$h/" | sed -n 's/.*name="csrf" value="\([^"]*\)".*/\1/p')"`,
+  String.raw`curl -s -H "Cookie: $c" "$h$loc" > "$F/start.html"`,
+  String.raw`curl -s -H "Cookie: $c" "$h/setup/app-manifest/callback?state=$state&code=ci-signin-code"`,
+  String.raw`[ "$(curl -s -o "$F/loopback-page.html" -w '%{http_code}' "$u")" = 200 ]`,
+  String.raw`[ "$(curl -s -o "$F/setup-page.html" -w '%{http_code}' "$u")" = 200 ]`,
+];
+
+/** The actions a workflow may use (R1228f D4: a release-download action has no URL text), pinned by commit; ./ local. */
+const USES_ALLOWED = /^(?:(?:actions\/(?:checkout|setup-node|upload-artifact|download-artifact)|Vampire\/setup-wsl)@[0-9a-f]{40}|\.\/\S+)$/;
+
+/** Setup scripts that download pinned binaries themselves, each with its own checksum (the pinned-URL text rule skips them; the retry rule holds them). */
+const SETUP_DOWNLOADERS = ['scripts/bootstrap.sh', 'scripts/setup/node.sh', 'scripts/setup/ci-runner.sh', 'scripts/setup/tools.sh'];
 
 /**
  * Commands in scripts/ that keep what they fetch with no retry and are allowed to: each reads a local server's answer
@@ -264,11 +314,12 @@ export function scriptProblems(text: string, probes: string[] = []): { downloads
       if (!(outs.length && outs.every((o) => o === '/dev/null'))) problems.push(`a download that isn't curl: ${c}`);
       continue;
     }
-    if (!runsCurl(c)) continue;
+    // Every mention of curl, whatever its spelling (R1228f D1); a word in an install list isn't run, and keeps nothing.
+    if (!/\bcurl\b/.test(c)) continue;
     if (readsConfig(c)) problems.push(`a curl that reads a config file (-K: it can reset --retry): ${c}`);
     const o = curlOutput(c);
     // A body to stdout is kept when a pipe, a redirect or a capture takes it (R1228d D6).
-    const kept = o === 'file' || (o === 'stdout' && (piped || /\$\(\s*curl\b/.test(c) || words(c.slice(c.search(/\bcurl\b/))).some((w) => /^&?>>?/.test(w)))) || DOWNLOAD.test(c);
+    const kept = o === 'file' || (o === 'stdout' && (piped || /\$\(\s*\S*curl\b/.test(c) || words(c.slice(c.search(/\bcurl\b/))).some((w) => /^&?>>?/.test(w)))) || DOWNLOAD.test(c);
     if (!kept) continue;
     downloads++;
     if (lastRetry(c) < 1) problems.push(`a download with no retry (its last --retry must be 1 or more): ${c}`);
@@ -289,6 +340,11 @@ function workflowFiles(files: readonly { name: string; text: string }[], report:
   for (const { doc } of docs) for (const j of Object.values(doc?.jobs ?? {})) if (rootContainer(j ?? {})) for (const s of j?.steps ?? []) if (typeof s?.uses === 'string' && s.uses.startsWith('./')) rootActions.add(s.uses.replace(/^\.\//, '').replace(/\/$/, ''));
   let inline = 0;
   for (const { name, doc } of docs) {
+    // R1228f D3: every string the file holds, as YAML decodes it (an escape like \x67 or \x2F hides nothing), with its
+    // continuations joined: the pinned-URL and downloader rules are read over these, not over the raw text.
+    for (const v of scalars(doc)) for (const p of decodedProblems(v)) report(name, p);
+    // R1228f D4: only the actions used today, each pinned by commit (a new downloader action needs a lint edit).
+    for (const u of usesOf(doc)) if (!USES_ALLOWED.test(u)) report(name, `an action this lint doesn't allow (pinned: ${USES_ALLOWED.source}): ${u}`);
     const actionRoot = rootActions.has(name.replace(/\/action\.ya?ml$/, ''));
     const steps = [
       ...Object.values(doc?.jobs ?? {}).flatMap((j) => (j?.steps ?? []).map((s) => ({ s, root: rootContainer(j ?? {}) }))),
@@ -301,6 +357,31 @@ function workflowFiles(files: readonly { name: string; text: string }[], report:
     }
   }
   return inline;
+}
+
+/** Every string value in a parsed YAML document. */
+function scalars(v: unknown): string[] {
+  if (typeof v === 'string') return [v];
+  if (Array.isArray(v)) return v.flatMap(scalars);
+  if (v && typeof v === 'object') return Object.values(v as Record<string, unknown>).flatMap(scalars);
+  return [];
+}
+
+/** Every `uses:` in a workflow's jobs and steps, and a composite action's steps. */
+function usesOf(doc: Doc): string[] {
+  const steps = [...Object.values(doc?.jobs ?? {}).flatMap((j) => j?.steps ?? []), ...(doc?.runs?.steps ?? [])];
+  const jobUses = Object.values(doc?.jobs ?? {}).map((j) => (j as { uses?: unknown } | undefined)?.uses);
+  return [...steps.map((s) => s?.uses), ...jobUses].filter((u): u is string => typeof u === 'string');
+}
+
+/** The pinned-URL and downloader rules over one decoded string, its continuations joined as bash joins them. */
+export function decodedProblems(text: string): string[] {
+  const out: string[] = [];
+  for (const l of logicalLines(text)) {
+    if (DOWNLOAD.test(l) && !HELPER_LINE.test(l) && !INLINE_CURL.test(l)) out.push(`a pinned URL not on a ${HELPER} line: ${l.trim()}`);
+    if (!/^\s*#/.test(l) && OTHER_FETCH.test(l)) out.push(`a download that isn't the helper's curl: ${l.trim()}`);
+  }
+  return out;
 }
 
 /** A shell script by name or shebang. */
@@ -362,14 +443,14 @@ test('the workflow lint refuses every form R1228a and R1228b found, and keeps th
 });
 
 test('a root container step: the helper is refused, the inline pair must be exact and fail-safe; outside one the pair is refused (R1228d D1, D5)', () => {
-  const F = "curl -sSfL --proto '=https' --tlsv1.2 --connect-timeout 20 --max-time 60 --retry 5 --retry-all-errors --retry-delay 5 --retry-max-time 120";
+  const F = "curl -sSfL --proto '=https' --tlsv1.2 --connect-timeout 20 --speed-limit 1024 --speed-time 60 --retry 5 --retry-all-errors --retry-delay 5 --retry-max-time 120";
   const pair = (out: string, pin = '${CHROME_SHA256}') => `${F} -o "${out}.part" "${REL}"\necho "${pin}  ${out}.part" | sha256sum -c - --strict && mv -f -- "${out}.part" "${out}"`;
   assert.deepEqual(runProblems(pair('/tmp/$f'), true), [], 'the exact pair in a root step');
   assert.deepEqual(runProblems(`${F} -o "$f.part" "${REL}"\n# a comment\n\necho "${PIN}  $f.part" | sha256sum -c - --strict && mv -f -- "$f.part" "$f"`, true), [], 'comments and blank lines between are skipped');
   assert.match(runProblems(pair('/tmp/$f'), false).join(), /outside a root container step/, 'elsewhere the helper is the one way');
   assert.match(runProblems(`bash "$GITHUB_WORKSPACE/${HELPER}" "${REL}" ${PIN} "$f"`, true).join(), /from the checkout in a step that runs as root/);
   const bad = {
-    'the old pair (no .part, no move)': `${F.replace(' --connect-timeout 20 --max-time 60', '')} -o "$f" "${REL}"\necho "${PIN}  $f" | sha256sum -c -`,
+    'the old pair (no .part, no move)': `${F.replace(' --connect-timeout 20 --speed-limit 1024 --speed-time 60', '')} -o "$f" "${REL}"\necho "${PIN}  $f" | sha256sum -c -`,
     'a check that cannot fail': `${F} -o "$f.part" "${REL}"\necho "${PIN}  $f.part" | sha256sum -c - --strict || true`,
     'no --strict': `${F} -o "$f.part" "${REL}"\necho "${PIN}  $f.part" | sha256sum -c - && mv -f -- "$f.part" "$f"`,
     'moved before the check': `${F} -o "$f.part" "${REL}"\nmv -f -- "$f.part" "$f"\necho "${PIN}  $f" | sha256sum -c - --strict`,
@@ -380,7 +461,7 @@ test('a root container step: the helper is refused, the inline pair must be exac
   };
   for (const [why, s] of Object.entries(bad)) assert.ok(runProblems(s, true).length > 0, why);
   assert.equal(INLINE_CURL.test(`${F.replace('--retry 5', '--retry 0')} -o "$f.part" "${REL}"`), false, 'the flags are exact');
-  assert.equal(INLINE_CURL.test(`${F.replace(' --max-time 60', '')} -o "$f.part" "${REL}"`), false, 'the time bound is part of them (R1228d D2)');
+  assert.equal(INLINE_CURL.test(`${F.replace(' --speed-time 60', '')} -o "$f.part" "${REL}"`), false, 'the stall bound is part of them (R1228d D2, R1228e D1)');
   // D5: a container is root unless it runs as another user; the runner switch is matched exactly.
   assert.ok(rootContainer({ container: "${{ github.event_name != 'push' && fromJSON('{}') || '' }}" }), 'X1: a container expression without the text pull_request');
   assert.ok(!rootContainer({}) && !rootContainer({ container: { image: 'x', options: '--user 1001' } }));
@@ -394,7 +475,7 @@ test('the inline pair, run: a failed check leaves nothing at the name used, howe
   const d = mkdtempSync(join(tmpdir(), 'inline-pair-'));
   try {
     writeFileSync(join(d, 'curl'), '#!/usr/bin/env bash\nout=\nwhile [ $# -gt 0 ]; do [ "$1" = -o ] && out="$2"; shift; done\nprintf evil > "$out"\n', { mode: 0o755 });
-    const F = "curl -sSfL --proto '=https' --tlsv1.2 --connect-timeout 20 --max-time 60 --retry 5 --retry-all-errors --retry-delay 5 --retry-max-time 120";
+    const F = "curl -sSfL --proto '=https' --tlsv1.2 --connect-timeout 20 --speed-limit 1024 --speed-time 60 --retry 5 --retry-all-errors --retry-delay 5 --retry-max-time 120";
     const good = sha('good');
     const pairFor = (pin: string) => `${F} -o "$f.part" "${REL}"\necho "${pin}  $f.part" | sha256sum -c - --strict && mv -f -- "$f.part" "$f"`;
     const forms: Record<string, string> = {
@@ -474,6 +555,8 @@ test(`every pinned download in .github goes through ${HELPER}, and nothing else 
     for (const p of workflowTextProblems(text)) problems.push(`${name}: ${p}`);
   }
   inline = workflowFiles(files, (name, p) => problems.push(`${name}: ${p}`));
+  const allCmds = files.flatMap(({ text }) => scalars(parse(text) as Doc)).flatMap((v) => logicalLines(v).flatMap((l) => commands(l)));
+  for (const p of WORKFLOW_PROBES) assert.ok(allCmds.includes(p), `an allowed workflow probe is gone; remove it from WORKFLOW_PROBES: ${p}`);
   assert.deepEqual(problems, []);
   assert.ok(helperLines + inline >= 9, `found ${helperLines} helper lines and ${inline} inline pairs: the lint must see the workflows' 9 pinned downloads`);
   assert.ok(inline >= 2, `found ${inline} inline pairs: the test shards' Chrome and gitleaks downloads are root container steps`);
@@ -482,8 +565,18 @@ test(`every pinned download in .github goes through ${HELPER}, and nothing else 
 test("every download in the setup and CI scripts retries, the helpers in bootstrap.sh and ci-runner.sh among them", () => {
   const problems: string[] = [];
   const seen = new Map<string, number>();
-  for (const f of walk(join(repoRoot, 'scripts'), (p) => isShell(p.split('/').pop()!, readFileSync(p, 'utf8').slice(0, 200))).sort()) {
+  // R1228f D4: shell files anywhere in the repo (under .github too), not only under scripts/.
+  const skip = new Set(['node_modules', 'dist', '.git', '.claude']);
+  const shellFiles = (d: string): string[] =>
+    readdirSync(d).flatMap((n) => {
+      if (skip.has(n)) return [];
+      const p = join(d, n);
+      const st = statSync(p);
+      return st.isDirectory() ? shellFiles(p) : st.isFile() && st.size < 2_000_000 && isShell(n, readFileSync(p, 'utf8').slice(0, 200)) ? [p] : [];
+    });
+  for (const f of shellFiles(repoRoot).sort()) {
     const name = relative(repoRoot, f);
+    if (!SETUP_DOWNLOADERS.includes(name)) for (const p of logicalLines(readFileSync(f, 'utf8')).filter((l) => !/^\s*#/.test(l) && DOWNLOAD.test(l))) problems.push(`${name}: a pinned URL outside ${HELPER} and the setup downloaders: ${p.trim()}`);
     const probes = SCRIPT_PROBES[name] ?? [];
     const cmds = logicalLines(readFileSync(f, 'utf8')).flatMap(commands);
     for (const p of probes) assert.ok(cmds.includes(p), `${name}: the allowed probe is gone; remove it from SCRIPT_PROBES: ${p}`);
@@ -495,6 +588,45 @@ test("every download in the setup and CI scripts retries, the helpers in bootstr
   for (const f of ['scripts/bootstrap.sh', 'scripts/setup/ci-runner.sh', 'scripts/setup/tools.sh', 'scripts/setup/test-user.sh', 'scripts/setup/node.sh', HELPER]) {
     assert.ok((seen.get(f) ?? 0) >= 1, `${f}: the lint must see its download`);
   }
+});
+
+
+test('R1228f: any spelling of curl, bash-joined continuations, YAML escapes, gh api on release assets, a downloader action and an unread shell file are refused', () => {
+  const refused = (s: string) => decodedProblems(s).length + runProblems(s).length > 0;
+  const U = 'https://example.com/tool.tgz';
+  const forms: Record<string, string> = {
+    '/usr/bin/curl': `/usr/bin/curl -sSfL -o f ${U}`,
+    '\\curl': `\\curl -sSfL -o f ${U}`,
+    '"curl"': `"curl" -sSfL -o f ${U}`,
+    'sudo -E curl': `sudo -E curl -sSfL -o f ${U}`,
+    'env -i curl': `env -i curl -sSfL -o f ${U}`,
+    'nice curl': `nice curl -sSfL -o f ${U}`,
+    'timeout -s KILL 60 curl': `timeout -s KILL 60 curl -sSfL -o f ${U}`,
+    'bash -c "curl …"': `bash -c "curl -sSfL -o f ${U}"`,
+    'command -v curl': 'c="$(command -v curl)"\n"$c" -sSfL -o f "$u"',
+    'a variable URL kept': 'curl -sSfL -o f "$u"',
+    'curl --url=': `curl -sSfL --url=${U} -o f`,
+    'a continuation inside the word (bash joins it to curl)': `cu\\\nrl -sSfL -o f ${U}`,
+    'gh release split across lines': "gh release \\\n  download v8.30.1 -R gitleaks/gitleaks -p 'x.tar.gz'",
+    'gh api on a release asset': `gh api -H 'Accept: application/octet-stream' "repos/a/b/releases/$KIND/123" > f`,
+    'a shell file outside the walked folders': 'bash test/zz-get.sh',
+  };
+  for (const [why, s] of Object.entries(forms)) assert.ok(refused(s), `refused: ${why}`);
+  // A YAML escape decodes to wget of a pinned URL: the decoded scalar is what is read.
+  const doc = parse('jobs:\n  a:\n    steps:\n      - run: "w\\x67et -q -O g https://github.com/a/b/releases\\x2Fdownload/x"\n') as Doc;
+  assert.ok(scalars(doc).some((v) => decodedProblems(v).length > 0), 'a YAML escape hides nothing');
+  // A downloader action, and the actions used today.
+  assert.equal(USES_ALLOWED.test('robinraju/release-downloader@v1'), false);
+  assert.equal(USES_ALLOWED.test('actions/checkout@v7'), false, 'by tag: refused (pinned by commit only)');
+  for (const u of ['actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1', 'Vampire/setup-wsl@d1da7f2c0322a5ee4f24975344f67fc0f5baf364', './.github/workflows/ci-slow.yml']) assert.ok(USES_ALLOWED.test(u), u);
+  // Kept: probes and loopback, and a shell file under scripts/ or .github/.
+  for (const s of ['curl -sf "$GH_FAKE/repos/example/alpha" >/dev/null', `curl -fsS -o /dev/null ${U}`, 'curl -sS -o f "http://127.0.0.1:8080/x"', 'bash scripts/ci/x.sh', 'bash "$GITHUB_WORKSPACE/scripts/ci/fetch-pinned.sh" "https://x/y" ' + PIN + ' f'.replace('https://x/y', 'https://example.com/y')]) {
+    assert.deepEqual(runProblems(s), [], `kept: ${s}`);
+  }
+  // The scripts rule: xargs curl, /usr/bin/curl with no retry.
+  assert.ok(scriptProblems('xargs -n1 curl -fsSL -O < urls').problems.length > 0, 'xargs curl');
+  assert.ok(scriptProblems('/usr/bin/curl -fsSL -o f "$u"').problems.length > 0, '/usr/bin/curl');
+  assert.ok(scriptProblems('"curl" -fsSL -o f "$u"').problems.length > 0, '"curl" (read with its quotes off)');
 });
 
 /** Runs the helper with a stub curl first on PATH: it logs its argv and writes `body` to its -o target, or exits `rc`. */
@@ -535,8 +667,11 @@ test('the helper: a matching download lands at its out file, fetched over https 
   const a = r.curlArgs!;
   assert.equal(a[0], '-q', 'curl reads no ~/.curlrc: -q comes first (R1228d D7)');
   for (const flag of ['-fsSL', '--retry-all-errors', '--tlsv1.2']) assert.ok(a.includes(flag), `curl gets ${flag}`);
-  // Bounded in time (R1228d D2): a stalled try ends at --max-time, and no retry begins after --retry-max-time.
-  assert.equal(a[a.indexOf('--max-time') + 1], '60');
+  // Bounded in time (R1228d D2): a stalled try ends (under 1 KB/s for 60 s), and no retry begins after
+  // --retry-max-time. Not a whole-transfer cap (R1228e D1: --max-time 60 needed ~27 Mbit/s for Chrome's 203 MB).
+  assert.equal(a.includes('--max-time'), false);
+  assert.equal(a[a.indexOf('--speed-limit') + 1], '1024');
+  assert.equal(a[a.indexOf('--speed-time') + 1], '60');
   assert.equal(a[a.indexOf('--connect-timeout') + 1], '20');
   assert.equal(a[a.indexOf('--retry-max-time') + 1], '120');
   // An unpredictable part file beside the out file (mktemp), never a name a link could be planted at (R1228d D7).
@@ -574,4 +709,11 @@ test('the helper: a failed download exits non-zero and leaves nothing; a bad arg
     assert.equal(r.status, 2, `${why}: ${r.stderr}`);
     assert.equal(r.curlArgs, null, `${why}: curl never ran`);
   }
+});
+
+test('the .github scan reads decoded strings and every uses: (R1228f D3, D4), as the repo scan runs it', () => {
+  const problems: string[] = [];
+  workflowFiles([{ name: '.github/workflows/zz.yml', text: 'jobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - run: "w\\x67et -q -O g https://github.com/a/b/releases\\x2Fdownload/x"\n      - uses: robinraju/release-downloader@v1\n' }], (n, p) => problems.push(`${n}: ${p}`));
+  assert.match(problems.join('\n'), /zz\.yml: a pinned URL not on a scripts\/ci\/fetch-pinned\.sh line: wget/, 'the escaped wget of a pinned URL');
+  assert.match(problems.join('\n'), /zz\.yml: an action this lint doesn't allow .*robinraju\/release-downloader@v1/);
 });
