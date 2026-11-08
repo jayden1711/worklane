@@ -1,0 +1,3 @@
+### Guardrail changes: what each one does
+
+- **Direct land holds what PR mode holds (#716).** `land_mode: direct` skips the merge decision, so a change in a category PR mode always holds for a human (review.yaml's L3 categories, CI config, the agents' own instructions, the harness's own controls, the odd paths, the repo's `merge.wait_categories`, and dependency manifests) could land at L0 to L2 with only the evaluator's approval. It is now raised to L3 and the owner is asked, with the same reasons the merge policy gives in PR mode. Direct mode now skips only what can't apply to it: a PR and the GitHub merge.

@@ -46,7 +46,7 @@ import { readRun, runsForIssue } from './run-record.js';
 import { claimsOf, unbackedClaims, type CheckRecord } from './receipts.js';
 import { calibrated, claimDoubt, compromisedDoubts, protectedBrief, verdictRefusal } from './verdict-confidence.js';
 import { handoffDoubt, handoffs, readClaims } from './claim-labels.js';
-import { waitCategoriesOf, whyHighRisk } from './merge-policy.js';
+import { riskAndDesignReasons, waitCategoriesOf, whyHighRisk } from './merge-policy.js';
 import { crossDisagreement, crossFamilyModel, crossFamilySkip, type SideVerdict } from './cross-eval.js';
 import { route as routingValue } from './routing.js';
 import type { ReviewConfig } from './config/schema.js';
@@ -1066,6 +1066,18 @@ export class Coordinator extends AutomationRuns {
         if (this.d.cfg.project.land_mode === 'direct' && !verdict.patch_correct) {
           lvl.level = 'L3';
           lvl.reasons.push('the evaluator rejected the patch: held for the owner (safety floor)');
+        }
+        // #716: the merge policy's wait floor in direct mode too. In PR mode mergeDecision holds every change in a wait
+        // category (L3's, ci-config, the locked agent-instructions and self-modification, the odd paths, the repo's
+        // merge.wait_categories) and every design-level change; direct land skips mergeDecision, so the same function
+        // raises such a change to L3 here. Direct mode then skips only what can't apply: a PR and the GitHub merge.
+        if (this.d.cfg.project.land_mode === 'direct' && lvl.level !== 'L3') {
+          const review = this.d.cfg.review ?? DEFAULT_REVIEW;
+          const held = riskAndDesignReasons({ level: lvl, waitCategories: waitCategoriesOf(review), newTopLevel: [] });
+          if (held.length) {
+            lvl.level = 'L3';
+            lvl.reasons.push(...held.map((r) => `${r}: held for the owner (direct land's merge-policy floor)`));
+          }
         }
         if (plan && (await this.planObjected(n, owner, planComments))) return;
         this.emit('review.level_set', { issue: n, head, level: lvl.level, reasons: [...lvl.reasons, ...(verdict.unread.length ? [`evaluator did not read: ${shownPaths(verdict.unread.slice(0, 10))}${verdict.unread.length > 10 ? ` and ${verdict.unread.length - 10} more` : ''}`] : []), ...change.tampered.map((t) => `tamper guard: ${t}`), ...(repro?.unavailable ? [`no reproduction: ${repro.unavailable}`] : [])] });
