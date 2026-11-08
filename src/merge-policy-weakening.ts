@@ -27,7 +27,7 @@
 // isn't text, a table it can't find or a git failure, the change waits. The engine's own source paths (ENGINE_ONLY)
 // stand aside in a managed app's repo, as the locks do there (src/review.ts lockedCategories).
 import { BRAND } from './brand.js';
-import { changedNames, changeFiles, exactMoves, filesAt, filesAtOnce, filesWithText, mergeBaseOf, mergedTree } from './coordinator/change-files.js';
+import { changedNames, changeFiles, exactMoves, filesAt, filesWithText, mergeBaseOf, mergedTree } from './coordinator/change-files.js';
 import { globRegExp } from './guardrails/glob.js';
 import { escapedPath, isNonUtf8Path, shownPath } from './path-text.js';
 import { engineSourceGlob, LOCKED_CATEGORIES, lockedCategories, type ChangeFile, type LockScope } from './review.js';
@@ -368,13 +368,6 @@ export interface WeakeningInput {
    * what it makes is never read. Absent: the change isn't a merge.
    */
   conflicts?: readonly string[];
-  /**
-   * #941: files the change may not touch, by path, with their text before the change (throws: over MAX_TABLE_FILE, not
-   * read): every file that registers a table (its mark's text, git grep over the whole tree), every changed JS or TS
-   * file, and the files those import by a relative path (contextAt). A registered table whose file the change leaves
-   * alone still has its uses read in every changed file. Absent: only the tables in the changed files (a pure test).
-   */
-  context?: { paths: ReadonlySet<string>; registering: ReadonlySet<string>; reached?: ReadonlySet<string>; text: (path: string) => string | null };
 }
 
 /** Each kind of weakening, in the words a reason uses, in the order reasons are given. */
@@ -390,7 +383,6 @@ const KINDS = {
   'table-grown': 'adds or changes an entry in an allowlist, exception or good-fixture list',
   'allow-file': "adds a line to an allowlist file or a package manager's settings file",
   'table-used': "changes a check's or guard's table outside its own list",
-  'table-use-removed': "removes or changes a line that uses a check's or guard's table, so what the engine uses may no longer be that table",
   'table-hidden': "adds a line that could hide a check's table from the line reader, an escaped name, a name on the next line or a global binding",
   'guard-lines': 'removes or changes a line of a guard or lint',
   marker: 'adds a line with a skip, only or lint or type-check suppression mark',
@@ -844,197 +836,6 @@ export function tableSpan(text: string, table: string): [number, number] | null 
   throw new Error(`${table} never closes`);
 }
 
-/** A line's code that goes on to the next line: it ends with an operator, `=`, `(`, `,`, `?`, `:` or an import's `from` (R1184g). */
-const CONTINUES = /(?:[=(,?:+\-*/%|&^<>!~]|=>|\?\?|\bfrom)\s*$/;
-/** A line's code that goes on from the line before: it starts with `.`, `?`, `:`, `)`, `,`, a binary operator, or an import's `from` (R1184f). */
-const CONTINUED = /^\s*(?:[.?:),+\-*/%|&^<>=]|\]|\?\.|from\b)/;
-const IDENT = /[A-Za-z_$][\w$]*/g;
-/** A module-level binding statement's start: `const`, `let` or `var` at column 0 (exported or not), then its name or pattern and `=`. */
-const TOP_BINDS = /^(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*|\{[^=]*\}|\[[^=]*\])\s*(?::[^=]*)?=(?![=>])/;
-const MAX_STATEMENT_LINES = 40;
-/** How many imports deep contextAt follows the changed files' relative imports. */
-const MAX_USE_ROUNDS = 2;
-
-/**
- * #941: each line's statement in `text`, as the range of lines a line reader can tell are one statement: lines joined
- * where one ends with an operator (or `=`, `(`, `,`, `?`, `:`) or the next starts with one (`.`, `?`, `:`, `)`, an
- * operator), and an `import {` or `export {` list to its `}`. Comments and strings are left out first (codeLinesOf).
- * At most MAX_STATEMENT_LINES lines. Lines a reader can't tell apart (a block, a call's arguments without a trailing
- * operator) are separate: what can't be placed is read on its own line.
- */
-/** statementsOf's results while one change is read (useRemoved clears it): each text is read once. */
-const statementCache = new Map<string, ReturnType<typeof readStatements>>();
-function statementsOf(text: string): ReturnType<typeof readStatements> {
-  let r = statementCache.get(text);
-  if (!r) statementCache.set(text, (r = readStatements(text)));
-  return r;
-}
-function readStatements(text: string): { code: string[]; raw: string[]; span: (k: number) => [number, number] } {
-  const code = codeLinesOf(text).map(withoutComments);
-  const n = code.length;
-  const start = new Array<number>(n);
-  let list = false;
-  for (let k = 0; k < n; k++) {
-    const joined = k > 0 && k - start[k - 1]! < MAX_STATEMENT_LINES && (list || CONTINUES.test(code[k - 1]!) || CONTINUED.test(code[k]!));
-    start[k] = joined ? start[k - 1]! : k;
-    if (list) list = !code[k]!.includes('}');
-    else list = /^\s*(?:import\b[^=]*|export\s*(?:type\s*)?)\{[^}]*$/.test(code[k]!);
-  }
-  const end = new Array<number>(n);
-  for (let k = n - 1; k >= 0; k--) end[k] = k + 1 < n && start[k + 1] === start[k] ? end[k + 1]! : k;
-  return { code, raw: text.split('\n'), span: (k) => [start[k]!, end[k]!] };
-}
-
-/** A line's code for plainUse: comments and the text of strings left out (their quotes kept). */
-function codeOfLine(l: string): string {
-  return withoutComments(l.replace(/\/\*.*?\*\//g, ' ')).replace(/(['"`])(?:\\.|(?!\1)[^\\])*\1/g, "''");
-}
-/** A one-line import or require of something (its specifier on the same line). */
-const IMPORT_LINE = /^\s*import\b[^;]*\bfrom\s*''|\brequire\s*\(\s*''\s*\)/;
-/** A statement that brings names in from a module: import, a re-export from one, require, import(). */
-const IMPORTISH_STMT = /^\s*(?:import\b|export\s*(?:type\s*)?(?:\{[^}]*\}|\*(?:\s*as\s+[\w$]+)?)\s*from\b)|\brequire\s*\(|\bimport\s*\(/;
-/** A member a plain read calls or reads: none of them changes the array or set it is on. */
-const READ_MEMBERS = /^(?:length|size|includes|some|every|find|findIndex|findLast|findLastIndex|indexOf|lastIndexOf|has|get|keys|values|entries|join|at|map|flatMap|flat|reduce|reduceRight|concat|toString|toSorted|toReversed|toSpliced)$/;
-/** A built-in call that only reads its first argument, just before it: `Object.keys(`, `new Set(`, `Array.from(`, ... */
-const READ_CALL = /(?:\bObject\.(?:keys|values|entries|getOwnPropertyNames|getOwnPropertySymbols)|\bArray\.(?:from|isArray)|\bnew\s+(?:Set|Map|WeakSet|WeakMap)|\bJSON\.stringify|\bstructuredClone|\bString|\bBoolean)\s*\($/;
-/** An assignment or update right after an expression: `=`, `+=`, `*=`, `**=`, `||=`, `++`, ... (not `==`, `=>`). */
-const WRITES = /^\s*(?:(?:\*\*|<<|>>>|>>|&&|\|\||\?\?|[-+*/%&|^])?=(?![=>])|\+\+|--)/;
-
-/**
- * Whether every use of `name` on `line` (its code, codeOfLine) is a plain read (R1184h): a read member (READ_MEMBERS)
- * that isn't assigned, an index read that isn't assigned or called, `for (... of name)`, `...name`, `k in name`,
- * `typeof name`, a comparison, a call of it (a derived function), or its whole value handed to a built-in that only
- * reads it (READ_CALL) (an import line is its caller's: brought in from a table's file, it is a read).
- * Anything else, a bare name as an argument, an assignment's left side, a declaration, `(name).x`, a computed
- * member call or a member not on the list, is not.
- */
-function plainUse(line: string, name: string): boolean {
-  const re = new RegExp(`(?<![\\w$.])${name.replace(/\$/g, '\\$')}(?![\\w$])`, 'g');
-  for (const m of line.matchAll(re)) {
-    const before = line.slice(0, m.index).trimEnd();
-    const after = line.slice(m.index! + name.length);
-    if (/(?:\bof|\.\.\.|\bin|\btypeof)$/.test(before) && !/^\s*(?:\.|\[|\()/.test(after)) continue;
-    // A call of it (an alias that is a function derived from the table, `holds(g)`): it reads what it was made from.
-    if (/^\s*(?:\?\.)?\(/.test(after)) continue;
-    // Its whole value handed to a built-in that only reads it (`Object.keys(T)`, `new Set(T)`, `[...]` copies).
-    if (READ_CALL.test(before) && /^\s*[,)]/.test(after)) continue;
-    const member = /^\s*\??\.\s*([A-Za-z_$][\w$]*)/.exec(after);
-    if (member) {
-      if (READ_MEMBERS.test(member[1]!) && !WRITES.test(after.slice(member[0].length))) continue;
-      return false;
-    }
-    const index = /^\s*\[[^\]]*\]/.exec(after);
-    if (index) {
-      if (!WRITES.test(after.slice(index[0].length)) && !/^\s*(?:\?\.)?\(/.test(after.slice(index[0].length))) continue;
-      return false;
-    }
-    if (/^\s*(?:===|!==|==|!=)/.test(after) || /(?:===|!==|==|!=)$/.test(before)) continue;
-    return false;
-  }
-  return true;
-}
-
-/**
- * #941: the names that stand for each table in `tables`, in each of `texts` (by path). In every file, the table's own
- * name. In a file, also every name it binds to one of its names (`const rules = CHECKS`, `const { a } = CHECKS`,
- * `const run = () => CHECKS.length`), the binding's whole statement read (statementsOf), and every name such a binding
- * anywhere gives that the file imports (`import`, `require` or `export {` naming it), and every name an import or a
- * destructuring gives one of those under another name (`import { CHECKS as C }`, `export { rules as R }`,
- * `const { CHECKS: C } = require(...)`), or a default import (`import C from`, `const C = require(...)`) of a file
- * whose default export (`export default`, `module.exports =`, `export { X as default }`) stands for it (R1184c). So
- * another file's own `rules` isn't the table's. `all`: every such name. Not followed: a property, a function
- * declaration, a class field, a namespace import's member under another name, or a dynamic `import()`'s result.
- */
-export function useNames(texts: ReadonlyMap<string, string>, tables: readonly string[]): Map<string, { all: Set<string>; in: (path: string) => Set<string> }> {
-  const files = [...texts];
-  // Each file's statements, read only once one of the names is in its text (most files name no table).
-  const read = new Map<string, ReturnType<typeof statementsOf>>();
-  const statements = (p: string, t: string) => read.get(p) ?? read.set(p, statementsOf(t)).get(p)!;
-  const nameRe = (ns: Iterable<string>) => new RegExp(`(?<![\\w$])(?:${[...ns].map((x) => x.replace(/\$/g, '\\$')).join('|')})(?![\\w$])`);
-  const IMPORTISH = /^\s*(?:import\b|export\s*(?:type\s*)?\{|export\s*\*)|\brequire\s*\(/;
-  /** The relative specifier in a statement's raw text (strings are blanked in its code). */
-  const specOf = (raw: string) => /(?:\bfrom\s*|\brequire\s*\(\s*|\bimport\s*\(\s*)(['"])([^'"\n]{1,300})\1/.exec(raw)?.[2] ?? null;
-  const out = new Map<string, { all: Set<string>; in: (path: string) => Set<string> }>();
-  for (const table of tables) {
-    const per = new Map<string, Set<string>>();
-    const bound = new Set<string>();
-    // The files whose default export (`export default X`, `module.exports = X`) stands for the table.
-    const defaults = new Set<string>();
-    for (let round = 0; round < 16; round++) {
-      let grew = false;
-      const sought = [table, ...bound];
-      for (const [p, text] of files) {
-        // A file that names none of the names can still import a default that stands for the table.
-        if (!sought.some((n) => text.includes(n)) && !(defaults.size && /\bimport\b|\brequire\s*\(/.test(text))) continue;
-        const { code, raw, span } = statements(p, text);
-        const here = per.get(p) ?? per.set(p, new Set([table])).get(p)!;
-        const add = (id: string, exported: boolean) => {
-          if (exported) bound.add(id);
-          if (here.has(id)) return;
-          here.add(id);
-          grew = true;
-        };
-        const re = nameRe(here);
-        const stands = (id: string) => here.has(id) || bound.has(id);
-        const fromDefault = (rawStmt: string) => {
-          const spec = specOf(rawStmt);
-          return spec !== null && specifierPaths(p, spec).some((x) => defaults.has(x));
-        };
-        for (let k = 0; k < code.length; k++) {
-          if (span(k)[0] !== k) continue;
-          const stmt = code.slice(k, span(k)[1] + 1).join('\n');
-          const rawStmt = raw.slice(k, span(k)[1] + 1).join('\n');
-          // Its default export stands for the table.
-          const def = /^\s*(?:export\s+default\s+|module\.exports\s*=\s*)([\s\S]*)$/.exec(stmt);
-          if (def && re.test(def[1]!) && !defaults.has(p)) {
-            defaults.add(p);
-            grew = true;
-          }
-          if (IMPORTISH.test(stmt)) {
-            // A name another file binds, imported as itself; one renamed (`X as Y`, `{ X: Y } = require(...)`); a
-            // default import of a file whose default stands for the table.
-            for (const id of stmt.match(IDENT) ?? []) if (bound.has(id)) add(id, false);
-            for (const m of stmt.matchAll(/([A-Za-z_$][\w$]*)\s+as\s+([A-Za-z_$][\w$]*)/g)) {
-              if (!(stands(m[1]!) || (m[1] === 'default' && fromDefault(rawStmt)))) continue;
-              // `export { rules as default }`: this file's default stands for it (never the word `default` as a name).
-              if (m[2] === 'default') {
-                if (!defaults.has(p)) {
-                  defaults.add(p);
-                  grew = true;
-                }
-              } else add(m[2]!, true);
-            }
-            const dflt = /^\s*import\s+(?:type\s+)?([A-Za-z_$][\w$]*)\s*(?:,|from\b)/.exec(stmt);
-            if (dflt && fromDefault(rawStmt)) add(dflt[1]!, true);
-            // A namespace import (`import * as A`) of a file that binds a name to the table, or whose default stands for
-            // it: `A.rules`, `A.default` are its uses, so `A` stands for it in this file (R1184f).
-            const ns = /^\s*import\s+(?:type\s+)?\*\s*as\s+([A-Za-z_$][\w$]*)/.exec(stmt);
-            const spec = ns ? specOf(rawStmt) : null;
-            if (ns && spec !== null && specifierPaths(p, spec).some((x) => defaults.has(x) || (per.get(x)?.size ?? 0) > 1)) add(ns[1]!, false);
-          }
-          // Only a module's own binding: a statement at column 0 that is a `const`, `let` or `var` (exported or not),
-          // its first binding. A local inside a function is not followed (each would make every line near it a use).
-          const m = TOP_BINDS.exec(stmt);
-          if (!m) continue;
-          const init = stmt.slice(m[0].length);
-          const pattern = m[1]!;
-          if (re.test(init)) {
-            for (const id of pattern.match(IDENT) ?? []) if (!/^(?:const|let|var)$/.test(id)) add(id, true);
-            continue;
-          }
-          // Destructured under another name (`const { CHECKS: C } = require(...)`, `= mod`): the key stands for it.
-          if (pattern.startsWith('{')) for (const pair of pattern.matchAll(/([A-Za-z_$][\w$]*)\s*:\s*([A-Za-z_$][\w$]*)/g)) if (stands(pair[1]!)) add(pair[2]!, true);
-          // A CommonJS default (`const C = require('./x')`) of a file whose `module.exports` stands for it.
-          if (/^[A-Za-z_$]/.test(pattern) && /^\s*require\s*\(/.test(init) && fromDefault(rawStmt)) add(pattern, true);
-        }
-      }
-      if (!grew) break;
-    }
-    out.set(table, { all: new Set([table, ...bound]), in: (path) => per.get(path) ?? new Set([table]) });
-  }
-  return out;
-}
-
 /** Each kind's first three places and how many there are: nothing kept per line. */
 type Found = Map<Kind, { first: string[]; n: number }>;
 
@@ -1061,165 +862,6 @@ export function weakeningReasons(i: WeakeningInput, ...more: WeakeningInput[]): 
     out.push(`${WEAKENING_REASON}${KINDS[kind]} (${at.first.join('; ')}${at.n > at.first.length ? `; and ${at.n - at.first.length} more` : ''})`);
   }
   return out;
-}
-
-/** #941's scan (findings): each removed or changed line that takes a use away from a registered table. */
-function useRemoved(i: WeakeningInput, inChange: readonly (CheckTable & { marked?: boolean })[], hit: (kind: Kind, path: string, what?: string) => void) {
-  try {
-    useRemovedIn(i, inChange, hit);
-  } finally {
-    statementCache.clear();
-  }
-}
-function useRemovedIn(i: WeakeningInput, inChange: readonly (CheckTable & { marked?: boolean })[], hit: (kind: Kind, path: string, what?: string) => void) {
-  const ctx = i.context;
-  const textOf = (p: string): string | null => {
-    try {
-      return ctx?.paths.has(p) ? ctx.text(p) : i.files.some((f) => f.path === p) && MARKABLE.test(p) ? i.before(p) : null;
-    } catch {
-      return null;
-    }
-  };
-  // The tables: those the change's files register (and CHECK_TABLES), and those every other file registers.
-  const all = new Map<string, { path: string; table: string }>();
-  for (const t of inChange) if (!t.path.endsWith('.json')) all.set(`${t.path}\0${t.table}`, t);
-  for (const p of ctx?.paths ?? []) {
-    if (!MARKABLE.test(p) || !holds(p, i.scope)) continue;
-    let text: string | null;
-    try {
-      text = ctx!.text(p);
-    } catch (e) {
-      // A registering file it can't read: its tables' uses can't be followed (fail closed).
-      if (ctx!.registering.has(p)) hit('unreadable', p, String((e as Error).message ?? e));
-      continue;
-    }
-    if (text !== null) for (const t of registrationsOf(text).tables) all.set(`${p}\0${t.table}`, { path: p, table: t.table });
-  }
-  if (!all.size) return;
-  const texts = new Map<string, string>();
-  for (const p of new Set([...(ctx?.paths ?? []), ...i.files.map((f) => f.path)])) {
-    const t = textOf(p);
-    if (t !== null) texts.set(p, t);
-  }
-  // Names bound to a table are followed only in the changed files and what they import (context.reached): elsewhere,
-  // one can't reach a changed line.
-  const reach = ctx?.reached;
-  const names = useNames(reach ? new Map([...texts].filter(([p]) => reach.has(p) || i.files.some((f) => f.path === p))) : texts, [...new Set([...all.values()].map((t) => t.table))]);
-  const word = (n: string) => new RegExp(`(?<![\\w$])${n.replace(/\$/g, '\\$')}(?![\\w$])`);
-  // The files a table lives in, and the files that bind a name to one: an import of either brings the table in.
-  const tableFiles = new Set([...all.values()].map((t) => t.path));
-  const tableish = (p: string) => tableFiles.has(p) || [...all.values()].some((t) => names.get(t.table)!.in(p).size > 1);
-  // Each changed file's removed lines and, once, where each stood before the change (by its trimmed text).
-  const changed = i.files.filter((f) => !f.path.endsWith('.json') && (f.removedLines ?? []).some((l) => l.trim())).map((f) => {
-    const before = texts.get(f.path) ?? null;
-    const at = new Map<string, number[]>();
-    (before?.split('\n') ?? []).forEach((l, k) => {
-      const key = l.trim();
-      if (key) (at.get(key) ?? at.set(key, []).get(key)!).push(k);
-    });
-    return { f, before, at };
-  });
-  for (const t of all.values()) {
-    const own = new Set<string>();
-    try {
-      const b = i.files.some((f) => f.path === t.path) ? i.before(t.path) : null;
-      for (const l of (b === null ? null : tableLines(b, t.table)) ?? []) own.add(entry(l));
-    } catch {
-      // Its lines unreadable: the table checks above say so; here no line is its own.
-    }
-    for (const { f, before, at } of changed) {
-      // The names that stand for the table in this file (useNames); a file whose text and removed lines hold none of
-      // them can't take a use away.
-      const mine = [...names.get(t.table)!.in(f.path)];
-      const removed = f.removedLines!.filter((l) => l.trim() && !(f.path === t.path && own.has(entry(l))));
-      if (!removed.length || !mine.some((n) => (before ?? '').includes(n) || removed.some((l) => l.includes(n)))) continue;
-      const here = mine.map(word);
-      const named = (l: string) => here.some((re) => re.test(l));
-      const st = before === null ? null : statementsOf(before);
-      for (const l of removed) {
-        let use = named(l);
-        if (!use && st) {
-          // The removed line's place before the change (each line with its text: one is enough), and its statement.
-          for (const k of at.get(l.trim()) ?? []) {
-            const [a, b] = st.span(k);
-            if ((use = a !== b && st.code.slice(a, b + 1).some(named))) break;
-          }
-        }
-        if (use) hit('table-use-removed', f.path, `${t.table}: ${l.trim()}`);
-      }
-    }
-    // Added lines (R1184f, R1184h): in a file where one of its names stands for the table (an alias valid there, or the
-    // table's own name where the file imported it before or imports it now), an added line naming it waits unless every
-    // use of it on that line is a plain read (plainUse). A write, a shadowing declaration in any form, a call through
-    // a computed member, the name passed anywhere: each could empty the table or stand a decoy in for it, and listing
-    // write shapes keeps missing some. In the table's own file its own name is the table checks' (any added line naming
-    // it there already waits as table-used); its aliases there are read here. Comments and strings are left out first.
-    for (const f of i.files) {
-      if (f.path.endsWith('.json')) continue;
-      const rawAdded = (f.addedLines ?? []).filter((l) => l.trim());
-      const added = rawAdded.map(codeOfLine);
-      if (!added.length) continue;
-      const mine = [...names.get(t.table)!.in(f.path)].filter((n) => {
-        if (f.path === t.path) return n !== t.table;
-        if (n !== t.table) return true;
-        return word(n).test(texts.get(f.path) ?? '') || added.some((l) => IMPORT_LINE.test(l) && word(n).test(l));
-      });
-      if (!mine.length) continue;
-      added.forEach((l, k) => {
-        const raw = rawAdded[k]!;
-        const named = mine.filter((n) => word(n).test(l));
-        // An import line naming it: a read when every specifier on it is a table's file (or binds a name to one).
-        if (named.length && IMPORT_LINE.test(l)) {
-          const specs = [...raw.matchAll(/(?:\bfrom\s*|\brequire\s*\(\s*)(['"])([^'"\n]{1,300})\1/g)].map((m) => m[2]!);
-          if (!specs.length || !specs.every((spec) => specifierPaths(f.path, spec).some(tableish))) hit('table-used', f.path, `${t.table}: ${raw.trim()}`);
-          return;
-        }
-        // A module-level declaration of one of its names (column 0): the old one must be gone too (a name declared
-        // twice in a module doesn't compile), and its removed line waits above.
-        const top = TOP_BINDS.exec(l);
-        const declared = top ? (top[1]!.match(IDENT) ?? ([] as string[])) : [];
-        if (named.some((n) => !declared.includes(n) && !plainUse(l, n))) hit('table-used', f.path, `${t.table}: ${raw.trim()}`);
-        // A `with` statement brings names in from an object at run time: in a file that uses the table, it waits.
-        else if (/(?<![\w$.])with\s*\(/.test(l)) hit('table-used', f.path, `${t.table}: ${raw.trim()}`);
-      });
-    }
-  }
-  // An import or re-export taken away or changed whose specifier named a table's file, or a file that binds a name to
-  // one (R1184h: `import * as M from` the table's own file, `const M = require(...)`, `import M = require(...)`,
-  // `export * from`, a barrel), re-pointed or not: what it brings in may no longer be the table. Its whole statement
-  // is read (a specifier on a line of its own included), from the raw lines, where strings aren't blanked.
-  for (const { f, before, at } of changed) {
-    if (before === null) continue;
-    const st = statementsOf(before);
-    for (const l of f.removedLines ?? []) {
-      for (const k of at.get(l.trim()) ?? []) {
-        const [a, b] = st.span(k);
-        const code = st.code.slice(a, b + 1).join('\n');
-        if (!IMPORTISH_STMT.test(code)) continue;
-        const raw = st.raw.slice(a, b + 1).join('\n');
-        const specs = [...raw.matchAll(/(?:\bfrom\s*|\brequire\s*\(\s*|\bimport\s*\(\s*)(['"])([^'"\n]{1,300})\1/g)].map((m) => m[2]!);
-        if (specs.some((spec) => specifierPaths(f.path, spec).some(tableish))) {
-          hit('table-use-removed', f.path, `an import of a table's file: ${l.trim()}`);
-          break;
-        }
-      }
-    }
-  }
-  // A subpath import redirect (R1184f): `package.json` "imports" (`#rules` re-pointed at a decoy) changes what an
-  // import resolves to with no JS line changed. The root one is compared parsed; in any other, a removed `"#..."` key
-  // line waits. Only with a registered table in the repo (above).
-  for (const f of i.files) {
-    if (!/(^|\/)package\.json$/.test(f.path)) continue;
-    let changedImports: boolean;
-    try {
-      const [b, a] = [i.before(f.path), i.after(f.path)];
-      const imports = (t: string | null) => JSON.stringify(t === null ? null : ((JSON.parse(t) as { imports?: unknown }).imports ?? null));
-      changedImports = b !== null || a !== null ? imports(b) !== imports(a) : (f.removedLines ?? []).some((l) => /^\s*"#/.test(l));
-    } catch {
-      changedImports = (f.removedLines ?? []).some((l) => /^\s*"#/.test(l)) || (f.removedLines ?? []).some((l) => /"imports"\s*:/.test(l));
-    }
-    if (changedImports) hit('table-use-removed', f.path, 'its "imports" (subpath imports) changed, which can re-point an import of a table');
-  }
 }
 
 /** One change's findings, by kind; over MAX_CHANGED_CHARS, only the finding that says so. */
@@ -1438,15 +1080,6 @@ function findings(i: WeakeningInput): Found {
     }
   }
 
-  // #941: a use of a registered table taken away. Every use moved to a decoy declared under a new name (in the table's
-  // file or another, imported or not), with the registered table and its mark left in place unused, reads to the line
-  // reader as the table unchanged; the lost uses are what show it. So a removed or changed line, in any changed file
-  // but JSON, waits when it names the table or a name bound to it (useNames; one bound in another file counts in a file
-  // that binds or imports that name), or is part of a statement that does (statementsOf: `const rules =` with `CHECKS;`
-  // on the next line). A line of the table's own (an entry) is the shrink check's. Every registered table counts,
-  // its file in the change or not (context), so a use moved in another file waits too.
-  useRemoved(i, tables, hit);
-
   // In a registered table's file, an added line that could give the live table a binding the line reader never matches
   // waits (#886's rounds 4 to 6): with the table's old lines kept as dead text (in a comment or a template), the live
   // one could be declared under a name written with a `\u` escape, or with its name on the next line, or bound on the
@@ -1538,8 +1171,7 @@ function measured(cwd: string, from: string, to: string, files: ChangeFile[], sc
   // The files that hold a mark's text before the change and at the tip (#869): git grep over each whole tree, so a
   // mark is found wherever it is; a git failure makes the change wait.
   const markable = (set: Set<string>) => new Set([...files.map((f) => f.path), ...(conflicts ?? [])].filter((p) => set.has(p) && MARKABLE.test(p) && !isNonUtf8Path(p)));
-  const markedAll = new Set(filesWithText(cwd, from, [TABLE_MARK.trimEnd(), LINT_MARK]));
-  const marked = markable(markedAll);
+  const marked = markable(new Set(filesWithText(cwd, from, [TABLE_MARK.trimEnd(), LINT_MARK])));
   const tipMarked = at ? markable(new Set(filesWithText(cwd, at.tip, [TABLE_MARK.trimEnd(), LINT_MARK]))) : new Set<string>();
   const paths = [...new Set([...CHECK_TABLES.map((t) => t.path), ...marked, ...tipMarked])].filter((p) => files.some((f) => f.path === p) && !isNonUtf8Path(p));
   // A file over the cap isn't read at all: the change waits.
@@ -1550,74 +1182,6 @@ function measured(cwd: string, from: string, to: string, files: ChangeFile[], sc
       return texts.get(p) ?? null;
     };
   };
-  const input: WeakeningInput = { files, deleted, moved, before: side(from), after: side(to), scope, marked, context: contextAt(cwd, from, files, markedAll), ...(conflicts ? { conflicts } : {}) };
+  const input: WeakeningInput = { files, deleted, moved, before: side(from), after: side(to), scope, marked, ...(conflicts ? { conflicts } : {}) };
   return at ? { ...input, tip: side(at.tip), tipMarked, meet: side(at.meet) } : input;
-}
-
-/**
- * #941's context at `from` (WeakeningInput.context): the files that register a table (`markedAll`, their mark's text),
- * the changed JS and TS files, and the files they import by a relative path, and those files' imports in turn, up to
- * MAX_USE_ROUNDS deep (relativeImports): a name bound to a table in a file the change leaves alone reaches a changed
- * file only through an import. Each file over MAX_TABLE_FILE throws when read.
- */
-function contextAt(cwd: string, from: string, files: ChangeFile[], markedAll: ReadonlySet<string>): NonNullable<WeakeningInput['context']> {
-  const code = (p: string) => MARKABLE.test(p) && !isNonUtf8Path(p);
-  const registering = new Set([...markedAll].filter(code));
-  const texts = new Map<string, string>();
-  const tooBig = new Map<string, number>();
-  const tried = new Set<string>();
-  const read = (paths: string[]): string[] => {
-    const fresh = [...new Set(paths)].filter((p) => !tried.has(p));
-    for (const p of fresh) tried.add(p);
-    const got = filesAtOnce(cwd, from, fresh, MAX_TABLE_FILE);
-    for (const [p, t] of got.texts) texts.set(p, t);
-    for (const [p, n] of got.tooBig) tooBig.set(p, n);
-    return fresh.filter((p) => got.texts.has(p));
-  };
-  read([...registering]);
-  // The changed files and what they import, MAX_USE_ROUNDS deep: where a name bound to a table can reach a changed file.
-  const changed = files.map((f) => f.path).filter(code);
-  read(changed);
-  const reached = new Set(changed.filter((p) => texts.has(p)));
-  let frontier = [...reached];
-  for (let round = 0; round < MAX_USE_ROUNDS && frontier.length; round++) {
-    const next = [...new Set(frontier.flatMap((p) => relativeImports(p, texts.get(p)!)).filter(code))].filter((p) => !reached.has(p));
-    read(next);
-    frontier = next.filter((p) => texts.has(p));
-    for (const p of frontier) reached.add(p);
-  }
-  const paths = new Set([...texts.keys(), ...tooBig.keys()]);
-  return {
-    paths,
-    registering,
-    reached,
-    text: (p) => {
-      if (tooBig.has(p)) throw new Error(`${tooBig.get(p)} bytes, over ${MAX_TABLE_FILE}: not read`);
-      return texts.get(p) ?? null;
-    },
-  };
-}
-
-/** The files `text` (at `path`) may import by a relative specifier (`from './x.js'`, `require('../y')`, `import('./z')`), each extension a TS build maps to it. */
-export function relativeImports(path: string, text: string): string[] {
-  return [...text.matchAll(/(?:\bfrom\s*|\bimport\s*\(?\s*|\brequire\s*\(\s*)(['"])(\.{1,2}\/[^'"\n]{1,300})\1/g)].flatMap((m) => specifierPaths(path, m[2]!));
-}
-
-/** The paths a relative specifier `spec` in the file at `path` may name, each extension a TS build maps to it; none for a bare one. */
-function specifierPaths(path: string, spec: string): string[] {
-  if (!/^\.{1,2}\//.test(spec)) return [];
-  const parts: string[] = path.includes('/') ? path.slice(0, path.lastIndexOf('/')).split('/') : [];
-  for (const seg of spec.split('/')) {
-    if (seg === '.' || seg === '') continue;
-    if (seg === '..') {
-      if (parts.pop() === undefined) return [];
-    } else parts.push(seg);
-  }
-  if (!parts.length) return [];
-  const p = parts.join('/');
-  const ext = /\.[cm]?[jt]sx?$/.exec(p)?.[0];
-  const stem = ext ? p.slice(0, -ext.length) : p;
-  const alts: Record<string, string[]> = { '.js': ['.js', '.ts', '.tsx', '.jsx'], '.mjs': ['.mjs', '.mts'], '.cjs': ['.cjs', '.cts'], '.jsx': ['.jsx', '.tsx'] };
-  if (!ext) return ['.ts', '.tsx', '.js', '.mjs', '.cjs', '/index.ts', '/index.js'].map((e) => p + e);
-  return (alts[ext] ?? [ext]).map((e) => stem + e);
 }
