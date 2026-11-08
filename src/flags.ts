@@ -13,7 +13,7 @@ import type { EventLog } from './events/log.js';
 import type { EventPayload } from './events/types.js';
 import { FLAGS } from './config/schema.js';
 
-export { FLAG_NAME, FLAGS, RETIRED_FLAGS, flagsSchema, withRetiredFlags, type FlagInfo } from './config/schema.js';
+export { FLAG_NAME, FLAGS, RETIRED_FLAGS, flagsSchema, type FlagInfo } from './config/schema.js';
 
 /** Whether a flag is on for this repo: only an explicit `true` counts; anything else is off. */
 export const flagOn = (flags: Readonly<Record<string, boolean>> | undefined, name: string): boolean => flags?.[name] === true;

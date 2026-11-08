@@ -116,10 +116,6 @@ export const RETIRED_FLAGS: readonly string[] = Object.freeze([]);
 
 export const FLAG_NAME = /^[a-z][a-z0-9_]{0,63}$/;
 
-/**
- * config.yaml `flags:`: known names, each true or false; absent is `{}` (every flag off). A retired name is accepted
- * and dropped; any other name makes the config invalid. Both lists are read when a config is parsed.
- */
 /** Names a test retires for the length of one call (withRetiredFlags); null: none. Never set by engine code. */
 let retiredForTest: readonly string[] | null = null;
 
@@ -139,6 +135,10 @@ export function withRetiredFlags<T>(names: readonly string[], fn: () => T): T {
   }
 }
 
+/**
+ * config.yaml `flags:`: known names, each true or false; absent is `{}` (every flag off). A retired name is accepted
+ * and dropped; any other name makes the config invalid. Both lists are read when a config is parsed.
+ */
 export function flagsSchema(known: () => readonly string[] = () => Object.keys(FLAGS), retired: () => readonly string[] = () => (retiredForTest ? [...RETIRED_FLAGS, ...retiredForTest] : RETIRED_FLAGS)) {
   return z
     .record(z.string().regex(FLAG_NAME, 'a flag name is lowercase letters, digits and underscores'), z.boolean())
@@ -411,6 +411,8 @@ export const ProjectConfig = z.strictObject({
     })
     .prefault({}),
 });
+// Frozen (#1173 review R1173f): `ProjectConfig.shape.flags` can't be replaced in place by any module.
+Object.freeze(ProjectConfig.shape);
 
 // ---------- agents.yaml ----------
 
@@ -992,7 +994,9 @@ export type TestsConfig = z.infer<typeof TestsConfig>;
 export type ReviewConfig = z.infer<typeof ReviewConfig>;
 export type DeployConfig = z.infer<typeof DeployConfig>;
 
-export const FILES = {
+// Frozen (#1173 review R1173f): no module can swap a file's schema at run time (a looser one would let a typo'd flag
+// load), and ProjectConfig's shape is frozen below for the same reason.
+export const FILES = Object.freeze({
   'config.yaml': ProjectConfig,
   'agents.yaml': AgentsConfig,
   'guardrails.yaml': GuardrailsConfig,
@@ -1001,4 +1005,4 @@ export const FILES = {
   'deploy.yaml': DeployConfig,
   'app.yaml': AppConfig,
   'benchmarks.yaml': BenchmarksConfig,
-} as const;
+} as const);
