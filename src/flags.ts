@@ -50,7 +50,8 @@ export function flagsInText(text: string, known: readonly string[] = knownFlags(
   if (doc.errors.length) return { error: doc.errors[0]!.message.split('\n')[0]! };
   const raw = (doc.toJS() as { flags?: unknown } | null)?.flags;
   if (raw === undefined || raw === null) return { on: [] };
-  if (typeof raw !== 'object' || Array.isArray(raw) || Object.getPrototypeOf(raw) !== Object.prototype) return { error: 'flags is not a mapping' };
+  // A mapping: YAML's toJS gives a plain object for one, an array for a list (whose keys, 0 and up, aren't flag names).
+  if (typeof raw !== 'object' || Array.isArray(raw)) return { error: 'flags is not a mapping' };
   const on: string[] = [];
   for (const name of Object.keys(raw)) {
     const value = (raw as Record<string, unknown>)[name];
