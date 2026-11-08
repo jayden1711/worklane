@@ -1,3 +1,4 @@
+// lint-test
 // Every download of a pinned release asset in CI retries with backoff, and is still checked against its pinned
 // sha256 (#1201). WHY: on 2026-11-08 GitHub release downloads answered 504 for a while, and a single-shot `curl` turned
 // whole PRs red with no test failing; a retry rides that out, and the pin keeps a retried download as strict as before.
