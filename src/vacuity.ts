@@ -24,6 +24,7 @@
 //           added code, so a test that runs it counts; and a deleted app file, or one renamed out of app code, leaves
 //           no app code to measure.
 import { spawn, spawnSync } from './os/child-process.js';
+import { gitSpawnSync } from './os/git.js';
 import { lstatSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
@@ -1172,7 +1173,7 @@ export function baseTextReader(repo: string, base: string): (path: string) => st
   const seen = new Map<string, string | null>();
   return (path) => {
     if (!seen.has(path)) {
-      const r = spawnSync('git', ['--no-replace-objects', '-c', 'core.attributesFile=/dev/null', 'show', `${base}:${path}`], { cwd: repo, encoding: 'utf8', maxBuffer: SCRIPT_BYTES, stdio: ['ignore', 'pipe', 'ignore'] });
+      const r = gitSpawnSync(['--no-replace-objects', '-c', 'core.attributesFile=/dev/null', 'show', `${base}:${path}`], { cwd: repo, encoding: 'utf8', maxBuffer: SCRIPT_BYTES, stdio: ['ignore', 'pipe', 'ignore'] });
       seen.set(path, r.status === 0 && typeof r.stdout === 'string' ? r.stdout : null);
     }
     return seen.get(path)!;

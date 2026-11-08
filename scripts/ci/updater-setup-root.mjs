@@ -26,6 +26,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync,
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { commandExecFileSync, gitExecFileSync } from '../lib/git.cjs';
 
 assert.equal(process.getuid(), 0, 'run this as root');
 const coordinator = process.argv[2];
@@ -58,7 +59,8 @@ const owner = (f) => {
 const sha = (f) => (existsSync(f) ? createHash('sha256').update(readFileSync(f)).digest('hex') : 'absent');
 const changes = () => readFileSync(CHANGES, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
 const pending = () => JSON.parse(readFileSync(PENDING, 'utf8')).pending;
-const sh = (file, args, cwd = '/') => execFileSync(file, args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+// A caller's git (the command named git) through the git runner (#807).
+const sh = (file, args, cwd = '/') => commandExecFileSync(file, args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 /** One run of the updater's unit, as its timer starts it; when it fails, its own journal says why. */
 const updaterRun = () => {
   // This proof starts the unit many times in a few seconds, past systemd's default start limit (5 in 10 s); its timer
@@ -164,7 +166,7 @@ release('v1.0.2', other.file);
 // The installed updater's own check, as root, against the machine's signers file.
 const updater = createRequire(import.meta.url)(UPDATER);
 let n = 0;
-const verify = (tag) => updater.verifyRelease(origin, tag, SIGNERS, (file, args) => execFileSync(file, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }), join(work, `verify-${++n}.git`));
+const verify = (tag) => updater.verifyRelease(origin, tag, SIGNERS, (file, args) => commandExecFileSync(file, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }), join(work, `verify-${++n}.git`));
 
 // ---- every other argument list: refused, and nothing changes
 const k = other.pub;
@@ -405,9 +407,9 @@ const deps = {
   installed: () => installedSha,
   installedVersion: () => '1.0.2',
   // The release tags and their check: real, against the local repo, as root.
-  verifyRelease: (_url, tag, signers) => updater.verifyRelease(origin, tag, signers, (file, args) => execFileSync(file, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }), join(work, `run-verify-${++n}.git`)),
+  verifyRelease: (_url, tag, signers) => updater.verifyRelease(origin, tag, signers, (file, args) => commandExecFileSync(file, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }), join(work, `run-verify-${++n}.git`)),
   exec: (file, args) => {
-    if (file === 'git' && args[0] === 'ls-remote') return execFileSync('git', ['ls-remote', '--tags', origin, 'refs/tags/v*'], { encoding: 'utf8' });
+    if (file === 'git' && args[0] === 'ls-remote') return gitExecFileSync(['ls-remote', '--tags', origin, 'refs/tags/v*'], { encoding: 'utf8' });
     if (file === 'systemctl' && args[0] === 'list-units') return 'worklane-ci-standin.service loaded active running x\n';
     if (file === 'systemctl' && args[0] === 'show') return 'ActiveState=active\nSubState=running\nNRestarts=0\nResult=success\n';
     runLogs.push({ exec: [file, ...args].join(' ').slice(0, 80) });

@@ -40,7 +40,8 @@
 // A change that touches neither .worklane/ nor the pin has nothing to load: it prints so and exits 0, before fetching
 // any engine (the workflow's paths filter already skips most such PRs; this keeps the script right without it).
 // Exit 1: refused, or it couldn't check.
-import { execFileSync, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
+import { gitExecFileSync, gitSpawnSync } from '../lib/git.cjs';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -77,7 +78,7 @@ class Refused extends Error {}
 const fail = (msg) => {
   throw new Refused(msg);
 };
-const git = (...a) => spawnSync('git', a, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024 });
+const git = (...a) => gitSpawnSync(a, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024 });
 const gitText = (...a) => {
   const r = git(...a);
   return r.status === 0 ? r.stdout.trim() : null;
@@ -442,7 +443,7 @@ async function loadWith({ commit, label: engine }, root, head) {
   const dir = mkdtempSync(join(tmpdir(), 'installed-engine-'));
   try {
     try {
-      const tar = execFileSync('git', ['archive', '--format=tar', commit, 'dist/src'], { maxBuffer: 512 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
+      const tar = gitExecFileSync(['archive', '--format=tar', commit, 'dist/src'], { maxBuffer: 512 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
       const x = spawnSync('tar', ['-x', '-C', dir], { input: tar, stdio: ['pipe', 'ignore', 'pipe'] });
       if (x.status !== 0) throw new Error(lastLine(x.stderr) || `tar exited ${x.status}`);
     } catch (e) {
