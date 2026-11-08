@@ -1,0 +1,78 @@
+name: soak
+# The soak test (docs/soak.md, test/soak.test.ts): the real coordinator works for hours with stand-in agents (no
+# spend, no secrets, nothing pushed anywhere but a local remote), and src/soak.ts fails the run on a leak (heap, RSS,
+# open file handles), a stuck run, leaked slots, event-log or WAL growth, tick drift, or too little work.
+# Never on a pull request (every PR runs the short smoke of the same test in the unit tests). Weekly, and by hand.
+# Optional: required by nothing (not the ruleset, not .worklane/config.yaml, not the updater).
+# GitHub-hosted runners stop a job at 6 hours, so a run here is at most 5.5 h (330 min). A continuous 8 h soak needs the
+# trusted self-hosted runner, which this workflow doesn't ask for (docs/soak.md says why).
+on:
+  schedule:
+    - cron: '41 2 * * 6'
+  workflow_dispatch:
+    inputs:
+      hours:
+        description: 'How long to soak, in hours (at most 5.5 on GitHub-hosted runners)'
+        required: false
+        default: '5.5'
+concurrency:
+  group: soak
+  cancel-in-progress: false
+permissions:
+  contents: read
+jobs:
+  soak:
+    runs-on: ubuntu-latest
+    # The soak's own time plus the build and the report; GitHub stops a hosted job at 360 min whatever this says.
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      # As ci.yml's test shards: the coordinator scans each change with gitleaks.
+      - name: install gitleaks
+        shell: bash
+        env:
+          GITLEAKS_VERSION: 8.30.1
+        run: |
+          f="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          mkdir -p "$RUNNER_TEMP/bin" && cd "$RUNNER_TEMP/bin"
+          curl -sSfL -o "$f" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${f}"
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  ${f}" | sha256sum -c -
+          tar -xzf "$f" gitleaks
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - run: npm run build
+      - name: soak
+        shell: bash
+        # Hours from the input (5.5 on the schedule), refused past 5.5: a longer one would be cut off by GitHub with
+        # no verdict. The process is capped at 4 GiB of heap, so a leak fails it rather than the runner.
+        env:
+          HOURS: ${{ inputs.hours || '5.5' }}
+          SOAK_REPORT_DIR: ${{ runner.temp }}/soak
+        run: |
+          if ! [[ "$HOURS" =~ ^[0-9]+(\.[0-9]+)?$ ]] || ! awk -v h="$HOURS" 'BEGIN { exit !(h > 0 && h <= 5.5) }'; then
+            echo "hours must be a number above 0 and at most 5.5 (got: $HOURS)"; exit 2
+          fi
+          SOAK_HOURS="$HOURS" timeout --signal=INT "$(awk -v h="$HOURS" 'BEGIN { printf "%d", h * 3600 + 900 }')" \
+            node --max-old-space-size=4096 --import ./dist/test/isolate.js --test --test-name-pattern='^soak: the real coordinator' dist/test/soak.test.js
+      - name: report
+        if: ${{ !cancelled() }}
+        shell: bash
+        env:
+          SOAK_REPORT_DIR: ${{ runner.temp }}/soak
+        run: |
+          if [ -f "$SOAK_REPORT_DIR/soak-verdict.json" ]; then
+            { echo '## Soak'; echo '```json'; cat "$SOAK_REPORT_DIR/soak-verdict.json"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo '## Soak: no verdict (the run ended before it wrote one)' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ !cancelled() }}
+        with:
+          name: soak-report
+          path: ${{ runner.temp }}/soak
+          if-no-files-found: warn
+          retention-days: 30
