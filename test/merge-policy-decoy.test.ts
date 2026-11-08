@@ -282,6 +282,8 @@ test('decoy (#941, R1184f): shadowing, a split import, a namespace import of an 
   // Controls: a read of it added, a new unrelated declaration, and package.json's other fields changed add none of these.
   assert.deepEqual(weakensChanged({ [F]: BASE, 'src/x-user.ts': plain }, { [F]: BASE, 'src/x-user.ts': `${plain}export const n = CHECKS.length + 1;\nconst other = ['x'];\n` }), [], 'a read and an unrelated declaration');
   assert.deepEqual(weakensChanged(viaHash, { ...viaHash, 'package.json': viaHash['package.json'].replace('"name": "x"', '"name": "y"') }), [], 'package.json without its imports changed');
+  // A new file's own local of the same name (as test/guard-auth-fuzz.test.ts's FLOOR in #1171) shadows no use of it.
+  assert.deepEqual(weakensChanged({ [F]: BASE }, { [F]: BASE, 'test/x-new.test.ts': "const CHECKS = ['mine'];\nexport const n = CHECKS.length;\n" }), [], "a new file's own same-named local");
 });
 
 test('decoy (#941), control: adding a use of the table, changing a line that never named it, or another file\'s own name like an alias, adds no such reason', () => {

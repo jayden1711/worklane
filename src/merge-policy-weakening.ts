@@ -1099,6 +1099,7 @@ function useRemovedIn(i: WeakeningInput, inChange: readonly (CheckTable & { mark
     // Added lines (R1184f): a declaration of one of its names (a local `const CHECKS = ['a']` above a use shadows it,
     // and no line is removed), and, outside its own file (where any added line naming it already waits, table-used), a
     // line that changes it through one of its names (`CHECKS.splice(0)`, `Object.assign(CHECKS, ...)`, `rules.length = 0`).
+    const usedBefore = (path: string, n: string) => word(n).test(texts.get(path) ?? '');
     for (const f of i.files) {
       if (f.path.endsWith('.json')) continue;
       const added = (f.addedLines ?? []).filter((l) => l.trim());
@@ -1112,8 +1113,10 @@ function useRemovedIn(i: WeakeningInput, inChange: readonly (CheckTable & { mark
         for (const l of added) {
           // The table's own declaration in its own file is the table checks' (a name declared twice waits there).
           if (f.path === t.path && n === t.table && own.has(entry(l))) continue;
-          if (declares.test(l)) hit('table-use-removed', f.path, `${t.table}: ${l.trim()}`);
-          else if (f.path !== t.path && mutates.test(l)) hit('table-used', f.path, `${t.table}: ${l.trim()}`);
+          // A declaration shadows only where the file used the name before (a new file's own `FLOOR` is no use of it).
+          if (declares.test(l)) {
+            if (usedBefore(f.path, n)) hit('table-use-removed', f.path, `${t.table}: ${l.trim()}`);
+          } else if (f.path !== t.path && mutates.test(l)) hit('table-used', f.path, `${t.table}: ${l.trim()}`);
         }
       }
     }
