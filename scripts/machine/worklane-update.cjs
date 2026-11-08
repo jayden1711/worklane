@@ -898,7 +898,7 @@ const ENGINE_CHECK_SOURCES = Object.freeze({
   'test-run sandbox (real systemd)': 'ci-slow.yml',
   'wizard end to end (real systemd)': 'ci-slow.yml',
 });
-/** GitHub Actions' App id (its check runs' app.id): a pin to it is judged per workflow file. */
+/** GitHub Actions' App id (its check runs' app.id). */
 const ACTIONS_APP_ID = 15368;
 /** A check run GitHub Actions posted: told by its App's id, as the engine tells it (src/check-source.ts). */
 const isActions = (r) => !!r && !!r.app && r.app.id === ACTIONS_APP_ID;
@@ -1043,8 +1043,8 @@ async function checkPins(deps, cfg, api) {
   // Unread rules: whether a required check is pinned is unknown, so it is taken as pinned (the commit waits anyway).
   if (rulesUnread) return { forSha: async () => ({ noAnswer: "the branch's rules" }), rulesUnread, pinned: true };
   const pinOf = (n) => checkPinOf(n, own, rules);
-  // WHY: an Actions-App pin needs the workflow runs too: its runs are judged per workflow file (evaluateChecks), so one
-  // file never supersedes another.
+  // WHY: an Actions-App pin reads the workflow runs too, so its latest run is told by the workflow runs' order
+  // (ownVerdict), as a workflow pin's is.
   const needRuns = required.some((n) => 'workflow' in (pinOf(n) || {}) || (pinOf(n) || {}).app_id === ACTIONS_APP_ID);
   const pinned = required.some((n) => pinOf(n));
   return {
@@ -1066,17 +1066,20 @@ async function checkPins(deps, cfg, api) {
       // counts when it ran), so the commit can't be installed: its verdict comes from the check runs alone.
       const hopeless = required.find((n) => pinOf(n) && !pinOf(n).invalid && (!RETIRED_CHECKS.includes(n) || ran(n)) && !passedOnce(n));
       if (hopeless !== undefined) return { pinOf, suites: new Map(), repo, sha, statuses: [], hopeless };
-      // Likewise a check judged by name (not a pinned required one) whose latest run finished red, or is still running,
-      // holds the commit whatever the pinned ones say.
+      // Likewise a check judged by name (not a pinned required one) holds the commit whatever the pinned ones say: a
+      // required one when any run of its name finished red or is still running (#925), another when its latest did.
       const byName = new Map();
+      const every = [];
       for (const r of list) {
         if (required.includes(r.name) && pinOf(r.name)) continue;
+        if (required.includes(r.name)) every.push(r);
         const prev = byName.get(r.name);
         if (!prev || (r.started_at || '') > (prev.started_at || '') || ((r.started_at || '') === (prev.started_at || '') && r.id > prev.id)) byName.set(r.name, r);
       }
-      const red = [...byName.values()].find((r) => r.status === 'completed' && !GREEN.has(r.conclusion));
+      const heldBy = [...every, ...byName.values()];
+      const red = heldBy.find((r) => r.status === 'completed' && !GREEN.has(r.conclusion));
       if (red) return { pinOf, suites: new Map(), repo, sha, statuses: [], red: { name: red.name, conclusion: red.conclusion } };
-      const running = [...byName.values()].find((r) => r.status !== 'completed');
+      const running = heldBy.find((r) => r.status !== 'completed');
       if (running) return { pinOf, suites: new Map(), repo, sha, statuses: [], running: { name: running.name, status: running.status } };
       const suites = new Map();
       if (needRuns) {
@@ -1201,36 +1204,28 @@ const GREEN = new Set(['success', 'neutral', 'skipped']);
  */
 const RETIRED_CHECKS = Object.freeze(['desktop']);
 /**
- * #727, the owner's rule: the run that decides a pinned check, from its own source's runs `own` on the commit. They
- * are grouped by workflow file (an Actions run: its suite's workflow run's path, or a group of its own when that run
- * wasn't read; one group for any other App). In each file's group the latest run (the later workflow run, then the
- * later check run, as a re-run attempt is) and the newest check run (the highest id: GitHub numbers check runs as it
- * makes them, a re-run's jobs included) must both pass. So one file never supersedes another, and a re-run of an
- * older run that failed after a newer run passed still refuses. An App that isn't Actions can't be split by file: its
- * latest check run of the name (the highest id) decides, in whatever check suite, so a later pipeline or re-run of that
- * App supersedes its earlier ones (the owner's decision, round 8; round 6 refused a failure in another suite). Returns
- * a run that doesn't pass (the same whatever the list order), else the latest run of all.
+ * Of runs that aren't passes, the one to report, the same whatever the list order: a finished one (waiting can't fix
+ * it) before a running one, then the highest id. Undefined when every run passed.
+ */
+function worstRun(runs) {
+  const bad = runs.filter((r) => !(r.status === 'completed' && r.conclusion === 'success'));
+  bad.sort((a, b) => Number(b.status === 'completed') - Number(a.status === 'completed') || (b.id ?? -1) - (a.id ?? -1));
+  return bad[0];
+}
+
+/**
+ * #727, #925: the run that decides a pinned check, from its own source's runs `own` on the commit (GitHub's latest
+ * check run per check suite: a re-run attempt of a job already replaces its earlier one there). Every one of them must
+ * pass, whatever workflow run or suite it is in and however it is ordered against a passing one: an earlier workflow
+ * run of the pinned file that failed, was cancelled or is still running blocks, as an earlier run of a pinned App
+ * does. Returns the run that doesn't pass (worstRun), else the latest run of all (the later workflow run, then the
+ * later check run).
  */
 function ownVerdict(own, pins) {
   const suite = (r) => pins.suites.get(r.check_suite && r.check_suite.id);
   const order = (r) => [(suite(r) || {}).run ?? -1, r.id ?? -1];
   const later = (a, b) => order(a)[0] > order(b)[0] || (order(a)[0] === order(b)[0] && order(a)[1] > order(b)[1]);
-  const groups = new Map();
-  own.forEach((r, i) => {
-    const key = !isActions(r) ? 'app' : suite(r) ? `file ${suite(r).path}` : `unread ${r.id ?? `#${i}`}`;
-    groups.set(key, [...(groups.get(key) || []), r]);
-  });
-  const ok = (r) => r.status === 'completed' && r.conclusion === 'success';
-  const bad = [];
-  for (const [key, g] of groups) {
-    // An App that isn't Actions can't be split by file: its latest run decides, in any suite (the owner, round 8).
-    const newest = g.reduce((a, b) => ((b.id ?? -1) > (a.id ?? -1) ? b : a));
-    const decide = key === 'app' ? [newest] : [g.reduce((a, b) => (later(b, a) ? b : a)), newest];
-    bad.push(...decide.filter((r) => !ok(r)));
-  }
-  // The same run whatever the list order: a finished one (waiting can't fix it) before a running one, then the highest id.
-  bad.sort((a, b) => Number(b.status === 'completed') - Number(a.status === 'completed') || (b.id ?? -1) - (a.id ?? -1));
-  return bad[0] || own.reduce((a, b) => (later(b, a) ? b : a));
+  return worstRun(own) || own.reduce((a, b) => (later(b, a) ? b : a));
 }
 
 /**
@@ -1240,10 +1235,9 @@ function ownVerdict(own, pins) {
  * idle: true when a required check hasn't run and every check that is on the commit is complete: nothing in flight
  * will bring it (a slow check that only runs in batches, on a commit with no batch).
  * pins (checkPins, #727; the owner's rule, 2026-10-19): a pinned required check is judged by its pinned source's runs
- * on this commit (ownVerdict: per workflow file, the latest run and the newest check run must pass), and every run of
- * its name from any other source, and every commit status of its name, must be a pass too. One nothing pins is judged
- * by name, as before, and every other name's latest run must still be green. Absent: by name alone (tests' stand-ins
- * only).
+ * on this commit (ownVerdict: every one must pass), and every run of its name from any other source, and every commit
+ * status of its name, must be a pass too. One nothing pins is judged by name: every run of its name must pass (#925),
+ * and every other name's latest run must still be green. Absent: by name alone (tests' stand-ins only).
  */
 function evaluateChecks(runs, required, pins) {
   if (!Array.isArray(required) || required.length === 0) return { ok: false, final: true, reason: 'no required checks configured in updates.json' };
@@ -1256,7 +1250,7 @@ function evaluateChecks(runs, required, pins) {
     return m;
   };
   const latest = latestOf(runs || []);
-  let judged = latest;
+  let judged = new Map(latest);
   if (pins) {
     const invalid = required.filter((name) => (pins.pinOf(name) || {}).invalid);
     if (invalid.length) return { ok: false, final: true, reason: `updates.json required_check_sources has an invalid pin for ${invalid.map((n) => `"${n}"`).join(', ')} ({ "app_id": N } or { "workflow": ".github/workflows/<file>" }): refused` };
@@ -1273,9 +1267,8 @@ function evaluateChecks(runs, required, pins) {
     }
     if (pins.red) return { ok: false, final: true, reason: `${required.includes(pins.red.name) ? 'required check' : 'check'} "${pins.red.name}" ended ${pins.red.conclusion}` };
     if (pins.running) return { ok: false, final: false, reason: `${required.includes(pins.running.name) ? 'required check' : 'check'} "${pins.running.name}" is ${pins.running.status}` };
-    // One nothing pins: by name, as before pins (the owner's choice, 2026-10-19). A pinned one: its pinned source's
-    // runs on this commit (ownVerdict), so a later run of a workflow file supersedes that file's earlier or cancelled
-    // ones (the owner's rule), and nothing else does.
+    // One nothing pins: by name (the owner's choice, 2026-10-19). A pinned one: its pinned source's runs on this
+    // commit (ownVerdict), every one of which must pass (#925).
     judged = latestOf((runs || []).filter((r) => !pins.pinOf(r.name)));
     const own = new Map();
     for (const r of runs || []) {
@@ -1283,6 +1276,13 @@ function evaluateChecks(runs, required, pins) {
       own.set(r.name, [...(own.get(r.name) || []), r]);
     }
     for (const [name, list] of own) judged.set(name, ownVerdict(list, pins));
+  }
+  // #925: a required check judged by name is decided by any run of its name that isn't a pass, never by its latest
+  // alone: an earlier red or unfinished run (another source's, or one that started first) blocks.
+  for (const name of required) {
+    if (pins && pins.pinOf(name)) continue;
+    const bad = worstRun((runs || []).filter((r) => r.name === name));
+    if (bad) judged.set(name, bad);
   }
   // A pinned required check: any run of its name from any OTHER source that isn't a pass blocks it.
   const isOwn = (r) => !!pins && !!pins.pinOf(r.name) && fromPinnedSource(r, pins.pinOf(r.name), pins);

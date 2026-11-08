@@ -5,7 +5,7 @@
 // the task's project config is its own at the base, except the harness config taken from the harness under test
 // (HARNESS_CONFIG_PATHS), so a change to that config is what the replay measures.
 import { gitExecFileSync } from '../os/git.js';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { parseDocument } from 'yaml';
@@ -182,12 +182,23 @@ export interface ReplayOptions {
   timeoutMs?: number;
   /** Keep the scratch clone (debugging). */
   keep?: boolean;
+  /** Copy the replay's event log to this file when it ends (a shadow run's, src/shadow.ts); it must not exist yet. */
+  keepLog?: string;
   signal?: AbortSignal;
   /** Instance wiring passed through to the scratch coordinator (agents as their own user). */
   deps?: Pick<CoordinatorDeps, 'commandsAs' | 'agentTasks' | 'depCacheRoot' | 'commitIdentity'>;
   /** Readings for the scratch coordinator's machine gates (tests); default: never held by load or disk. */
   machine?: CoordinatorDeps['machine'];
   say?: (line: string) => void;
+}
+
+/**
+ * A kept replay log's file name: the task's id and the sample, the same for every engine that replays it, so two runs'
+ * logs pair up. A held-out task's id is never written down: a hash of it stands in.
+ */
+export function shadowLogName(t: Pick<LoadedTask, 'id' | 'heldOut'>, sample: number): string {
+  const name = t.heldOut ? `held-out-${createHash('sha256').update(t.id).digest('hex').slice(0, 12)}` : t.id.replace(/[^A-Za-z0-9._-]/g, '_');
+  return `${name}-${sample}.db`;
 }
 
 export interface ReplayResult extends TaskScore {
@@ -260,6 +271,11 @@ export async function replayTask(t: LoadedTask, o: ReplayOptions): Promise<Repla
       await c.idle();
     }
     const wallMs = Date.now() - started;
+    if (o.keepLog) {
+      mkdirSync(dirname(o.keepLog), { recursive: true });
+      // A consistent copy of the whole log (VACUUM INTO refuses a file that is already there).
+      log.db.exec(`VACUUM INTO '${o.keepLog.replace(/'/g, "''")}'`);
+    }
     return { ...scoreReplay(log.read(), n, { budgetHit: o.runner.hit && !ended() }), wallMs };
   } finally {
     log?.close();
@@ -280,6 +296,8 @@ export interface SuiteOptions extends Omit<ReplayOptions, 'sample' | 'runner' | 
   pr: number | null;
   /** Records each event in the instance's own log. */
   emit: <T extends EventType>(type: T, payload: EventPayload<T>) => void;
+  /** Keep each replay's event log in this directory, as shadowLogName names it (shadow runs: docs/shadow-runs.md). */
+  logsDir?: string;
   /** Replays a task (tests inject this); default: replayTask. */
   replay?: (t: LoadedTask, o: ReplayOptions) => Promise<ReplayResult>;
 }
@@ -311,7 +329,7 @@ export async function runSuite(o: SuiteOptions): Promise<EventPayload<'harness_e
       const before = { spent: runner.spent, turns: runner.turns };
       let r: ReplayResult;
       try {
-        r = await replay(t, { ...o, runner, sample: s, ...(harness ? { harness } : {}) });
+        r = await replay(t, { ...o, runner, sample: s, ...(harness ? { harness } : {}), ...(o.logsDir ? { keepLog: join(o.logsDir, shadowLogName(t, s)) } : {}) });
       } catch (e) {
         const spent = round(runner.spent - before.spent);
         r = { success: false, doneWhen: null, verdict: null, outcome: 'error', costUsd: spent, turns: runner.turns - before.turns, interventions: 0, detail: (e as Error).message.slice(0, 500), wallMs: 0 };
