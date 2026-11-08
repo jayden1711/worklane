@@ -103,16 +103,16 @@ export interface FlagInfo {
  * name to RETIRED_FLAGS (never just delete it). A flag's name: lowercase letters, digits and underscores. This file is
  * in the agents' tool guard's import tree, so a change here is L3 (the owner reviews it).
  */
-export const FLAGS: Readonly<Record<string, FlagInfo>> = {};
+export const FLAGS: Readonly<Record<string, FlagInfo>> = Object.freeze({});
 
 /**
  * Flags this engine retired: still accepted in a config.yaml, whatever their value, and always off (dropped from the
  * parsed flags), so a repo that still names one keeps working across the engine upgrade that retired it. WHY (#1173
  * review): at start the service reads the checkout's config with loadConfig, with no last good config to fall back
- * on, so a removed name that made the config invalid stopped the engine. A name never leaves this list. Mutable only
- * so a test can retire a name for one load.
+ * on, so a removed name that made the config invalid stopped the engine. A name never leaves this list. Frozen: a
+ * test retires a name for one load through withRetiredFlags, never by changing this list.
  */
-export const RETIRED_FLAGS: string[] = [];
+export const RETIRED_FLAGS: readonly string[] = Object.freeze([]);
 
 export const FLAG_NAME = /^[a-z][a-z0-9_]{0,63}$/;
 
@@ -120,7 +120,26 @@ export const FLAG_NAME = /^[a-z][a-z0-9_]{0,63}$/;
  * config.yaml `flags:`: known names, each true or false; absent is `{}` (every flag off). A retired name is accepted
  * and dropped; any other name makes the config invalid. Both lists are read when a config is parsed.
  */
-export function flagsSchema(known: () => readonly string[] = () => Object.keys(FLAGS), retired: () => readonly string[] = () => RETIRED_FLAGS) {
+/** Names a test retires for the length of one call (withRetiredFlags); null: none. Never set by engine code. */
+let retiredForTest: readonly string[] | null = null;
+
+/**
+ * Run `fn` with `names` also retired: for the test that loads a config naming a retired flag at start. WHY (#1173
+ * review): the lists are frozen, so no module can grow RETIRED_FLAGS (a typo then loads quietly) or empty it (the
+ * startup outage again) without editing this file; the override lasts only while `fn` runs, and a test holds that
+ * nothing in src/ but this file calls it.
+ */
+export function withRetiredFlags<T>(names: readonly string[], fn: () => T): T {
+  const before = retiredForTest;
+  retiredForTest = Object.freeze([...(before ?? []), ...names]);
+  try {
+    return fn();
+  } finally {
+    retiredForTest = before;
+  }
+}
+
+export function flagsSchema(known: () => readonly string[] = () => Object.keys(FLAGS), retired: () => readonly string[] = () => (retiredForTest ? [...RETIRED_FLAGS, ...retiredForTest] : RETIRED_FLAGS)) {
   return z
     .record(z.string().regex(FLAG_NAME, 'a flag name is lowercase letters, digits and underscores'), z.boolean())
     .default({})
