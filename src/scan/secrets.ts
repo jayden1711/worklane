@@ -6,9 +6,7 @@ import { accessSync, constants, existsSync, lstatSync, mkdirSync, mkdtempSync, r
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, isAbsolute, join, resolve as resolvePath } from 'node:path';
 import { BRAND } from '../brand.js';
-// R1124h: folding puts each name APFS reads as one file in its own root (foldName's doc).
-import { foldName } from '../fold-name.js';
-import { gitConfigRefusal, gitEnv, gitExecFileSync, gitGuarded, gitSnapshot, gitSpawnSync, type GitSnapshot } from '../os/git.js';
+import { foldName, gitConfigRefusal, gitEnv, gitExecFileSync, gitGuarded, gitSnapshot, gitSpawnSync, type GitSnapshot } from '../os/git.js';
 import { ignoredNames, presentNames, rawChanges, untrackedNames } from '../coordinator/change-files.js';
 import { notRootsProgram } from '../os/index.js';
 import { findTool } from '../tool-path.js';

@@ -179,6 +179,14 @@ const marked = (env: NodeJS.ProcessEnv): boolean => marks(ownEnv(env).get(GIT_GU
  */
 export const gitGuarded = (env: NodeJS.ProcessEnv = process.env): boolean => marked(env);
 
+/**
+ * A file name folded at least as far as any file system git or the scan may be on folds it (R1124h, R1124j): NFKC
+ * (the compatibility forms: ſ, µ, ϐ, ligatures, the Kelvin sign), then upper and lower case (as APFS's case folding
+ * pairs them), and final sigma as sigma. Folding further than a file system does only makes a check stricter. Here,
+ * not in a module of its own, so the agents' tool guard's import tree (src/hook-imports.ts, #785) stays as pinned.
+ */
+export const foldName = (p: string) => p.normalize('NFKC').toUpperCase().toLowerCase().replaceAll('ς', 'σ');
+
 /** The instance checkout a marked git is pinned to: this process's mark first (the coordinator's own), then the git's. */
 function markedRepo(env: NodeJS.ProcessEnv): string | null {
   for (const v of [ownEnv(process.env).get(GIT_GUARD_VAR), ownEnv(env).get(GIT_GUARD_VAR)]) if (marks(v) && v !== '1') return v;

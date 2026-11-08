@@ -5,8 +5,7 @@
 // Like the rest of the shell matcher this is best effort (shell.ts): the runner also drops the variable from every
 // agent's environment (runner.ts agentEnv), and the hook itself refuses the hatch inside an agent run.
 import { resolve as resolvePath } from 'node:path';
-import { foldName } from '../fold-name.js';
-import { gitGuarded } from '../os/git.js';
+import { foldName, gitGuarded } from '../os/git.js';
 import { basename, envShort, envTakesNext, programsIn, shortCluster, splitCommands, type SimpleCommand } from './shell.js';
 
 /** The hatch: set to 1 in a person's own shell, for one push. */
