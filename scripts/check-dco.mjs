@@ -2,7 +2,7 @@
 // Fail if any commit in <base>..<head> lacks a Signed-off-by trailer that
 // matches its author (Developer Certificate of Origin, see CONTRIBUTING.md).
 //   node scripts/check-dco.mjs <base> [head]
-import { execFileSync } from 'node:child_process';
+import { gitExecFileSync } from './lib/git.cjs';
 
 const [base, head = 'HEAD'] = process.argv.slice(2);
 if (!base) {
@@ -11,8 +11,7 @@ if (!base) {
 }
 
 const SEP = '\x1e';
-const log = execFileSync(
-  'git',
+const log = gitExecFileSync(
   ['log', '--no-merges', `--format=%H%x1f%an <%ae>%x1f%B${SEP}`, `${base}..${head}`],
   { encoding: 'utf8' },
 );

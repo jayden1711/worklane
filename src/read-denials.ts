@@ -15,7 +15,7 @@ import { ConfigInvalid, loadConfig, loadConfigAt, readRegular } from './config/l
 import { TaskFile } from './contract.js';
 import { projectStateDir } from './guardrails/context.js';
 import { globMatcher, type GlobStyle } from './guardrails/glob.js';
-import { spawnSync } from './os/child-process.js';
+import { gitSpawnSync } from './os/git.js';
 
 /** Directory entries listed, at most, to expand one pattern that has an exception; past it the pattern is denied whole. */
 export const EXPAND_LIMIT = 5000;
@@ -310,7 +310,7 @@ const realOrNull = (p: string) => {
 function git(common: string, args: string[], ok: number[] = [0], benign?: RegExp): { out: string } | { error: string } {
   const env: NodeJS.ProcessEnv = {};
   for (const [k, v] of Object.entries(process.env)) if (!k.startsWith('GIT_') && k !== 'LANGUAGE') env[k] = v;
-  const r = spawnSync('git', ['-c', 'core.quotePath=true', '--git-dir', common, ...args], {
+  const r = gitSpawnSync(['-c', 'core.quotePath=true', '--git-dir', common, ...args], {
     env: { ...env, LC_ALL: 'C', GIT_TERMINAL_PROMPT: '0' },
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],

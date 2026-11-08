@@ -17,10 +17,10 @@
 // browser asked for) and <out dir>/automation.json (each step's "Without this page" line as the page showed it), for
 // the job's leak check. Nothing secret is ever printed: the key goes into the page from its file, never typed here.
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { commandSpawnSync } from '../lib/git.cjs';
 
 const [mode, dist, wizardUrl, keyFile, out, extra] = process.argv.slice(2);
 if (!['local', 'server', 'setup-loopback'].includes(mode) || !dist || !wizardUrl || !keyFile || !out || !extra) {
@@ -116,8 +116,9 @@ async function firstRun(fresh = false) {
     return r.ok ? r.json() : { error: r.status };
   })()`);
 }
+// A caller's git (the command named git) through the git runner (#807).
 const sh = (cmd, args, o = {}) => {
-  const r = spawnSync(cmd, args, { encoding: 'utf8', ...o });
+  const r = commandSpawnSync(cmd, args, { encoding: 'utf8', ...o });
   return { status: r.status, out: (r.stdout ?? '').trim(), err: (r.stderr ?? '').trim() };
 };
 /** A file's owner and octal mode (through sudo on a server: the files are other users'). */
