@@ -172,15 +172,16 @@ export function startConfig(o: { repo: string; remote: string; fallback: Config;
   // WHY (#1173 review R1173f): feature flags turn on only from the default branch's own config. A checkout's config (a
   // branch, or a hand edit) never turns one on, even while main's is invalid (a typo'd flag there would be enough).
   const noFlags = (cfg: Config): Config => ({ ...cfg, project: { ...cfg.project, flags: {} } });
-  const off = ' (feature flags off: only the default branch\'s config turns one on)';
+  // Said only when the checkout's config named any flag, after the rest of the note (whose form the start tests hold).
+  const off = (cfg: Config) => (Object.keys(cfg.project.flags ?? {}).length ? '; its feature flags are off (only the default branch\'s config turns one on)' : '');
   const checkout = (why: string, detail = '') => {
     try {
       const committed = loadConfigAt(o.repo, 'HEAD');
-      if (!(o.check?.(committed) ?? []).length) return { cfg: noFlags(committed), tree: configTree(o.repo, 'HEAD'), note: `${why}, started with the checkout's committed config (HEAD)${off}${detail}` };
+      if (!(o.check?.(committed) ?? []).length) return { cfg: noFlags(committed), tree: configTree(o.repo, 'HEAD'), note: `${why}, started with the checkout's committed config (HEAD)${detail}${off(committed)}` };
     } catch {
       // none valid at HEAD either
     }
-    return { cfg: noFlags(o.fallback), tree: configTree(o.repo, 'HEAD'), note: `${why}, started with the checkout's working tree (no valid config committed at HEAD)${off}${detail}` };
+    return { cfg: noFlags(o.fallback), tree: configTree(o.repo, 'HEAD'), note: `${why}, started with the checkout's working tree (no valid config committed at HEAD)${detail}${off(o.fallback)}` };
   };
   if (tree === null) return checkout(`no ${BRAND.configDir}/ at ${o.remote}/${branch}`);
   try {
