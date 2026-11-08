@@ -114,9 +114,17 @@ export function soakVerdict(samples: readonly SoakSample[], limits: SoakLimits =
   const rss = grew((s) => s.rss);
   if (heap > limits.heapGrowthBytes) failures.push(`leak: the heap grew ${MB(heap)} from the first quarter to the last or the end (limit ${MB(limits.heapGrowthBytes)})`);
   if (rss > limits.rssGrowthBytes) failures.push(`leak: RSS grew ${MB(rss)} (limit ${MB(limits.rssGrowthBytes)})`);
-  const counted = use.every((s) => s.fds !== null);
-  const fds = counted ? grew((s) => s.fds!) : null;
-  if (fds !== null && fds > limits.fdGrowth) failures.push(`leak: open file handles grew by ${fds} (limit ${limits.fdGrowth})`);
+  // Open file handles are judged over the samples that counted them. WHY (#1181 review): one uncounted sample turned the
+  // check off for the whole run. Most uncounted is a failure: a leak there couldn't be seen.
+  const counted = use.filter((s) => s.fds !== null);
+  let fds: number | null = null;
+  if (counted.length * 2 < use.length) failures.push(`open file handles not counted in ${use.length - counted.length} of ${use.length} sample(s): a leak of them can't be judged`);
+  else {
+    const cq = Math.max(1, Math.floor(counted.length / 4));
+    const f0 = median(counted.slice(0, cq).map((s) => s.fds!));
+    fds = Math.max(median(counted.slice(-cq).map((s) => s.fds!)), median(counted.slice(-Math.min(END_SAMPLES, cq)).map((s) => s.fds!))) - f0;
+    if (fds > limits.fdGrowth) failures.push(`leak: open file handles grew by ${fds} (limit ${limits.fdGrowth})`);
+  }
   const end = samples.at(-1)!;
   if (end.openRuns && end.oldestOpenRunMs > limits.stuckMinutes * 60_000) failures.push(`stuck: ${end.openRuns} agent run(s) open, the oldest for ${Math.round(end.oldestOpenRunMs / 60_000)} min (limit ${limits.stuckMinutes})`);
   if (end.slotsHeld > end.openRuns) failures.push(`leaked slots: ${end.slotsHeld} agent slot(s) held with ${end.openRuns} run(s) open`);

@@ -27,6 +27,8 @@ jobs:
     timeout-minutes: 355
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '24'
@@ -47,8 +49,9 @@ jobs:
       - run: npm run build
       - name: soak
         shell: bash
-        # Hours from the input (5.5 on the schedule), refused past 5.5: a longer one would be cut off by GitHub with
-        # no verdict. The process is capped at 4 GiB of heap, so a leak fails it rather than the runner.
+        # Hours from the input (5.5 on the schedule), from 1 to 5.5: a longer one would be cut off by GitHub with no
+        # verdict, a shorter one is no soak. The process is capped at 4 GiB of heap, so a leak fails it rather than the
+        # runner. Green only on a verdict with no failure: a skipped or renamed test exits 0 and writes none.
         env:
           HOURS: ${{ inputs.hours || '5.5' }}
           SOAK_REPORT_DIR: ${{ runner.temp }}/soak
@@ -58,6 +61,7 @@ jobs:
           fi
           SOAK_HOURS="$HOURS" timeout --signal=INT "$(awk -v h="$HOURS" 'BEGIN { printf "%d", h * 3600 + 900 }')" \
             node --max-old-space-size=4096 --import ./dist/test/isolate.js --test --test-name-pattern='^soak: the real coordinator' dist/test/soak.test.js
+          node -e 'const v = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); if (!Array.isArray(v.failures) || v.failures.length) { console.error(`soak failed: ${JSON.stringify(v.failures)}`); process.exit(1); }' "$SOAK_REPORT_DIR/soak-verdict.json"
       - name: report
         if: ${{ !cancelled() }}
         shell: bash

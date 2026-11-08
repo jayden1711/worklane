@@ -1,16 +1,17 @@
 // The soak test (docs/soak.md). On every PR it runs SOAK_TICKS (12) coordinator ticks as a smoke test of the driver; the
-// soak workflow (.github/workflows/soak.yml) runs it for SOAK_HOURS (8 on the trusted runner) and keeps its report.
+// soak workflow (.github/workflows/soak.yml) runs it for SOAK_HOURS (1 to 5.5, on GitHub-hosted runners) and keeps its report.
 // The coordinator is the real one, on a scratch repo with a local remote; the agents are stand-ins (no spend), and a
 // new task is filed every SOAK_ISSUE_EVERY_S. Every SOAK_SAMPLE_S it records what the process holds; src/soak.ts
 // judges the samples.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { FakeRunner, type RunRequest } from '../src/runner.js';
 import { slotStatus } from '../src/slots.js';
 import { SOAK_LIMITS, openRunsOf, soakVerdict, type SoakSample } from '../src/soak.js';
 import { commitAll, coordinator, easyIssue, fixture, readAll, skip } from './repro-state-graph/harness.js';
+import { repoRoot } from './helpers.js';
 
 const MB = 2 ** 20;
 const sample = (at: number, o: Partial<SoakSample> = {}): SoakSample => ({ at, rss: 200 * MB, heapUsed: 80 * MB, fds: 40, eventsBytes: 1_000_000 + at, walBytes: MB, tickMs: 50, tasksDone: Math.floor(at / 60_000), filed: Math.floor(at / 60_000) + 1, openRuns: 0, oldestOpenRunMs: 0, slotsHeld: 0, ...o });
@@ -39,9 +40,8 @@ test('soak verdict: each failure it is there for (a leak of heap, RSS or handles
   // The warm-up is left out: a heap that fills its caches in the first minutes, then holds, is no leak.
   assert.deepEqual(soakVerdict(series(40, (m) => ({ heapUsed: m < 9 ? 20 * MB : 300 * MB }))).failures, []);
   assert.match(soakVerdict(series(40, (m) => ({ heapUsed: m < 9 ? 20 * MB : 300 * MB })), { ...SOAK_LIMITS, warmupMs: 0 }).failures.join(), /leak: the heap grew/, "the same samples judged with no warm-up: a leak");
-  // A short open run is a run in progress, not a stuck one; handles that can't be counted are not judged.
+  // A short open run is a run in progress, not a stuck one.
   assert.deepEqual(soakVerdict([...series(119), sample(119 * 60_000, { openRuns: 1, oldestOpenRunMs: 60_000, slotsHeld: 1 })]).failures, []);
-  assert.deepEqual(soakVerdict(series(120, (m) => ({ fds: m % 2 ? null : 40 + m }))).failures, []);
 });
 
 test('open runs: a finish closes its own run, never another; a run stuck while hundreds of others finish out of order is the oldest (#1181 review, 1)', () => {
@@ -95,6 +95,36 @@ test('soak verdict: a run too short to judge, or shorter than asked, fails; neve
   // Asked for 5.5 h, stopped at 2 h: too short; at 5.4 h (the last sample a minute before the end): fine.
   assert.match(soakVerdict(series(120), SOAK_LIMITS, { expectedMs: 5.5 * 3600_000 }).failures.join(), /too short: it ran 1\.98 h of the 5\.50 h asked for/);
   assert.deepEqual(soakVerdict(series(330), SOAK_LIMITS, { expectedMs: 5.5 * 3600_000 - 60_000 }).failures, []);
+});
+
+test('soak verdict: open file handles are judged over the samples that counted them; mostly uncounted fails (#1181 review, 5a)', () => {
+  // One uncounted sample of 330, and a 240-handle leak: still a leak.
+  assert.match(soakVerdict(series(330, (m) => ({ fds: m === 100 ? null : 40 + Math.floor((m * 240) / 330) }))).failures.join(), /^leak: open file handles grew by/);
+  // Half uncounted, half counting a leak: a leak.
+  assert.match(soakVerdict(series(120, (m) => ({ fds: m % 2 ? null : 40 + m }))).failures.join(), /^leak: open file handles grew by/);
+  // Most, or all, uncounted: a failure saying so, never a pass.
+  assert.match(soakVerdict(series(120, (m) => ({ fds: m % 3 ? null : 40 }))).failures.join(), /^open file handles not counted in \d+ of 110 sample\(s\)/);
+  assert.match(soakVerdict(series(120, () => ({ fds: null }))).failures.join(), /not counted in 110 of 110/);
+  assert.deepEqual(soakVerdict(series(120, (m) => ({ fds: m === 50 ? null : 40 }))).failures, [], 'steady, one uncounted: fine');
+});
+
+test('the soak workflow: schedule and dispatch only, read-only, on GitHub-hosted runners, 1 to 5.5 h, and green only on a verdict with no failure (#1181 review, 5b)', async () => {
+  const { parse } = await import('yaml');
+  const text = readFileSync(join(repoRoot, '.github', 'workflows', 'soak.yml'), 'utf8');
+  const w = parse(text) as { on: Record<string, unknown>; permissions: unknown; jobs: Record<string, { 'runs-on': unknown; steps: { uses?: string; with?: Record<string, unknown>; run?: string; name?: string }[] }> };
+  assert.deepEqual(Object.keys(w.on).sort(), ['schedule', 'workflow_dispatch'], 'never on a pull request or a push');
+  assert.deepEqual(w.permissions, { contents: 'read' });
+  assert.deepEqual(Object.keys(w.jobs), ['soak']);
+  const job = w.jobs.soak!;
+  assert.equal(job['runs-on'], 'ubuntu-latest');
+  assert.doesNotMatch(text, /secrets\./);
+  assert.deepEqual(job.steps.find((s) => s.uses?.startsWith('actions/checkout@'))?.with, { 'persist-credentials': false }, 'no token left in .git/config');
+  const run = job.steps.find((s) => s.name === 'soak')!.run!;
+  assert.match(run, /exit !\(h >= 1 && h <= 5\.5\)/, 'hours from 1 to 5.5');
+  // After the run: the verdict file must exist and say no failures (a skipped or renamed test exits 0 with none).
+  const check = run.indexOf('soak-verdict.json');
+  assert.ok(check > run.indexOf('dist/test/soak.test.js'), 'the verdict is read after the run');
+  assert.match(run.slice(check - 400), /failures\.length[^\n]*process\.exit\(1\)/);
 });
 
 /** Open file handles of this process, where the platform shows them. */

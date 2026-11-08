@@ -26,7 +26,7 @@ verdict). Workflow: `.github/workflows/soak.yml`.
 
 | Finding | Limit (`SOAK_LIMITS`) |
 |---|---|
-| Heap grew, last quarter vs first, after a 10-minute warm-up | 128 MB |
+| Heap grew, last quarter or end (last 10 samples) vs first quarter, after a 10-minute warm-up | 128 MB |
 | RSS grew | 256 MB |
 | Open file handles grew | 32 |
 | An agent run open at the end for longer than | 30 min |
@@ -34,9 +34,24 @@ verdict). Workflow: `.github/workflows/soak.yml`.
 | Event log growth per landed task | 256 KB |
 | WAL size at any sample (checkpoints falling behind) | 64 MB |
 | Median tick, last quarter vs first | 3× |
-| Tasks landed | at least 1 |
+| Tasks landed | at least 1, and at least half of those filed |
+| Tasks landed in the last quarter, while tasks were filed in it | at least 1 |
+| Samples after the warm-up | at least 4, and the run at least 90% of the hours asked for |
+| Samples that counted open file handles | at least half |
 
-Medians of whole quarters are compared, so one slow tick or one GC pause doesn't fail it. The verdict and every sample
+Medians are compared: a quarter's, and the end's (its last 10 samples), against the first quarter's. One slow tick
+or one GC pause doesn't fail a soak, but a leak late in the run does.
+
+- **Work must keep landing.** A soak fails when no task landed in its last quarter while tasks were filed, or when
+  fewer than half the tasks filed landed.
+- **Too short fails.** A run with fewer than 4 samples after the warm-up fails, and so does one shorter than the hours
+  it was asked for.
+- **Open file handles are judged over the samples that counted them.** A run where most samples couldn't count them
+  fails.
+- **The WAL is read once a sample** (a minute), so a spike between two samples isn't seen. The log is judged per
+  landed task, with no absolute cap.
+
+The verdict and every sample
 are written to `SOAK_REPORT_DIR` (`soak-verdict.json`, `soak-samples.json`).
 
 ## When it runs
@@ -46,7 +61,7 @@ are written to `SOAK_REPORT_DIR` (`soak-verdict.json`, `soak-samples.json`).
   minute is no time to judge a slope. It shows that the driver, the sampling and the verdict work.
 - **Weekly and by hand**, the soak itself: the `soak` workflow, never on a pull request. It runs on GitHub's runners,
   which stop a job at 6 hours, so a soak is **at most 5.5 hours**. The schedule runs 5.5 h; `workflow_dispatch` takes
-  `hours` (above 0, at most 5.5; anything else is refused). The process has a 4 GiB heap cap, so a leak fails the
+  `hours` (from 1 to 5.5; anything else is refused). A run must leave a verdict with no failure to pass: a skipped or renamed test that writes none fails the job. The process has a 4 GiB heap cap, so a leak fails the
   soak rather than the runner, and `timeout` ends it 15 minutes past its hours. The verdict goes to the run's summary,
   and the report is kept as the `soak-report` artifact for 30 days. The workflow is required by nothing: not the
   ruleset, not `.worklane/config.yaml`, and not the updater.
