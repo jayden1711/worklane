@@ -45,6 +45,16 @@ export function instanceDirOf(n: string, d: RolloutDeps): { dir: string | null; 
   const own = join(d.ownDir(), n);
   const at = (p: string | null) => p !== null && existsSync(join(p, 'instance.yaml'));
   const real = (p: string) => { try { return realpathSync(p); } catch { return p; } };
+  // A coordinator home there but not readable by this user (0700, another user's) is never "not there" (R1174g D2,
+  // R1174h H5): the instance is unread, and the running user's own folder is never read in its place.
+  if (theirs) {
+    try {
+      statSync(join(theirs, 'instance.yaml'));
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') return { dir: null, why: `can't read wl-${n}'s home (${code}): run this as root on a separate-users machine` };
+    }
+  }
   if (at(theirs) && at(own) && real(theirs!) !== real(own)) return { dir: null, why: `two folders for ${n}: ${theirs} (wl-${n}'s home) and ${own}; remove the stale one` };
   if (at(theirs)) return { dir: theirs, why: '' };
   if (at(own)) return { dir: own, why: '' };

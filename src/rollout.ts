@@ -107,6 +107,10 @@ export interface InstanceRead {
   lastTick: string | null;
   /** A bad sign in an earlier on-period (rolled back before, then turned on again). */
   badBefore: string | null;
+  /** Off by the engine's own off (it read no config from the default branch): the repo didn't turn it off. */
+  engineOff: boolean;
+  /** The flip's stamp is before events logged ahead of it: a clock behind, so the soak can't be timed. */
+  skewed: boolean;
 }
 
 export function readInstance(events: readonly StoredEvent[], flag: string, maxErrors: number): InstanceRead {
@@ -116,14 +120,16 @@ export function readInstance(events: readonly StoredEvent[], flag: string, maxEr
   let on = false;
   let periodStart = -1;
   let badBefore: string | null = null;
+  let engineOff = false;
   for (const [i, e] of events.entries()) {
     if (e.type !== 'flag.flipped' || (e.payload as { flag: string }).flag !== flag) continue;
     const to = (e.payload as { to: boolean }).to;
-    // R1174f 1: an off with no commit is the engine's own (it read no config from the default branch), not a config
-    // change: it says nothing about the flag there, so it changes nothing here. R1174f A1: an on while on is a replay,
+    // An off with no commit is the engine's own (it read no config from the default branch) and it is a real off: the
+    // engine ran with the flag off, so the next on starts a new soak (#1174 reviews R1174g D1, R1174h H1; R1174f 1
+    // had it ignored, which counted hours and merges made with the flag off). R1174f A1: an on while on is a replay,
     // never a new on-period.
-    if (!to && (e.payload as { sha?: unknown }).sha === null) continue;
     if (to && on) continue;
+    engineOff = !to && (e.payload as { sha?: unknown }).sha === null;
     if (!to && on && periodStart >= 0) {
       // The on-period that just ended: a bad sign in it is remembered (R1174d A3: off and on again erased it).
       const b = events.slice(periodStart + 1, i).map(badSign).find((x) => x !== null);
@@ -141,11 +147,21 @@ export function readInstance(events: readonly StoredEvent[], flag: string, maxEr
   let bad: string | null = null;
   let errors = 0;
   let lastTick: string | null = null;
+  // Alive: the last tick comes after any recorded stop (R1174h H4: a coordinator that stopped cleanly read as alive).
+  let stoppedAfterTick = false;
+  // The clock: a flip stamped before an event logged ahead of it (R1174h H3a: a clock behind) can't time a soak.
+  const flipTs = on && flipAt >= 0 ? Date.parse(events[flipAt]!.ts) : NaN;
+  const latestBefore = on && flipAt > 0 ? Math.max(...events.slice(0, flipAt).map((e) => Date.parse(e.ts))) : -Infinity;
+  const skewed = on && latestBefore - flipTs > 60_000;
   // A coordinator.started with no clean stop since the one before it: the process died (a crash loop shows as several).
   let running = false;
   for (const [i, e] of events.entries()) {
     const after = on && i > flipAt;
-    if (e.type === 'coordinator.tick') lastTick = e.ts;
+    if (e.type === 'coordinator.tick') {
+      lastTick = e.ts;
+      stoppedAfterTick = false;
+    }
+    if (e.type === 'coordinator.stopped') stoppedAfterTick = true;
     if (e.type === 'coordinator.started') {
       if (after && running) bad ??= 'the coordinator restarted without a clean stop';
       running = true;
@@ -154,13 +170,17 @@ export function readInstance(events: readonly StoredEvent[], flag: string, maxEr
     if (!after) continue;
     if (e.type === 'merge.done') {
       const n = (e.payload as { number?: unknown }).number;
-      if (n === undefined || n === null || !mergedPrs.has(n)) merges.push(e.ts);
+      // Merged after the flip, by its own merged_at when it has one (R1174h H2: a merge made before the flip and
+      // recorded after it counted).
+      const at = (e.payload as { merged_at?: unknown }).merged_at;
+      const before = typeof at === 'string' && Number.isFinite(Date.parse(at)) && Date.parse(at) < flipTs;
+      if (!before && (n === undefined || n === null || !mergedPrs.has(n))) merges.push(e.ts);
       if (n !== undefined && n !== null) mergedPrs.add(n);
     }
     if (e.type === 'coordinator.error' && ++errors > maxErrors) bad ??= `${errors} coordinator errors since it went on (limit ${maxErrors})`;
     bad ??= badSign(e);
   }
-  return { on, since: on ? since : null, merges, bad, lastTick, badBefore };
+  return { on, since: on ? since : null, merges, bad, lastTick: stoppedAfterTick ? null : lastTick, badBefore, engineOff: !on && engineOff, skewed };
 }
 
 /** Each instance's last recorded state of `flag` (flag.flipped), in log order. */
@@ -229,6 +249,7 @@ export function rolloutStatus(o: {
     else if (onCount && Date.parse(earliest!) < prevPromotedAt!) st = { ...base, state: 'out of order', why: `turned on at ${earliest}, before ring ${prevName} was promoted (${new Date(prevPromotedAt!).toISOString()}): turn it off here and on again${also}` };
     else if (onCount && bad.length) st = { ...base, state: 'roll back', why: `${bad.join('; ')}${also}` };
     else if (missing.length) st = { ...base, state: 'unknown', why: `${unread}: nothing is promoted or turned on while a ring's log is unread` };
+    else if (reads.some((s) => s.engineOff)) st = { ...base, state: 'unknown', why: `${reads.filter((s) => s.engineOff).map((s) => s.n).join(', ')} runs with the flag off by itself (it read no config from its default branch): fix that before anything is turned on (R1174f A2)` };
     else if (onCount === 0) st = { ...base, state: 'off', why: 'the flag is off in every instance of this ring' };
     else if (onCount < r.instances.length) st = { ...base, state: 'partial', why: `on in ${onCount} of ${r.instances.length} instances: turn it on in all of them, or off in all` };
     else {
@@ -241,7 +262,9 @@ export function rolloutStatus(o: {
       const short = onReads.filter((s) => s.merges.length < min_merges).map((s) => `${s.n}: ${s.merges.length} of ${min_merges} merges`);
       const before = onReads.map((s) => s.badBefore).find((x) => x) ?? null;
       const earlier = before ? `; rolled back before: ${before}` : '';
-      if (stale.length) st = { ...base, state: 'soaking', why: `no coordinator tick in the last ${live_minutes} min from ${stale.join(', ')}: a coordinator that isn't running isn't soaking${earlier}` };
+      const skewed = onReads.filter((s) => s.skewed).map((s) => s.n);
+      if (stale.length) st = { ...base, state: 'soaking', why: `no coordinator tick in the last ${live_minutes} min from ${stale.join(', ')} (or it stopped since): a coordinator that isn't running isn't soaking${earlier}` };
+      else if (skewed.length) st = { ...base, state: 'soaking', why: `${skewed.join(', ')}: the flip is stamped before events logged ahead of it (a clock behind), so the soak can't be timed: turn it off and on again${earlier}` };
       else if (hours >= soak_hours && !short.length) {
         st = { ...base, state: 'promoted', why: `${Math.floor(hours)} h on, ${mergeTs.length} merges (at least ${min_merges} in each instance), nothing went wrong${earlier}` };
         // Promoted once its hours were done and every instance had its min_merges-th merge.

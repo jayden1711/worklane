@@ -63,11 +63,14 @@ A ring is **promoted** when all of these hold:
 - every instance's event log could be read.
 
 "Since it went on" is by the **log's own order**: what was written after the flip that turned the flag on. The clock
-only measures the soak's hours, so a clock stepped back never hides a bad sign. A tick stamped in the future is no sign
-of life. Two kinds of flip don't count:
-- an off with no commit (`sha: null`) is the engine's own, written when it read no config from the default branch, not
-  a config change, so the ring keeps its history;
-- an on while it is already on is a replay, never a new on-period.
+only measures the soak's hours, so a clock stepped back never hides a bad sign. A flip stamped before events logged
+ahead of it (a clock behind) can't time a soak: the ring is held until the flag goes off and on again. A tick stamped in
+the future is no sign of life, and neither is a tick followed by a recorded stop. A merge counts once per PR, and only
+when it was merged after the flip (by its own `merged_at` when it has one).
+- **An off with no commit** (`sha: null`) is the engine's own, written when it read no config from the default branch.
+  It is a real off: the engine ran with the flag off, so the next on starts a new soak. While an instance is off this
+  way, its ring is held (`unknown`), and status never advises setting the flag true in a repo that already says so.
+- **An on while already on** is a replay, never a new on-period.
 
 Only then is the next ring turned on. **Out of order** is judged from the flip history, not today's state: a ring
 turned on before the ring before it was promoted (its hours done and its `min_merges`-th merge) stays out of order
@@ -97,8 +100,10 @@ It prints each ring's state (`off`, `partial`, `soaking`, `promoted`, `roll back
 
 **Where it finds an instance:** in the instance's coordinator home (`wl-<name>`,
 `~/.local/state/worklane/instances/<name>`), where a separate-users machine keeps it, or in the running user's own
-instances folder. Run as root, it reads every home. A name in both, and not the same folder, is ambiguous: neither is
-read, and status says to remove the stale one. A folder that is a link to one is listed too. The machine's instances are those in the running user's folder and the server instances under
+instances folder. Run as root, it reads every home; a home that is there but can't be read (another user's, 0700) is
+unread, and status exits 1 asking to run as root: the running user's own folder is never read in its place. A name in
+both, and not the same folder, is ambiguous: neither is read, and status says to remove the stale one. A folder that is
+a link to one is listed too. The machine's instances are those in the running user's folder and the server instances under
 `/srv/worklane`; a list that doesn't name every ring instance isn't the machine's whole list, and holds (exit 1).
 
 **Instances in no ring are read too.** Status also reads every other instance on the machine.

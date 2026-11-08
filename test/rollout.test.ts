@@ -318,11 +318,13 @@ test('rollout: an engine-recorded off (no commit) and a replayed on change nothi
   assert.equal(s.rings[1]!.state, 'roll back', s.rings[1]!.why);
   s = status({ e1: healthy(300, 3, 250), p1: [on(280), on(100), ...merges(3, 60), tick()], p2: [], p3: [] });
   assert.equal(s.rings[1]!.state, 'out of order', 'the first on counts');
-  // A2: the engine's own off (sha null), then on again: out of order and the bad sign stay; never "set true".
+  // A2: the engine's own off (sha null) is a real off (R1174g D1, R1174h H1): on again later starts a new soak, and the
+  // earlier bad sign is said; while it is off by itself, nothing says "set true".
   const nullOff = (h: number) => ev('flag.flipped', { flag: 'f', from: true, to: false, sha: null }, hoursAgo(h));
   const p1 = [on(280), ev('config.invalid', { sha: 'b', errors: [] }, hoursAgo(200)), nullOff(199), on(150), ...merges(3, 60), tick()];
   s = status({ e1: healthy(300, 3, 250), p1, p2: [], p3: [] });
-  assert.equal(s.rings[1]!.state, 'out of order');
+  assert.equal(s.rings[1]!.state, 'promoted');
+  assert.match(s.rings[1]!.why, /rolled back before: the config went invalid/);
   const mid = status({ e1: healthy(300, 3, 250), p1: p1.slice(0, 3), p2: [], p3: [] });
   assert.notEqual(mid.rings[1]!.state, 'off', "the engine's own off is not the repo turning it off");
   assert.doesNotMatch(mid.next, /set `flags\.f: true`/);
