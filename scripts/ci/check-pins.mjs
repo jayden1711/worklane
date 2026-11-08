@@ -26,13 +26,16 @@ import { lstatSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { tablesOf } from '../lib/check-tables.mjs';
 
-/**
- * The package.json files the checkout may hold besides its top one (tracked today: examples/basic only). Data in
- * scripts/ci/check-pins.tables.json (#941), which the weakening hold compares parsed; deep-frozen at load.
- */
-export const ALLOWED_PACKAGE_JSON = tablesOf(import.meta.url).get('ALLOWED_PACKAGE_JSON');
+// ALLOWED_PACKAGE_JSON: the package.json files the checkout may hold besides its top one (tracked today: examples/basic
+// only). Data in scripts/ci/check-pins.tables.json (#941); this file loads built-ins only (it runs before anything is
+// built), so it carries it (scripts/lib/table-copies.mjs).
+// BEGIN tables from check-pins.tables.json: generated, do not edit (node scripts/gen-table-copies.mjs --write)
+// This script runs on its own, so it carries its tables as frozen literals of the data in
+// scripts/ci/check-pins.tables.json, which the weakening hold compares parsed (#941).
+// test/table-copies.test.ts fails when this block is not what that file makes.
+export const ALLOWED_PACKAGE_JSON = Object.freeze(["examples/basic/package.json"]);
+// END tables from check-pins.tables.json
 /** The places, relative to the top, that load code in a test shard: Node resolves a bare name from each. */
 export const LOADERS = ['x.js', 'test/x.js', 'dist/test/x.js', 'dist/src/x.js', 'dist/src/os/x.js', 'dist/src/coordinator/x.js', 'dist/src/guardrails/x.js'];
 
