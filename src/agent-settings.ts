@@ -25,6 +25,7 @@ import { randomBytes } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { BRAND } from './brand.js';
+import { gitSpawnSync } from './os/git.js';
 
 /** Leading env assignment that marks our hook commands (the shell ignores it otherwise). */
 export const HOOK_MARKER = `${BRAND.envPrefix}_HOOK=1`;
@@ -177,6 +178,37 @@ export function guardrailSettings(instanceHome: string, instance: string, checko
 /** What a project's .claude/settings.json may set for an agent run: hooks (they only add) and permission rules. */
 const PROJECT_KEYS = new Set(['$schema', 'hooks', 'permissions']);
 const PROJECT_PERMISSION_KEYS = new Set(['allow', 'deny', 'ask']);
+
+/**
+ * Why an agent run in `cwd` must not start because what Claude Code loads from the checkout isn't what its last
+ * commit holds (#958), or null. A project command (a worktree setup step, a dependency's install script) runs as the
+ * agent user and can write `.claude/settings.json` with a SessionStart hook, or a CLAUDE.md, into the checkout; the
+ * next run would load it, and run the hook outside any sandbox. So anything under `.claude/` (ignored files too, as a
+ * gitignored settings.local.json; never the coordinator's own `.claude/worktrees/`) and any CLAUDE.md or
+ * CLAUDE.local.md (tracked or untracked; an ignored one, as under node_modules, isn't listed) that differs from the
+ * checkout's HEAD, or isn't in it, refuses the run. Not a checkout: null (nothing committed to compare with). A git
+ * status that fails: refused (fail closed). It compares with HEAD, not the task's base: a hook an agent commits
+ * itself is the merge policy's (agent-instructions waits), and not caught here.
+ */
+export function uncommittedAgentFilesRefusal(cwd: string): string | null {
+  const inside = gitSpawnSync(['rev-parse', '--is-inside-work-tree'], { cwd, encoding: 'utf8' });
+  if (inside.status !== 0 || inside.stdout.trim() !== 'true') return null;
+  const status = (args: string[]) => {
+    const r = gitSpawnSync(['status', '--porcelain=v1', '-z', '--untracked-files=all', '--no-renames', ...args], { cwd, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
+    if (r.status !== 0) throw new Error(`git status failed in ${cwd}: ${String(r.stderr ?? '').trim().split('\n')[0]?.slice(0, 200) ?? ''}`);
+    // The coordinator's own worktrees, as git lists them collapsed (`.claude/worktrees/`) or file by file: never these.
+    return r.stdout.split('\0').filter(Boolean).map((e) => e.slice(3)).filter((p) => p !== '.claude/worktrees/' && !p.startsWith('.claude/worktrees/'));
+  };
+  let changed: string[];
+  try {
+    changed = [...new Set([...status(['--ignored=matching', '--', ':(top).claude', ':(top,exclude).claude/worktrees']), ...status(['--', ':(top,glob)**/CLAUDE.md', ':(top,glob)**/CLAUDE.local.md'])])];
+  } catch (e) {
+    return `the checkout's agent settings and instructions couldn't be compared with its last commit (${(e as Error).message})`;
+  }
+  if (!changed.length) return null;
+  const shown = changed.slice(0, 5).map((p) => JSON.stringify(p)).join(', ');
+  return `the checkout's agent settings or instructions (${shown}${changed.length > 5 ? ` and ${changed.length - 5} more` : ''}) differ from its last commit or aren't in it: written by a setup step or a command since, a run would load them, and a hook there would run outside the sandbox`;
+}
 
 /**
  * Why an agent run in `cwd` must not start because of the checkout's .claude/settings.json, or null. Deny and ask

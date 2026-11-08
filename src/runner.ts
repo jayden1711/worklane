@@ -9,7 +9,7 @@ import { makePlace } from './worktrees.js';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { join, posix } from 'node:path';
-import { agentSettingsFileOf, projectSettingsRefusal, runSettings, settingsAppliedProblem, settingsCheckValue, type Settings, withRunCheck } from './agent-settings.js';
+import { agentSettingsFileOf, projectSettingsRefusal, uncommittedAgentFilesRefusal, runSettings, settingsAppliedProblem, settingsCheckValue, type Settings, withRunCheck } from './agent-settings.js';
 import { BRAND } from './brand.js';
 import type { CliAgentName } from './providers.js';
 import { logRefusalOnce, providerHostRefusal } from './provider-hosts.js';
@@ -723,7 +723,9 @@ export class CliRunner implements AgentRunner {
       } catch (e) {
         return { reason: 'failed', detail: `${(e as Error).message}; not starting`, costUsd: 0, turns: 0, model: req.model };
       }
-      const refusal = projectSettingsRefusal(req.cwd, guard);
+      // A project file that could loosen the run (named by key), then (#958) anything a setup step or a command wrote
+      // where Claude Code loads it since the checkout's last commit: a hook there passes the first and runs unsandboxed.
+      const refusal = projectSettingsRefusal(req.cwd, guard) ?? uncommittedAgentFilesRefusal(req.cwd);
       if (refusal) return { reason: 'failed', detail: `${refusal}; not starting`, costUsd: 0, turns: 0, model: req.model };
     }
     // INVARIANT (#890): a guarded run's task hidden paths and project secret paths are denied by its OS sandbox and
