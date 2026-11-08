@@ -1,7 +1,7 @@
 # Feature flags
 
 A risky change to the engine ships behind a flag. It stays off in every project until that project turns it on, so a
-new behaviour can be tried on one repo before it reaches the rest. Code: `src/flags.ts` (the schema half in `src/config/schema.ts`). Tests:
+new behaviour can be tried on one repo before it reaches the rest. Code: `src/config/schema.ts` (`FLAGS`, `RETIRED_FLAGS` and the schema) and `src/flags.ts` (`flagOn` and the audit). Tests:
 `test/feature-flags.test.ts`.
 
 ## The rules
@@ -11,9 +11,12 @@ new behaviour can be tried on one repo before it reaches the rest. Code: `src/fl
 - **Per repo.** Flags live in the repo's own `.worklane/config.yaml`, which the coordinator reads from the default
   branch (`src/config/live.ts`). So a flag changes only through a commit that was reviewed and merged there, like any
   other config change.
-- **Only flags the engine knows.** The engine lists its flags in `FLAGS` (`src/flags.ts`). A name it doesn't know makes
-  the config invalid: the coordinator keeps running on the last good config and raises `config_invalid`, naming the
-  flag and the ones it knows. A typo never turns something on, and never quietly does nothing.
+- **Only flags the engine knows.** The engine lists its flags in `FLAGS` (`src/config/schema.ts`).
+  - **A name it doesn't know makes the config invalid.** The coordinator keeps running on the last good config and
+    raises `config_invalid`, naming the flag and the ones it knows. A typo never turns something on, and never quietly
+    does nothing.
+  - **A retired name is the exception** (`RETIRED_FLAGS`): it's accepted with any value and always read as off. So a
+    repo that still names a flag the engine retired keeps working, at start too.
 - **Every flip is audited.** On each tick the coordinator compares each flag's state with the last one recorded in the
   event log. Each difference is one `flag.flipped` event: the flag, from, to, and the commit of the config it read.
   A flip made while the coordinator was down is recorded at its first tick. A flag the engine stopped knowing that
@@ -34,12 +37,18 @@ Once it's merged, the next tick applies it and records `flag.flipped` (`from: fa
 
 ## Add one (engine developers)
 
-1. Add an entry to `FLAGS` in `src/flags.ts`, with what turning it on changes and the PR that adds it.
+1. Add an entry to `FLAGS` in `src/config/schema.ts`, with what turning it on changes and the PR that adds it. That file
+   is in the agents' tool guard's import tree, so the change is L3 and waits for the owner.
 2. Guard the new behaviour with `flagOn(cfg.project.flags, '<name>')`, keeping the old behaviour when it's off.
 3. Test both states. Off must behave exactly as before.
-4. Once the change is the default everywhere, remove the flag and its old path, and say so in the changelog. A repo
-   that still names the removed flag gets `config_invalid` until it deletes the line, and the log records the flag
-   off.
+4. Once the change is the default everywhere, **retire** the flag:
+   - move its name from `FLAGS` to `RETIRED_FLAGS` (never just delete it);
+   - remove the old path;
+   - say so in the changelog.
+
+   A repo that still names it keeps working, with the flag off, and the log records it off at the first tick. A name
+   never leaves `RETIRED_FLAGS`. Deleting it would make every config that still names it invalid, and at start
+   (`loadConfig`, with no last good config to fall back on) the engine wouldn't run.
 
 The engine knows no flags yet. The first one comes with the first risky change that needs one. The canary rollout
 ([testing-in-production.md](testing-in-production.md), item f) stages any registered flag ring by ring.

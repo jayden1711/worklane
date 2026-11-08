@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { appendFileSync, cpSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
 import { tmpdir } from 'node:os';
@@ -8,7 +8,8 @@ import { join } from 'node:path';
 import { EventLog } from '../src/events/log.js';
 import type { EventPayload } from '../src/events/types.js';
 import { ProjectConfig } from '../src/config/schema.js';
-import { FLAGS, flagOn, flagsSchema, recordFlagFlips, recordedFlags } from '../src/flags.js';
+import { FLAGS, RETIRED_FLAGS, flagOn, flagsSchema, recordFlagFlips, recordedFlags } from '../src/flags.js';
+import { loadConfig } from '../src/config/load.js';
 import { FakeRunner } from '../src/runner.js';
 import { coordinator, fixture, skip } from './repro-state-graph/harness.js';
 
@@ -16,7 +17,7 @@ const repoRoot = fileURLToPath(new URL('../..', import.meta.url));
 const base = parse(readFileSync(join(repoRoot, 'examples', 'basic', '.worklane', 'config.yaml'), 'utf8')) as Record<string, unknown>;
 
 test('flags: absent is none; only names the engine knows, each true or false; anything else makes the config invalid', () => {
-  const s = flagsSchema(['risky_thing', 'other']);
+  const s = flagsSchema(() => ['risky_thing', 'other']);
   assert.deepEqual(s.parse(undefined), {});
   assert.deepEqual(s.parse({ risky_thing: true, other: false }), { risky_thing: true, other: false });
   for (const bad of [{ risky_thng: true }, { 'Risky-Thing': true }, { risky_thing: 'yes' }, { risky_thing: 1 }, { risky_thing: null }, { '': true }]) {
@@ -30,6 +31,36 @@ test('flags: absent is none; only names the engine knows, each true or false; an
   assert.equal(unknown.success, false);
   assert.match(JSON.stringify(unknown.error?.issues), /no such flag: not_a_flag_here/);
   for (const name of Object.keys(FLAGS)) assert.equal(ProjectConfig.parse(base).flags[name], undefined, `${name} is off by default`);
+});
+
+test('a retired flag: still accepted in a config, whatever its value, and always off; any other unknown name stays invalid', () => {
+  const s = flagsSchema(() => ['live_one'], () => ['old_one']);
+  assert.deepEqual(s.parse({ live_one: true, old_one: true }), { live_one: true }, 'dropped from the parsed flags, so never on');
+  assert.deepEqual(s.parse({ old_one: false }), {});
+  assert.equal(s.safeParse({ old_one: 'yes' }).success, false, 'still a boolean, as when it was a flag');
+  assert.equal(s.safeParse({ never_one: false }).success, false);
+});
+
+test('the engine starts on a repo whose config still names a retired flag, on or off: loadConfig at start, with no last good config to fall back on (#1173 review)', () => {
+  for (const value of [true, false]) {
+    const dir = mkdtempSync(join(tmpdir(), 'flags-retired-'));
+    cpSync(join(repoRoot, 'examples', 'basic'), dir, { recursive: true });
+    appendFileSync(join(dir, '.worklane', 'config.yaml'), `flags:\n  retired_one: ${value}\n`);
+    try {
+      // Before it is retired (an engine that never knew it): the config is invalid, as for any unknown name.
+      assert.throws(() => loadConfig(dir), /no such flag: retired_one/);
+      RETIRED_FLAGS.push('retired_one');
+      try {
+        const cfg = loadConfig(dir);
+        assert.deepEqual(cfg.project.flags, {}, `retired_one: ${value} loads, and is off`);
+        assert.equal(flagOn(cfg.project.flags, 'retired_one'), false);
+      } finally {
+        RETIRED_FLAGS.splice(RETIRED_FLAGS.indexOf('retired_one'), 1);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
 });
 
 test('flagOn: only an explicit true is on', () => {
