@@ -6,6 +6,7 @@
 import { lstatSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import { basename, splitCommands, type SimpleCommand } from '../guardrails/shell.js';
+import { gitGuarded } from '../os/git.js';
 import { ATTRIBUTES_FILE } from '../scan/secrets.js';
 
 /** What one scan of a checkout covers, on top of the staged changes it always covers. */
@@ -767,9 +768,16 @@ function aliasRefusal(loose: SimpleCommand[], p: PlanEnv, dirs: Set<string> | st
     const g = looseGit(c);
     if (!g?.sub || g.sub.startsWith('-') || GIT_BUILTINS.has(g.sub)) continue;
     if (g.configs.some((k) => /^alias\./i.test(k))) return `git ${g.sub} with an alias given on its command line`;
-    if (g.configs.some((k) => /^help\.autocorrect$/i.test(k))) return `git ${g.sub} with help.autocorrect given on its command line`;
+    // -c stores `key=value` (R1124g): the key, whatever its value.
+    if (g.configs.some((k) => /^help\.autocorrect(=|$)/i.test(k))) return `git ${g.sub} with help.autocorrect given on its command line`;
     if (loose.some((x) => looseGit(x)?.sub === 'config')) return `git ${g.sub} in a line that also changes git config`;
     if (loose.some(setsGitEnv)) return `git ${g.sub} in a line that sets git's environment`;
+    // R1124h 3: a name with a dot may be an alias in a subsection ([alias "Ci"] x = commit runs as `git ci.x`), which
+    // git matches case-insensitively; the lookup below can't say so, so it refuses.
+    if (g.sub.includes('.')) return `git ${g.sub}: a name with a dot may be an alias in a subsection (alias.<sub>.<name>), which git matches whatever its case`;
+    // R1124h 4 (as R124d): in a process marked as an instance's, the lookups below read no global config, so they
+    // can't say what git would run for this name.
+    if (gitGuarded()) return `git ${g.sub}: this process's git reads no global config (it runs for an instance), so it can't say whether the name is an alias or a correction`;
     if (typeof dirs === 'string') return `git ${g.sub} after ${dirs}`;
     for (const dir of dirs) {
       let sub = g.sub;

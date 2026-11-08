@@ -314,3 +314,81 @@ test('R1124f D3: with help.autocorrect on, a misspelt command git corrects to co
     assert.notEqual(await decide(d, 'Bash', { command: 'git commit -m x' }), 'deny', `a real commit, help.autocorrect ${value}`);
   }
 });
+
+// R1124g, R1124h: what the file system makes one file, and what git reads as config or an alias, beyond D1-D3.
+// Folding and case-insensitive names collide only where the scan's temp dir is on such a file system (macOS APFS);
+// CI runs Linux only, so these two run on macOS.
+const skipFold = skip || (process.platform !== 'darwin' && 'needs a case-insensitive, normalisation-insensitive tmpdir (macOS APFS)');
+const stageIndex = (d: string, entries: [Buffer, string][]) => {
+  const lines = entries.map(([name, body]) => {
+    const blob = execFileSync('git', ['-C', d, 'hash-object', '-w', '--stdin'], { input: body, encoding: 'utf8' }).trim();
+    return Buffer.concat([Buffer.from(`100644 ${blob}\t`), name, Buffer.from([0])]);
+  });
+  execFileSync('git', ['-C', d, 'update-index', '-z', '--index-info'], { input: Buffer.concat(lines) });
+};
+
+test('R1124g/R1124h 1: names APFS folds alike that no lower-casing pairs (long s, sharp s, micro sign, final sigma, beta symbol) are each scanned', { skip: skipFold }, () => {
+  const got: Record<string, string> = {};
+  for (const [a, b] of [['s', 'ſ'], ['ss', 'ß'], ['μ', 'µ'], ['σ', 'ς'], ['β', 'ϐ']] as const) {
+    // git lists entries by bytes: the first is the one a second write would overwrite, so it holds the secret.
+    const [first, second] = Buffer.compare(Buffer.from(a), Buffer.from(b)) < 0 ? [a, b] : [b, a];
+    const d = checkout();
+    stageIndex(d, [[Buffer.from(`${first}.js`), SECRET], [Buffer.from(`${second}.js`), 'export const y = 2;\n']]);
+    const was = head(d);
+    const r = commit(d, '-m', 'wip');
+    got[`${first}.js / ${second}.js`] = r.status !== 0 && head(d) === was ? 'refused' : 'committed';
+  }
+  assert.deepEqual(Object.values(got), Object.values(got).map(() => 'refused'), JSON.stringify(got));
+});
+
+test("R1124h 2: a case variant of the scanner's ignore file goes a folder lower, as the exact name does, so it ignores nothing", { skip: skipFold }, async () => {
+  const d = checkout();
+  writeFileSync(join(d, 'k.js'), SECRET);
+  // The scan prefixes 65 536 newlines, so the secret is on line 65 537; gitleaks dir fingerprints are file:rule:line.
+  writeFileSync(join(d, '.GITLEAKSIGNORE'), 'k.js:github-pat:65537\n');
+  git(d, 'add', 'k.js', '.GITLEAKSIGNORE');
+  assert.equal(await decide(d, 'Bash', { command: 'git commit -m wip' }), 'deny', 'the first layer');
+  const was = head(d);
+  assert.notEqual(commit(d, '-m', 'wip').status, 0, 'the hook');
+  assert.equal(head(d), was, 'nothing committed');
+});
+
+test('R1124h 3: a name with a dot, which git may run as an alias in a subsection ([alias "Ci"] x = commit), is refused', { skip }, async () => {
+  const d = checkout();
+  writeFileSync(join(d, '.git', 'config'), `${readFileSync(join(d, '.git', 'config'), 'utf8')}[alias "Ci"]\n\tx = commit\n`);
+  assert.equal(await decide(d, 'Bash', { command: 'git ci.x -n -m x' }), 'deny', 'git ci.x -n');
+  assert.equal(await decide(d, 'Bash', { command: 'git CI.x -n -m x' }), 'deny', 'git CI.x -n');
+});
+
+test("R1124h 4 (as R124d): in a process marked as an instance's, a name that isn't git's own is refused, as its alias or correction can't be read", { skip }, async () => {
+  const d = checkout();
+  const was = process.env[GIT_GUARD_VAR];
+  process.env[GIT_GUARD_VAR] = d;
+  try {
+    for (const line of ['git comit -n -m x', 'git ci -n -m x']) assert.equal(await decide(d, 'Bash', { command: line }), 'deny', line);
+    // The control: git's own commands aren't looked up (a commit here is refused anyway, by R124d's check).
+    for (const line of ['git status', 'git log -n 3']) assert.notEqual(await decide(d, 'Bash', { command: line }), 'deny', `the control: ${line}`);
+  } finally {
+    if (was === undefined) delete process.env[GIT_GUARD_VAR];
+    else process.env[GIT_GUARD_VAR] = was;
+  }
+});
+
+test('R1124h 5: a folder moved, copied or linked into a place git reads config from is a config write, and so is a file moved into one', { skip }, async () => {
+  const d = checkout();
+  const h = process.env.HOME!;
+  for (const line of [
+    `mv ${h}/.config/gx ${h}/.config/git`,
+    `cp -r /tmp/x ${h}/.config/git`,
+    `ln -s /tmp/x ${h}/.config/git`,
+    `mv /tmp/x ${h}/.config`,
+    `mv /tmp/.gitconfig ${h}`,
+    `cp /tmp/config ${h}/.config/git/`,
+    `mv -t ${h} /tmp/.gitconfig`,
+    'mv /tmp/g .git',
+    'cp -r /tmp/h .git/hooks',
+    `(sleep 20; mv ${h}/.config/gx ${h}/.config/git) > /dev/null 2>&1 &`,
+  ]) assert.equal(await decide(d, 'Bash', { command: line }), 'deny', line);
+  // The controls: moving into an ordinary folder, and making one, aren't refused.
+  for (const line of ['mv build out', `mkdir -p ${h}/.config/gx`, `cp a.txt ${h}/notes.txt`]) assert.notEqual(await decide(d, 'Bash', { command: line }), 'deny', line);
+});

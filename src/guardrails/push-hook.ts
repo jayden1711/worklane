@@ -5,6 +5,7 @@
 // Like the rest of the shell matcher this is best effort (shell.ts): the runner also drops the variable from every
 // agent's environment (runner.ts agentEnv), and the hook itself refuses the hatch inside an agent run.
 import { resolve as resolvePath } from 'node:path';
+import { gitGuarded } from '../os/git.js';
 import { basename, envShort, envTakesNext, programsIn, shortCluster, splitCommands, type SimpleCommand } from './shell.js';
 
 /** The hatch: set to 1 in a person's own shell, for one push. */
@@ -191,6 +192,10 @@ function resolveGit(a: string[], look: Lookup | null, depth = 0): Resolved[] | s
   if (depth > 10) return `git ${sub}: an alias loop`;
   if (typeof look.dirs === 'string') return `git ${sub} ${look.dirs}`;
   if (look.env) return `git ${sub} in a line that ${look.env}`;
+  // R1124h 3: a name with a dot may be an alias in a subsection, which git matches whatever its case.
+  if (sub.includes('.')) return `git ${sub}: a name with a dot may be an alias in a subsection (alias.<sub>.<name>), which git matches whatever its case`;
+  // R1124h 4 (as R124d): a marked process's git reads no global config, so it can't say what this name runs.
+  if (gitGuarded()) return `git ${sub}: this process's git reads no global config (it runs for an instance), so it can't say whether the name is an alias or a correction`;
   const out: Resolved[] = [{ ...g, pushes: false }];
   for (const dir of look.dirs) {
     const query = (key: string) => look.git(dir, [...g.locate, 'config', '--get', key]);
@@ -274,6 +279,43 @@ const GIT_HOOKS_OR_CONFIG = [/(^|\/)\.git\/(.*\/)?hooks(\/|$)/, /(^|\/)\.git\/(.
 /** Files a later shell, tool or push reads its environment from. */
 const ENV_FILE = /(^|\/)(\.(bashrc|bash_profile|bash_login|bash_aliases|bash_logout|profile|zshrc|zshenv|zprofile|zlogin|kshrc|envrc|pam_environment|env(\.[^/]*)?)|[^/]*\.env|config\.fish|environment)$|(^|\/)(environment\.d|profile\.d|conf\.d)\/[^/]+$/i;
 
+/** Commands that put their sources at, or into, a destination they name (a move, a copy, a link). */
+const PLACES = new Set(['mv', 'cp', 'ln', 'install', 'rsync']);
+
+/**
+ * R1124h 5: what a move, copy or link may create besides its destination: `<destination>/<source's name>`, when the
+ * destination is a folder (`mv /tmp/.gitconfig ~` makes ~/.gitconfig). Its operands are its words that aren't options;
+ * `-t DIR`, `--target-directory=DIR` name the destination first.
+ */
+function placedInto(c: SimpleCommand): string[] {
+  if (!c.argv.length || !PLACES.has(basename(c.argv[0]!))) return [];
+  const args = c.argv.slice(1);
+  let target: string | null = null;
+  const operands: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === '-t' || a === '--target-directory') target = args[++i] ?? null;
+    else if (a.startsWith('--target-directory=')) target = a.slice('--target-directory='.length);
+    else if (!a.startsWith('-')) operands.push(a);
+  }
+  const dest = target ?? operands.pop();
+  if (!dest) return [];
+  return operands.map((s) => `${dest.replace(/\/+$/, '')}/${basename(s.replace(/\/+$/, ''))}`);
+}
+
+/**
+ * R1124h 5: whether `resolved`, put in place as a folder, is one git reads config or hooks from: a git dir (a worktree's
+ * included), or the user's config folder or its git/ (HOME, XDG_CONFIG_HOME). `mkdir .config/gx`, write its config,
+ * then `mv .config/gx .config/git` wrote a git config no path test saw.
+ */
+function holdsGitConfig(resolved: string): boolean {
+  const p = slashes(resolved).replace(/\/+$/, '');
+  if (/(^|\/)\.git(\/worktrees\/[^/]+)?$/.test(p)) return true;
+  const home = process.env.HOME ? slashes(resolvePath(process.env.HOME)).replace(/\/+$/, '') : null;
+  const xdg = process.env.XDG_CONFIG_HOME ? slashes(resolvePath(process.env.XDG_CONFIG_HOME)).replace(/\/+$/, '') : home ? `${home}/.config` : null;
+  return !!xdg && (p === xdg || p === `${xdg}/git` || (!!home && (p === `${home}/.config` || p === `${home}/.config/git`)));
+}
+
 /** Whether writing `path` (as given, and as resolved against the call's directory) changes git's hooks or config. */
 export function isGitHooksOrConfigPath(path: string, resolved: string): boolean {
   return [path, resolved].map(slashes).some((p) => GIT_HOOKS_OR_CONFIG.some((re) => re.test(p)));
@@ -312,7 +354,7 @@ export function pushHookShellRefusal(command: string, commands: SimpleCommand[],
       if (pushes && PUSH_ENV.test(name)) return bypass(`${name} gives this push a git config or hooks of its own`);
     }
     if (pushes && unsets(c)) return bypass(`${c.argv[0]} in a push's line can take git's config away`);
-    const hit = c.writes.find((w) => isGitHooksOrConfigPath(w, resolve(w)));
+    const hit = c.writes.find((w) => isGitHooksOrConfigPath(w, resolve(w))) ?? placedInto(c).find((w) => isGitHooksOrConfigPath(w, resolve(w))) ?? c.writes.find((w) => holdsGitConfig(resolve(w)));
     if (hit) return bypass(`${hit} is a git hooks dir or config file`);
   }
   if (pushes && commands.some((c) => envOptionsOf(c).length)) return bypass("env with an option in a push's line can take git's config away");

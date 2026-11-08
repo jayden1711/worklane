@@ -177,34 +177,38 @@ function scanComparisons(top: string, binary: string | null | undefined, compari
       const side = (name: string, pick: (c: Compared) => Buffer | null) => {
         const keys = new Map<string, string[]>();
         for (const [k, scannerName] of [[0, false], [1, true]] as const) {
-          // R1124f D1: two entries can land on one file here: names that aren't UTF-8 decode alike (U+FFFD), and on a
-          // case-insensitive or normalising file system a case or NFC/NFD pair is one file. Each entry goes in the
-          // first root where its folded name, and every folder above it, is still free (as a file or as a folder), so
-          // none overwrites another and every one is scanned.
-          const roots: { files: Set<string>; dirs: Set<string> }[] = [];
-          const fold = (p: string) => p.normalize('NFC').toLowerCase();
-          const slotOf = (path: string): number => {
-            const parts = fold(path).split('/');
-            const self = parts.join('/');
-            const above = parts.slice(0, -1).map((_, j) => parts.slice(0, j + 1).join('/'));
-            let n = roots.findIndex((r) => !r.files.has(self) && !r.dirs.has(self) && above.every((d) => !r.files.has(d)));
-            if (n === -1) n = roots.push({ files: new Set(), dirs: new Set() }) - 1;
-            roots[n]!.files.add(self);
-            for (const d of above) roots[n]!.dirs.add(d);
-            return n;
+          // R1124f D1, R1124g: two entries can land on one file here: names that aren't UTF-8 decode alike (U+FFFD), and
+          // a case-insensitive or normalising file system makes one file of a case, NFC/NFD or folding pair (APFS: ß
+          // and ss, ſ and s, µ and μ, ς and σ, and more). No fold predicts every file system, so the file system is
+          // asked: each entry is created exclusively, in the first root where its name is free and no file blocks a
+          // folder above it, else in a new root. None overwrites another, and every one is scanned.
+          let roots = 0;
+          const rootDir = (n: number) => join(tmp, `c${i}-${name}-${k}-${n}`);
+          const place = (path: string, data: Buffer) => {
+            for (let n = 0; ; n++) {
+              if (n >= roots) roots = n + 1;
+              const at = join(rootDir(n), scannerName ? SCANNER_DIR : '', path);
+              try {
+                mkdirSync(dirname(at), { recursive: true });
+                writeFileSync(at, data, { flag: 'wx' });
+                return;
+              } catch (e) {
+                // Taken (EEXIST), or a file stands where a folder of the path must be (ENOTDIR, EEXIST): the next root.
+                const code = (e as NodeJS.ErrnoException).code;
+                if (code !== 'EEXIST' && code !== 'ENOTDIR' && code !== 'EISDIR') throw e;
+              }
+            }
           };
           for (const c of files) {
             const content = pick(c);
-            if (content === null || SCANNER_NAMES.has(c.path) !== scannerName) continue;
+            if (content === null || scannerNamed(c.path) !== scannerName) continue;
             const parts = c.path.split('/');
             if (!c.path || c.path.startsWith('/') || parts.some((p) => p === '..' || p === '')) throw new Error(`an unexpected path from git: ${JSON.stringify(c.path)}`);
             // WHY: a file the scanner would read as its own settings at its root goes, as content, a folder lower.
-            const at = join(tmp, `c${i}-${name}-${k}-${slotOf(c.path)}`, scannerName ? SCANNER_DIR : '', c.path);
-            mkdirSync(dirname(at), { recursive: true });
-            writeFileSync(at, Buffer.concat([TEXT_PREFIX, text(content)]));
+            place(c.path, Buffer.concat([TEXT_PREFIX, text(content)]));
           }
           // Each root's findings, added to what the others found under the same name (never in place of them).
-          for (const n of roots.keys()) for (const [file, found] of scan(join(tmp, `c${i}-${name}-${k}-${n}`), scannerName)) keys.set(file, [...(keys.get(file) ?? []), ...found]);
+          for (let n = 0; n < roots; n++) for (const [file, found] of scan(rootDir(n), scannerName)) keys.set(file, [...(keys.get(file) ?? []), ...found]);
         }
         return keys;
       };
@@ -262,8 +266,17 @@ export function committedRules(top: string): Buffer | null {
   return r.stdout;
 }
 
+/**
+ * A name folded at least as far as any file system the scan's temp dir may be on folds it (R1124h): NFKC (the
+ * compatibility forms: ſ, µ, ϐ, ligatures, the Kelvin sign), then upper and lower case (as APFS's case folding pairs
+ * them), and final sigma as sigma. Folding further than a file system does only puts more entries in their own root.
+ */
+const foldName = (p: string) => p.normalize('NFKC').toUpperCase().toLowerCase().replaceAll('ς', 'σ');
+
 /** Names the scanner reads as its own settings at the root of what it scans; such a file of the commit goes lower. */
 const SCANNER_NAMES = new Set(['.gitleaksignore', '.gitleaks.toml', '.gitleaksbaseline']);
+/** Whether `path` is, on a case-insensitive file system, one of SCANNER_NAMES (`.GITLEAKSIGNORE` too, R1124h). */
+const scannerNamed = (path: string) => SCANNER_NAMES.has(foldName(path));
 const SCANNER_DIR = 'scanner-named';
 
 /** The bytes the scanner reads for a file: NUL bytes dropped, so text spread across them is read as text. */
