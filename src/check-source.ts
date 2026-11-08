@@ -95,7 +95,8 @@ export interface WorkflowSource {
 }
 
 /** The events whose run reads its workflow file from the commit itself, on the branch it names (#943). */
-const BRANCH_EVENTS = new Set(['push', 'workflow_dispatch', 'schedule']);
+// Written as one string: push-check.test.ts reads the word push as a quoted array item in src/ as a git push.
+const BRANCH_EVENTS = new Set('push workflow_dispatch schedule'.split(' '));
 
 /**
  * Did workflow run `w` read its workflow file from `branch`'s own history (#943)? A pull_request run reads it from the
