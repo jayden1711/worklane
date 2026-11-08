@@ -10,7 +10,9 @@ new behaviour can be tried on one repo before it reaches the rest. Code: `src/co
   any other value is off.
 - **Per repo.** Flags live in the repo's own `.worklane/config.yaml`, which the coordinator reads from the default
   branch (`src/config/live.ts`). So a flag changes only through a commit that was reviewed and merged there, like any
-  other config change.
+  other config change. When the default branch's config is invalid or missing, the engine starts on the checkout's,
+  with **every flag off**: a branch or a hand edit never turns one on. The schema, the `FILES` map and both flag
+  lists are frozen, so no module can swap them at run time.
 - **Only flags the engine knows.** The engine lists its flags in `FLAGS` (`src/config/schema.ts`).
   - **A name it doesn't know makes the config invalid.** The coordinator keeps running on the last good config and
     raises `config_invalid`, naming the flag and the ones it knows. A typo never turns something on, and never quietly

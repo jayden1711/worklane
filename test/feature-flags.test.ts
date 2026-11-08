@@ -7,11 +7,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EventLog } from '../src/events/log.js';
 import type { EventPayload } from '../src/events/types.js';
-import { ProjectConfig } from '../src/config/schema.js';
-import { FLAGS, FLAG_NAME, RETIRED_FLAGS, flagOn, flagsSchema, recordFlagFlips, recordedFlags, withRetiredFlags } from '../src/flags.js';
+import { FILES, ProjectConfig, withRetiredFlags } from '../src/config/schema.js';
+import { FLAGS, FLAG_NAME, RETIRED_FLAGS, flagOn, flagsSchema, recordFlagFlips, recordedFlags } from '../src/flags.js';
+import { startConfig } from '../src/config/live.js';
 import { loadConfig } from '../src/config/load.js';
 import { FakeRunner } from '../src/runner.js';
-import { coordinator, fixture, skip } from './repro-state-graph/harness.js';
+import { coordinator, fixture, git, skip } from './repro-state-graph/harness.js';
 
 const repoRoot = fileURLToPath(new URL('../..', import.meta.url));
 const base = parse(readFileSync(join(repoRoot, 'examples', 'basic', '.worklane', 'config.yaml'), 'utf8')) as Record<string, unknown>;
@@ -59,6 +60,9 @@ test('the engine starts on a repo whose config still names a retired flag, on or
   }
 });
 
+/** The engine files that name the test seam (any mention of the bare name). */
+const seamUsers = (files: readonly (readonly [string, string])[]) => files.filter(([, text]) => /\bwithRetiredFlags\b/.test(text)).map(([f]) => f);
+
 test('the flag lists are frozen and share no name; only the schema itself retires one for a test (#1173 review)', () => {
   assert.ok(Object.isFrozen(FLAGS), 'FLAGS is frozen');
   assert.ok(Object.isFrozen(RETIRED_FLAGS), 'RETIRED_FLAGS is frozen');
@@ -75,12 +79,53 @@ test('the flag lists are frozen and share no name; only the schema itself retire
   assert.equal(s(), false);
   assert.throws(() => withRetiredFlags(['seam_one'], () => { throw new Error('boom'); }), /boom/);
   assert.equal(s(), false, 'unwound after a throw too');
-  // No engine module calls the seam: only the schema defines it, and only tests use it.
+  // No engine module names the seam at all: only src/config/schema.ts defines it, and only tests use it. The bare name,
+  // so an aliased import, a `.call(...)` or a property read is caught too (#1173 review R1173e).
   const src = join(repoRoot, 'src');
-  const walk = (d: string): string[] => readdirSync(d).flatMap((n) => (statSync(join(d, n)).isDirectory() ? walk(join(d, n)) : n.endsWith('.ts') ? [join(d, n)] : []));
-  const callers = walk(src).filter((f) => !f.endsWith(join('config', 'schema.ts')) && !f.endsWith('flags.ts') && /withRetiredFlags\(/.test(readFileSync(f, 'utf8')));
-  assert.deepEqual(callers, []);
-  assert.doesNotMatch(readFileSync(join(src, 'flags.ts'), 'utf8'), /withRetiredFlags\(/, 'flags.ts only re-exports it');
+  const walk = (d: string): string[] => readdirSync(d).flatMap((n) => (statSync(join(d, n)).isDirectory() ? walk(join(d, n)) : /\.[cm]?[jt]s$/.test(n) ? [join(d, n)] : []));
+  const definer = join(src, 'config', 'schema.ts');
+  assert.deepEqual(seamUsers(walk(src).filter((f) => f !== definer).map((f) => [f, readFileSync(f, 'utf8')] as const)), []);
+  // The scan itself, on the shapes that dodged the old one: each is caught.
+  for (const text of ["import { withRetiredFlags as retire } from './config/schema.js'; retire(['x'], f);", "schema.withRetiredFlags.call(null, ['x'], f)", "withRetiredFlags (['x'], f)", "const { withRetiredFlags: w } = schema;"]) {
+    assert.deepEqual(seamUsers([['src/x-flags.ts', text]]), ['src/x-flags.ts'], text);
+  }
+});
+
+test('no module can swap the config schema at run time: FILES and ProjectConfig.shape are frozen (#1173 review R1173f, 2)', () => {
+  assert.ok(Object.isFrozen(FILES));
+  assert.throws(() => ((FILES as Record<string, unknown>)['config.yaml'] = ProjectConfig), TypeError);
+  assert.ok(Object.isFrozen(ProjectConfig.shape));
+  assert.throws(() => ((ProjectConfig.shape as Record<string, unknown>).flags = null), TypeError);
+  // And it still parses as before: a typo'd flag is refused.
+  assert.equal(ProjectConfig.safeParse({ ...base, flags: { typo_flag: true } }).success, false);
+});
+
+test("a checkout's config never turns a flag on: when main's config is invalid or missing, the start config's flags are off (#1173 review R1173f, 1)", () => {
+  const f = fixture();
+  try {
+    // The clone's HEAD: a branch whose config (never reviewed or merged) names a flag on. Retired here only so it parses;
+    // the point is which config's flags count, whatever they say.
+    git(f.repo, 'checkout', '-q', '-b', 'try-it');
+    const cfgPath = join(f.repo, '.worklane', 'config.yaml');
+    appendFileSync(cfgPath, 'flags:\n  some_flag: true\n');
+    git(f.repo, 'add', '-A');
+    git(f.repo, '-c', 'user.email=ada@example.com', '-c', 'user.name=Ada', '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'branch: flag on');
+    // main's config: invalid (a typo'd flag), so the start falls back to the checkout.
+    const person = join(f.base, 'person');
+    git(f.base, 'clone', '-q', f.remote, person);
+    appendFileSync(join(person, '.worklane', 'config.yaml'), 'flags:\n  some_flgg: false\n');
+    git(person, 'add', '-A');
+    git(person, '-c', 'user.email=ada@example.com', '-c', 'user.name=Ada', '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'typo');
+    git(person, 'push', '-q', 'origin', 'main');
+    // HEAD's config names a flag this engine doesn't know, so it is no valid config either: the start falls back to the
+    // working tree's, here one with the flag on (as a registered flag would be).
+    const start = startConfig({ repo: f.repo, remote: 'origin', fallback: { ...f.cfg, project: { ...f.cfg.project, flags: { some_flag: true } } } });
+    assert.match(start.note ?? '', /is invalid, started with the checkout's (committed config \(HEAD\)|working tree).*feature flags off/);
+    assert.deepEqual(start.cfg.project.flags, {}, "the checkout's flags never count");
+  } finally {
+    f.log.close();
+    rmSync(f.base, { recursive: true, force: true });
+  }
 });
 
 test('flagOn: only an explicit true is on', () => {

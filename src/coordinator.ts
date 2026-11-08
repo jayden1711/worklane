@@ -128,7 +128,9 @@ export class Coordinator extends AutomationRuns {
       this.refreshConfig();
       // Every flag flip is audited (src/flags.ts): against the last state the log recorded, so one made while this
       // coordinator was down is recorded at its first tick.
-      recordFlagFlips({ log: this.d.log, flags: this.repoCfg.project.flags, sha: this.configSha, actor: this.d.instance });
+      // A flag counts as on only from a config the default branch has (configSha set by a poll of it): never from a
+      // checkout's (#1173 review R1173f).
+      recordFlagFlips({ log: this.d.log, flags: this.configSha ? this.repoCfg.project.flags : {}, sha: this.configSha, actor: this.d.instance });
     }, undefined);
     await step('settings', () => this.refreshSettings(), undefined);
     // The audit chain's checkpoint (src/audit-chain.ts, docs/audit-log.md): at most every 10 minutes. WHY early: a step
