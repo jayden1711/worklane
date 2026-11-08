@@ -23,7 +23,8 @@
 //   permission rules refuses the run (projectSettingsRefusal).
 import { randomBytes } from 'node:crypto';
 import { existsSync, lstatSync, readdirSync, readFileSync, readlinkSync, realpathSync } from 'node:fs';
-import { dirname, join, relative, sep } from 'node:path';
+import { dirname, join, normalize, relative, sep } from 'node:path';
+import { homedir } from 'node:os';
 import { BRAND } from './brand.js';
 import { changedNames, ignoredNames, lookAwayNames, untrackedNames } from './coordinator/change-files.js';
 import { gitSpawnSync } from './os/git.js';
@@ -197,11 +198,11 @@ const MAX_CLAUDE_DIR_ENTRIES = 10_000;
  * agent user and can write `.claude/settings.json` with a SessionStart hook, or a CLAUDE.md, into the checkout; the
  * next run would load it, and run the hook outside any sandbox. So the run is refused for any of these:
  * - anything under `.claude/` (ignored files too, as a gitignored settings.local.json; never the coordinator's own
- *   `.claude/worktrees/`) or any CLAUDE.md or CLAUDE.local.md (tracked or untracked) that differs from the checkout's
+ *   `.claude/worktrees/`) or any CLAUDE.md (tracked or untracked) that differs from the checkout's
  *   HEAD, or isn't in it;
  * - a `.claude` that is a link or not a folder, or a link anywhere under one (R1185a D1): git lists a linked folder as
  *   one entry and never looks inside, and what it points at is never compared;
- * - a CLAUDE.md, CLAUDE.local.md or .claude/CLAUDE.md in a folder from the top down to `cwd`, the files Claude Code
+ * - a CLAUDE.md or .claude/CLAUDE.md in a folder from the top down to `cwd` (and `.claude/rules/**/*.md`), the files Claude Code
  *   loads up front, whose bytes (through a link, to its target in the checkout) aren't HEAD's, compared directly, so an
  *   ignore rule (a `.gitignore` the same step writes, info/exclude, core.excludesFile) can't hide it (R1185a D3).
  * Not counted: an empty, untracked regular file (R1185a D2), the mount points Claude Code's Linux sandbox leaves
@@ -213,7 +214,13 @@ const MAX_CLAUDE_DIR_ENTRIES = 10_000;
  */
 export function uncommittedAgentFilesRefusal(cwd: string): string | null {
   const inside = gitSpawnSync(['rev-parse', '--is-inside-work-tree'], { cwd, encoding: 'utf8' });
-  if (inside.status !== 0 || inside.stdout.trim() !== 'true') return null;
+  if (inside.status !== 0 || inside.stdout.trim() !== 'true') {
+    // Not a checkout only when there is no `.git` from cwd up to `/` (R1185h H5, H7, H8): a `.git` git can't read (a
+    // garbage HEAD or a rewritten gitdir in the agent-writable `.git/worktrees/<id>/`, core.bare set) refuses.
+    const dotGit = gitEntryAbove(cwd);
+    if (dotGit === null) return null;
+    return `the checkout's agent settings and instructions couldn't be compared with its last commit: ${dotGit} is there, but git can't read the checkout at ${cwd} (${(inside.stderr || inside.stdout || `exit ${inside.status}`).trim().slice(0, 200)})`;
+  }
   let changed: string[];
   try {
     // Through the one helper for changed names (src/coordinator/change-files.ts): what differs from HEAD (staged or
@@ -251,12 +258,15 @@ export function uncommittedAgentFilesRefusal(cwd: string): string | null {
       }
     };
     // A tracked agent file gone from disk loads nothing (R1185f L1: a sparse checkout leaves folders out): not counted.
+    // A tracked file a sparse checkout left out (flagged, R1185f L1) loads nothing; one simply deleted is a change
+    // (R1185g G5: a committed .claude/settings.json with deny rules, removed by a setup step).
+    const flagged = new Set(lookAwayNames(root));
     const onDisk = (p: string) => {
       try {
         lstatSync(join(root, p));
         return true;
       } catch {
-        return false;
+        return !flagged.has(p);
       }
     };
     const differs = changedNames(root, ['HEAD']).filter((p) => (inClaudeDir(p) || (instructions(p) && !NOT_LOADED.test(p))) && onDisk(p));
@@ -274,6 +284,23 @@ export function uncommittedAgentFilesRefusal(cwd: string): string | null {
   if (!changed.length) return null;
   const shown = changed.slice(0, 5).map((p) => JSON.stringify(p)).join(', ');
   return `the checkout's agent settings or instructions (${shown}${changed.length > 5 ? ` and ${changed.length - 5} more` : ''}) differ from its last commit or aren't in it: written by a setup step or a command since, a run would load them, and a hook there would run outside the sandbox`;
+}
+
+/** The first `.git` (a folder, a file or a link) from `cwd` up to `/`, or null when there is none. */
+function gitEntryAbove(cwd: string): string | null {
+  let dir = cwd;
+  for (let n = 0; n < 256; n++) {
+    try {
+      lstatSync(join(dir, '.git'));
+      return join(dir, '.git');
+    } catch {
+      // none here
+    }
+    const up = dirname(dir);
+    if (up === dir) return null;
+    dir = up;
+  }
+  return null;
 }
 
 /** The folders from the checkout's top `root` down to `cwd`, as paths from the top ('' for the top). */
@@ -312,17 +339,22 @@ function blob(root: string, sha: string): Buffer {
 
 /**
  * Each of HEAD's entries `agent` picks whose file on disk isn't HEAD's (D4): the bytes, or a link's target text, read
- * directly, so an index flag or a refresh can't make git look away. Missing on disk: deleted. A submodule is skipped.
+ * directly, so an index flag or a refresh can't make git look away. Missing on disk: a change, unless a sparse checkout
+ * left it out (flagged). A submodule is skipped.
  */
 function trackedDiffer(root: string, head: Map<string, { mode: string; sha: string }>, agent: (p: string) => boolean): string[] {
   const out: string[] = [];
+  const sparse = new Set(lookAwayNames(root));
   for (const [p, e] of head) {
     if (!agent(p) || e.mode === '160000') continue;
     let st;
     try {
       st = lstatSync(join(root, p));
     } catch {
-      continue; // gone from disk: it loads nothing (a sparse checkout's left-out folder, R1185f L1)
+      // Gone from disk: a sparse checkout's left-out file (flagged) loads nothing (R1185f L1); one deleted outright is
+      // a change (R1185g G5).
+      if (!sparse.has(p)) out.push(p);
+      continue;
     }
     if (e.mode === '120000') {
       if (!st.isSymbolicLink() || readlinkSync(join(root, p)) !== blob(root, e.sha).toString('utf8')) out.push(p);
@@ -375,6 +407,13 @@ function linkedClaudeDirs(root: string, cwd: string, head: Map<string, { mode: s
       return;
     }
     const t = target.split(sep).join('/');
+    // Where its committed text says, read as text from its folder: the same place as where it leads, or a folder on
+    // the way was swapped for a link (R1185g G4: `config` -> `examples`, so `../config/claude.json` lands elsewhere).
+    const lexical = normalize(join(dirname(p), readlinkSync(join(root, p)))).split(sep).join('/');
+    if (lexical !== t) {
+      refused.push(p);
+      return;
+    }
     targets.push(t);
     if (!lstatSync(join(root, t)).isDirectory()) {
       // A file target must be one HEAD holds as a regular file (R1185f D6/F2), so its bytes are compared with HEAD's.
@@ -396,6 +435,8 @@ function linkedClaudeDirs(root: string, cwd: string, head: Map<string, { mode: s
       if (++seen > MAX_CLAUDE_DIR_ENTRIES) throw new Error(`over ${MAX_CLAUDE_DIR_ENTRIES} entries under .claude`);
       if (e.isSymbolicLink()) link(p);
       else if (e.isDirectory()) walk(p);
+      // Not a file, a folder or a link (a FIFO, a socket, a device, R1185h H12): nothing a run should open.
+      else if (!e.isFile()) refused.push(p);
     }
   };
   for (const folder of foldersDown(root, cwd)) {
@@ -418,14 +459,25 @@ function linkedClaudeDirs(root: string, cwd: string, head: Map<string, { mode: s
  * Each instruction file Claude Code loads up front (LOADED_INSTRUCTIONS, from the top down to `cwd`) whose bytes aren't
  * HEAD's (D3): compared directly, whatever ignore rules say (line endings aside, R1185f L2). Through a link, the target's
  * bytes against HEAD's at the target's path, which must be in the checkout. An empty, untracked file is a placeholder
- * (D2). Missing: it loads nothing. Each `@` import in one (R1185f F6) is read the same way, MAX_IMPORT_DEPTH deep: one
+ * (D2). Missing: it loads nothing. Each `@` import (also from `.claude/rules/**/*.md`, R1185g G1) in one (R1185f F6) is read the same way, MAX_IMPORT_DEPTH deep: one
  * outside the checkout refuses, since nothing compares it.
  */
 function loadedInstructionsChanged(root: string, cwd: string): string[] {
   const out: string[] = [];
   const realRoot = realpathSync(root);
   const visited = new Set<string>();
-  for (const folder of foldersDown(root, cwd)) for (const name of LOADED_INSTRUCTIONS) instructionChanged(root, realRoot, folder ? `${folder}/${name}` : name, 0, visited, out);
+  for (const folder of foldersDown(root, cwd)) {
+    for (const name of LOADED_INSTRUCTIONS) instructionChanged(root, realRoot, folder ? `${folder}/${name}` : name, 0, visited, out);
+    // `.claude/rules/**/*.md`, which Claude Code loads too, with their imports (R1185g G1).
+    const rules = folder ? `${folder}/.claude/rules` : '.claude/rules';
+    let found: string[] = [];
+    try {
+      found = readdirSync(join(root, rules), { recursive: true }).map((x) => String(x).split(sep).join('/')).filter((x) => /\.md$/i.test(x));
+    } catch {
+      found = [];
+    }
+    for (const f of found.sort()) instructionChanged(root, realRoot, `${rules}/${f}`, 0, visited, out);
+  }
   return out;
 }
 
@@ -471,12 +523,29 @@ function instructionChanged(root: string, realRoot: string, rel: string, depth: 
   }
   if (depth >= MAX_IMPORT_DEPTH) return;
   // Its imports: `@path` at a word's start, outside code (fenced blocks and backticks left out), as Claude Code reads them.
-  const text = bytes.toString('utf8').replace(/```[\s\S]*?```/g, '').replace(/`[^`\n]*`/g, '');
+  // As Claude Code reads them (R1185h H9-H11): code and HTML comments left out; the token is every non-space character
+  // (with `\\ ` as a space), cut at `#`, nothing stripped from its end.
+  const text = bytes.toString('utf8').replace(/```[\s\S]*?```/g, '').replace(/`[^`\n]*`/g, '').replace(/<!--[\s\S]*?-->/g, '');
   const dir = at.includes('/') ? at.slice(0, at.lastIndexOf('/')) : '';
-  for (const m of text.matchAll(/(?:^|\s)@((?:~\/|\.{1,2}\/|\/)?[^\s`'"()<>@]+)/g)) {
-    const spec = m[1]!.replace(/[.,;:!?]+$/, '');
-    if (!spec || spec.startsWith('~/') || spec.startsWith('/')) {
-      if (spec) out.push(`${rel} imports ${spec} (outside the checkout)`);
+  for (const m of text.matchAll(/(?:^|\s)@((?:[^\s\\]|\\ )+)/g)) {
+    const spec = m[1]!.split('#')[0]!.replace(/\\ /g, ' ');
+    if (!spec) continue;
+    // Outside the checkout (`~/`, `/`, `..` past the top): nothing compares it, so one that is there refuses. One that
+    // isn't loads nothing (R1185g G2: a per-developer `@~/.claude/...` import, an `@/alias` in prose).
+    const outsideFile = (abs: string) => {
+      try {
+        lstatSync(abs);
+        out.push(`${rel} imports ${spec} (outside the checkout, and it is there)`);
+      } catch {
+        // not there: it loads nothing
+      }
+    };
+    if (spec.startsWith('~/')) {
+      for (const h of new Set([process.env.HOME, homedir()].filter((x): x is string => !!x))) outsideFile(join(h, spec.slice(2)));
+      continue;
+    }
+    if (spec.startsWith('/')) {
+      outsideFile(spec);
       continue;
     }
     const parts = dir ? dir.split('/') : [];
@@ -487,7 +556,7 @@ function instructionChanged(root: string, realRoot: string, rel: string, depth: 
       else parts.push(seg);
     }
     if (outside || !parts.length) {
-      out.push(`${rel} imports ${spec} (outside the checkout)`);
+      outsideFile(join(root, dir, spec));
       continue;
     }
     instructionChanged(root, realRoot, parts.join('/'), depth + 1, visited, out);
