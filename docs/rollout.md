@@ -29,6 +29,10 @@ The rings name instances, so they live on the machine, never in a repository:
 - **Ring 0 is the engine's own repository.** The rings go in order, and an instance is in one ring only.
 - **Ring and instance names** are lowercase letters, digits and dashes, never a path.
 - **`promote`** defaults to 48 hours and 3 merges.
+- **Removing or renaming an instance keeps the file right** (`scripts/setup/instance-records.cjs`):
+  - removing an instance takes it out of its ring (kept in the removal's archive first);
+  - a ring left empty goes, and with no ring left, the file goes;
+  - renaming an instance renames it in its ring.
 
 ## Promotion criteria
 

@@ -291,6 +291,7 @@ function machine(): string {
   put(`/etc/${cli}/testrun-network.json`, { version: 1, instances: { alpha: { tiers: ['e2e'] }, 'alpha-2': { tiers: ['e2e'] } } });
   put(`/etc/${cli}/updates.json`, { enabled: true, channel: 'release', canary: { instance: 'alpha', repo: 'o/scratch', time_limit_minutes: 60 }, required_checks: ['a'] });
   put(`/var/lib/${cli}/canary.json`, { running: { issue: 7 }, lastFiledAt: '2026-10-15T00:00:00Z' });
+  put(`/etc/${cli}/rollout.json`, { rings: [{ name: 'engine', instances: ['alpha'] }, { name: 'first', instances: ['alpha-2', 'beta'] }], promote: { soak_hours: 48, min_merges: 3 } });
   const rec = (instance: string, user: string) => ({ instance, kind: 'agent', user, api_ok: true });
   put(`/var/lib/${cli}/claude-account/profiles.json`, {
     version: 1,
@@ -318,10 +319,10 @@ test("remove takes out exactly alpha's records, never alpha-2's or beta's, and k
   const root = machine();
   const archive = join(root, 'archive', 'alpha.records.json');
   const planned = reg.plan(NAME, root);
-  assert.deepEqual(Object.keys(planned).sort(), ['canary', 'claude-paused', 'claude-profiles', 'claude-status', 'gpu', 'incidents', 'managed-apps', 'pending-signers', 'plugin-pending', 'testrun-net']);
+  assert.deepEqual(Object.keys(planned).sort(), ['canary', 'claude-paused', 'claude-profiles', 'claude-status', 'gpu', 'incidents', 'managed-apps', 'pending-signers', 'plugin-pending', 'rollout', 'testrun-net']);
   const taken = reg.remove(NAME, archive, root);
   // The GPU grant is testrun-gpu.sh's to take out (its strict form): planned, never written here.
-  assert.deepEqual(Object.keys(taken).sort(), ['canary', 'claude-paused', 'claude-profiles', 'claude-status', 'incidents', 'managed-apps', 'pending-signers', 'plugin-pending']);
+  assert.deepEqual(Object.keys(taken).sort(), ['canary', 'claude-paused', 'claude-profiles', 'claude-status', 'incidents', 'managed-apps', 'pending-signers', 'plugin-pending', 'rollout']);
   // Root's word that alpha's repo is an app goes with alpha; alpha-2's stays, in the form the engine reads.
   assert.equal(readFileSync(join(root, `/etc/${cli}/managed-apps.json`), 'utf8'), '{"version":1,"apps":{"alpha-2":"o/site"}}\n');
   assert.deepEqual(taken['managed-apps'], { alpha: 'o/shop' });
@@ -331,6 +332,8 @@ test("remove takes out exactly alpha's records, never alpha-2's or beta's, and k
   const u = read(root, `/etc/${cli}/updates.json`);
   assert.deepEqual(u, { enabled: true, channel: 'release', required_checks: ['a'] }, 'only the canary goes');
   assert.ok(!existsSync(join(root, `/var/lib/${cli}/canary.json`)), "the canary's run state goes with it");
+  assert.deepEqual(read(root, `/etc/${cli}/rollout.json`), { rings: [{ name: 'first', instances: ['alpha-2', 'beta'] }], promote: { soak_hours: 48, min_merges: 3 } }, 'alpha leaves its ring, which goes with it; the others stay');
+  assert.deepEqual(taken.rollout, { rings: ['engine'] });
 
   const p = read(root, `/var/lib/${cli}/claude-account/profiles.json`);
   assert.deepEqual(Object.keys(p.active), ['alpha-2', 'beta']);
@@ -394,7 +397,7 @@ test("rekey moves exactly alpha's records to bravo, never alpha-2's or beta's; a
   const claim = (k: string, n: string) => join(root, `/var/lib/${cli}/agent-slots/${k}-claim-${n}.json`);
   for (const k of ['discord', 'slack', 'linear']) for (const n of ['alpha', 'alpha-2']) writeFileSync(claim(k, n), '{}');
   const moved = reg.rekey('alpha', 'bravo', join(root, 'archive', 'r.json'), root);
-  assert.deepEqual(moved.sort(), ['canary', 'claude-paused', 'claude-profiles', 'claude-status', 'incidents', 'init', 'pending-signers']);
+  assert.deepEqual(moved.sort(), ['canary', 'claude-paused', 'claude-profiles', 'claude-status', 'incidents', 'init', 'pending-signers', 'rollout']);
 
   const p = read(root, `/var/lib/${cli}/claude-account/profiles.json`);
   assert.deepEqual(Object.keys(p.active).sort(), ['alpha-2', 'beta', 'bravo']);
@@ -408,6 +411,7 @@ test("rekey moves exactly alpha's records to bravo, never alpha-2's or beta's; a
   assert.deepEqual(st, ['bravo:wl-bravo-agent', 'bravo:wl-bravo-eval', 'alpha-2:wl-alpha-2-agent', 'beta:wl-beta-agent']);
   assert.equal(readFileSync(join(root, `/var/lib/${cli}/claude-account/paused`), 'utf8'), 'alpha-2\nbravo\nbeta\n');
   assert.equal(read(root, `/etc/${cli}/updates.json`).canary.instance, 'bravo');
+  assert.deepEqual(read(root, `/etc/${cli}/rollout.json`).rings, [{ name: 'engine', instances: ['bravo'] }, { name: 'first', instances: ['alpha-2', 'beta'] }]);
   assert.ok(existsSync(join(root, `/var/lib/${cli}/canary.json`)), 'the canary run in progress stays: same repo, same canary');
   const inc = read(root, `/var/lib/${cli}/agent-slots/incidents.json`).incidents.map((x: { id: string; instance: string; key: string }) => `${x.id}:${x.instance}:${x.key}`);
   assert.deepEqual(inc, [`1:bravo:${cli}-bravo.service`, `2:alpha-2:${cli}-alpha-2.service`, '3:null:disk', '4:bravo:bravo#12']);

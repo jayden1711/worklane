@@ -74,6 +74,7 @@ const ITEMS = [
   { kind: 'shared', rename: 'rekey', what: 'claude-status', by: 'claude-account.sh status|switch, add-project.sh' },
   { kind: 'shared', rename: 'rekey', what: 'claude-paused', by: 'claude-account.sh switch' },
   { kind: 'shared', rename: 'rekey', what: 'canary', by: 'docs/canary.md (an admin, in updates.json)' },
+  { kind: 'shared', rename: 'rekey', what: 'rollout', by: 'docs/rollout.md (an admin, in rollout.json)' },
   { kind: 'shared', rename: 'rekey', what: 'incidents', by: 'the coordinator and the watchdog (src/watchdog/incidents.ts)' },
   { kind: 'shared', rename: 'rekey', what: 'pending-signers', by: "the machine helper's stage-update-signer" },
   { kind: 'shared', rename: 'drop', note: "staged plugin approvals aren't moved: stage them again for the new name", what: 'plugin-pending', by: "the machine helper's plugin-stage" },
@@ -136,6 +137,7 @@ const SHARED_FILES = [
   { at: '/etc/worklane/testrun-gpu.json', item: 'gpu' },
   { at: '/etc/worklane/testrun-network.json', item: 'testrun-net' },
   { at: '/etc/worklane/updates.json', item: 'canary' },
+  { at: '/etc/worklane/rollout.json', item: 'rollout' },
   { at: '/var/lib/worklane/claude-account', item: 'claude-profiles, claude-status, claude-paused (switch.jsonl, profile-ops.jsonl: logs, kept)' },
   { at: '/var/lib/worklane/agent-slots', item: 'incidents, <kind>-claim-<name>.json for each of CLAIM_SOURCES (the slot locks name no instance)' },
   { at: '/var/lib/worklane/pending-signers.json', item: 'pending-signers' },
@@ -350,6 +352,7 @@ const P = {
   pluginPending: '/var/lib/worklane/plugins/pending.json',
   gpu: '/etc/worklane/testrun-gpu.json',
   updates: '/etc/worklane/updates.json',
+  rollout: '/etc/worklane/rollout.json',
   canaryState: '/var/lib/worklane/canary.json',
   profiles: '/var/lib/worklane/claude-account/profiles.json',
   status: '/var/lib/worklane/claude-account/status.json',
@@ -582,6 +585,26 @@ const SHARED = {
       return taken;
     },
   },
+  // The canary rollout's rings (src/rollout.ts): the instance leaves its ring; a ring left empty goes; with no ring
+  // left, the file goes (a rollout.json needs at least one ring).
+  rollout: {
+    file: P.rollout,
+    get: (prefix, name) => {
+      const r = readJson(at(prefix, P.rollout));
+      const rings = r && Array.isArray(r.rings) ? r.rings.filter((g) => g && Array.isArray(g.instances) && g.instances.includes(name)).map((g) => g.name) : [];
+      return rings.length ? { rings } : null;
+    },
+    drop: (prefix, name) => {
+      const f = at(prefix, P.rollout);
+      const r = readJson(f);
+      if (!(r && Array.isArray(r.rings) && r.rings.some((g) => g && Array.isArray(g.instances) && g.instances.includes(name)))) return null;
+      const taken = { rings: r.rings.filter((g) => g.instances.includes(name)).map((g) => g.name) };
+      r.rings = r.rings.map((g) => ({ ...g, instances: g.instances.filter((n) => n !== name) })).filter((g) => g.instances.length);
+      if (r.rings.length) writeKeeping(f, JSON.stringify(r, null, 2) + '\n');
+      else fs.rmSync(f, { force: true });
+      return taken;
+    },
+  },
   incidents: {
     file: `${P.slots}/${INCIDENTS}`,
     get: (prefix, name) => {
@@ -712,6 +735,14 @@ const REKEY = {
     if (!(u && u.canary && u.canary.instance === old)) return null;
     u.canary.instance = nu;
     writeKeeping(f, JSON.stringify(u, null, 2) + '\n');
+    return true;
+  },
+  rollout: (prefix, old, nu) => {
+    const f = at(prefix, P.rollout);
+    const r = readJson(f);
+    if (!(r && Array.isArray(r.rings) && r.rings.some((g) => g && Array.isArray(g.instances) && g.instances.includes(old)))) return null;
+    r.rings = r.rings.map((g) => ({ ...g, instances: g.instances.map((n) => (n === old ? nu : n)) }));
+    writeKeeping(f, JSON.stringify(r, null, 2) + '\n');
     return true;
   },
   incidents: (prefix, old, nu) => {
