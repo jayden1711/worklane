@@ -23,7 +23,7 @@
 //   permission rules refuses the run (projectSettingsRefusal).
 import { randomBytes } from 'node:crypto';
 import { existsSync, lstatSync, readdirSync, readFileSync, readlinkSync, realpathSync } from 'node:fs';
-import { join, relative, sep } from 'node:path';
+import { dirname, join, relative, sep } from 'node:path';
 import { BRAND } from './brand.js';
 import { changedNames, ignoredNames, lookAwayNames, untrackedNames } from './coordinator/change-files.js';
 import { gitSpawnSync } from './os/git.js';
@@ -181,7 +181,13 @@ const PROJECT_KEYS = new Set(['$schema', 'hooks', 'permissions']);
 const PROJECT_PERMISSION_KEYS = new Set(['allow', 'deny', 'ask']);
 
 /** The instruction files Claude Code loads up front from each folder from the checkout's top down to the run's cwd. */
-const LOADED_INSTRUCTIONS = ['CLAUDE.md', 'CLAUDE.local.md', '.claude/CLAUDE.md'];
+const LOADED_INSTRUCTIONS = ['CLAUDE.md', '.claude/CLAUDE.md'];
+/** What these runs never load (measured, R1185f L3: --setting-sources project): a local settings file and CLAUDE.local.md. */
+const NOT_LOADED = /(^|\/)\.claude\/settings\.local\.json$|(^|\/)claude\.local\.md$/i;
+/** How many `@` imports deep a loaded instruction file's imports are followed (as Claude Code follows them). */
+const MAX_IMPORT_DEPTH = 5;
+/** Bytes alike but for line endings (R1185f L2: a checkout under eol=crlf or core.autocrlf), as git's text conversion makes them. */
+const sameText = (a: Buffer, b: Buffer) => a.equals(b) || a.toString('latin1').replace(/\r\n/g, '\n') === b.toString('latin1').replace(/\r\n/g, '\n');
 /** The most entries under a `.claude/` folder it walks for links; past it, the run is refused (fail closed). */
 const MAX_CLAUDE_DIR_ENTRIES = 10_000;
 
@@ -208,9 +214,6 @@ const MAX_CLAUDE_DIR_ENTRIES = 10_000;
 export function uncommittedAgentFilesRefusal(cwd: string): string | null {
   const inside = gitSpawnSync(['rev-parse', '--is-inside-work-tree'], { cwd, encoding: 'utf8' });
   if (inside.status !== 0 || inside.stdout.trim() !== 'true') return null;
-  // Under .claude/ (and .claude itself), never the coordinator's own worktrees; a CLAUDE.md or CLAUDE.local.md anywhere.
-  const inClaudeDir = (p: string) => (p === '.claude' || p.startsWith('.claude/')) && !p.startsWith('.claude/worktrees/');
-  const instructions = (p: string) => /(^|\/)CLAUDE(\.local)?\.md$/.test(p);
   let changed: string[];
   try {
     // Through the one helper for changed names (src/coordinator/change-files.ts): what differs from HEAD (staged or
@@ -220,6 +223,24 @@ export function uncommittedAgentFilesRefusal(cwd: string): string | null {
     const top = gitSpawnSync(['rev-parse', '--show-toplevel'], { cwd, encoding: 'utf8' });
     if (top.status !== 0 || !top.stdout.trim()) throw new Error(`git can't say where the checkout at ${cwd} starts`);
     const root = top.stdout.trim();
+    // Under a `.claude` (or `.claude` itself) in any folder from the top down to cwd, never the coordinator's own
+    // `.claude/worktrees/` (R1185f F5); a CLAUDE.md anywhere. Names folded (R1185f F1: on a case-insensitive file
+    // system `.CLAUDE/settings.json` is the `.claude/settings.json` Claude Code opens). Never what these runs don't
+    // load (NOT_LOADED, R1185f L3).
+    const prefixes = foldersDown(root, cwd).map((f) => (f ? `${f}/.claude` : '.claude').toLowerCase());
+    const inClaudeDir = (p: string) => {
+      const l = p.toLowerCase();
+      return prefixes.some((x) => l === x || l.startsWith(`${x}/`)) && !l.startsWith('.claude/worktrees/') && !NOT_LOADED.test(p);
+    };
+    const instructions = (p: string) => /(^|\/)claude\.md$/i.test(p);
+    // The `.claude` folders git is asked about for ignored files, by their names on disk (any case).
+    const claudeDirs = foldersDown(root, cwd).flatMap((f) => {
+      try {
+        return readdirSync(join(root, f)).filter((n) => n.toLowerCase() === '.claude').map((n) => (f ? `${f}/${n}` : n));
+      } catch {
+        return [];
+      }
+    });
     // An untracked file that is empty and regular is a sandbox mount point: inert (D2).
     const placeholder = (p: string) => {
       try {
@@ -229,15 +250,24 @@ export function uncommittedAgentFilesRefusal(cwd: string): string | null {
         return false;
       }
     };
-    const differs = changedNames(root, ['HEAD']).filter((p) => inClaudeDir(p) || instructions(p));
-    const untracked = untrackedNames(root).filter((p) => (inClaudeDir(p) || instructions(p)) && !placeholder(p));
-    const ignored = ignoredNames(root, ['.claude']).filter((p) => inClaudeDir(p) && !placeholder(p));
+    // A tracked agent file gone from disk loads nothing (R1185f L1: a sparse checkout leaves folders out): not counted.
+    const onDisk = (p: string) => {
+      try {
+        lstatSync(join(root, p));
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    const differs = changedNames(root, ['HEAD']).filter((p) => (inClaudeDir(p) || (instructions(p) && !NOT_LOADED.test(p))) && onDisk(p));
+    const untracked = untrackedNames(root).filter((p) => (inClaudeDir(p) || (instructions(p) && !NOT_LOADED.test(p))) && !placeholder(p));
+    const ignored = claudeDirs.length ? ignoredNames(root, claudeDirs).filter((p) => inClaudeDir(p) && !placeholder(p)) : [];
     const head = headEntries(root);
     const links = linkedClaudeDirs(root, cwd, head, placeholder);
     // Every tracked agent file (and each committed link's target) against HEAD's bytes, whatever the index says, and
     // the index flags that make git look away from one (D4: --skip-worktree, --assume-unchanged).
-    const agent = (p: string) => inClaudeDir(p) || instructions(p) || links.targets.some((t) => p === t || p.startsWith(`${t}/`));
-    changed = [...new Set([...differs, ...untracked, ...ignored, ...links.refused, ...trackedDiffer(root, head, agent), ...hiddenFromGit(root, agent), ...loadedInstructionsChanged(root, cwd)])];
+    const agent = (p: string) => inClaudeDir(p) || (instructions(p) && !NOT_LOADED.test(p)) || links.targets.some((t) => p === t || p.startsWith(`${t}/`));
+    changed = [...new Set([...differs, ...untracked, ...ignored, ...links.refused, ...trackedDiffer(root, head, agent), ...hiddenFromGit(root, agent), ...loadedInstructionsChanged(root, cwd), ...ancestorsChanged(root)])];
   } catch (e) {
     return `the checkout's agent settings and instructions couldn't be compared with its last commit (${(e as Error).message})`;
   }
@@ -292,19 +322,27 @@ function trackedDiffer(root: string, head: Map<string, { mode: string; sha: stri
     try {
       st = lstatSync(join(root, p));
     } catch {
-      out.push(p);
-      continue;
+      continue; // gone from disk: it loads nothing (a sparse checkout's left-out folder, R1185f L1)
     }
     if (e.mode === '120000') {
       if (!st.isSymbolicLink() || readlinkSync(join(root, p)) !== blob(root, e.sha).toString('utf8')) out.push(p);
-    } else if (!st.isFile() || !blob(root, e.sha).equals(readFileSync(join(root, p)))) out.push(p);
+    } else if (!st.isFile() || !sameText(blob(root, e.sha), readFileSync(join(root, p)))) out.push(p);
   }
   return out;
 }
 
 /** Each tracked path `agent` picks that git is told to look away from (skip-worktree, assume-unchanged: lookAwayNames). */
 function hiddenFromGit(root: string, agent: (p: string) => boolean): string[] {
-  return lookAwayNames(root).filter(agent);
+  // Only a file that is there: a sparse checkout flags the files it leaves out (R1185f L1), and those load nothing.
+  return lookAwayNames(root).filter((p) => {
+    if (!agent(p)) return false;
+    try {
+      lstatSync(join(root, p));
+      return true;
+    } catch {
+      return false;
+    }
+  });
 }
 
 /**
@@ -338,7 +376,11 @@ function linkedClaudeDirs(root: string, cwd: string, head: Map<string, { mode: s
     }
     const t = target.split(sep).join('/');
     targets.push(t);
-    if (lstatSync(join(root, t)).isDirectory()) {
+    if (!lstatSync(join(root, t)).isDirectory()) {
+      // A file target must be one HEAD holds as a regular file (R1185f D6/F2), so its bytes are compared with HEAD's.
+      const te = head.get(t);
+      if (!te || (te.mode !== '100644' && te.mode !== '100755')) refused.push(p);
+    } else {
       const extra = [...untrackedNames(root, [t]).filter((x) => !placeholder(x)), ...ignoredNames(root, [t]).filter((x) => !placeholder(x))];
       if (extra.length) refused.push(p);
       walk(t);
@@ -374,49 +416,102 @@ function linkedClaudeDirs(root: string, cwd: string, head: Map<string, { mode: s
 
 /**
  * Each instruction file Claude Code loads up front (LOADED_INSTRUCTIONS, from the top down to `cwd`) whose bytes aren't
- * HEAD's (D3): compared directly, whatever ignore rules say. Through a link, the target's bytes against HEAD's at the
- * target's path, which must be in the checkout. An empty, untracked file is a placeholder (D2). Missing: deleted, which
- * the changed names list.
+ * HEAD's (D3): compared directly, whatever ignore rules say (line endings aside, R1185f L2). Through a link, the target's
+ * bytes against HEAD's at the target's path, which must be in the checkout. An empty, untracked file is a placeholder
+ * (D2). Missing: it loads nothing. Each `@` import in one (R1185f F6) is read the same way, MAX_IMPORT_DEPTH deep: one
+ * outside the checkout refuses, since nothing compares it.
  */
 function loadedInstructionsChanged(root: string, cwd: string): string[] {
   const out: string[] = [];
   const realRoot = realpathSync(root);
-  for (const folder of foldersDown(root, cwd)) {
-    for (const name of LOADED_INSTRUCTIONS) {
-      const rel = folder ? `${folder}/${name}` : name;
-      let st;
-      try {
-        st = lstatSync(join(root, rel));
-      } catch {
-        continue;
-      }
-      let at = rel;
-      if (st.isSymbolicLink()) {
-        let target: string;
-        try {
-          target = relative(realRoot, realpathSync(join(root, rel)));
-        } catch {
-          out.push(rel); // a dangling link: refused rather than guessed
-          continue;
-        }
-        if (!target || target.startsWith('..') || target.startsWith(sep)) {
-          out.push(rel); // outside the checkout: never compared
-          continue;
-        }
-        at = target.split(sep).join('/');
-        st = lstatSync(join(root, at));
-      }
-      if (!st.isFile()) {
-        out.push(rel);
-        continue;
-      }
-      const head = gitSpawnSync(['cat-file', 'blob', `HEAD:${at}`], { cwd: root, encoding: 'buffer', maxBuffer: 64 * 1024 * 1024 });
-      if (head.status !== 0) {
-        if (st.size > 0) out.push(rel); // not in HEAD, and not empty
-        continue;
-      }
-      if (!head.stdout.equals(readFileSync(join(root, at)))) out.push(rel);
+  const visited = new Set<string>();
+  for (const folder of foldersDown(root, cwd)) for (const name of LOADED_INSTRUCTIONS) instructionChanged(root, realRoot, folder ? `${folder}/${name}` : name, 0, visited, out);
+  return out;
+}
+
+/** instructionChanged's reading of one file at `rel` (from the checkout's top), then of its imports; names go in `out`. */
+function instructionChanged(root: string, realRoot: string, rel: string, depth: number, visited: Set<string>, out: string[]): void {
+  if (visited.has(rel)) return;
+  visited.add(rel);
+  let st;
+  try {
+    st = lstatSync(join(root, rel));
+  } catch {
+    return;
+  }
+  let at = rel;
+  if (st.isSymbolicLink()) {
+    let target: string;
+    try {
+      target = relative(realRoot, realpathSync(join(root, rel)));
+    } catch {
+      out.push(rel); // a dangling link: refused rather than guessed
+      return;
     }
+    if (!target || target.startsWith('..') || target.startsWith(sep)) {
+      out.push(rel); // outside the checkout: never compared
+      return;
+    }
+    at = target.split(sep).join('/');
+    st = lstatSync(join(root, at));
+  }
+  if (!st.isFile()) {
+    out.push(rel);
+    return;
+  }
+  const bytes = readFileSync(join(root, at));
+  const head = gitSpawnSync(['cat-file', 'blob', `HEAD:${at}`], { cwd: root, encoding: 'buffer', maxBuffer: 64 * 1024 * 1024 });
+  if (head.status !== 0) {
+    if (st.size > 0) out.push(rel); // not in HEAD, and not empty
+    return;
+  }
+  if (!sameText(head.stdout, bytes)) {
+    out.push(rel);
+    return;
+  }
+  if (depth >= MAX_IMPORT_DEPTH) return;
+  // Its imports: `@path` at a word's start, outside code (fenced blocks and backticks left out), as Claude Code reads them.
+  const text = bytes.toString('utf8').replace(/```[\s\S]*?```/g, '').replace(/`[^`\n]*`/g, '');
+  const dir = at.includes('/') ? at.slice(0, at.lastIndexOf('/')) : '';
+  for (const m of text.matchAll(/(?:^|\s)@((?:~\/|\.{1,2}\/|\/)?[^\s`'"()<>@]+)/g)) {
+    const spec = m[1]!.replace(/[.,;:!?]+$/, '');
+    if (!spec || spec.startsWith('~/') || spec.startsWith('/')) {
+      if (spec) out.push(`${rel} imports ${spec} (outside the checkout)`);
+      continue;
+    }
+    const parts = dir ? dir.split('/') : [];
+    let outside = false;
+    for (const seg of spec.split('/')) {
+      if (seg === '.' || seg === '') continue;
+      if (seg === '..') outside = parts.pop() === undefined || outside;
+      else parts.push(seg);
+    }
+    if (outside || !parts.length) {
+      out.push(`${rel} imports ${spec} (outside the checkout)`);
+      continue;
+    }
+    instructionChanged(root, realRoot, parts.join('/'), depth + 1, visited, out);
+  }
+}
+
+/**
+ * The instruction files Claude Code loads from folders above this checkout (R1185f F3: from every parent folder, up to
+ * `/`): each such folder inside another checkout (a task worktree under the main checkout's `.claude/worktrees/`) has
+ * its CLAUDE.md and .claude/CLAUDE.md compared with that checkout's HEAD, as this checkout's are. Named from this
+ * checkout's top. A folder in no checkout isn't read (a machine's or a user's own files, as ~/.claude/CLAUDE.md).
+ */
+function ancestorsChanged(root: string): string[] {
+  const out: string[] = [];
+  let dir = dirname(root);
+  for (let n = 0; n < 64 && dir !== dirname(dir); n++) {
+    const top = gitSpawnSync(['rev-parse', '--show-toplevel'], { cwd: dir, encoding: 'utf8' });
+    if (top.status !== 0 || !top.stdout.trim()) {
+      dir = dirname(dir);
+      continue;
+    }
+    const outer = top.stdout.trim();
+    for (const p of loadedInstructionsChanged(outer, dir)) out.push(relative(root, join(outer, p.replace(/ imports .*$/, ''))) + (p.includes(' imports ') ? p.slice(p.indexOf(' imports ')) : ''));
+    dir = dirname(outer);
   }
   return out;
 }

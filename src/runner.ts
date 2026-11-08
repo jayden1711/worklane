@@ -821,6 +821,17 @@ export class CliRunner implements AgentRunner {
     // The stuck-run guard reads the same stream; a stop verdict ends the run only in mode 'on'.
     const stuck = req.stuck && req.stuck.mode !== 'off' ? { mode: req.stuck.mode, detector: new StuckDetector(), stopped: null as StuckVerdict | null } : null;
     return new Promise((resolve) => {
+      // INVARIANT (#958, R1185f F4): the checkout is read again here, synchronously, right before claude starts and
+      // after every await above (the auth preflight, the login's start lock): a file a command left running writes
+      // in between is caught. What it writes after this, while claude starts, is the race named in #958.
+      if (guard) {
+        const late = projectSettingsRefusal(req.cwd, guard) ?? uncommittedAgentFilesRefusal(req.cwd);
+        if (late) {
+          cleanup();
+          resolve({ reason: 'failed', detail: `${late}; not starting`, costUsd: 0, turns: 0, model: req.model });
+          return;
+        }
+      }
       const argv = cliArgs(mcpArgs ? { ...req, allowedTools: [...req.allowedTools, ...mcpArgs.allowedTools] } : req, settings, systemPromptFile, plugins?.dirs ?? [], mcpConfigFile);
       const [file, args] = runAs ? asUser(runAs.user, this.bin, argv, runEnv) : [this.bin, argv];
       // As another user, sudo gets only PATH; the agent's environment is passed explicitly through env -i.
