@@ -3,8 +3,12 @@
 // files): R1181b, R1181c (attacks-1181c/verdict.mjs) and R1181d (their cases, from the review comments), R1181f
 // (attacks-1181f/attacks-r1181f.test.mjs), R1181g (r1181g/probe.mjs), R1181h (attacks-1181h/attack-1181h.test.mjs),
 // R1181e's false fail (r1181e/overread.mjs), and the workflow bypasses of R1181c, R1181f 7 and R1181h 4.
-// Not cases, by the reviews' own ranking: R1181d A15 / R1181f E1 (a run 4.96 h of 5.5 h: the 90% rule), and R1181h H4
-// (one held sample at the very end fails: the envelope reads the last ~30 samples, a stated limit).
+// Not cases, by the reviews' own ranking: R1181d A15 / R1181f E1 (a run 4.96 h of 5.5 h: the 90% rule), R1181d A16
+// (ticks 10x slower in the last 4 samples only: drift is judged on medians, a stated limit), and R1181h H4 (one held
+// sample at the very end fails: the envelope reads the last ~30 samples, a stated limit).
+// Out of this file's reach (R1231c): the driver's own fixes (it records oldestUnlandedMs, and passes sampleMs and
+// issueEveryMs) and what the committed scripts/ci/fetch-pinned.sh does; the PR's own tests cover those.
+// Revised per the spec review R1231c: its N1-N15 split the shapes earlier cases merged, so each fix has a case.
 // Each must-fail case names the failure it expects (R1231a's lesson: "any failure" lets a fix that refuses everything
 // pass); the healthy twins catch such a fix. Frozen once its spec review passes: a change then needs its own review.
 import { test } from 'node:test';
@@ -51,7 +55,7 @@ mustFail('R1181b: landing stops at task 15', series(N, (m) => ({ tasksDone: Math
 mustFail('R1181b: a run of 2 h of the 5.5 h asked', series(120), SHORT);
 mustFail('R1181b: all samples in the warm-up', series(6), SHORT);
 mustFail('R1181b: open file handles uncounted in most samples', series(N, (m) => ({ fds: m % 3 ? null : 40 })), LEAK_FDS);
-mustFail('R1181b: a 240-handle leak with one sample uncounted', series(N, (m) => ({ fds: m === 100 ? null : 40 + Math.floor((m * 240) / 330) })), LEAK_FDS);
+mustFail('R1181b: a 240-handle leak with one sample uncounted reads as a leak', series(N, (m) => ({ fds: m === 100 ? null : 40 + Math.floor((m * 240) / 330) })), /^leak: open file handles/);
 
 // --- R1181d A1-A14 ---
 mustFail('R1181d A1: heap +1.5 GB in the last 4 samples', series(N, (m) => (m >= N - 4 ? { heapUsed: 1600 * MB } : {})), LEAK_HEAP);
@@ -88,7 +92,8 @@ test('must fail: R1181f SL3: an orphaned run re-paired by its retries still read
   const r = openRunsOf(events, t0 + 305 * 60_000);
   assert.equal(r.open, 1);
   assert.ok(r.oldestMs > SOAK_LIMITS.stuckMinutes * 60_000, `read as ${r.oldestMs / 60_000} min old`);
-  assert.notDeepEqual(failures([...series(305), sample(305 * 60_000, { openRuns: r.open, oldestOpenRunMs: r.oldestMs })]), []);
+  const f = failures([...series(305), sample(305 * 60_000, { openRuns: r.open, oldestOpenRunMs: r.oldestMs })]);
+  assert.ok(f.some((m) => OPEN.test(m)), `failed, but not for ${OPEN}: ${f.join(' | ')}`);
 });
 
 // --- R1181g ---
@@ -143,6 +148,94 @@ for (const t of [100, 250]) mustPass(`R1181e: an fd step of +20 at minute ${t}`,
 mustPass('a tick 1.5x slower, steady', series(N, () => ({ tickMs: 75, maxTickMs: 120 })));
 mustPass('R1181h V1d twin: fds 100 through the first quarter, then 40 flat', series(N, (m) => ({ fds: m < 90 ? 100 : 40 })));
 
+// --- R1231c: the review shapes the earlier cases merged, apart, so each fix has its own case (attacks-1231c) ---
+mustFail('R1231c N1: no sample for minutes 101-125, ticks normal', series(N).filter((_, m) => m <= 100 || m >= 126), /^hang: no sample/);
+mustFail('R1231c N2: landing (1/min) stops at minute 321', series(N, (m) => ({ tasksDone: Math.min(m, 321), oldestUnlandedMs: Math.max(0, m - 321) * 60_000 })), /^stalled/);
+mustFail('R1231c N3 (R1181d A10, the slot half): 2 slots held minutes 60-328, no run open', series(N, (m) => (m >= 60 && m < N - 1 ? { slotsHeld: 2 } : {})), /^leaked slots/);
+mustFail('R1231c N4 (R1181d A10, the run half): a run open minutes 60-328, no slot held', series(N, (m) => (m >= 60 && m < N - 1 ? { openRuns: 1, oldestOpenRunMs: (m - 60) * 60_000 } : {})), /^never finished/);
+mustFail('R1231c N5 (R1181h D2 at D1\'s rate): the slowest tick 138 ms + 0.0125 ms an event', series(N, (m) => ({ events: m * 60, maxTickMs: 138 + 0.0125 * m * 60 })), /^drift: the slowest tick/);
+mustFail('R1231c N6 (R1181h D2, a step): the slowest tick 80 -> 400 ms from minute 200', series(N, (m) => ({ events: m * 60, maxTickMs: m >= 200 ? 400 : 80 })), /^drift: the slowest tick/);
+mustFail('R1231c N7 (R1181h W2, the filing knob alone): one task in 5.5 h, a sample a minute', series(N, (m) => ({ tasksDone: 1, filed: 1, events: m * 60 })), /^too little work: 1 task\(s\) filed/);
+mustFail('R1231c N8: the log grows 10 MB in minutes 140-160 while landing pauses for minutes 120-180', series(N, (m) => { const d = m < 120 ? m : m < 180 ? 120 : m - 60; return { tasksDone: d, filed: d + 1, eventsBytes: 1_000_000 + d * 100 * 1024 + Math.min(20, Math.max(0, m - 140)) * 0.5 * MB }; }), /^log growth: the event log grew [\d.]+ MB in 30 min/);
+mustFail('R1231c N9: the WAL grows to 95 MB', series(N, (m) => ({ walBytes: MB + m * 300_000 })), /^log growth: the WAL/);
+mustFail('R1231c N10: a run of 4.8 h of the 5.5 h asked', series(289), SHORT);
+{
+  const s = [sample(0)];
+  let at = 0;
+  for (let i = 0; i < 302; i++) { at += (i % 100 < 51 ? 110 : 20) * 1000 + (i === 150 ? 200_000 : 0); s.push(sample(at)); }
+  mustFail('R1231c N11: bunched samples (median 110 s) and one 5.2-min gap', s.map((x) => sample(x.at, { tasksDone: Math.floor(x.at / 60_000), filed: Math.floor(x.at / 60_000) + 1 })), /^hang: no sample/);
+}
+mustFail('R1231c N14 (R1181b 4 as dispatched): 0.1 h asked and run', series(6), SHORT, { expectedMs: 0.1 * 3600_000 - 60_000, sampleMs: 60_000, issueEveryMs: 30_000 } as unknown as Opts);
+test('must fail: R1231c N15 (R1181b 1): issue 1 never finishes while 599 runs of other issues start and finish', () => {
+  const t0 = Date.parse('2026-11-08T00:00:00.000Z');
+  const ts = (m: number) => new Date(t0 + m * 60_000).toISOString();
+  const ev = [{ type: 'run.started', ts: ts(0), payload: { issue: 1, role: 'worker' } }];
+  for (let k = 0; k < 599; k++) ev.push({ type: 'run.started', ts: ts(1 + k * 0.5), payload: { issue: 100 + k, role: 'worker' } }, { type: 'run.finished', ts: ts(1.2 + k * 0.5), payload: { issue: 100 + k, role: 'worker' } });
+  assert.deepEqual(openRunsOf(ev, t0 + 330 * 60_000), { open: 1, oldestMs: 330 * 60_000 });
+});
+mustFail('R1231c: the slowest tick 80 -> 1200 ms in the last 35 min, the median flat', series(N, (m) => ({ maxTickMs: m >= 295 ? 1200 : 80 })), /^drift: the slowest tick/);
+mustFail('R1181e (final-3 note 3): the log +8 MB in the last 30 min, 20 KB a task before', series(N, (m) => ({ eventsBytes: 1_000_000 + m * 20 * 1024 + (m >= N - 30 ? ((m - (N - 30)) * 8 * MB) / 29 : 0) })), LOG);
+
+// --- R1231c: the reviews' healthy twins the file lacked ---
+let seed = 1;
+const rnd = () => (seed = (seed * 1103515245 + 12345) % 2 ** 31) / 2 ** 31;
+const g = () => Math.sqrt(-2 * Math.log(rnd() + 1e-12)) * Math.cos(2 * Math.PI * rnd());
+test('must pass: R1181e noise, 500 seeds (heap sd 8 MB, RSS sd 30 MB, fds 40-44, tick 50 +- 10 ms)', () => {
+  const bad: string[] = [];
+  for (let k = 1; k <= 500; k++) {
+    seed = k;
+    const f = failures(series(N, (m) => ({ heapUsed: 80 * MB + 8 * MB * g(), rss: 200 * MB + 30 * MB * g(), fds: 40 + Math.floor(rnd() * 5), tickMs: 50 + 10 * g(), tasksDone: 2 * m, filed: 2 * m + 1, eventsBytes: 4_000_000 + m * 20_000, walBytes: 4 * MB })));
+    if (f.length) bad.push(`${k}: ${f[0]}`);
+  }
+  assert.deepEqual(bad, []);
+});
+test('must pass: R1181g noise, 300 seeds (heap sd 15 MB, RSS sd 50 MB, fds 38-47, tick 150 +- 30 ms, log jitter)', () => {
+  const bad: string[] = [];
+  for (let k = 1; k <= 300; k++) {
+    seed = k;
+    const f = failures(series(N, (m) => ({ heapUsed: 80 * MB + 15 * MB * g(), rss: 200 * MB + 50 * MB * g(), fds: 38 + Math.floor(rnd() * 10), tickMs: 150 + 30 * g(), maxTickMs: 300 + 60 * Math.abs(g()), events: m * 60, eventsBytes: 1_000_000 + m * 60_000 + 200_000 * rnd() })));
+    if (f.length) bad.push(`${k}: ${f[0]}`);
+  }
+  assert.deepEqual(bad, []);
+});
+mustPass('R1181g: the tick 150 ms rising 40 ms over the run', series(N, (m) => ({ tickMs: 150 + (40 * m) / N, maxTickMs: 300 + (40 * m) / N, events: m * 80 })));
+mustPass('R1181g: the WAL fills to 4 MB, the main file grows in 400 KB checkpoint steps', series(N, (m) => ({ tasksDone: 2 * m, filed: 2 * m + 1, walBytes: Math.min(4 * MB, m * 280_000), eventsBytes: 32_768 + Math.min(4 * MB, m * 280_000) + Math.floor((m * 2 * 24_576) / 409_600) * 409_600 })));
+for (const P of [15, 45, 90, 150]) mustPass(`R1181h H2: a heap sawtooth to +120 MB, period ${P}`, series(N, (m) => ({ heapUsed: 80 * MB + ((m % P) / (P - 1)) * 120 * MB })));
+mustPass('R1181e: fds +24 over minutes 10-234, flat after', series(N, (m) => ({ fds: 40 + Math.round(24 * Math.min(1, Math.max(0, m - 10) / 224)) })));
+mustPass('R1181h: the real 15-min runs\' log rate, 142 KB a task', series(N, (m) => ({ eventsBytes: 1_000_000 + m * 142 * 1024 })));
+mustPass('the slowest tick 80 -> 200 ms in the last 35 min (under the drift limit)', series(N, (m) => ({ maxTickMs: m >= 295 ? 200 : 80 })));
+
+// The steps before the soak step, exactly (R1231c).
+const BEFORE_SOAK: unknown[] = [
+  {
+    "uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+    "with": {
+      "persist-credentials": false
+    }
+  },
+  {
+    "uses": "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
+    "with": {
+      "node-version": "24",
+      "cache": "npm"
+    }
+  },
+  {
+    "run": "npm ci"
+  },
+  {
+    "name": "install gitleaks",
+    "shell": "bash",
+    "env": {
+      "GITLEAKS_VERSION": "8.30.1"
+    },
+    "run": "f=\"gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz\"\nmkdir -p \"$RUNNER_TEMP/bin\" && cd \"$RUNNER_TEMP/bin\"\nbash \"$GITHUB_WORKSPACE/scripts/ci/fetch-pinned.sh\" \"https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${f}\" 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb \"$f\"\ntar -xzf \"$f\" gitleaks\necho \"$RUNNER_TEMP/bin\" >> \"$GITHUB_PATH\"\n"
+  },
+  {
+    "run": "npm run build"
+  }
+];
+
 // --- The workflow: the bypasses of R1181c 2, R1181f 7 and R1181h 4 ---
 test('must hold: the soak workflow can be green only on a soak run as asked (R1181c 2, R1181f 7, R1181h 4)', () => {
   const text = readFileSync(join(repoRoot, '.github', 'workflows', 'soak.yml'), 'utf8');
@@ -157,6 +250,9 @@ test('must hold: the soak workflow can be green only on a soak run as asked (R11
   for (const k of ['if', 'permissions', 'continue-on-error', 'env', 'container', 'strategy', 'environment']) assert.equal(job[k], undefined, `no job ${k}`);
   const at = job.steps.findIndex((s) => s.name === 'soak');
   assert.ok(at > 0);
+  // R1231c (R1181h 4): every step before the soak runs exactly this, so no earlier step can edit the code or the driver
+  // the soak builds and runs, or swap an action: checkout and setup-node pinned by commit.
+  assert.deepEqual(job.steps.slice(0, at), BEFORE_SOAK, 'every step before the soak runs exactly this');
   for (const s of job.steps.slice(0, at + 1)) {
     for (const k of ['if', 'continue-on-error', 'working-directory']) assert.equal(s[k], undefined, `step ${s.name ?? s.uses}: no ${k}`);
     // An earlier step writes nothing the soak step reads: no GITHUB_ENV, and GITHUB_PATH only for gitleaks's folder.
