@@ -212,6 +212,9 @@ usage: ${BRAND.cli} <command> [options]
                                    root's testrun-gpu.json lists (docs/test-runs.md "GPU")
   stuck-scan [--instance name]     read-only: how many recorded runs the stuck-run guard would have
                                    flagged or stopped (run as the coordinator user)
+  rollout status --flag <name> [--file <rollout.json>]
+                                   read-only: where a flagged change stands ring by ring (root's rollout.json
+                                   names the rings' instances), and the one next step (docs/rollout.md)
   receipts verify <file|dir> --key <pub> [--key <pub>]... [--anchor <receipt id>]
                                    check signed receipts offline: each signature by the chain's key, the order,
                                    and that none was changed or dropped (a dropped tail only against --anchor, a
@@ -808,6 +811,11 @@ async function main(argv: string[]): Promise<number> {
     case 'policy': {
       const { policyCommand } = await import('./policy-root.js');
       return policyCommand(sub, rest);
+    }
+
+    case 'rollout': {
+      const { rolloutCommand } = await import('./rollout-cli.js');
+      return rolloutCommand(sub, rest);
     }
 
     case 'receipts': {
