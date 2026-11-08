@@ -54,6 +54,25 @@ export const SOAK_LIMITS: SoakLimits = {
   minTasks: 1,
 };
 
+/**
+ * Agent runs started and not finished at `now`, and the oldest one's age. Each run.finished closes the oldest open
+ * run.started of the same issue and role. WHY (#1181 review): pairing by count took the newest open run's age once runs
+ * finished out of order (two agent slots), so a run stuck for hours read as minutes, with its slot.
+ */
+export function openRunsOf(events: readonly { type: string; ts: string; payload: unknown }[], now: number): { open: number; oldestMs: number } {
+  const open = new Map<string, string[]>();
+  const key = (p: unknown) => {
+    const o = p as { issue?: unknown; role?: unknown };
+    return `${String(o.issue)}\u0000${String(o.role)}`;
+  };
+  for (const e of events) {
+    if (e.type === 'run.started') open.set(key(e.payload), [...(open.get(key(e.payload)) ?? []), e.ts]);
+    else if (e.type === 'run.finished') open.get(key(e.payload))?.shift();
+  }
+  const starts = [...open.values()].flat();
+  return { open: starts.length, oldestMs: starts.length ? now - Math.min(...starts.map((t) => Date.parse(t))) : 0 };
+}
+
 const median = (xs: number[]): number => {
   if (!xs.length) return 0;
   const s = [...xs].sort((a, b) => a - b);

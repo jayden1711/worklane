@@ -8,9 +8,8 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { FakeRunner, type RunRequest } from '../src/runner.js';
-import type { StoredEvent } from '../src/events/types.js';
 import { slotStatus } from '../src/slots.js';
-import { SOAK_LIMITS, soakVerdict, type SoakSample } from '../src/soak.js';
+import { SOAK_LIMITS, openRunsOf, soakVerdict, type SoakSample } from '../src/soak.js';
 import { commitAll, coordinator, easyIssue, fixture, readAll, skip } from './repro-state-graph/harness.js';
 
 const MB = 2 ** 20;
@@ -45,6 +44,25 @@ test('soak verdict: each failure it is there for (a leak of heap, RSS or handles
   assert.deepEqual(soakVerdict(series(120, (m) => ({ fds: m % 2 ? null : 40 + m }))).failures, []);
 });
 
+test('open runs: a finish closes its own run, never another; a run stuck while hundreds of others finish out of order is the oldest (#1181 review, 1)', () => {
+  const t0 = Date.parse('2026-11-08T00:00:00.000Z');
+  const ts = (min: number) => new Date(t0 + min * 60_000).toISOString();
+  const ev = (type: string, issue: number, role: string, min: number) => ({ type, ts: ts(min), payload: { issue, role } });
+  // Run 1 starts and never finishes (its slot held); 599 later runs start and finish, each a minute or less apart.
+  const events = [ev('run.started', 1, 'worker', 0)];
+  for (let i = 2; i <= 600; i++) events.push(ev('run.started', i, 'worker', i / 2), ev('run.finished', i, 'worker', i / 2 + 0.25));
+  const now = t0 + 330 * 60_000;
+  assert.deepEqual(openRunsOf(events, now), { open: 1, oldestMs: 330 * 60_000 });
+  // Out of order: B finishes before A; A is the one still open, and its age is A's.
+  assert.deepEqual(openRunsOf([ev('run.started', 7, 'worker', 0), ev('run.started', 8, 'worker', 10), ev('run.finished', 8, 'worker', 11)], t0 + 60 * 60_000), { open: 1, oldestMs: 60 * 60_000 });
+  // The same issue's worker and evaluator are two runs; a finish with no start closes nothing.
+  assert.equal(openRunsOf([ev('run.started', 3, 'worker', 0), ev('run.finished', 3, 'evaluator', 1), ev('run.finished', 9, 'worker', 2)], t0 + 5 * 60_000).open, 1);
+  assert.deepEqual(openRunsOf([], now), { open: 0, oldestMs: 0 });
+  // And so the verdict: that stuck run and its slot fail the soak.
+  const r = openRunsOf(events, now);
+  assert.match(soakVerdict([...series(329), sample(329 * 60_000, { openRuns: r.open, oldestOpenRunMs: r.oldestMs, slotsHeld: 1 })]).failures.join(), /^stuck: 1 agent run\(s\) open, the oldest for 330 min/);
+});
+
 /** Open file handles of this process, where the platform shows them. */
 function openFds(): number | null {
   for (const d of ['/proc/self/fd', '/dev/fd']) {
@@ -55,18 +73,6 @@ function openFds(): number | null {
     }
   }
   return null;
-}
-
-/** Agent runs started and not finished, and how long the oldest has been open. */
-function openRuns(events: readonly StoredEvent[], now: number): { open: number; oldestMs: number } {
-  const started: StoredEvent[] = [];
-  let finished = 0;
-  for (const e of events) {
-    if (e.type === 'run.started') started.push(e);
-    else if (e.type === 'run.finished') finished++;
-  }
-  const open = Math.max(0, started.length - finished);
-  return { open, oldestMs: open ? now - Date.parse(started[finished]!.ts) : 0 };
 }
 
 test('soak: the real coordinator works for a while with stand-in agents; nothing leaks, sticks or grows past its limits', { skip, timeout: 10 * 3600_000 }, async () => {
@@ -112,7 +118,7 @@ test('soak: the real coordinator works for a while with stand-in agents; nothing
       ticks.push(performance.now() - t0);
       if (at - lastSample >= sampleMs) {
         const events = f.log.read(0, ['run.started', 'run.finished', 'land.result']);
-        const runs = openRuns(events, Date.now());
+        const runs = openRunsOf(events, Date.now());
         const mem = process.memoryUsage();
         // The log's size is its file and its WAL: writes sit in the WAL until a checkpoint moves them over.
         const wal = existsSync(`${f.log.path}-wal`) ? statSync(`${f.log.path}-wal`).size : 0;
