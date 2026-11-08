@@ -9,6 +9,7 @@ import { readEvents } from '../src/events/read-only.js';
 import { ROLLOUT_FILE, RolloutFile, readRollout, ringZeroProblem, rolloutStatus, type Rollout } from '../src/rollout.js';
 import { rolloutCommand, type RolloutDeps } from '../src/rollout-cli.js';
 import { EventLog } from '../src/events/log.js';
+import { onRealMachine } from './isolate.js';
 
 const NOW = new Date('2026-11-10T12:00:00.000Z');
 const hoursAgo = (h: number) => new Date(NOW.getTime() - h * 3_600_000).toISOString();
@@ -170,6 +171,8 @@ test('rollout.json: rings in order, each instance in one ring only, names withou
   ]) assert.equal(RolloutFile.safeParse(bad).success, false, JSON.stringify(bad));
   if (process.platform === 'win32') return;
   const file = ROLLOUT_FILE();
+  // The test machine's root, never the real /etc (#815): onRealMachine throws for a path outside it.
+  assert.equal(onRealMachine(file), `/etc/${BRAND.cli}/rollout.json`);
   mkdirSync(dirname(file), { recursive: true });
   const body = JSON.stringify({ rings: [{ name: 'engine', instances: ['e1'] }] });
   const me = process.getuid!();
