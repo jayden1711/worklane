@@ -7,17 +7,19 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { GitHubBacklog } from '../src/backlog/github.js';
-import { PinnedChecks, type CheckPin, type WorkflowSource } from '../src/check-source.js';
+import { parse as parseYaml } from 'yaml';
+import { PinnedChecks, pinnedVerdict, pinOf, type CheckPin, type GithubCheckApps, type WorkflowSource } from '../src/check-source.js';
 import { readiness } from '../src/pr-watch.js';
 import type { Role } from '../src/dashboard-auth.js';
 import { GitHubMainWatchApi } from '../src/github/main-watch-api.js';
 import { TooManyPages } from '../src/main-watch.js';
-import { acceptGit, acceptMerge, CONFIG_PATH, DEAD_CHECK_MS, disabledWorkflowFor, disabledWorkflowsOf, judge, LINK_LAG_MS, MAIN_WATCH_CALL_MS, MainWatch, outcomesAt, protectionView, readWatchState, repoGit, revertCapsAt, type Acceptance, type AcceptTarget, type CheckRunAt, type Compared, type MainWatchApi, type MainWatchDeps, type MergedPull, type ProtectionMode, type StatusAt, subjectPrNumber, tripOf, type Trip, type WatchGit, type WorkflowAt } from '../src/main-watch.js';
+import { acceptGit, acceptMerge, checksAt, CONFIG_PATH, DEAD_CHECK_MS, disabledWorkflowFor, disabledWorkflowsOf, judge, LINK_LAG_MS, MAIN_WATCH_CALL_MS, MainWatch, outcomesAt, protectionView, readWatchState, repoGit, revertCapsAt, type Acceptance, type AcceptTarget, type CheckRunAt, type Compared, type MainWatchApi, type MainWatchDeps, type MergedPull, type ProtectionMode, type StatusAt, subjectPrNumber, tripOf, type Trip, type WatchGit, type WorkflowAt } from '../src/main-watch.js';
 
 const git = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 const ident = ['-c', 'user.email=ada@example.com', '-c', 'user.name=Ada', '-c', 'commit.gpgsign=false'];
 /** What started a PR head's workflow run (#943): a pull_request for a PR into main, the watched branch. */
-const PR_RUN = { event: 'pull_request', branch: 'feature', bases: ['main'] };
+/** What started a merged PR head's workflow run (#943): a pull_request, which GitHub no longer links to the PR once it is closed (pull_requests is filled only for open PRs). */
+const PR_RUN = { event: 'pull_request', branch: 'feature', bases: [] as string[] };
 
 /** A remote, a clone people push from, and the coordinator's clone the watch reads. */
 function world(o: { config?: string; files?: Record<string, string> } = {}) {
@@ -107,13 +109,33 @@ const T = Date.parse('2026-10-12T10:00:00Z');
 const iso = (ms: number) => new Date(ms).toISOString();
 const ci = (o: Partial<CheckRunAt> = {}): CheckRunAt => ({ name: 'ci', status: 'completed', conclusion: 'success', startedAt: iso(T - 10 * 60_000), completedAt: iso(T - 5 * 60_000), ...o });
 
-function watcher(w: ReturnType<typeof world>, gh: ReturnType<typeof fakeGitHub>, o: { harness?: Map<string, { number: number; head: string; at: string }>; required?: string[]; pins?: MainWatchDeps['pins'] } = {}) {
+function watcher(w: ReturnType<typeof world>, gh: ReturnType<typeof fakeGitHub>, o: { harness?: Map<string, { number: number; head: string; at: string }>; required?: string[]; pins?: MainWatchDeps['pins']; config?: string; readiness?: MainWatchDeps['readiness'] | false } = {}) {
   const out = { modes: [] as { mode: ProtectionMode; detail: string }[], checked: [] as { sha: string; how: string; number: number }[], accepted: [] as { sha: string; number: number | null; a: Acceptance }[], unaccounted: [] as { sha: string; reason: string; number: number | null; revert: boolean; trip: Trip | null }[], dead: [] as { check: string; since: string; state: string; workflow?: WorkflowAt }[] };
+  // #943 (a): what readiness recorded while the PR was open, standing in for checks.judged. The same runs, statuses and
+  // pins, with each run's source still naming its pull request into main (GitHub drops that once the PR is closed).
+  let apps: GithubCheckApps = {};
+  if (o.pins) void o.pins.github(o.required ?? ['ci'], o.pins.sources()).then((a) => (apps = a ?? {}));
+  const readiness = (number: number, head: string) => {
+    if (!o.pins) return null;
+    // The pins and names as the watch reads them: the committed config's, over the loaded ones.
+    const committed = (o.config ? parseYaml(o.config) : {}) as { required_checks?: string[]; required_check_sources?: Record<string, CheckPin> };
+    const configured = { ...o.pins.sources(), ...(committed.required_check_sources ?? {}) };
+    const open = Object.fromEntries(Object.entries(gh.sources.get(head) ?? {}).map(([k, v]) => [k, { ...v, bases: ['main'] }]));
+    const out: Record<string, 'pass' | 'fail' | 'pending' | 'missing'> = {};
+    for (const name of committed.required_checks ?? o.required ?? ['ci']) {
+      const pin = pinOf(name, configured, apps);
+      if (!pin) continue;
+      const c = pinnedVerdict(checksAt(name, gh.runs.get(head) ?? [], gh.statuses.get(head) ?? [], new Date(gh.g.now).toISOString(), open), pin, { repo: o.pins.repo, sha: head, branch: 'main' });
+      out[name] = !c ? 'missing' : c.status !== 'completed' ? 'pending' : c.conclusion === 'success' ? 'pass' : 'fail';
+    }
+    void number;
+    return out;
+  };
   const watch = new MainWatch({
     stateFile: w.stateFile,
     branch: 'main',
     required: () => o.required ?? ['ci'],
-    ...(o.pins ? { pins: o.pins } : {}),
+    ...(o.pins ? { pins: o.pins, ...(o.readiness === false ? {} : { readiness: o.readiness ?? readiness }) } : {}),
     deadCheck: (d) => void out.dead.push(d),
     api: gh.api,
     git: repoGit(w.coord, 'origin', 'main'),
@@ -136,7 +158,7 @@ async function run(gh: ReturnType<typeof fakeGitHub>, watch: MainWatch, minutes:
 }
 
 /** A watch that has asked about protection and taken main's tip as its baseline. */
-async function started(o: { harness?: Map<string, { number: number; head: string; at: string }>; required?: string[]; config?: string; files?: Record<string, string>; pins?: MainWatchDeps['pins'] } = {}) {
+async function started(o: { harness?: Map<string, { number: number; head: string; at: string }>; required?: string[]; config?: string; files?: Record<string, string>; pins?: MainWatchDeps['pins']; readiness?: MainWatchDeps['readiness'] | false } = {}) {
   const w = world({ ...(o.config === undefined ? {} : { config: o.config }), ...(o.files ? { files: o.files } : {}) });
   const gh = fakeGitHub();
   gh.g.now = T + 60 * 60_000;
@@ -181,6 +203,35 @@ test("main watch: a merge is judged by the required_checks committed at its firs
   assert.equal(a.unaccounted.length, 1);
   assert.match(a.unaccounted[0]!.reason, /lint missing/);
   assert.doesNotMatch(a.unaccounted[0]!.reason, /loaded at startup/);
+});
+
+test("main watch (#943 (a), R1176a): a merged PR's pinned runs, which GitHub no longer links to it, are judged by the verdict readiness recorded while it was open", async () => {
+  const repo = 'example-org/example-shop';
+  const pins = { sources: () => ({}), github: async () => ({}), repo };
+  const config = 'required_checks: [lint]\nrequired_check_sources:\n  lint: { workflow: .github/workflows/ci.yml }\n';
+  const runPage = `https://github.com/${repo}/actions/runs/7000`;
+  // The merged PR's genuine green lint run, as GitHub lists it after the merge: a pull_request, no pull request named.
+  const merged = async (o: { readiness?: MainWatchDeps['readiness'] | false; conclusion?: 'failure' }) => {
+    const s = await started({ pins, config, ...(o.readiness === undefined ? {} : { readiness: o.readiness }) });
+    const m = s.w.mergedPr();
+    s.gh.pr(7, m.merge, m.head, iso(T), 'example-collaborator');
+    s.gh.roles.set('example-collaborator', 'writer');
+    s.gh.runs.set(m.head, [ci({ name: 'lint', app: 15368, suite: 70, id: 701, url: `${runPage}/job/701`, ...(o.conclusion ? { conclusion: o.conclusion } : {}) })]);
+    s.gh.sources.set(m.head, { '70': { run: 7000, url: runPage, path: '.github/workflows/ci.yml', repo, sha: m.head, ...PR_RUN } });
+    await run(s.gh, s.watch, 8);
+    return s;
+  };
+  // No readiness record (a PR the harness never judged): its runs can't be told from a closed decoy's. Fail closed.
+  const none = await merged({ readiness: false });
+  assert.equal(none.unaccounted.length, 1);
+  assert.match(none.unaccounted[0]!.reason, /lint missing/);
+  // Readiness judged it passing while it was open (checks.judged): accounted for.
+  const judged = await merged({ readiness: () => ({ lint: 'pass' }) });
+  assert.deepEqual(judged.unaccounted, []);
+  // A red run of the name at merge time still fails it, whatever readiness recorded.
+  const red = await merged({ readiness: () => ({ lint: 'pass' }), conclusion: 'failure' });
+  assert.equal(red.unaccounted.length, 1);
+  assert.match(red.unaccounted[0]!.reason, /lint fail/);
 });
 
 test('main watch (#727): a merge whose required checks came from another App or workflow than their pins, or a status, is unaccounted', async () => {

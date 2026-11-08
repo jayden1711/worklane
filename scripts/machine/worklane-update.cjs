@@ -999,7 +999,7 @@ function startedBy(w) {
  * PR's merge ref but posts its checks on the head, so a PR whose head is a commit already on `branch` and whose base
  * is another branch, with its own workflow, would post green runs of the file's name on that commit. Only a push,
  * dispatch or schedule run on `branch`, or a pull_request run whose every pull request (at least one) is based on
- * `branch`. The same rule as src/check-source.ts fromBranch (test/check-run-branch.test.ts holds both).
+ * `branch`. The same rule as src/check-source.ts fromBranch (test/required-check-source.test.ts and test/update-check-sources.test.ts hold each).
  */
 function fromBranch(w, branch) {
   if (w.event === 'push' || w.event === 'workflow_dispatch' || w.event === 'schedule') return w.branch === branch;

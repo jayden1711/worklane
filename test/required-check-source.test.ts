@@ -82,6 +82,8 @@ test('a check pinned to a workflow file and posted by another workflow (or a run
     ['a pull_request into another base (its workflow is that base\'s)', { bases: ['evil'] }],
     ['a pull_request into main and into another base at once', { bases: ['main', 'evil'] }],
     ['a pull_request GitHub lists no PR for (a fork\'s)', { bases: [] }],
+    // R1176a: a decoy PR into another base, closed once its runs were posted: GitHub then lists no PR on them either.
+    ['a pull_request from a decoy PR into another base, since closed', { bases: [] }],
     ['a pull_request whose PR has no readable base', { bases: [''] }],
     ['a push to another branch', { event: 'push', branch: 'evil', bases: [] }],
     ['a dispatch on another branch', { event: 'workflow_dispatch', branch: 'evil', bases: [] }],

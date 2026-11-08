@@ -285,7 +285,7 @@ const outcomeOf = (c: CommitCheck | undefined): Outcome => (!c ? 'missing' : c.s
  * Is commit `sha` accounted for, given what is known? Or which one call would tell. Pure: the watch and the tests
  * share it. An empty commit-to-PR link is asked again until an answer LINK_LAG_MS after its first one (pullsAt).
  */
-export function judge(sha: string, f: Facts, o: { branch: string; required: string[]; accepted?: Acceptance[]; pins?: WatchPins; rulesUnknown?: boolean }): Verdict {
+export function judge(sha: string, f: Facts, o: { branch: string; required: string[]; accepted?: Acceptance[]; pins?: WatchPins; rulesUnknown?: boolean; readiness?: (number: number, head: string) => Record<string, Exclude<Outcome, 'unknown'>> | null }): Verdict {
   const short = sha.slice(0, 8);
   const bySha = o.accepted?.find((a) => a.sha === sha);
   if (bySha) return { done: true, accounted: true, how: 'accepted', number: null, acceptance: bySha };
@@ -379,7 +379,16 @@ export function judge(sha: string, f: Facts, o: { branch: string; required: stri
     out = out.map((byName) => {
       const pin = pinned(byName.name);
       if (pin === null) return byName;
-      return { name: byName.name, outcome: outcomeOf(pinnedVerdict(checksAt(byName.name, f.runs!, f.statuses ?? [], at, f.sources), pin, { repo: pins.repo, sha: head, branch: o.branch })) };
+      const checks = checksAt(byName.name, f.runs!, f.statuses ?? [], at, f.sources);
+      const now = outcomeOf(pinnedVerdict(checks, pin, { repo: pins.repo, sha: head, branch: o.branch }));
+      if (now !== 'missing') return { name: byName.name, outcome: now };
+      // #943 (a): a merged PR's runs no longer name it (GitHub fills pull_requests only for open PRs), so its own
+      // pinned runs read as missing now; and pinnedVerdict weighs other runs only beside an own pass. So first, any run
+      // or status of the name at merge time that isn't a pass, from any source, decides (a failure, else a wait); only
+      // then does the verdict readiness recorded at this head while the PR was open stand (R1176a: never a red hidden).
+      const bad = checks.filter((c) => !(c.status === 'completed' && c.conclusion === 'success'));
+      if (bad.length) return { name: byName.name, outcome: bad.some((c) => c.status === 'completed') ? 'fail' : 'pending' };
+      return { name: byName.name, outcome: o.readiness?.(number, head)?.[byName.name] ?? now };
     });
   }
   const bad = out.filter((c) => c.outcome !== 'pass');
@@ -661,6 +670,11 @@ export interface MainWatchDeps {
   git: WatchGit;
   /** The harness's own merge whose merge commit is `sha` (merge.done), or null. */
   harnessMerge(sha: string): { number: number; head: string; at: string } | null;
+  /**
+   * #943 (a): how readiness judged PR `number`'s required checks at `head` while it was open (checks.judged), by
+   * name, or null when it never did. Absent: none is known.
+   */
+  readiness?(number: number, head: string): Record<string, Exclude<Outcome, 'unknown'>> | null;
   now?: () => number;
   /** The mode changed (or its detail): recorded as main_watch.mode. */
   mode(mode: ProtectionMode, detail: string): void;
@@ -868,7 +882,8 @@ export class MainWatch {
     // #727: GitHub's rules never answered: judge waits at the checks (need 'rules', no call to make), and everything
     // before them is judged as before.
     const pins = this.d.pins && github ? { pins: { configured: sources, github, repo: this.d.pins.repo } } : {};
-    const ctx = { branch: this.d.branch, required: judgedBy, accepted, ...pins, ...(this.d.pins && github === null ? { rulesUnknown: true } : {}) };
+    const readiness = this.d.readiness?.bind(this.d);
+    const ctx = { branch: this.d.branch, required: judgedBy, accepted, ...pins, ...(this.d.pins && github === null ? { rulesUnknown: true } : {}), ...(readiness ? { readiness } : {}) };
     let v = judge(p.sha, p.facts, ctx);
     if (!v.done) {
       if (v.need.call === 'rules') return;
