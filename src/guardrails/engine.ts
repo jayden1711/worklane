@@ -9,6 +9,7 @@ import { connectionsIn, fingerprint } from './fingerprint.js';
 import { globToRegExp } from './glob.js';
 import { pushHookFileRefusal, pushHookShellRefusal, type GitLookup } from './push-hook.js';
 import { callAccesses, Secrets } from './access.js';
+import type { OtherCheckouts } from './checkouts.js';
 import { asWritten, hardLinked, Reach } from './reach.js';
 import { BRAND } from '../brand.js';
 
@@ -69,6 +70,8 @@ export interface EvalContext {
   linkedEnvironment(resolver: string, cwd: string): string | null;
   /** A read-only git query, for the names git reads from its config (aliases). Absent: any such name may push. */
   git?: GitLookup;
+  /** The repository's other checkouts, where the project's secret globs hold too (#939). Absent: the run's own only. */
+  checkouts?: OtherCheckouts;
 }
 
 export interface Verdict {

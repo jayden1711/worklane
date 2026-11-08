@@ -837,20 +837,17 @@ test(`adversarial guards / sandbox.read-tool-same-deny (${doc('The Read tool is 
   }
 });
 
-knownHole(`adversarial guards / sandbox.read-tool-same-deny (${doc('The Read tool is denied the same paths as the commands')}): Read rules for file entries`, '#959', { skip: !posix && 'POSIX stand-in claude' }, async () => {
-  const attacks: string[] = [];
-  const open: string[] = [];
-  for (const { what, settings, home } of (await sandboxed()).filter((x) => x.run)) {
+// Closed by PR #1151 (#959): once a known hole, now a normal case.
+test(`adversarial guards / sandbox.read-tool-same-deny (${doc('The Read tool is denied the same paths as the commands')}): each file the sandbox hides from commands is denied to the Read tool by its exact path`, { skip: !posix && 'POSIX stand-in claude' }, async () => {
+  const runs = (await sandboxed()).filter((x) => x.run);
+  assert.ok(runs.length > 0, 'a sandboxed run');
+  for (const { what, settings, home } of runs) {
     const files = entryKinds(settings.sandbox?.filesystem?.denyRead ?? []).filter((k) => k.kind === 'file');
     assert.ok(files.length > 0, `${what}: the sandbox hides a file`);
     const rules = readRulePaths(settings.permissions?.deny, home);
-    files.forEach((f, i) => {
-      const name = `${what}: file entry ${i + 1} of ${files.length}`;
-      attacks.push(name);
-      if (!readRuleDenies(rules, f.entry)) open.push(name);
-    });
+    const unread = files.map((f, i) => ({ name: `file entry ${i + 1} of ${files.length} (${f.entry})`, f })).filter(({ f }) => !readRuleDenies(rules, f.entry)).map(({ name }) => name);
+    assert.deepEqual(unread, [], `${what}: files hidden from commands that the Read tool may read`);
   }
-  return { attacks, open };
 });
 
 // Closed by PR #893 (#890): once a known hole, now a normal case.
