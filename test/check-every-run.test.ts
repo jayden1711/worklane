@@ -35,7 +35,7 @@ const checkRun = (r: Run) => {
     check_suite: { id: r.suite },
   };
 };
-const workflowRun = (suite: number, path: string) => ({ id: suite * 10, html_url: `https://github.com/o/r/actions/runs/${suite * 10}`, check_suite_id: suite, path, head_sha: SHA, repository: { full_name: 'o/r' }, event: 'push', head_branch: 'main', pull_requests: [] });
+const workflowRun = (suite: number, path: string) => ({ id: suite * 10, html_url: `https://github.com/o/r/actions/runs/${suite * 10}`, check_suite_id: suite, path, head_sha: SHA, repository: { full_name: 'o/r' }, head_repository: { full_name: 'o/r' }, event: 'push', head_branch: 'main', pull_requests: [] });
 // ci.yml ran twice on the commit (suites 1 and 3); gitleaks.yml once (suite 2).
 const WORKFLOWS = [workflowRun(1, '.github/workflows/ci.yml'), workflowRun(2, '.github/workflows/gitleaks.yml'), workflowRun(3, '.github/workflows/ci.yml')];
 
@@ -121,7 +121,7 @@ function backlog(runs: Run[]) {
 }
 async function ready(runs: Run[], pins: Record<string, CheckPin> | undefined): Promise<'installs' | 'fail' | 'wait'> {
   const pinned = new PinnedChecks({ backlog: backlog(runs), branch: () => 'main', repo: () => 'o/r', configured: () => pins ?? {}, required: () => ['test'] });
-  const r = readiness({ required: ['test'], checks: await pinned.of(SHA), head: SHA, evaluated: { head: SHA, approved: true } });
+  const r = readiness({ required: ['test'], checks: await pinned.of(SHA, { main: true }), head: SHA, evaluated: { head: SHA, approved: true } });
   if (r.ready) return 'installs';
   return r.checks[0]!.outcome === 'pending' ? 'wait' : 'fail';
 }
@@ -144,7 +144,7 @@ const runAt = (r: Run): CheckRunAt => {
   const c = checkRun(r);
   return { name: c.name, status: c.status, conclusion: c.conclusion, startedAt: c.started_at, completedAt: c.status === 'completed' ? '2026-10-18T10:10:00Z' : null, id: c.id, url: c.html_url, app: c.app.id, suite: r.suite };
 };
-const sources: Record<string, WorkflowSource> = Object.fromEntries(WORKFLOWS.map((w) => [String(w.check_suite_id), { run: w.id, url: w.html_url, path: w.path, repo: w.repository.full_name, sha: w.head_sha, event: 'push', branch: 'main', bases: [], prHeads: [] }]));
+const sources: Record<string, WorkflowSource> = Object.fromEntries(WORKFLOWS.map((w) => [String(w.check_suite_id), { run: w.id, url: w.html_url, path: w.path, repo: w.repository.full_name, sha: w.head_sha, event: 'push', branch: 'main', bases: [], prHeads: [], headRepo: w.repository.full_name, prsLocal: true }]));
 function watch(runs: Run[], pins: Record<string, CheckPin> | undefined): 'installs' | 'fail' | 'wait' {
   const at = runs.map(runAt);
   const outcome = pins

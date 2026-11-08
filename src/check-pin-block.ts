@@ -289,7 +289,7 @@ export function ghTipRuns(repo: string, branch: string, api: Api = ghApi): Tip |
     const sha = typeof tip.sha === 'string' && /^[0-9a-f]{40}$/.test(tip.sha) ? tip.sha : '';
     if (!sha) return null;
     const cr = pages<{ id: number; name: string; head_sha: string; html_url?: string; app?: { id?: number; slug?: string }; check_suite?: { id?: number } }>(api, `repos/${repo}/commits/${sha}/check-runs?filter=latest`, 'check_runs');
-    const wr = pages<{ id: number; html_url: string; check_suite_id: number; path: string; head_sha: string; repository?: { full_name?: string }; event?: unknown; head_branch?: unknown; pull_requests?: unknown }>(api, `repos/${repo}/actions/runs?head_sha=${sha}`, 'workflow_runs');
+    const wr = pages<{ id: number; html_url: string; check_suite_id: number; path: string; head_sha: string; repository?: { full_name?: string }; head_repository?: { full_name?: string }; event?: unknown; head_branch?: unknown; pull_requests?: unknown }>(api, `repos/${repo}/actions/runs?head_sha=${sha}`, 'workflow_runs');
     const bySuite = new Map(wr.items.map((w) => [w.check_suite_id, w]));
     const runs = cr.items.map((c) => {
       const actions = c.app?.slug === 'github-actions';

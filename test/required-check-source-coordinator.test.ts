@@ -54,7 +54,7 @@ test("the merge flow's checks of a commit keep a pinned check only from the App 
   const sha = 'c'.repeat(40);
   const lint: CommitCheck = { name: 'lint', source: 'check_run', status: 'completed', conclusion: 'success', id: 3, app: SPOOF_APP };
   f.backlog.setChecks(sha, [ci(SPOOF_APP), lint]);
-  const judged = () => (c as unknown as { headChecksOf(s: string): Promise<CommitCheck[]> }).headChecksOf(sha);
+  const judged = () => (c as unknown as { headChecksOf(s: string, at: { main: true }): Promise<CommitCheck[]> }).headChecksOf(sha, { main: true });
   assert.deepEqual(await judged(), [lint], 'the spoofed ci is dropped; lint, which nothing pins, is judged by name');
   f.backlog.setChecks(sha, [ci(CI_APP), lint]);
   assert.deepEqual(await judged(), [ci(CI_APP), lint]);

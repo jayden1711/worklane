@@ -24,7 +24,7 @@ export const engineCli = join(repoRoot, 'dist', 'src', 'cli.js');
  * GitHub rules (so judged by name), since the judging functions check at run time that their input was made in
  * src/check-source.ts (a cast throws).
  */
-export const asJudged = (checks: readonly CommitCheck[]): Promise<JudgedChecks> => new PinnedChecks({ backlog: { checks: async () => [...checks] }, branch: () => 'main', repo: () => 'o/r', configured: () => ({}) }).of('0'.repeat(40));
+export const asJudged = (checks: readonly CommitCheck[]): Promise<JudgedChecks> => new PinnedChecks({ backlog: { checks: async () => [...checks] }, branch: () => 'main', repo: () => 'o/r', configured: () => ({}) }).of('0'.repeat(40), { main: true });
 
 /** A throwaway git repo copied from examples/basic, with its own state dir. */
 export function exampleProject(): { dir: string; stateDir: string } {

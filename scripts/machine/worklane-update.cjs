@@ -989,6 +989,8 @@ function startedBy(w) {
   return {
     event: typeof w.event === 'string' ? w.event : '',
     branch: typeof w.head_branch === 'string' ? w.head_branch : null,
+    // R1176f D2: the repo the run's commit came from (a fork's for a fork's PR); none is never trusted.
+    headRepo: w.head_repository && typeof w.head_repository.full_name === 'string' ? w.head_repository.full_name : null,
     // A pull request with no readable base counts as one based elsewhere: never trusted.
     bases: prs.map((p) => (p && p.base && typeof p.base.ref === 'string' ? p.base.ref : '')),
   };
@@ -998,10 +1000,12 @@ function startedBy(w) {
  * Did workflow run `w`, on a commit of `branch` the updater judges, read its workflow file from `branch`'s own history
  * (#943)? Only a push, dispatch or schedule run on `branch` itself. A pull_request run reads its workflow from the PR's
  * merge ref, and GitHub lists on it every OPEN PR matching its head branch or commit, not the one that started it
- * (R1176c/d): no pull_request run ever counts for a main commit. As src/check-source.ts fromBranch with no PR
- * (test/update-check-sources.test.ts holds it).
+ * (R1176c/d): no pull_request run ever counts for a main commit. Its commit must have come from the run's own repo
+ * (`head_repository`, R1176f D2). As src/check-source.ts fromBranch with no PR (test/update-check-sources.test.ts
+ * holds it).
  */
 function fromBranch(w, branch) {
+  if (typeof w.headRepo !== 'string' || typeof w.repo !== 'string' || w.headRepo.toLowerCase() !== w.repo.toLowerCase()) return false;
   return (w.event === 'push' || w.event === 'workflow_dispatch' || w.event === 'schedule') && w.branch === branch;
 }
 

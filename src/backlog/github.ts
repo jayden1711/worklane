@@ -322,22 +322,44 @@ export class GitHubBacklog implements Backlog {
   }
 
   /**
-   * #943 (R1176c/d): the base of every pull request, open or closed, from this repo's `headRef` (pulls?head=&state=all)
-   * or that holds commit `sha` (commits/{sha}/pulls), every page up to 10 of 100; past that, or any read GitHub refuses,
-   * throws: the head waits, it is never judged from part of the list.
+   * #943 (R1176c/d, R1176f D1): the base of every pull request from this repo's `headRef`, open or closed
+   * (pulls?head=&state=all), or open and holding commit `sha` (commits/{sha}/pulls lists only open and merged ones,
+   * measured by R1176e). A pull request whose base was ever changed (a `base_ref_changed` in its issue events or its
+   * timeline) is named with base '': a run from before the change read another base's workflow, and GitHub lists such a
+   * PR on that run with its current base. Every page up to 10 of 100; past that, or any read GitHub refuses, throws:
+   * the head waits, it is never judged from part of the list.
    */
   async prBases(headRef: string, sha: string): Promise<string[]> {
     const owner = this.repo.split('/')[0]!;
-    const out: string[] = [];
-    for (const first of [`/repos/${this.repo}/pulls?head=${encodeURIComponent(`${owner}:${headRef}`)}&state=all&per_page=100`, `/repos/${this.repo}/commits/${sha}/pulls?per_page=100`]) {
+    const pages = async <T>(first: string, what: string): Promise<T[]> => {
+      const all: T[] = [];
       for (let page = 1; ; page++) {
-        if (page > 10) throw new Error(`more than 10 pages of pull requests for ${headRef} at ${sha.slice(0, 8)}: not judged`);
-        const list = await this.req<{ base?: { ref?: unknown } }[]>('GET', `${first}&page=${page}`);
-        for (const p of list) out.push(typeof p?.base?.ref === 'string' ? p.base.ref : '');
-        if (list.length < 100) break;
+        if (page > 10) throw new Error(`more than 10 pages of ${what}: not judged`);
+        const list = await this.req<T[]>('GET', `${first}${first.includes('?') ? '&' : '?'}per_page=100&page=${page}`);
+        all.push(...list);
+        if (list.length < 100) return all;
+      }
+    };
+    const prs = new Map<number | string, string>();
+    for (const first of [`/repos/${this.repo}/pulls?head=${encodeURIComponent(`${owner}:${headRef}`)}&state=all`, `/repos/${this.repo}/commits/${sha}/pulls`]) {
+      for (const p of await pages<{ number?: unknown; base?: { ref?: unknown } }>(first, `pull requests for ${headRef} at ${sha.slice(0, 8)}`)) {
+        const base = typeof p?.base?.ref === 'string' ? p.base.ref : '';
+        prs.set(typeof p?.number === 'number' ? p.number : `?${prs.size}`, base);
       }
     }
-    return out;
+    for (const [n, base] of prs) {
+      // A PR with no number can't be asked for its history: unknown, so never trusted.
+      if (typeof n !== 'number') {
+        prs.set(n, '');
+        continue;
+      }
+      if (base === '') continue;
+      for (const kind of ['events', 'timeline']) {
+        const items = await pages<{ event?: unknown }>(`/repos/${this.repo}/issues/${n}/${kind}`, `${kind} of #${n}`);
+        if (items.some((e) => e?.event === 'base_ref_changed')) prs.set(n, '');
+      }
+    }
+    return [...prs.values()];
   }
 
   /** #727: the App each required check needs on `branch`, as classic protection (get a branch) and rulesets name it. */

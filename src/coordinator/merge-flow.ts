@@ -2,7 +2,7 @@
 // main's checks after a merge (revert on red).
 import { startRefusal, TestRunHeld } from '../testrun/gate.js';
 import { CI_NONE_MAIN_WATCH, ciIsNone, requiredFor } from '../ci-none.js';
-import { PinnedChecks, pinOf, type CheckPin, type JudgedChecks } from '../check-source.js';
+import { PinnedChecks, pinOf, type CheckPin, type JudgedAs, type JudgedChecks } from '../check-source.js';
 import type { Coordinator } from '../coordinator.js';
 import { gitExecFileSync, gitSpawn, gitSpawnSync } from '../os/git.js';
 import { randomBytes } from 'node:crypto';
@@ -142,7 +142,7 @@ export abstract class MergeFlow extends FixRuns {
       },
       config: () => this.d.cfg.project.fix_forward,
       required: () => this.requiredChecks(),
-      checks: (sha, judging) => this.headChecksOf(sha, judging),
+      checks: (sha, judging) => this.headChecksOf(sha, { main: true }, judging),
       probeTimeoutMin: () => this.d.cfg.project.flaky.rerun_timeout_min,
       // WHY: read at each use, not once: off while the sandbox's check fails, on when it passes (liveTestRuns).
       get testRuns() {
@@ -256,7 +256,9 @@ export abstract class MergeFlow extends FixRuns {
       this.peoplePolled.set(pr.number, now);
       const role = pr.bot ? null : ((await this.d.roleOf?.(pr.author)) ?? null);
       const mapped = role === 'owner' || role === 'writer';
-      const fast = requiredOutcomes(fastChecks, await this.headChecksOf(pr.headSha, fastChecks));
+      // A PR whose head ref the listing didn't give can't be judged as a PR head (R1176e): not queued on fast checks.
+      if (pr.headRef === undefined) continue;
+      const fast = requiredOutcomes(fastChecks, await this.headChecksOf(pr.headSha, { pr: { headRef: pr.headRef } }, fastChecks));
       if (fast.some((c) => c.outcome !== 'pass')) continue;
       if (!mapped && !(await this.adminApproved(pr.number))) continue;
       this.prBatch.enqueue({ issue: pr.number, number: pr.number, head: pr.headSha, by: pr.author || 'unknown' });
@@ -853,7 +855,7 @@ export abstract class MergeFlow extends FixRuns {
       // GitHub still computing: try again next poll, up to a cap. A conflict, or anything else blocking a clean merge: a human.
       if (pr.mergeableState === 'draft') return;
       // Decided on the light checks, but GitHub's ruleset still requires every required check: blocked until they pass.
-      const hold = fast && pr.mergeableState === 'blocked' ? rulesetHold(requiredOutcomes(this.requiredChecks(), await this.headChecksOf(pr.headSha, this.requiredChecks()))) : { act: 'none' as const };
+      const hold = fast && pr.mergeableState === 'blocked' ? rulesetHold(requiredOutcomes(this.requiredChecks(), await this.headChecksOf(pr.headSha, { pr: { headRef: pr.head } }, this.requiredChecks()))) : { act: 'none' as const };
       if (hold.act === 'wait') return;
       if (hold.act === 'hold') d.reasons.push(hold.why);
       else if (pr.mergeable === null || pr.mergeableState === 'unknown') {
@@ -913,7 +915,7 @@ export abstract class MergeFlow extends FixRuns {
   private async mergeTested(w: EventPayload<'pr.opened'>, pr: PullRequest, how: 'auto' | 'approved') {
     const { issue: n, number } = w;
     const events = () => this.d.log.read(0, [...PR_BATCH_EVENTS, 'merge.done', 'merge.decided', 'pr.status', 'pr.opened']);
-    const ok = mayMerge({ events: events(), number, head: pr.headSha, checks: await this.headChecksOf(pr.headSha, this.d.cfg.tests.land.pr_batch.fast_checks), fastChecks: this.d.cfg.tests.land.pr_batch.fast_checks });
+    const ok = mayMerge({ events: events(), number, head: pr.headSha, checks: await this.headChecksOf(pr.headSha, { pr: { headRef: pr.head } }, this.d.cfg.tests.land.pr_batch.fast_checks), fastChecks: this.d.cfg.tests.land.pr_batch.fast_checks });
     if (!ok.ok) {
       this.emit('merge.failed', { issue: n, number, head: pr.headSha, why: `not merged untested: ${ok.why}`.slice(0, 500) });
       return;
@@ -1159,7 +1161,7 @@ export abstract class MergeFlow extends FixRuns {
     const late = new Promise<{ error: string }>((done) => {
       timer = setTimeout(() => done({ error: `no answer in ${Math.round(this.mainChecksReadMs / 1000)} s` }), this.mainChecksReadMs);
     });
-    const read = this.headChecksOf(sha, required).then(
+    const read = this.headChecksOf(sha, { main: true }, required).then(
       (checks) => ({ checks }),
       (e: unknown) => {
         const message = String((e as Error)?.message ?? e).replace(/\s+/g, ' ');
@@ -1266,7 +1268,7 @@ export abstract class MergeFlow extends FixRuns {
   /** The default branch's required checks on its tip now (src/auto-merge-resume.ts): what a stop waits for. */
   private mainNow(): Promise<MainState> {
     // #727: the required checks judged by the pinned-source verdict readiness and the main watch use (JudgedChecks).
-    return mainNow({ repo: this.d.repo, remote: this.remote, branch: this.branch, required: this.requiredChecks(), checks: (sha) => this.headChecksOf(sha, this.requiredChecks()) });
+    return mainNow({ repo: this.d.repo, remote: this.remote, branch: this.branch, required: this.requiredChecks(), checks: (sha) => this.headChecksOf(sha, { main: true }, this.requiredChecks()) });
   }
 
   /** mainNow, recorded (merge.main_measured), so the dashboard can show the coordinator's last look; `request`: the request it answers. */
@@ -1981,9 +1983,10 @@ export abstract class MergeFlow extends FixRuns {
   }
 
   /** The checks on a PR's head as the merge policy judges them: GitHub's, or under No CI the event log's test runs in place of any of their names. */
-  protected async headChecksOf(sha: string, judging?: readonly string[]): Promise<JudgedChecks> {
-    // `judging`: the names the caller judges (#727): a pin on one of them turns the pinned reads on.
-    return this.pinned.of(sha, judging ? { judging } : {});
+  protected async headChecksOf(sha: string, at: JudgedAs, judging?: readonly string[]): Promise<JudgedChecks> {
+    // `at`: a main commit or a PR's head, required (R1176e): a PR head judged as a main commit would never count its
+    // pull_request runs. `judging`: the names the caller judges (#727): a pin on one of them turns the pinned reads on.
+    return this.pinned.of(sha, at, judging ? { judging } : {});
   }
 
   /** The stale-PR merge-ins this instance pushed (pr_hygiene.merged_in), oldest first. */

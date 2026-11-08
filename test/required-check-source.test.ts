@@ -27,10 +27,10 @@ const approved = { head: HEAD, approved: true };
 type Run = { id: number; name: string; app: number; suite: number; status?: string; conclusion?: string | null; page?: string };
 const checkRun = (r: Run) => ({ id: r.id, name: r.name, status: r.status ?? 'completed', conclusion: r.conclusion === undefined ? 'success' : r.conclusion, html_url: r.page ?? (r.app === ACTIONS ? `https://github.com/o/r/actions/runs/${r.suite * 10}/job/${r.id}` : `https://github.example/o/r/runs/${r.id}`), app: { id: r.app, slug: r.app === ACTIONS ? 'github-actions' : `app-${r.app}` }, check_suite: { id: r.suite } });
 // A PR head's run as GitHub lists it: a pull_request for a PR into main (#943), unless `o` says otherwise.
-const workflowRun = (suite: number, path: string, o: { repo?: string; sha?: string; event?: string; branch?: string | null; bases?: string[]; heads?: string[] } = {}) => ({ id: suite * 10, html_url: `https://github.com/${o.repo ?? 'o/r'}/actions/runs/${suite * 10}`, check_suite_id: suite, path, head_sha: o.sha ?? HEAD, repository: { full_name: o.repo ?? 'o/r' }, event: o.event ?? 'pull_request', head_branch: o.branch === undefined ? 'feature' : o.branch, pull_requests: (o.bases ?? ['main']).map((ref, i) => ({ base: { ref }, head: { sha: o.heads?.[i] ?? o.sha ?? HEAD } })) });
+const workflowRun = (suite: number, path: string, o: { repo?: string; sha?: string; event?: string; branch?: string | null; bases?: string[]; heads?: string[]; headRepo?: string; prHeadRepo?: string } = {}) => ({ id: suite * 10, html_url: `https://github.com/${o.repo ?? 'o/r'}/actions/runs/${suite * 10}`, check_suite_id: suite, path, head_sha: o.sha ?? HEAD, repository: { full_name: o.repo ?? 'o/r' }, head_repository: { full_name: o.headRepo ?? o.repo ?? 'o/r' }, event: o.event ?? 'pull_request', head_branch: o.branch === undefined ? 'feature' : o.branch, pull_requests: (o.bases ?? ['main']).map((ref, i) => ({ base: { ref, repo: { url: `https://api.github.com/repos/${o.repo ?? 'o/r'}` } }, head: { sha: o.heads?.[i] ?? o.sha ?? HEAD, repo: { url: `https://api.github.com/repos/${o.prHeadRepo ?? o.repo ?? 'o/r'}` } } })) });
 
 /** A stand-in GitHub REST API for repo o/r, branch main: check runs, statuses, workflow runs, protection and rules. */
-function github(o: { runs: Run[]; statuses?: { context: string; state: string }[]; workflowRuns?: unknown[] | number; branch?: unknown; rules?: unknown[] | number; prs?: string[] | number }) {
+function github(o: { runs: Run[]; statuses?: { context: string; state: string }[]; workflowRuns?: unknown[] | number; branch?: unknown; rules?: unknown[] | number; prs?: string[] | number; rebased?: number[] }) {
   const calls: string[] = [];
   const answer = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
   const f = (async (url: string) => {
@@ -42,7 +42,10 @@ function github(o: { runs: Run[]; statuses?: { context: string; state: string }[
     if (path === '/repos/o/r/branches/main') return answer(o.branch ?? { name: 'main', protection: { enabled: false, required_status_checks: { checks: [], contexts: [], enforcement_level: 'off' } } });
     if (path.startsWith('/repos/o/r/rules/branches/main')) return typeof o.rules === 'number' ? answer({ message: 'Upgrade to GitHub Pro' }, o.rules) : answer(o.rules ?? []);
     // #943 (R1176c/d): the pull requests, open or closed, from the head ref (o:feature) or holding HEAD, by base.
-    if (path.startsWith('/repos/o/r/pulls?head=o%3Afeature&state=all') || path.startsWith(`/repos/o/r/commits/${HEAD}/pulls`)) return typeof o.prs === 'number' ? answer({ message: 'Server Error' }, o.prs) : answer((o.prs ?? ['main']).map((ref) => ({ base: { ref } })));
+    if (path.startsWith('/repos/o/r/pulls?head=o%3Afeature&state=all') || path.startsWith(`/repos/o/r/commits/${HEAD}/pulls`)) return typeof o.prs === 'number' ? answer({ message: 'Server Error' }, o.prs) : answer((o.prs ?? ['main']).map((ref, i) => ({ number: i + 1, base: { ref } })));
+    // R1176f D1: each PR's history; `rebased` names the ones whose base was ever changed.
+    const history = /^\/repos\/o\/r\/issues\/(\d+)\/(events|timeline)/.exec(path);
+    if (history) return answer((o.rebased ?? []).includes(Number(history[1])) ? [{ event: 'base_ref_changed' }] : [{ event: 'labeled' }]);
     return answer({ message: 'Not Found' }, 404);
   }) as typeof fetch;
   return { backlog: new GitHubBacklog('o/r', () => 't', f), calls };
@@ -51,7 +54,7 @@ function github(o: { runs: Run[]; statuses?: { context: string; state: string }[
 /** Readiness of the PR from `feature` at HEAD; `main: true` judges HEAD as a main commit instead (no PR). */
 async function judged(gh: ReturnType<typeof github>, configured: Record<string, CheckPin>, required = ['test'], o: { main?: boolean } = {}) {
   const pinned = new PinnedChecks({ backlog: gh.backlog, branch: () => 'main', repo: () => 'o/r', configured: () => configured });
-  return readiness({ required, checks: await pinned.of(HEAD, o.main ? {} : { pr: { headRef: 'feature' } }), head: HEAD, evaluated: approved });
+  return readiness({ required, checks: await pinned.of(HEAD, o.main ? { main: true } : { pr: { headRef: 'feature' } }), head: HEAD, evaluated: approved });
 }
 const outcomes = (r: Awaited<ReturnType<typeof judged>>) => r.checks.map((c) => `${c.name} ${c.outcome}`);
 
@@ -116,6 +119,19 @@ test('a check pinned to a workflow file and posted by another workflow (or a run
   const noPrs = { checks: gh.backlog.checks.bind(gh.backlog), checkApps: gh.backlog.checkApps.bind(gh.backlog) };
   const blind = new PinnedChecks({ backlog: noPrs, branch: () => 'main', repo: () => 'o/r', configured: () => pin });
   assert.deepEqual(outcomes(readiness({ required: ['test'], checks: await blind.of(HEAD, { pr: { headRef: 'feature' } }), head: HEAD, evaluated: approved })), ['test missing'], 'no pull requests read: the bases are unknown');
+  // R1176f D1: a pull request whose base was ever changed (base_ref_changed in its history): a run from before the
+  // change read another base's workflow, and GitHub lists the PR on it with its current base.
+  const rebased = async (prs: string[], numbers: number[]) => outcomes(await judged(github({ runs, workflowRuns: [workflowRun(70, '.github/workflows/ci.yml')], prs, rebased: numbers }), pin));
+  assert.deepEqual(await rebased(['main'], [1]), ['test missing'], 'the PR itself was re-pointed at main');
+  assert.deepEqual(await rebased(['main', 'main'], [2]), ['test missing'], 'a decoy from the ref, re-pointed at main');
+  assert.deepEqual(await rebased(['main'], []), ['test pass'], 'no base change: its own run counts');
+  // R1176f D2: GitHub's real shape for a fork's PR run: `repository` is this repo, `head_repository` the fork.
+  const fork = async (o: Parameters<typeof workflowRun>[2]) => outcomes(await judged(github({ runs, workflowRuns: [workflowRun(70, '.github/workflows/ci.yml', o)] }), pin));
+  assert.deepEqual(await fork({ headRepo: 'attacker/r' }), ['test missing'], "a fork's run on a same-named branch");
+  assert.deepEqual(await fork({ prHeadRepo: 'attacker/r' }), ['test missing'], 'a listed PR whose head is in a fork');
+  const forkMain = async (headRepo?: string) => outcomes(await judged(github({ runs, workflowRuns: [workflowRun(70, '.github/workflows/ci.yml', { event: 'push', branch: 'main', bases: [], ...(headRepo ? { headRepo } : {}) })] }), pin, ['test'], { main: true }));
+  assert.deepEqual(await forkMain('attacker/r'), ['test missing'], "a main commit: a run whose commit came from a fork");
+  assert.deepEqual(await forkMain(), ['test pass'], 'a main commit: a push run in this repo');
   // The spoof's green never hides the real run's red (#943 with #925's rule: a run from elsewhere that isn't a pass blocks).
   const both = judged(github({ runs: [{ id: 1, name: 'test', app: ACTIONS, suite: 70, conclusion: 'failure' }, { id: 2, name: 'test', app: ACTIONS, suite: 71 }], workflowRuns: [workflowRun(70, '.github/workflows/ci.yml'), workflowRun(71, '.github/workflows/ci.yml', { bases: ['evil'] })] }), pin);
   assert.deepEqual(outcomes(await both), ['test fail']);
@@ -279,7 +295,7 @@ test('option (c) unchanged: an unpinned check is judged exactly by name, over ev
   let same = 0;
   for (const checks of orders) {
     const pinned = new PinnedChecks({ backlog: { checks: async () => checks, checkApps: async () => ({}) }, branch: () => 'main', repo: () => 'o/r', configured: () => ({ other: { app_id: CI_APP } }) });
-    const a = readiness({ required: ['test'], checks: await pinned.of(HEAD), head: HEAD, evaluated: approved });
+    const a = readiness({ required: ['test'], checks: await pinned.of(HEAD, { main: true }), head: HEAD, evaluated: approved });
     assert.deepEqual(a, readiness({ required: ['test'], checks: await asJudged(checks), head: HEAD, evaluated: approved }), JSON.stringify(checks));
     same++;
   }
@@ -333,7 +349,7 @@ test('without GitHub (no checkApps) every check is judged by name exactly as bef
   for (const [required, checks] of cases) {
     const pinned = new PinnedChecks({ backlog: { checks: async () => checks }, branch: () => 'main', repo: () => 'o/r', configured: () => ({}) });
     assert.equal(pinned.enforced, false);
-    assert.deepEqual(readiness({ required, checks: await pinned.of(HEAD), head: HEAD, evaluated: approved }), readiness({ required, checks: await asJudged(checks), head: HEAD, evaluated: approved }));
+    assert.deepEqual(readiness({ required, checks: await pinned.of(HEAD, { main: true }), head: HEAD, evaluated: approved }), readiness({ required, checks: await asJudged(checks), head: HEAD, evaluated: approved }));
   }
 });
 
@@ -341,7 +357,7 @@ test("GitHub's rules never answered: a check config.yaml doesn't pin is missing 
   let down = true;
   const checks: CommitCheck[] = [{ name: 'test', source: 'check_run', status: 'completed', conclusion: 'success', id: 1, app: SPOOF_APP }, { name: 'lint', source: 'check_run', status: 'completed', conclusion: 'success', id: 2, app: CI_APP }];
   const pinned = new PinnedChecks({ backlog: { checks: async () => checks, checkApps: async () => (down ? Promise.reject(new Error('GitHub 502')) : {}) }, branch: () => 'main', repo: () => 'o/r', configured: () => ({ lint: { app_id: CI_APP } }), now: () => 0 });
-  const judge = async () => readiness({ required: ['test', 'lint'], checks: await pinned.of(HEAD), head: HEAD, evaluated: approved }).checks.map((c) => `${c.name} ${c.outcome}`);
+  const judge = async () => readiness({ required: ['test', 'lint'], checks: await pinned.of(HEAD, { main: true }), head: HEAD, evaluated: approved }).checks.map((c) => `${c.name} ${c.outcome}`);
   assert.equal(await pinned.githubApps(), null);
   assert.deepEqual(await judge(), ['test missing', 'lint pass'], 'unknown: missing; the config pin still applies');
   down = false;
@@ -378,7 +394,7 @@ test('GitHub checks carry who posted each check run, and the workflow run behind
   assert.deepEqual(
     checks.map((c) => ({ name: c.name, app: c.app, workflow: c.workflow })),
     [
-      { name: 'test', app: ACTIONS, workflow: { run: 700, url: 'https://github.com/o/r/actions/runs/700', path: '.github/workflows/ci.yml', repo: 'o/r', sha: HEAD, event: 'pull_request', branch: 'feature', bases: ['main'], prHeads: [HEAD] } },
+      { name: 'test', app: ACTIONS, workflow: { run: 700, url: 'https://github.com/o/r/actions/runs/700', path: '.github/workflows/ci.yml', repo: 'o/r', sha: HEAD, event: 'pull_request', branch: 'feature', bases: ['main'], prHeads: [HEAD], headRepo: 'o/r', prsLocal: true } },
       { name: 'lint', app: CI_APP, workflow: undefined },
     ],
   );
@@ -395,7 +411,7 @@ test("the main watch's GitHub calls carry each run's App and suite, and the work
   }) as typeof fetch;
   const api = new GitHubMainWatchApi('o/r', async () => 't', f);
   assert.deepEqual((await api.checkRuns(HEAD)).map((r) => [r.app, r.suite, r.id, r.url]), [[ACTIONS, 70, 1, 'https://github.com/o/r/actions/runs/700/job/1']]);
-  assert.deepEqual(await api.runSources(HEAD), { '70': { run: 700, url: 'https://github.com/o/r/actions/runs/700', path: '.github/workflows/ci.yml', repo: 'o/r', sha: HEAD, event: 'pull_request', branch: 'feature', bases: ['main'], prHeads: [HEAD] } });
+  assert.deepEqual(await api.runSources(HEAD), { '70': { run: 700, url: 'https://github.com/o/r/actions/runs/700', path: '.github/workflows/ci.yml', repo: 'o/r', sha: HEAD, event: 'pull_request', branch: 'feature', bases: ['main'], prHeads: [HEAD], headRepo: 'o/r', prsLocal: true } });
   const denied = new GitHubMainWatchApi('o/r', async () => 't', (async () => new Response('{}', { status: 403 })) as typeof fetch);
   assert.equal(await denied.runSources(HEAD), null);
 });

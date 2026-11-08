@@ -22,7 +22,7 @@ const ident = ['-c', 'user.email=ada@example.com', '-c', 'user.name=Ada', '-c', 
  * is closed (pull_requests holds only OPEN PRs matching the run's head branch or commit). The main watch never trusts
  * such a run itself; it reads readiness's record (checks.judged).
  */
-const PR_RUN = { event: 'pull_request', branch: 'feature', bases: [] as string[], prHeads: [] as string[] };
+const PR_RUN = { event: 'pull_request', branch: 'feature', bases: [] as string[], prHeads: [] as string[], prsLocal: true };
 
 /** A remote, a clone people push from, and the coordinator's clone the watch reads. */
 function world(o: { config?: string; files?: Record<string, string> } = {}) {
@@ -222,7 +222,7 @@ test("main watch (#943 (a), R1176a): a merged PR's pinned runs, which GitHub no 
     s.gh.pr(7, m.merge, m.head, iso(T), 'example-collaborator');
     s.gh.roles.set('example-collaborator', 'writer');
     s.gh.runs.set(m.head, o.noRuns ? [] : [ci({ name: 'lint', app: 15368, suite: 70, id: 701, url: `${runPage}/job/701`, ...(o.conclusion ? { conclusion: o.conclusion } : {}) })]);
-    s.gh.sources.set(m.head, { '70': { run: 7000, url: runPage, path: '.github/workflows/ci.yml', repo, sha: m.head, ...PR_RUN } });
+    s.gh.sources.set(m.head, { '70': { run: 7000, url: runPage, path: '.github/workflows/ci.yml', repo, sha: m.head, ...PR_RUN, headRepo: repo } });
     await run(s.gh, s.watch, 8);
     return s;
   };
@@ -263,7 +263,7 @@ test('main watch (#727): a merge whose required checks came from another App or 
   s.gh.runs.set(m.head, [ci({ app: 2222, suite: 1 }), ci({ name: 'lint', app: 15368, suite: 70, ...job(701) })]);
   s.gh.statuses.set(m.head, [{ context: 'deploy', state: 'success', createdAt: iso(T - 60_000) }]);
   const runPage = `https://github.com/${repo}/actions/runs/7000`;
-  s.gh.sources.set(m.head, { '70': { run: 7000, url: runPage, path: '.github/workflows/evil.yml', repo, sha: m.head, ...PR_RUN } });
+  s.gh.sources.set(m.head, { '70': { run: 7000, url: runPage, path: '.github/workflows/evil.yml', repo, sha: m.head, ...PR_RUN, headRepo: repo } });
   await run(s.gh, s.watch, 8);
   assert.equal(s.unaccounted.length, 1);
   assert.match(s.unaccounted[0]!.reason, /ci missing, lint missing, deploy missing/);
@@ -274,7 +274,7 @@ test('main watch (#727): a merge whose required checks came from another App or 
   a.gh.pr(8, n.merge, n.head, iso(T), 'example-collaborator');
   a.gh.roles.set('example-collaborator', 'writer');
   a.gh.runs.set(n.head, [ci({ app: 1111, suite: 1 }), ci({ name: 'lint', app: 15368, suite: 70, ...job(701) }), ci({ name: 'deploy', app: 1111, suite: 1 })]);
-  a.gh.sources.set(n.head, { '70': { run: 7000, url: runPage, path: '.github/workflows/ci.yml', repo, sha: n.head, ...PR_RUN } });
+  a.gh.sources.set(n.head, { '70': { run: 7000, url: runPage, path: '.github/workflows/ci.yml', repo, sha: n.head, ...PR_RUN, headRepo: repo } });
   await run(a.gh, a.watch, 8);
   assert.deepEqual(a.unaccounted, []);
   assert.deepEqual(a.checked, [{ sha: n.merge, how: 'person', number: 8 }]);
@@ -287,7 +287,7 @@ test('main watch (#727): a merge whose required checks came from another App or 
   api.gh.pr(10, q.merge, q.head, iso(T), 'example-collaborator');
   api.gh.roles.set('example-collaborator', 'writer');
   api.gh.runs.set(q.head, [ci({ app: 1111, suite: 1 }), ci({ name: 'lint', app: 15368, suite: 70, id: 702, url: `https://github.com/${repo}/runs/702` }), ci({ name: 'deploy', app: 1111, suite: 1 })]);
-  api.gh.sources.set(q.head, { '70': { run: 7000, url: runPage, path: '.github/workflows/ci.yml', repo, sha: q.head, ...PR_RUN } });
+  api.gh.sources.set(q.head, { '70': { run: 7000, url: runPage, path: '.github/workflows/ci.yml', repo, sha: q.head, ...PR_RUN, headRepo: repo } });
   await run(api.gh, api.watch, 8);
   assert.match(api.unaccounted[0]?.reason ?? '', /: lint missing$/);
 });
@@ -317,7 +317,7 @@ test("main watch (#727, owner rule; #925): every run of a pinned check's source 
     s.gh.roles.set('example-collaborator', 'writer');
     s.gh.runs.set(m.head, runs);
     s.gh.statuses.set(m.head, statuses);
-    s.gh.sources.set(m.head, { '1': { run: 100, url: page(100), path: '.github/workflows/ci.yml', repo, sha: m.head, ...PR_RUN }, '2': { run: 200, url: page(200), path: '.github/workflows/ci.yml', repo, sha: m.head, ...PR_RUN }, '3': { run: 300, url: page(300), path: '.github/workflows/ci.yml', repo, sha: 'f'.repeat(40), ...PR_RUN } });
+    s.gh.sources.set(m.head, { '1': { run: 100, url: page(100), path: '.github/workflows/ci.yml', repo, sha: m.head, ...PR_RUN, headRepo: repo }, '2': { run: 200, url: page(200), path: '.github/workflows/ci.yml', repo, sha: m.head, ...PR_RUN, headRepo: repo }, '3': { run: 300, url: page(300), path: '.github/workflows/ci.yml', repo, sha: 'f'.repeat(40), ...PR_RUN, headRepo: repo } });
     await run(s.gh, s.watch, 8);
     return s.unaccounted[0]?.reason.replace(/^.*: /, '') ?? (s.checked.length ? 'accounted' : 'none');
   };
@@ -351,7 +351,7 @@ test('main watch (#727): an Actions-App pin never lets one workflow file superse
     s.gh.pr(7, m.merge, m.head, iso(T), 'example-collaborator');
     s.gh.roles.set('example-collaborator', 'writer');
     s.gh.runs.set(m.head, o.runs);
-    s.gh.sources.set(m.head, Object.fromEntries(Object.entries(o.files).map(([suite, path]) => [suite, { run: Number(suite) * 100, url: page(Number(suite) * 100), path, repo, sha: m.head, ...PR_RUN }])));
+    s.gh.sources.set(m.head, Object.fromEntries(Object.entries(o.files).map(([suite, path]) => [suite, { run: Number(suite) * 100, url: page(Number(suite) * 100), path, repo, sha: m.head, ...PR_RUN, headRepo: repo }])));
     await run(s.gh, s.watch, 8);
     // Round 6: the watch itself asked for the workflow runs (it used to under a workflow pin only, so under an
     // Actions-App pin every run was its own group and these cases passed for the wrong reason).
@@ -1224,12 +1224,13 @@ async function readinessVerdict(c: Case, head: string, pin: { configured: Record
       return answer({ total_count: runs.length, check_runs: runs });
     }
     if (path.startsWith(`/repos/${AGREE_REPO}/actions/runs?head_sha=${head}`)) {
-      const runs = Object.entries(c.files ?? {}).map(([suite, file]) => ({ id: Number(suite) * 100, html_url: `https://github.com/${AGREE_REPO}/actions/runs/${Number(suite) * 100}`, check_suite_id: Number(suite), path: file, head_sha: head, repository: { full_name: AGREE_REPO }, event: 'pull_request', head_branch: 'feature', pull_requests: [{ base: { ref: 'main' }, head: { sha: head } }] }));
+      const runs = Object.entries(c.files ?? {}).map(([suite, file]) => ({ id: Number(suite) * 100, html_url: `https://github.com/${AGREE_REPO}/actions/runs/${Number(suite) * 100}`, check_suite_id: Number(suite), path: file, head_sha: head, repository: { full_name: AGREE_REPO }, head_repository: { full_name: AGREE_REPO }, event: 'pull_request', head_branch: 'feature', pull_requests: [{ base: { ref: 'main', repo: { url: `https://api.github.com/repos/${AGREE_REPO}` } }, head: { sha: head, repo: { url: `https://api.github.com/repos/${AGREE_REPO}` } } }] }));
       return answer({ total_count: runs.length, workflow_runs: runs });
     }
     if (path.startsWith(`/repos/${AGREE_REPO}/commits/${head}/status`)) return answer({ total_count: (c.statuses ?? []).length, statuses: c.statuses ?? [] });
     // R1176c: every PR from `feature`, or holding the head, targets main.
-    if (path.startsWith(`/repos/${AGREE_REPO}/pulls?head=`) || path.startsWith(`/repos/${AGREE_REPO}/commits/${head}/pulls`)) return answer([{ base: { ref: 'main' } }]);
+    if (path.startsWith(`/repos/${AGREE_REPO}/pulls?head=`) || path.startsWith(`/repos/${AGREE_REPO}/commits/${head}/pulls`)) return answer([{ number: 7, base: { ref: 'main' } }]);
+    if (path.startsWith(`/repos/${AGREE_REPO}/issues/7/`)) return answer([]);
     if (path === `/repos/${AGREE_REPO}/branches/main`) return answer({ name: 'main', protection: { enabled: false } });
     if (path.startsWith(`/repos/${AGREE_REPO}/rules/branches/main`)) return answer(Object.entries(pin.github).map(([context, id]) => ({ type: 'required_status_checks', parameters: { required_status_checks: [{ context, integration_id: id }] } })));
     return answer({ message: 'Not Found' }, 404);
@@ -1250,7 +1251,7 @@ async function watchVerdict(c: Case, pin: { config: string; github: Record<strin
     m.head,
     c.jobs.map((j) => ci({ id: j.id, suite: j.suite, app: j.app ?? ACTIONS_ID, url: pageOf(j), status: j.status ?? 'completed', conclusion: (j.status ?? 'completed') === 'completed' ? (j.conclusion ?? 'success') : null, startedAt: iso(T - (60 - j.id) * 60_000), completedAt: (j.status ?? 'completed') === 'completed' ? iso(T - (59 - j.id) * 60_000) : null })),
   );
-  s.gh.sources.set(m.head, Object.fromEntries(Object.entries(c.files ?? {}).map(([suite, path]) => [suite, { run: Number(suite) * 100, url: `https://github.com/${AGREE_REPO}/actions/runs/${Number(suite) * 100}`, path, repo: AGREE_REPO, sha: m.head, ...PR_RUN }])));
+  s.gh.sources.set(m.head, Object.fromEntries(Object.entries(c.files ?? {}).map(([suite, path]) => [suite, { run: Number(suite) * 100, url: `https://github.com/${AGREE_REPO}/actions/runs/${Number(suite) * 100}`, path, repo: AGREE_REPO, sha: m.head, ...PR_RUN, headRepo: AGREE_REPO }])));
   s.gh.statuses.set(m.head, (c.statuses ?? []).map((x) => ({ ...x, createdAt: iso(T - 30 * 60_000) })));
   await run(s.gh, s.watch, 10);
   const why = s.unaccounted[0]?.reason;
