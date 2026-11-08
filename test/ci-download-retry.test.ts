@@ -36,9 +36,9 @@ const HELPER_LINE = new RegExp(
     String.raw`(?:"${VAR}"|[0-9a-f]{64}) ` +
     String.raw`(?:"(?:[^"$\x60\\]|${VAR})+"|[A-Za-z0-9_./-]+)\s*$`,
 );
-/** The inline download a root container step makes: the helper's own curl flags, an out file and an https URL. */
+/** The inline download a root container step makes: the helper's own curl flags (-sSfL: self-hosted-guard.test.ts asks for it), an out file and an https URL. */
 const INLINE_CURL = new RegExp(
-  String.raw`^\s*curl -fsSL --proto '=https' --tlsv1\.2 --retry 5 --retry-all-errors --retry-delay 5 --retry-max-time 120 ` +
+  String.raw`^\s*curl -sSfL --proto '=https' --tlsv1\.2 --retry 5 --retry-all-errors --retry-delay 5 --retry-max-time 120 ` +
     String.raw`-o "((?:[^"\s$\x60\\]|${VAR})+)" "https://(?:[^"\s$\x60\\]|${VAR})+"\s*$`,
 );
 /** Its check, the very next line: the pin (a variable or 64 hex) and the same out file, nothing after it. */
@@ -217,7 +217,7 @@ test('the workflow lint refuses every form R1228a and R1228b found, and keeps th
 });
 
 test('a root container step: the helper is refused, the inline pair must be exact; outside one the pair is refused', () => {
-  const F = "curl -fsSL --proto '=https' --tlsv1.2 --retry 5 --retry-all-errors --retry-delay 5 --retry-max-time 120";
+  const F = "curl -sSfL --proto '=https' --tlsv1.2 --retry 5 --retry-all-errors --retry-delay 5 --retry-max-time 120";
   const pair = `${F} -o "/tmp/$f" "${REL}"\necho "\${CHROME_SHA256}  /tmp/$f" | sha256sum -c -`;
   assert.deepEqual(runProblems(pair, true), [], 'the exact pair in a root step');
   assert.deepEqual(runProblems(`${F} -o "$f" "${REL}"\n# a comment\n\necho "${PIN}  $f" | sha256sum -c -`, true), [], 'comments and blank lines between are skipped');

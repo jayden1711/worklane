@@ -93,7 +93,7 @@ jobs:
           done
           f=chrome-linux64.zip
           # Inline, not the repo's fetch helper: this step runs as root in the self-hosted container, so nothing from the checkout.
-          curl -fsSL --proto '=https' --tlsv1.2 --retry 5 --retry-all-errors --retry-delay 5 --retry-max-time 120 -o "/tmp/$f" "https://storage.googleapis.com/chrome-for-testing-public/${CHROME_VERSION}/linux64/$f"
+          curl -sSfL --proto '=https' --tlsv1.2 --retry 5 --retry-all-errors --retry-delay 5 --retry-max-time 120 -o "/tmp/$f" "https://storage.googleapis.com/chrome-for-testing-public/${CHROME_VERSION}/linux64/$f"
           echo "${CHROME_SHA256}  /tmp/$f" | sha256sum -c -
           unzip -q "/tmp/$f" -d /opt && rm -f "/tmp/$f"
           # Each deb.deps line is "a (>= v) | b | c": the first alternative this release can install, or its t64
@@ -165,7 +165,7 @@ jobs:
           esac
           mkdir -p "$RUNNER_TEMP/bin" && cd "$RUNNER_TEMP/bin"
           # Inline, not the repo's fetch helper: in the self-hosted container this step runs as root, so nothing from the checkout.
-          curl -fsSL --proto '=https' --tlsv1.2 --retry 5 --retry-all-errors --retry-delay 5 --retry-max-time 120 -o "$f" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${f}"
+          curl -sSfL --proto '=https' --tlsv1.2 --retry 5 --retry-all-errors --retry-delay 5 --retry-max-time 120 -o "$f" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${f}"
           echo "${sum}  $f" | sha256sum -c -
           case "$f" in *.zip) unzip -q "$f" gitleaks.exe ;; *) tar -xzf "$f" gitleaks ;; esac
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
