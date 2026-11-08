@@ -846,8 +846,8 @@ export function tableSpan(text: string, table: string): [number, number] | null 
 
 /** A line's code that goes on to the next line: it ends with an operator, `=`, `(`, `,`, `?` or `:`. */
 const CONTINUES = /(?:[=(,?:+\-*/%|&^<>!~]|=>|\?\?)\s*$/;
-/** A line's code that goes on from the line before: it starts with `.`, `?`, `:`, `)`, `,` or a binary operator. */
-const CONTINUED = /^\s*(?:[.?:),+\-*/%|&^<>=]|\]|\?\.)/;
+/** A line's code that goes on from the line before: it starts with `.`, `?`, `:`, `)`, `,`, a binary operator, or an import's `from` (R1184f). */
+const CONTINUED = /^\s*(?:[.?:),+\-*/%|&^<>=]|\]|\?\.|from\b)/;
 const IDENT = /[A-Za-z_$][\w$]*/g;
 /** A module-level binding statement's start: `const`, `let` or `var` at column 0 (exported or not), then its name or pattern and `=`. */
 const TOP_BINDS = /^(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*|\{[^=]*\}|\[[^=]*\])\s*(?::[^=]*)?=(?![=>])/;
@@ -957,6 +957,11 @@ export function useNames(texts: ReadonlyMap<string, string>, tables: readonly st
             }
             const dflt = /^\s*import\s+(?:type\s+)?([A-Za-z_$][\w$]*)\s*(?:,|from\b)/.exec(stmt);
             if (dflt && fromDefault(rawStmt)) add(dflt[1]!, true);
+            // A namespace import (`import * as A`) of a file that binds a name to the table, or whose default stands for
+            // it: `A.rules`, `A.default` are its uses, so `A` stands for it in this file (R1184f).
+            const ns = /^\s*import\s+(?:type\s+)?\*\s*as\s+([A-Za-z_$][\w$]*)/.exec(stmt);
+            const spec = ns ? specOf(rawStmt) : null;
+            if (ns && spec !== null && specifierPaths(p, spec).some((x) => defaults.has(x) || (per.get(x)?.size ?? 0) > 1)) add(ns[1]!, false);
           }
           // Only a module's own binding: a statement at column 0 that is a `const`, `let` or `var` (exported or not),
           // its first binding. A local inside a function is not followed (each would make every line near it a use).
@@ -1091,6 +1096,42 @@ function useRemovedIn(i: WeakeningInput, inChange: readonly (CheckTable & { mark
         if (use) hit('table-use-removed', f.path, `${t.table}: ${l.trim()}`);
       }
     }
+    // Added lines (R1184f): a declaration of one of its names (a local `const CHECKS = ['a']` above a use shadows it,
+    // and no line is removed), and, outside its own file (where any added line naming it already waits, table-used), a
+    // line that changes it through one of its names (`CHECKS.splice(0)`, `Object.assign(CHECKS, ...)`, `rules.length = 0`).
+    for (const f of i.files) {
+      if (f.path.endsWith('.json')) continue;
+      const added = (f.addedLines ?? []).filter((l) => l.trim());
+      if (!added.length) continue;
+      const mine = [...names.get(t.table)!.in(f.path)];
+      if (!mine.some((n) => added.some((l) => l.includes(n)))) continue;
+      for (const n of mine) {
+        const e = n.replace(/\$/g, '\\$');
+        const declares = new RegExp(`\\b(?:const|let|var|function\\*?|class)\\s+${e}(?![\\w$])|\\b(?:const|let|var)\\s*[{[][^=]*(?<![\\w$.])${e}(?![\\w$])[^=]*[}\\]]\\s*=|\\bimport\\b[^;]*\\bas\\s+${e}(?![\\w$])`);
+        const mutates = new RegExp(`(?<![\\w$.])${e}\\s*(?:\\.\\s*(?:push|pop|shift|unshift|splice|sort|reverse|fill|copyWithin|add|delete|clear|set)\\s*\\(|\\.\\s*length\\s*=(?!=)|\\[[^\\]]*\\]\\s*=(?!=)|=(?![=>]))|\\b(?:Object\\.(?:assign|defineProperty|defineProperties|setPrototypeOf)|Reflect\\.(?:set|defineProperty|deleteProperty))\\s*\\(\\s*${e}(?![\\w$])|\\bdelete\\s+${e}\\s*[.[]`);
+        for (const l of added) {
+          // The table's own declaration in its own file is the table checks' (a name declared twice waits there).
+          if (f.path === t.path && n === t.table && own.has(entry(l))) continue;
+          if (declares.test(l)) hit('table-use-removed', f.path, `${t.table}: ${l.trim()}`);
+          else if (f.path !== t.path && mutates.test(l)) hit('table-used', f.path, `${t.table}: ${l.trim()}`);
+        }
+      }
+    }
+  }
+  // A subpath import redirect (R1184f): `package.json` "imports" (`#rules` re-pointed at a decoy) changes what an
+  // import resolves to with no JS line changed. The root one is compared parsed; in any other, a removed `"#..."` key
+  // line waits. Only with a registered table in the repo (above).
+  for (const f of i.files) {
+    if (!/(^|\/)package\.json$/.test(f.path)) continue;
+    let changedImports: boolean;
+    try {
+      const [b, a] = [i.before(f.path), i.after(f.path)];
+      const imports = (t: string | null) => JSON.stringify(t === null ? null : ((JSON.parse(t) as { imports?: unknown }).imports ?? null));
+      changedImports = b !== null || a !== null ? imports(b) !== imports(a) : (f.removedLines ?? []).some((l) => /^\s*"#/.test(l));
+    } catch {
+      changedImports = (f.removedLines ?? []).some((l) => /^\s*"#/.test(l)) || (f.removedLines ?? []).some((l) => /"imports"\s*:/.test(l));
+    }
+    if (changedImports) hit('table-use-removed', f.path, 'its "imports" (subpath imports) changed, which can re-point an import of a table');
   }
 }
 

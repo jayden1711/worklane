@@ -249,6 +249,41 @@ test('decoy (#941, R1184c): an alias an import or a destructuring makes, then it
   assert.deepEqual(weakensChanged(other, { ...other, 'src/x-user.ts': "import d from './x-other.js';\nexport default d;\nexport const n = d.length + 1;\n" }), []);
 });
 
+test('decoy (#941, R1184f): shadowing, a split import, a namespace import of an alias file, a subpath-import redirect, and a mutation from another file each wait', () => {
+  const live = { 'src/x-live.ts': "export const LIVE = ['a'];\n" };
+  const decoy = { 'src/x-decoy.ts': "export const CHECKS = ['a'];\n" };
+  const TABLE_USED = "changes a check's or guard's table outside its own list";
+  const has = (r: string[], k: string, what: string) => assert.ok(r.includes(k), `${what}: ${JSON.stringify(r)}`);
+  // 1. A local `const CHECKS` added above an existing use: no line removed.
+  const user = "import { CHECKS } from '../test/x-rules.test.js';\nexport function run() {\n  return CHECKS.length;\n}\n";
+  has(weakensChanged({ [F]: BASE, 'src/x-user.ts': user }, { [F]: BASE, 'src/x-user.ts': user.replace('export function run() {\n', "export function run() {\n  const CHECKS = ['a'];\n") }), USE_REMOVED, 'shadowing');
+  // 2. `from` on its own line, re-pointed at a decoy that exports the same name.
+  for (const split of ["import { CHECKS }\n  from '../test/x-rules.test.js';\n", "import {\n  CHECKS,\n}\n  from '../test/x-rules.test.js';\n"]) {
+    const u = `${split}export const run = () => CHECKS.length;\n`;
+    // The decoy is already there (unchanged), so only the re-pointed `from` line shows the move.
+    has(weakensChanged({ [F]: BASE, ...decoy, 'src/x-user.ts': u }, { [F]: BASE, ...decoy, 'src/x-user.ts': u.replace('../test/x-rules.test.js', './x-decoy.js') }), USE_REMOVED, `split import: ${JSON.stringify(split)}`);
+  }
+  // 3. A namespace import of an alias file, its member use switched to a decoy: a bound name, and a default.
+  const switched = "import * as A from './x-alias.js';\nimport { LIVE } from './x-live.js';\nexport const run = () => LIVE.length;\n";
+  for (const [alias, use] of [
+    ["import { CHECKS } from '../test/x-rules.test.js';\nexport const rules = CHECKS;\n", 'A.rules.length'],
+    ["import { CHECKS } from '../test/x-rules.test.js';\nexport default CHECKS;\n", 'A.default.length'],
+  ] as const) {
+    const u = `import * as A from './x-alias.js';\nexport const run = () => ${use};\n`;
+    has(weakensChanged({ [F]: BASE, 'src/x-alias.ts': alias, 'src/x-user.ts': u }, { [F]: BASE, 'src/x-alias.ts': alias, 'src/x-user.ts': switched, ...live }), USE_REMOVED, `namespace import: ${use}`);
+  }
+  // 4. package.json "imports": `#rules` re-pointed, no JS line changed.
+  const pkg = (to: string) => `{\n  "name": "x",\n  "imports": {\n    "#rules": "${to}"\n  },\n  "scripts": {\n    "test": "node --test"\n  }\n}\n`;
+  const viaHash = { [F]: BASE, ...decoy, 'src/x-user.ts': "import { CHECKS } from '#rules';\nexport const run = () => CHECKS.length;\n", 'package.json': pkg('./dist/test/x-rules.test.js') };
+  has(weakensChanged(viaHash, { ...viaHash, 'package.json': pkg('./dist/src/x-decoy.js') }), USE_REMOVED, 'a subpath-import redirect (only package.json changes)');
+  // 5. Emptied from another file.
+  const plain = "import { CHECKS } from '../test/x-rules.test.js';\nexport const run = () => CHECKS.length;\n";
+  for (const line of ['CHECKS.splice(0);', 'CHECKS.length = 0;', 'Object.assign(CHECKS, []);']) has(weakensChanged({ [F]: BASE, 'src/x-user.ts': plain }, { [F]: BASE, 'src/x-user.ts': `${plain}${line}\n` }), TABLE_USED, line);
+  // Controls: a read of it added, a new unrelated declaration, and package.json's other fields changed add none of these.
+  assert.deepEqual(weakensChanged({ [F]: BASE, 'src/x-user.ts': plain }, { [F]: BASE, 'src/x-user.ts': `${plain}export const n = CHECKS.length + 1;\nconst other = ['x'];\n` }), [], 'a read and an unrelated declaration');
+  assert.deepEqual(weakensChanged(viaHash, { ...viaHash, 'package.json': viaHash['package.json'].replace('"name": "x"', '"name": "y"') }), [], 'package.json without its imports changed');
+});
+
 test('decoy (#941), control: adding a use of the table, changing a line that never named it, or another file\'s own name like an alias, adds no such reason', () => {
   const more = BASE.replace("test('t', () => { for (const c of CHECKS) void c; });", "test('t', () => { for (const c of CHECKS) void c; });\ntest('u', () => { void CHECKS.length; });");
   assert.ok(!weakensChanged({ [F]: BASE }, { [F]: more }).includes(USE_REMOVED), 'an added use (the table-used rule reads added lines)');
