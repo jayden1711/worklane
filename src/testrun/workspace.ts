@@ -13,13 +13,13 @@
 //
 // Directories the project leaves out (tests.yaml checkout.sparse_exclude) are left out of the workspace too (sparse
 // checkout), unless a tier of the run sets full_checkout.
-import { execFileSync, spawn } from '../os/child-process.js';
 import { Readable } from 'node:stream';
 import { BRAND } from '../brand.js';
+import { gitExecFileSync, gitSpawn } from '../os/git.js';
 import { safeProjectEnv } from '../project-env.js';
 import type { RunDatabase, RunHost } from './host.js';
 
-const git = (repo: string, ...a: string[]) => execFileSync('git', ['-C', repo, ...a], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 120_000 }).trim();
+const git = (repo: string, ...a: string[]) => gitExecFileSync(['-C', repo, ...a], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 120_000 }).trim();
 
 /** The default branch's name and commit in the coordinator's clone: origin/HEAD, else origin/main, else main. */
 export function defaultBranch(repo: string): { name: string; sha: string } | null {
@@ -44,7 +44,7 @@ export function defaultBranch(repo: string): { name: string; sha: string } | nul
 export function sharedTips(repo: string, tips: readonly string[]): string[] {
   const wanted = [...new Set(tips.filter((t) => /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(t)))];
   if (!wanted.length) return [];
-  const out = execFileSync('git', ['-C', repo, 'cat-file', '--batch-check=%(objectname) %(objecttype)'], { input: wanted.map((t) => `${t}\n`).join(''), encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 120_000 });
+  const out = gitExecFileSync(['-C', repo, 'cat-file', '--batch-check=%(objectname) %(objecttype)'], { input: wanted.map((t) => `${t}\n`).join(''), encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 120_000 });
   return out
     .split('\n')
     .map((l) => l.split(' '))
@@ -83,7 +83,7 @@ export function treeBundle(repo: string, sha: string, id: string, have: readonly
   const refs = [...(lacks(repo, full, have) ? [[head, full] as const] : []), ...(lacks(repo, base.sha, have) ? [[baseRef, base.sha] as const] : [])];
   if (!refs.length) return { stream: Readable.from([]), branch: base.name, headSha: full, baseSha: base.sha, refs: 0, done: Promise.resolve() };
   for (const [r, c] of refs) git(repo, 'update-ref', r, c);
-  const child = spawn('git', ['-C', repo, 'bundle', 'create', '--quiet', '-', ...refs.map(([r]) => r), ...(have.length ? ['--not', ...have] : [])], { stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = gitSpawn(['-C', repo, 'bundle', 'create', '--quiet', '-', ...refs.map(([r]) => r), ...(have.length ? ['--not', ...have] : [])], { stdio: ['ignore', 'pipe', 'pipe'] });
   let err = '';
   child.stderr.on('data', (d: Buffer) => (err += d.toString()));
   const cleanup = () => {

@@ -7,14 +7,14 @@
 // branch being pushed can't change it; and the copy holds no rules of its own: it loads the gate and its rules
 // from origin's default branch on every push. The older `core.hooksPath=.githooks` setup ran the hook straight
 // from the checked-out branch, so this unsets it.
-import { execFileSync } from 'node:child_process';
+import { gitExecFileSync } from './lib/git.cjs';
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const MARKER = '# managed by setup-hooks: push gate';
 const LAUNCHER = 'push-gate-hook.mjs';
-const git = (...a) => execFileSync('git', a, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+const git = (...a) => gitExecFileSync(a, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 const tryGit = (...a) => {
   try {
     return git(...a);

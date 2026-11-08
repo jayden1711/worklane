@@ -160,8 +160,10 @@ test('eval-roles.mjs: a dist/ whose eval-roles.js has no spend option still stop
     join(root, 'dist', 'src', 'eval-roles.js'),
     `export * from ${JSON.stringify(real('eval-roles.js'))};\nimport { evalRolesOptions as current } from ${JSON.stringify(real('eval-roles.js'))};\nexport const evalRolesOptions = (argv) => { const o = current(argv); delete o.spend; return o; };\n`,
   );
-  mkdirSync(join(root, 'scripts'));
+  mkdirSync(join(root, 'scripts', 'lib'), { recursive: true });
   writeFileSync(join(root, 'scripts', 'eval-roles.mjs'), readFileSync(evalRoles, 'utf8'));
+  // The git runner the script imports (#807).
+  writeFileSync(join(root, 'scripts', 'lib', 'git.cjs'), readFileSync(join(repoRoot, 'scripts', 'lib', 'git.cjs'), 'utf8'));
   for (const d of ['node_modules', 'src', 'templates']) symlinkSync(join(repoRoot, d), join(root, d));
   const r = run(join(root, 'scripts', 'eval-roles.mjs'), ['--score', '--roles', 'feedback-checks'], m.env, root);
   assert.equal(r.status, 2, r.out);

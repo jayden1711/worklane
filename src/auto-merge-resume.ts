@@ -12,7 +12,8 @@
 // Main's checks are JudgedChecks, so a pinned required check is green only from its pinned source.
 // Fail closed: a stop with no `by`, an unknown one, or an unreadable stop file waits for green main; main with no
 // required checks configured, a tip that can't be read, or checks that can't be read is not green.
-import { spawn } from './os/child-process.js';
+import { gitSpawn } from './os/git.js';
+import type { ChildProcess } from './os/child-process.js';
 import type { JudgedChecks } from './check-source.js';
 import { killTree, spawnDetached } from './os/index.js';
 import { requiredOutcomes } from './pr-watch.js';
@@ -85,9 +86,9 @@ export function remoteTip(repo: string, remote: string, branch: string, o: { tim
     };
     // In its own process group, so a timeout kills git and everything it started (the transport: git-remote-https,
     // ssh, upload-pack), never leaving one holding a connection.
-    let child: ReturnType<typeof spawn>;
+    let child: ChildProcess;
     try {
-      child = spawn('git', ['ls-remote', remote, ref], { cwd: repo, detached: spawnDetached, stdio: ['ignore', 'pipe', 'ignore'] });
+      child = gitSpawn(['ls-remote', remote, ref], { cwd: repo, detached: spawnDetached, stdio: ['ignore', 'pipe', 'ignore'] });
     } catch {
       return finish(null);
     }
