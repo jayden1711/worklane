@@ -106,6 +106,8 @@ const median = (xs: number[]): number => {
 
 /** The envelope's end: the highest of its last this many blocks (about the last 30 samples). */
 export const END_PEAK = 3;
+/** The end window drift is judged over too (R1181c). */
+export const END_WINDOW_MS = 30 * 60_000;
 /** The samples' end: the median of their last this many. */
 export const END_MEDIAN = 10;
 /** At least this share of the samples the run's length and sample period call for. */
@@ -286,6 +288,13 @@ export function soakVerdict(samples: readonly SoakSample[], limits: SoakLimits =
   const m0 = median(first.map((s) => s.maxTickMs));
   const m1 = median(last.map((s) => s.maxTickMs));
   if (m0 > 0 && m1 > m0 * limits.tickDrift) failures.push(`drift: the slowest tick of an interval went from ${Math.round(m0)} ms to ${Math.round(m1)} ms (limit ${limits.tickDrift}×)`);
+  // And the run's last 30 minutes (R1181c's final check: ticks going from 50 to 1000 ms in the last 35 min left the
+  // last quarter's median flat). Judged once the run is long enough for that window to be well inside its last quarter.
+  const tail = samples.filter((x) => x.at >= end.at - END_WINDOW_MS);
+  if (tail.length >= 5 && end.at - use[0]!.at >= 4 * END_WINDOW_MS) {
+    const e0 = median(tail.map((x) => x.tickMs));
+    if (t0 > 0 && e0 > t0 * limits.tickDrift) failures.push(`drift: the median tick of the last ${END_WINDOW_MS / 60_000} min is ${Math.round(e0)} ms, from ${Math.round(t0)} ms (limit ${limits.tickDrift}×)`);
+  }
   const newEvents = end.events - use[0]!.events;
   let perEvents: number | string = 'not judged';
   if (limits.tickMsPer100kEvents > 0 && newEvents >= DRIFT_MIN_EVENTS) {
