@@ -26,7 +26,7 @@ jobs:
       - name: install gitleaks
         run: |
           tarball="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
-          curl -sSfL -o "$tarball" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${tarball}"
+          curl -sSfL --retry 5 --retry-all-errors --retry-delay 5 -o "$tarball" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${tarball}"
           echo "${GITLEAKS_SHA256}  ${tarball}" | sha256sum -c -
           tar -xzf "$tarball" gitleaks
       - name: scan full history

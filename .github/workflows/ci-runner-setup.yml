@@ -36,7 +36,7 @@ jobs:
         run: |
           v="$(sed -n 's/^runner_version=//p' scripts/setup/ci-runner.sh)"
           s="$(sed -n 's/^runner_sha256_x64=//p' scripts/setup/ci-runner.sh)"
-          curl -fsSL --proto '=https' --tlsv1.2 -o "$RUNNER_TEMP/runner.tgz" "https://github.com/actions/runner/releases/download/v$v/actions-runner-linux-x64-$v.tar.gz"
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 --proto '=https' --tlsv1.2 -o "$RUNNER_TEMP/runner.tgz" "https://github.com/actions/runner/releases/download/v$v/actions-runner-linux-x64-$v.tar.gz"
           echo "$s  $RUNNER_TEMP/runner.tgz" | sha256sum -c -
           tar -tzf "$RUNNER_TEMP/runner.tgz" > "$RUNNER_TEMP/runner.list"
           for f in ./config.sh ./run.sh ./bin/Runner.Listener; do grep -qxF "$f" "$RUNNER_TEMP/runner.list" || { echo "the release has no $f" >&2; exit 1; }; done

@@ -92,7 +92,7 @@ jobs:
             grep -q "^$u:" /etc/subgid || usermod --add-subgids 2000-59999 "$u"
           done
           f=chrome-linux64.zip
-          curl -sSfL -o "/tmp/$f" "https://storage.googleapis.com/chrome-for-testing-public/${CHROME_VERSION}/linux64/$f"
+          curl -sSfL --retry 5 --retry-all-errors --retry-delay 5 -o "/tmp/$f" "https://storage.googleapis.com/chrome-for-testing-public/${CHROME_VERSION}/linux64/$f"
           echo "${CHROME_SHA256}  /tmp/$f" | sha256sum -c -
           unzip -q "/tmp/$f" -d /opt && rm -f "/tmp/$f"
           # Each deb.deps line is "a (>= v) | b | c": the first alternative this release can install, or its t64
@@ -163,7 +163,7 @@ jobs:
             Windows) f="gitleaks_${GITLEAKS_VERSION}_windows_x64.zip";     sum=d29144deff3a68aa93ced33dddf84b7fdc26070add4aa0f4513094c8332afc4e ;;
           esac
           mkdir -p "$RUNNER_TEMP/bin" && cd "$RUNNER_TEMP/bin"
-          curl -sSfL -o "$f" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${f}"
+          curl -sSfL --retry 5 --retry-all-errors --retry-delay 5 -o "$f" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${f}"
           echo "${sum}  ${f}" | sha256sum -c -
           case "$f" in *.zip) unzip -q "$f" gitleaks.exe ;; *) tar -xzf "$f" gitleaks ;; esac
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
@@ -334,7 +334,7 @@ jobs:
         run: |
           f="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
           mkdir -p "$RUNNER_TEMP/bin" && cd "$RUNNER_TEMP/bin"
-          curl -sSfL -o "$f" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${f}"
+          curl -sSfL --retry 5 --retry-all-errors --retry-delay 5 -o "$f" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${f}"
           echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  ${f}" | sha256sum -c -
           tar -xzf "$f" gitleaks && echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: gate the commits
