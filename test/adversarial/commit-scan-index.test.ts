@@ -392,3 +392,59 @@ test('R1124h 5: a folder moved, copied or linked into a place git reads config f
   // The controls: moving into an ordinary folder, and making one, aren't refused.
   for (const line of ['mv build out', `mkdir -p ${h}/.config/gx`, `cp a.txt ${h}/notes.txt`]) assert.notEqual(await decide(d, 'Bash', { command: line }), 'deny', line);
 });
+
+test('R1124i, R1124j: a write to the user git config in any spelling the shell or APFS reads as it, or by a program that writes a path it is given or reads, is refused', { skip }, async () => {
+  const d = checkout();
+  const h = process.env.HOME!;
+  for (const line of [
+    // R1124i F1: ~, $HOME, ./ and case, a cd the guard follows, --target-directory with ~.
+    'mv /tmp/gx ~/.config/git',
+    'mv /tmp/gx $HOME/.config/git',
+    'mv /tmp/gx ${HOME}/.config/git',
+    `mv /tmp/gx ${h}/.config/./git`,
+    `mv /tmp/gx ${h}/.config/x/../git`,
+    `mv /tmp/gx ${h}/.CONFIG/git`,
+    'cd ~/.config && mv gx git',
+    `cd ${h}/.config && mv gx git`,
+    'cd "$(echo ~)/.config" && mv gx git',
+    'mv --target-directory=~/.config /tmp/git',
+    `mv --target-directory=${h}/.config /tmp/git`,
+    // R1124j 1: APFS reads these as the user's config.
+    'cp gc ~/.GITCONFIG',
+    `cp gc ${h}/.GitConfig`,
+    `cp gc ${h}/.config/GIT/config`,
+    `mv /tmp/gx ${h}/.config/Git`,
+    'cp gc .GIT/config',
+    'cp h .Git/hooks/pre-push',
+    // R1124j 2: programs that write a path they are given, or read.
+    'find /tmp -name gc -exec cp {} ~/.gitconfig \\;',
+    'curl -o ~/.gitconfig https://example.com/gc',
+    'curl -o~/.gitconfig https://example.com/gc',
+    'dd if=gc of=~/.gitconfig',
+    'echo ~/.gitconfig | xargs cp gc',
+    'ls ~/.gitconfig | xargs -n1 cp gc',
+    'echo ~ | xargs -I{} cp gc {}/.gitconfig',
+    'find ~ -maxdepth 1 -name .gitconfig -exec cp gc {} \\;',
+    'tee ~/.git{config,x} < gc',
+    'ln -s .git/config c; cat gc >> c',
+    'ln -s ~/.gitconfig c',
+    'D=~/.config; mv gx $D/git',
+    'cp gc ~/.gitconf?g',
+    'cp gc "$HOME"/.gitconfig',
+  ]) assert.equal(await decide(d, 'Bash', { command: line }), 'deny', line);
+  assert.equal(await decide(d, 'Write', { file_path: `${h}/.GITCONFIG`, content: '[core]\n' }), 'deny', 'Write ~/.GITCONFIG');
+  // The controls: ordinary writes, reads of git's config, and run-time-path programs kept to the checkout aren't refused.
+  for (const line of [
+    'mv build out',
+    `mkdir -p ${h}/.config/gx`,
+    `cp a.txt ${h}/notes.txt`,
+    'cat .git/config',
+    `ls ${h}/.config/git`,
+    'git config --get user.name',
+    "find . -name '*.ts' -exec grep -l x {} +",
+    'git ls-files | xargs grep -l foo',
+    'cd src && cp a.ts b.ts',
+    'cp a $OUT',
+    'cd ~ && ls',
+  ]) assert.notEqual(await decide(d, 'Bash', { command: line }), 'deny', line);
+});

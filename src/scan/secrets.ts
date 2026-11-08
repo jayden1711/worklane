@@ -6,6 +6,8 @@ import { accessSync, constants, existsSync, lstatSync, mkdirSync, mkdtempSync, r
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, isAbsolute, join, resolve as resolvePath } from 'node:path';
 import { BRAND } from '../brand.js';
+// R1124h: folding puts each name APFS reads as one file in its own root (foldName's doc).
+import { foldName } from '../fold-name.js';
 import { gitConfigRefusal, gitEnv, gitExecFileSync, gitGuarded, gitSnapshot, gitSpawnSync, type GitSnapshot } from '../os/git.js';
 import { ignoredNames, presentNames, rawChanges, untrackedNames } from '../coordinator/change-files.js';
 import { notRootsProgram } from '../os/index.js';
@@ -265,13 +267,6 @@ export function committedRules(top: string): Buffer | null {
   if (r.error || r.status !== 0 || r.stdout.length > RULES_MAX_BYTES) return null;
   return r.stdout;
 }
-
-/**
- * A name folded at least as far as any file system the scan's temp dir may be on folds it (R1124h): NFKC (the
- * compatibility forms: ſ, µ, ϐ, ligatures, the Kelvin sign), then upper and lower case (as APFS's case folding pairs
- * them), and final sigma as sigma. Folding further than a file system does only puts more entries in their own root.
- */
-const foldName = (p: string) => p.normalize('NFKC').toUpperCase().toLowerCase().replaceAll('ς', 'σ');
 
 /** Names the scanner reads as its own settings at the root of what it scans; such a file of the commit goes lower. */
 const SCANNER_NAMES = new Set(['.gitleaksignore', '.gitleaks.toml', '.gitleaksbaseline']);
