@@ -1,0 +1,4 @@
+import { test } from 'node:test';
+import { existsSync } from 'node:fs';
+const booted = existsSync('/run' + '/systemd/system') && process.env.NEVER === '1';
+test('acceptance: concat', { skip: !booted && 'needs systemd' }, () => {});

@@ -1,0 +1,6 @@
+import { test } from 'node:test';
+import { existsSync } from 'node:fs';
+const SYSTEMD_DIR = '/run/systemd/system';
+const hasDir = existsSync(SYSTEMD_DIR);
+const booted = hasDir && process.env.NEVER === '1';
+test('acceptance: two hops', { skip: !booted && 'needs a disposable Linux CI runner with systemd' }, () => {});

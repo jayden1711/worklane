@@ -1,27 +1,163 @@
 {
-  "//": "Each folder is one attack on scripts/ci/systemd-acceptance.mjs (its files are *.test.ts.txt, so neither npm test nor the script's own scan of test/ reads them as tests). The script must exit with this code: 2 refused statically, 1 refused at run time. Kept as regression inputs (the owner's decision on #1169, 2026-11-08).",
-  "r1169h-a1": 2,
-  "r1169h-a2": 2,
-  "r1169h-a3": 2,
-  "r1169h-b1": 2,
-  "r1169h-b2": 2,
-  "r1169h-h1": 2,
-  "r1169h-h2": 2,
-  "r1169h-h3": 2,
-  "r1169h-h4": 1,
-  "r1169h-h5": 2,
-  "r1169h-h5b": 2,
-  "r1169h-h6": 1,
-  "r1169h-h7": 1,
-  "r1169h-h8": 1,
-  "r1169g-x-reg": 1,
-  "r1169g-x-replace": 1,
-  "r1169g-c1": 1,
-  "r1169g-c2": 2,
-  "r1169j-b01-path-const": 2,
-  "r1169j-b02-func-braces": 2,
-  "r1169j-b03-helper-import": 2,
-  "r1169j-b04-floor-same-file": 2,
-  "r1169j-b05-proc1": 2,
-  "r1169j-b06-arrow": 2
+  "//": "Each folder is one attack on scripts/ci/systemd-acceptance.mjs (its files are *.test.ts.txt, copied to test/ and dist/test/, and *.root, copied to the root, so neither npm test nor the script's own scan reads them). Each is [exit, reason]: the script must exit with that code (2 refused statically, 1 refused at run time) and its stderr match that pattern, so it's refused for its own reason. Kept as regression inputs (the owner's decision on #1169, 2026-11-08).",
+  "r1169h-a1": [
+    2,
+    "isn't its line's first statement"
+  ],
+  "r1169h-a2": [
+    2,
+    "isn't its line's first statement"
+  ],
+  "r1169h-a3": [
+    2,
+    "isn't its line's first statement"
+  ],
+  "r1169h-b1": [
+    2,
+    "isn't its line's first statement"
+  ],
+  "r1169h-b2": [
+    2,
+    "isn't its line's first statement"
+  ],
+  "r1169h-h1": [
+    2,
+    "use\\(s\\) of systemCi, 0 a gate"
+  ],
+  "r1169h-h2": [
+    2,
+    "test/x\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside"
+  ],
+  "r1169h-h3": [
+    2,
+    "isn't its line's first statement"
+  ],
+  "r1169h-h4": [
+    1,
+    "acceptance: x: SKIP needs a booted init"
+  ],
+  "r1169h-h5": [
+    2,
+    "test/x\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside"
+  ],
+  "r1169h-h5b": [
+    2,
+    "test/x\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside"
+  ],
+  "r1169h-h6": [
+    1,
+    "acceptance: x: didn't run"
+  ],
+  "r1169h-h7": [
+    1,
+    "its TAP summary says 1 fail"
+  ],
+  "r1169h-h8": [
+    1,
+    "its subtest \"half\" SKIP later"
+  ],
+  "r1169g-x-reg": [
+    2,
+    "test/x\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside"
+  ],
+  "r1169g-x-replace": [
+    1,
+    "acceptance: G: didn't run"
+  ],
+  "r1169g-c1": [
+    1,
+    "acceptance: x: SKIP needs systemd"
+  ],
+  "r1169g-c2": [
+    2,
+    "test/x\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside"
+  ],
+  "r1169j-b01-path-const": [
+    2,
+    "test/y\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside"
+  ],
+  "r1169j-b02-func-braces": [
+    2,
+    "test/y\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside"
+  ],
+  "r1169j-b03-helper-import": [
+    2,
+    "test/helpers/runner\\.ts: \\d+ use\\(s\\) of systemd's sign outside"
+  ],
+  "r1169j-b04-floor-same-file": [
+    2,
+    "test/x\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside"
+  ],
+  "r1169j-b05-proc1": [
+    2,
+    "test/y\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside"
+  ],
+  "r1169j-b06-arrow": [
+    2,
+    "test/y\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside"
+  ],
+  "r1169k-body-skip": [
+    2,
+    "test/x\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside"
+  ],
+  "r1169k-src-flag": [
+    2,
+    "test/x\\.test\\.ts: a skip reads src/flags\\.ts: onVm, from src/"
+  ],
+  "r1169k-t01-const-chain": [
+    2,
+    "test/y\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside"
+  ],
+  "r1169k-t02-helper-wraps-helper": [
+    2,
+    "test/helpers/sys\\.ts: \\d+ use\\(s\\) of systemd's sign outside"
+  ],
+  "r1169k-t03-reexport-renamed": [
+    2,
+    "test/helpers/sys\\.ts: \\d+ use\\(s\\) of systemd's sign outside"
+  ],
+  "r1169k-t04-reexport-same": [
+    2,
+    "test/helpers/sys\\.ts: \\d+ use\\(s\\) of systemd's sign outside"
+  ],
+  "r1169k-t05-namespace-import": [
+    2,
+    "test/helpers/runner\\.ts: \\d+ use\\(s\\) of systemd's sign outside"
+  ],
+  "r1169k-t06-import-alias": [
+    2,
+    "test/helpers/runner\\.ts: \\d+ use\\(s\\) of systemd's sign outside"
+  ],
+  "r1169k-t07-default-export": [
+    2,
+    "test/helpers/runner\\.ts: \\d+ use\\(s\\) of systemd's sign outside"
+  ],
+  "r1169k-t08-let-assign": [
+    2,
+    "test/y\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside"
+  ],
+  "r1169k-t09-destructure": [
+    2,
+    "test/y\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside"
+  ],
+  "r1169k-t10-helper-hop1-export": [
+    2,
+    "test/helpers/runner\\.ts: \\d+ use\\(s\\) of systemd's sign outside"
+  ],
+  "r1169k-t11-long-detector": [
+    2,
+    "test/y\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside"
+  ],
+  "r1169k-t12-fn-chain": [
+    2,
+    "test/y\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside"
+  ],
+  "r1169k-t13-concat": [
+    2,
+    "test/y\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside"
+  ],
+  "r1169k-t14-proc1-cmdline": [
+    2,
+    "test/y\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside"
+  ]
 }

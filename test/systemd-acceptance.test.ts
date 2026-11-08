@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -21,6 +22,9 @@ type Script = {
   buildRoots: (dir: string) => string[];
   summaryProblems: (tap: string, file: string, gates: number) => string[];
   gateLikeCount: (text: string) => number;
+  signUses: (ts: unknown, path: string, text: string) => string[];
+  skipImports: (ts: unknown, path: string, text: string, paths: Set<string>) => string[];
+  signProblems: (ts: unknown, texts: Map<string, string>, allow?: { uses?: Record<string, { n: number; why: string }>; skipImports?: Record<string, string> }) => string[];
 };
 const sa = (await import(pathToFileURL(join(repoRoot, 'scripts', 'ci', 'systemd-acceptance.mjs')).href)) as Script;
 
@@ -29,6 +33,10 @@ const sa = (await import(pathToFileURL(join(repoRoot, 'scripts', 'ci', 'systemd-
 const flag = `${'system'}Ci`;
 const gate = (sp = ' ') => `skip:${sp}!${flag}`;
 const tmp = () => mkdtempSync(join(tmpdir(), 'sa-'));
+/** The build's typescript package, which the script parses each file with (its sign rule, R1169k). */
+const ts = createRequire(join(repoRoot, 'package.json'))('typescript') as unknown;
+/** A scratch root's node_modules: the repo's, so the script finds typescript there as CI's npm ci gives it. */
+const modules = (r: string) => symlinkSync(join(repoRoot, 'node_modules'), join(r, 'node_modules'));
 
 type Ev = { type: 'test:pass' | 'test:fail'; name: string; nesting: number; file: string | null; line: number | null; column: number | null; skip: string | boolean | null; todo: string | boolean | null };
 /** One of node's results, as the reporter writes it: in `file` (built), at `line`, passed unless `o` says otherwise. */
@@ -155,12 +163,8 @@ test('a gate on a subtest (t.test), a function or an inline check that reads sys
   writeFileSync(join(dir, 'sub.test.ts'), `test('outer', async (t) => {\n  await t.test('acceptance: inner', { ${gate()} && 'x' }, () => {});\n});\n`);
   assert.throws(() => sa.findAll(dir), /test\/sub\.test\.ts: a gate on a subtest/);
   assert.deepEqual(sa.gatesOf(`// it ends with a dot.\ntest('acceptance: top', { ${gate()} && 'x' }, () => {});\n`).map((g) => [g.line, g.member]), [[2, false]], 'a dot on the line before is not a member call');
-  dir = tmp();
-  writeFileSync(join(dir, 'fn.test.ts'), `function onHost() { return existsSync('${'/run/sys'}temd/system'); }\ntest('acceptance: g', { skip: !onHost() && 'x' }, () => {});\n`);
-  assert.throws(() => sa.findAll(dir), /onHost read\(s\) systemd's sign under another name/);
-  dir = tmp();
-  writeFileSync(join(dir, 'inline.test.ts'), `test('acceptance: g', { skip: !existsSync('${'/run/sys'}temd/system') && 'x' }, () => {});\n`);
-  assert.throws(() => sa.findAll(dir), /1 skip\(s\) that read systemd's sign inline/);
+  assert.deepEqual(sa.signUses(ts, 'test/fn.test.ts', `function onHost() { return existsSync('${'/run/sys'}temd/system'); }\ntest('acceptance: g', { skip: !onHost() && 'x' }, () => {});\n`), ['1: systemd']);
+  assert.deepEqual(sa.signUses(ts, 'test/inline.test.ts', `test('acceptance: g', { skip: !existsSync('${'/run/sys'}temd/system') && 'x' }, () => {});\n`), ['1: systemd']);
   dir = tmp();
   writeFileSync(join(dir, 'gates.ts'), `export const hostOnly = { ${gate()} && 'x' };\n`);
   assert.throws(() => sa.findAll(dir, 'src/'), /src\/gates\.ts: a systemd gate outside a \*\.test\.ts file/);
@@ -178,6 +182,7 @@ test('end to end, the script and its reporter on real node --test runs: a faked 
     mkdirSync(join(r, 'dist', 'test'), { recursive: true });
     for (const f of ['systemd-acceptance.mjs', 'systemd-acceptance-reporter.mjs']) writeFileSync(join(r, 'scripts', 'ci', f), readFileSync(join(repoRoot, 'scripts', 'ci', f)));
     writeFileSync(join(r, 'package.json'), '{"type":"module"}\n');
+    modules(r);
     writeFileSync(join(r, 'dist', 'test', 'isolate.js'), '');
     const text = `import { test } from 'node:test';\nconst ${flag} = ${o.flagValue ?? true};\n${src}\n`;
     writeFileSync(join(r, 'test', 'x.test.ts'), text);
@@ -202,7 +207,7 @@ test('end to end, the script and its reporter on real node --test runs: a faked 
   assert.match(sub.err, /its subtest "real" SKIP no/);
   assert.equal(sub.status, 1, sub.why);
   // R1169g/h: a test can't replace or write the results. The gate skips (flag false), and the file tries both.
-  const forge = `import { readdirSync, rmSync, writeFileSync, writeSync } from 'node:fs';\nimport { tmpdir } from 'node:os';\nimport { join } from 'node:path';\nconst line = JSON.stringify({ type: 'test:pass', name: 'acceptance: g', nesting: 0, file: new URL(import.meta.url).pathname, line: 9, column: 1, skip: null, todo: null }) + '\\n';\ntry { writeSync(3, line); } catch {}\nfor (const d of readdirSync(tmpdir()).filter((x) => x.startsWith('systemd-acceptance-'))) for (const f of readdirSync(join(tmpdir(), d))) { rmSync(join(tmpdir(), d, f)); writeFileSync(join(tmpdir(), d, f), line); }`;
+  const forge = `import { readdirSync, rmSync, writeFileSync, writeSync } from 'node:fs';\nimport { tmpdir } from 'node:os';\nimport { join } from 'node:path';\nconst line = JSON.stringify({ type: 'test:pass', name: 'acceptance: g', nesting: 0, file: new URL(import.meta.url).pathname, line: 9, column: 1, skip: null, todo: null }) + '\\n';\ntry { writeSync(3, line); } catch {}\nfor (const d of readdirSync(tmpdir()).filter((x) => x.startsWith('sys' + 'temd-acceptance-'))) for (const f of readdirSync(join(tmpdir(), d))) { rmSync(join(tmpdir(), d, f)); writeFileSync(join(tmpdir(), d, f), line); }`;
   const forged = fixture(`${forge}\ntest('acceptance: g', ${g}, () => {});`, { flagValue: false });
   assert.equal(forged.status, 1, forged.why);
   assert.match(forged.err, /acceptance: g: SKIP x/, "a test writing fd 3 or the temp folder can't stand in for the gate's own skip");
@@ -220,6 +225,7 @@ test('end to end, refused (exit 2): a gate sharing its line, a template name, no
     mkdirSync(join(r, 'dist', 'test'), { recursive: true });
     for (const f of ['systemd-acceptance.mjs', 'systemd-acceptance-reporter.mjs']) writeFileSync(join(r, 'scripts', 'ci', f), readFileSync(join(repoRoot, 'scripts', 'ci', f)));
     writeFileSync(join(r, 'package.json'), '{"type":"module"}\n');
+    modules(r);
     writeFileSync(join(r, 'dist', 'test', 'isolate.js'), '');
     const text = `import { test } from 'node:test';\nimport { existsSync } from 'node:fs';\nimport { join } from 'node:path';\nconst ${flag} = true;\n${src}\n`;
     writeFileSync(join(r, 'test', 'x.test.ts'), text);
@@ -236,7 +242,7 @@ test('end to end, refused (exit 2): a gate sharing its line, a template name, no
     ['a namesake on its line', `false && test('acceptance: x', ${g}, () => {}); test('acceptance: x', () => {});`, {}, /isn't its line's first statement/],
     ['a template name', `const v = 'x';\ntest(\`acceptance: \${v}\`, ${g}, () => {});`, {}, /computed \(template\) name/],
     ['node:vm in a gated file', `import vm from 'node:vm';\nvoid vm;\n${known}`, {}, /uses node:vm, new Function or eval/],
-    ['a detector built from parts', `const booted = existsSync(join('/run', 'sys' + 'temd', 'system')) || existsSync(join('/run', '${'sys'}temd', 'system'));\n${known}\ntest('acceptance: y', { skip: !booted && 'x' }, () => {});`, {}, /booted read\(s\) systemd's sign/],
+    ['a detector built from parts', `const booted = existsSync(join('/run', 'sys' + 'temd', 'system')) || existsSync(join('/run', '${'sys'}temd', 'system'));\n${known}\ntest('acceptance: y', { skip: !booted && 'x' }, () => {});`, {}, /test\/x\.test\.ts: 1 use\(s\) of systemd's sign outside/],
     ['a renamed flag on the line after skip:', `const ${'system'}dCi = false;\n${known}\ntest('acceptance: r', { skip:\n  !${'system'}dCi && 'x' }, () => {});`, {}, /2 skip\(s\) that look like a systemd gate, 1 a gate/],
     ['a gate in src/, through a test helper', `import { hostOnly } from '../src/gates.js';\n${known}\ntest('acceptance: h', hostOnly, () => {});`, { 'src/gates.ts': `const ${flag} = true;\nexport const hostOnly = { ${gate()} && 'x' };\n` }, /src\/gates\.ts: a systemd gate outside a \*\.test\.ts file/],
     ['a gate in scripts/bench/', `${known}`, { 'scripts/bench/gates.ts': `const ${flag} = true;\nexport const hostOnly = { ${gate()} && 'x' };\n` }, /scripts\/bench\/gates\.ts: a systemd gate outside a \*\.test\.ts file/],
@@ -256,8 +262,7 @@ test('a systemd flag under another name, or a gate in a helper module, stops it,
   assert.throws(() => sa.findAll(dir), /test\/engine\.test\.ts: 1 skip\(s\) that look like a systemd gate, 0 a gate this reads/);
   // A flag read from systemd's sign under another name.
   dir = tmp();
-  writeFileSync(join(dir, 'engine.test.ts'), `const onVm = existsSync('${'/run/sys'}temd/system');\ntest('acceptance: other', { skip: !onVm && 'x' }, () => {});\n`);
-  assert.throws(() => sa.findAll(dir), /onVm read\(s\) systemd's sign under another name/);
+  assert.deepEqual(sa.signUses(ts, 'test/engine.test.ts', `const onVm = existsSync('${'/run/sys'}temd/system');\ntest('acceptance: other', { skip: !onVm && 'x' }, () => {});\n`), ['1: systemd']);
   // A gated test registered from a helper module (not *.test.ts), as test/browser-helpers.ts registers tests.
   dir = tmp();
   writeFileSync(join(dir, 'sys-helpers.ts'), `export function acceptance() { test('acceptance: from a helper', { ${gate()} && 'x' }, () => {}); }\n`);
@@ -281,16 +286,17 @@ test("the build's roots come from tsconfig.json's include; node's TAP summary mu
 
 test("every review's attack on this script, kept as a fixture, still exits as it must: 2 refused statically, 1 at run time (R1169g, R1169h; the owner's decision)", { timeout: 300_000 }, () => {
   const base = join(repoRoot, 'test', 'fixtures', 'systemd-acceptance');
-  const manifest = JSON.parse(readFileSync(join(base, 'manifest.json'), 'utf8')) as Record<string, number | string>;
-  const cases = Object.entries(manifest).filter(([k]) => k !== '//') as [string, number][];
+  const manifest = JSON.parse(readFileSync(join(base, 'manifest.json'), 'utf8')) as Record<string, [number, string] | string>;
+  const cases = Object.entries(manifest).filter(([k]) => k !== '//') as [string, [number, string]][];
   assert.deepEqual(cases.map(([k]) => k).sort(), readdirSync(base, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name).sort(), 'every fixture folder is in the manifest');
-  for (const [name, want] of cases) {
+  for (const [name, [want, why]] of cases) {
     const r = tmp();
     mkdirSync(join(r, 'scripts', 'ci'), { recursive: true });
     mkdirSync(join(r, 'test'));
     mkdirSync(join(r, 'dist', 'test'), { recursive: true });
     for (const f of ['systemd-acceptance.mjs', 'systemd-acceptance-reporter.mjs']) writeFileSync(join(r, 'scripts', 'ci', f), readFileSync(join(repoRoot, 'scripts', 'ci', f)));
     writeFileSync(join(r, 'package.json'), '{"type":"module"}\n');
+    modules(r);
     writeFileSync(join(r, 'dist', 'test', 'isolate.js'), '');
     for (const f of readdirSync(join(base, name), { recursive: true }).map(String).filter((x) => x.endsWith('.txt'))) {
       const text = readFileSync(join(base, name, f), 'utf8');
@@ -299,9 +305,70 @@ test("every review's attack on this script, kept as a fixture, still exits as it
       writeFileSync(join(r, 'test', f.replace(/\.txt$/, '')), text);
       writeFileSync(join(r, 'dist', 'test', f.replace(/\.ts\.txt$/, '.js')), text);
     }
+    // A file outside test/ (src/, a root's own file): `<path>.root`, at <path> from the root.
+    for (const f of readdirSync(join(base, name), { recursive: true }).map(String).filter((x) => x.endsWith('.root'))) {
+      mkdirSync(join(r, f, '..'), { recursive: true });
+      writeFileSync(join(r, f.replace(/\.root$/, '')), readFileSync(join(base, name, f)));
+    }
     const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'NODE_TEST_CONTEXT' && k !== 'NODE_OPTIONS'));
     const p = spawnSync(process.execPath, ['scripts/ci/systemd-acceptance.mjs'], { cwd: r, encoding: 'utf8', env, timeout: 60_000 });
-    assert.equal(p.status, want, `${name}: exit ${p.status}\nstderr:\n${p.stderr}\nstdout (tail):\n${(p.stdout ?? '').split('\n').slice(-15).join('\n')}`);
+    const what = `${name}: exit ${p.status}\nstderr:\n${p.stderr}\nstdout (tail):\n${(p.stdout ?? '').split('\n').slice(-15).join('\n')}`;
+    assert.equal(p.status, want, what);
+    assert.match(p.stderr, new RegExp(why), `${name}, refused for its own reason: ${what}`);
   }
 });
 
+
+// The sign built from parts, so this file's own text holds none outside its tests' functions.
+const sd = `${'sys'}temd`;
+
+test("systemd's sign may be only in the flag's declaration, a gate's reason, a test's name or a test's own function that skips nothing (R1169k)", () => {
+  const uses = (text: string, path = 'test/x.test.ts') => sa.signUses(ts, path, text);
+  // Allowed: the flag's declaration in a test file, a gate's reason, a test's name, a test's function.
+  assert.deepEqual(uses(`const ${flag} = existsSync('/run/${sd}/system');\ntest('acceptance: ${sd} unit', { ${gate()} && 'needs ${sd}' }, () => { run('${sd}-run', ['--version']); });\n// a comment: /run/${sd}\n`), []);
+  // Anywhere else, in any spelling the parser sees: a constant, a let, a parameter's default, a template, parts, a regex.
+  for (const [what, text, want] of [
+    ['a constant', `const DIR = '/run/${sd}/system';`, ['1: systemd']],
+    ['parts joined', `const p = '/run' + '/${sd}/system';`, ['1: systemd']],
+    ['a template', `const p = \`/run/\${x}/${sd}\`;`, ['1: systemd']],
+    ['a regex', `const r = /\\/run\\/${sd}/;`, ['1: systemd']],
+    ['process 1', `const c = readFileSync('/proc/1/exe');`, ['1: /proc/1/']],
+    ['systemctl', `const ok = spawnSync('${sd.slice(0, 6)}ctl', ['is-system-running']);`, ['1: systemctl', '1: is-system-running']],
+    ['the variables systemd sets', `const sd = process.env.INVOCATION_ID ?? process.env['NOTIFY_SOCKET'];`, ['1: INVOCATION_ID', '1: NOTIFY_SOCKET']],
+    ['a non-gate skip', `test('n', { skip: !ok && 'needs ${sd}' }, () => {});`, ['1: systemd']],
+    ["a test's function that skips", `test('n', (t) => { if (!existsSync('/run/${sd}')) t.skip(); });`, ['1: systemd']],
+    ['a describe() body', `describe('d', () => { const booted = existsSync('/run/${sd}'); });`, ['1: systemd']],
+  ] as const) assert.deepEqual(uses(text), want, what);
+  // A word that only contains it is not it; the flag declared in a helper (not *.test.ts) is a use.
+  assert.deepEqual(uses(`const ${sd}Tests = 1;`), []);
+  assert.deepEqual(uses(`export const ${flag} = existsSync('/run/${sd}');`, 'test/helpers.ts'), ['1: systemd']);
+});
+
+test('a skip may read a binding from src/, or from a file that holds the sign, only as the allowlist names it, in any import form (R1169k)', () => {
+  const paths = new Set(['test/x.test.ts', 'test/helpers/runner.ts', 'src/os.ts']);
+  const reads = (text: string) => sa.skipImports(ts, 'test/x.test.ts', text, paths);
+  assert.deepEqual(reads(`import { canRun as onVm } from './helpers/runner.js';\ntest('n', { skip: !onVm }, () => {});`), ['test/helpers/runner.ts: canRun']);
+  assert.deepEqual(reads(`import * as r from './helpers/runner.js';\ntest('n', { skip: !r.canRun }, () => {});`), ['test/helpers/runner.ts: *']);
+  assert.deepEqual(reads(`import canRun from '../src/os.js';\ntest('n', { skip: !canRun }, () => {});`), ['src/os.ts: default']);
+  assert.deepEqual(reads(`const { canRun: ok } = await import('../src/os.js');\ntest('n', { skip: !ok }, () => {});`), ['src/os.ts: canRun']);
+  assert.deepEqual(reads(`const os = require('../src/os.js');\nconst skip = !os.up;\ntest('n', { skip }, () => {});`), [], 'a shorthand skip reads its own local, which is no import');
+  assert.deepEqual(reads(`import { canRun } from './helpers/runner.js';\ntest('n', { timeout: canRun ? 1 : 2 }, () => {});`), [], 'not a skip');
+  const texts = new Map([
+    ['src/os.ts', `export const up = existsSync('/run/${sd}');\n`],
+    ['test/x.test.ts', `import { up } from '../src/os.js';\ntest('n', { skip: !up && 'x' }, () => {});\n`],
+  ]);
+  assert.deepEqual(sa.signProblems(ts, texts, { uses: { 'src/os.ts': { n: 1, why: 'product code' } } }).map((p) => p.split(':').slice(0, 3).join(':')), ['test/x.test.ts: a skip reads src/os.ts: up, from src/'], 'src/ named in uses, but its binding read by a skip');
+  assert.deepEqual(sa.signProblems(ts, texts, { uses: { 'src/os.ts': { n: 1, why: 'product code' } }, skipImports: { 'src/os.ts: up': 'why' } }), []);
+  // The counts hold: one more use, one fewer, or an entry with no file, each stops it.
+  assert.match(sa.signProblems(ts, texts, { uses: { 'src/os.ts': { n: 2, why: 'x' } }, skipImports: { 'src/os.ts: up': 'why' } }).join('\n'), /src\/os\.ts: 1 use\(s\) of systemd's sign .*, 2 named/);
+  assert.match(sa.signProblems(ts, texts, { uses: { 'src/os.ts': { n: 1, why: 'x' }, 'test/gone.ts': { n: 1, why: 'x' } }, skipImports: { 'src/os.ts: up': 'why' } }).join('\n'), /test\/gone\.ts: named in .*, but the build has no such file/);
+  assert.match(sa.signProblems(ts, texts, { uses: { 'src/os.ts': { n: 1, why: 'x' } }, skipImports: { 'src/os.ts: up': 'why', 'src/os.ts: down': 'why' } }).join('\n'), /src\/os\.ts: down: named in the allowlist's skipImports, but no skip reads it/);
+});
+
+test("this repo's build roots hold systemd's sign only where the rule or its allowlist says, so a PR breaks it here, before main's job (R1169k)", () => {
+  const texts = new Map<string, string>();
+  for (const r of sa.buildRoots(repoRoot)) for (const f of readdirSync(join(repoRoot, r), { recursive: true }).map((x) => String(x).split('\\').join('/')).filter((x) => /\.[cm]?[jt]sx?$/.test(x) && !x.endsWith('.d.ts'))) texts.set(`${r}/${f}`, readFileSync(join(repoRoot, r, f), 'utf8'));
+  const allow = JSON.parse(readFileSync(join(repoRoot, 'scripts', 'ci', 'systemd-acceptance-allow.json'), 'utf8')) as { uses: Record<string, { n: number; why: string }>; skipImports: Record<string, string> };
+  for (const [p, e] of Object.entries(allow.uses)) assert.ok(e.why.trim(), `${p}: named with why`);
+  assert.deepEqual(sa.signProblems(ts, texts, allow), []);
+});

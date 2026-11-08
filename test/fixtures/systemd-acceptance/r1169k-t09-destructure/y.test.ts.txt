@@ -1,0 +1,5 @@
+import { test } from 'node:test';
+import { existsSync } from 'node:fs';
+const probe = { booted: existsSync('/run/systemd/system') && process.env.NEVER === '1' };
+const { booted } = probe;
+test('acceptance: destructured', { skip: !booted && 'needs systemd' }, () => {});

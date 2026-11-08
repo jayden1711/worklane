@@ -4,19 +4,33 @@
 // runs exactly them, and fails unless every one ran and passed: a skip here is a failure, so none of them can
 // quietly run nowhere. Nothing is listed by hand, so a new test with that gate is run here too, in any directory
 // under test/ (npm test runs dist/test/**/*.test.js). The gate has one spelling: any other mention of systemCi in a
-// test file (`! systemCi`, `!(systemCi)`, a ternary, a check inside a test), a flag or function shaped like it or
-// reading systemd's sign under another name, or any of that in src/ or a test helper, stops the job.
+// test file (`! systemCi`, `!(systemCi)`, a ternary, a check inside a test), or a skip on a flag shaped like it,
+// stops the job.
+//
+// A test gated on systemd under another name is found by systemd's sign, not by the name (R1169k, signProblems):
+// in every file the build compiles (tsconfig.json's include), the sign (`systemd` as a word, `systemctl`, `/proc/1/`,
+// `is-system-running`, `sd_booted`, INVOCATION_ID, NOTIFY_SOCKET), read by typescript's parser in every string,
+// template, regex and identifier, may be only in systemCi's declaration, a gate's reason, a test's name or a test's
+// own function that skips nothing. Anywhere else it must be data scripts/ci/systemd-acceptance-allow.json names, by
+// file, count and why; and a skip may read a binding from src/ or from such a file only as that list names it. So
+// however many steps, names or imports lie between the sign and a skip, the sign is somewhere the rule refuses.
+// What it can't see: a sign spelled so no word of it is whole (`'sys' + 'temd'`, deliberate, out of scope), and a
+// value an allowlisted file computes, reached by a skip through another file (each allowlisted use is reviewed as
+// data no skip reads).
 //
 // Results come from node's own test events (systemd-acceptance-reporter.mjs, R1169f), never from TAP text a test
 // could print: each gate is matched by its built file, the line and column its test() call is on, and its name, and
 // the events arrive on a pipe (fd 3) no test process holds.
 //
-//   node scripts/ci/systemd-acceptance.mjs      (after the build: it runs dist/test/<file>.js)
+//   node scripts/ci/systemd-acceptance.mjs            (after npm ci and the build: it runs dist/test/<file>.js)
+//   node scripts/ci/systemd-acceptance.mjs --signs    (each file's uses of the sign, to update the allowlist)
 //
 // Exit 1: a test failed, skipped, didn't run, ran more than once or has a subtest that didn't pass, or a test here
-// skipped naming systemd. Exit 2: no such test was found, a file couldn't be read, or a gate isn't one it reads.
+// skipped naming systemd. Exit 2: no such test was found, a file couldn't be read, a gate isn't one it reads, or the
+// sign is somewhere the rule refuses.
 import { spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -25,6 +39,15 @@ const root = fileURLToPath(new URL('../../', import.meta.url));
 const PRELOAD = ['--import', './dist/test/isolate.js'];
 /** The reporter that writes node's own results as JSON lines (systemd-acceptance-reporter.mjs). */
 const REPORTER = fileURLToPath(new URL('./systemd-acceptance-reporter.mjs', import.meta.url));
+
+/** The typescript package (the build's own, a devDependency), which parses each file for the sign rule. */
+const typescript = () => {
+  try {
+    return createRequire(join(root, 'package.json'))('typescript');
+  } catch {
+    throw new Error('the typescript package (npm ci) is needed to read the build roots for systemd\'s sign');
+  }
+};
 
 /** A JS string literal's body, unescaped (\\, \', \", \` and \n; the names here use no other escape). */
 const unescape = (s) => s.replace(/\\(.)/g, (_, c) => (c === 'n' ? '\n' : c));
@@ -112,134 +135,195 @@ const unquoted = (e) => e.replace(/(['"`])(?:\\.|(?!\1)[^\\])*\1/g, "''");
 export const gateLikeCount = (text) => skipExprs(text).filter((e) => /(?<![\w$])[A-Za-z_$]*system[\w$]*ci(?![\w$])/i.test(unquoted(e))).length;
 
 /**
- * systemd's sign, however a path to it is built (R1169h, R1169j): `/run/systemd`, a `'run'` part then a `'systemd'`
- * part (`join('/run', 'systemd', 'system')`, `['', 'run', 'systemd', ...].join('/')`), `is-system-running`, `sd_booted`,
- * `/proc/1/comm` (systemd as process 1). A bare `'systemd'` string (a program name, data) isn't one.
- * Not `systemctl`: a test that checks for that program is not a booted-systemd gate.
+ * systemd's sign (R1169k): what code that asks "is systemd here?" has to read. The program and folder name (`systemd`,
+ * as a whole word: `/run/systemd`, `'systemd'`, `systemd-run`), `systemctl`, `/proc/1/` (process 1: comm, exe,
+ * cmdline), `is-system-running`, `sd_booted`, and the variables systemd sets (INVOCATION_ID, NOTIFY_SOCKET). Read in
+ * every string, template, regex and identifier the parser sees, so a path built from parts (`'/run' + '/systemd'`)
+ * still holds one. Comments don't count.
  */
-/** The longest declaration read as a detector of systemd's sign (signNames). */
-const MAX_DETECTOR = 600;
-const SIGN = /\/run\/systemd|(['"`])\/?run\1[^;\n]{0,40}?(['"`])systemd\2|is-system-running|sd_booted|\/proc\/1\/comm/;
+const SIGN = /(?<![\w$])(?:systemd|systemctl|is-system-running|sd_booted|INVOCATION_ID|NOTIFY_SOCKET)(?![\w$])|\/proc\/1\//;
 
-/** `text` without its comments (strings kept: a path is a string), one pass. */
-function withoutComments(text) {
-  let out = '';
-  let quote = null;
-  for (let k = 0; k < text.length; k++) {
-    const c = text[k];
-    if (quote) {
-      out += c;
-      if (c === '\\') out += text[++k] ?? '';
-      else if (c === quote) quote = null;
-      continue;
+/** Where the sign may be, as the only places a skip can't read it from (signUses). */
+function allowedSpans(ts, sf, testFile) {
+  const spans = [];
+  const isTestCall = (n) => {
+    if (!ts.isCallExpression(n)) return false;
+    let c = n.expression;
+    if (ts.isPropertyAccessExpression(c) && ts.isIdentifier(c.expression) && /^(?:only|skip|todo)$/.test(c.name.text)) c = c.expression;
+    return ts.isIdentifier(c) && (c.text === 'test' || c.text === 'it');
+  };
+  const hasSkip = (n) => {
+    let found = false;
+    const walk = (x) => {
+      if (found) return;
+      if (ts.isIdentifier(x) && x.text === 'skip') found = true;
+      else ts.forEachChild(x, walk);
+    };
+    walk(n);
+    return found;
+  };
+  const visit = (n) => {
+    // The flag itself: `const systemCi = ...` in a *.test.ts file, its whole initializer.
+    if (testFile && ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.name.text === 'systemCi' && n.initializer) spans.push([n.initializer.getStart(sf), n.initializer.end]);
+    if (isTestCall(n)) {
+      const args = n.arguments;
+      // A test's name: text, never a flag.
+      if (args.length) spans.push([args[0].getStart(sf), args[0].end]);
+      // A test's own function: data a running test uses, unless it skips anything (a skip there reading the sign
+      // would hide that test, or a subtest, as a gate under another name would).
+      const fn = args[args.length - 1];
+      if (args.length > 1 && fn && (ts.isArrowFunction(fn) || ts.isFunctionExpression(fn)) && !hasSkip(fn)) spans.push([fn.getStart(sf), fn.end]);
+      // A gate's reason: `{ skip: !systemCi && 'needs systemd' }`.
+      const o = args.length > 2 ? args[1] : null;
+      const first = o && ts.isObjectLiteralExpression(o) ? o.properties[0] : null;
+      const e = first && ts.isPropertyAssignment(first) && ts.isIdentifier(first.name) && first.name.text === 'skip' ? first.initializer : null;
+      if (e && ts.isBinaryExpression(e) && e.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken && ts.isPrefixUnaryExpression(e.left) && e.left.operator === ts.SyntaxKind.ExclamationToken && ts.isIdentifier(e.left.operand) && e.left.operand.text === 'systemCi' && ts.isStringLiteralLike(e.right)) spans.push([e.right.getStart(sf), e.right.end]);
     }
-    if (c === "'" || c === '"' || c === '`') {
-      quote = c;
-      out += c;
-    } else if (c === '/' && text[k + 1] === '/') {
-      while (k < text.length && text[k] !== '\n') k++;
-      out += '\n';
-    } else if (c === '/' && text[k + 1] === '*') {
-      const end = text.indexOf('*/', k + 2);
-      k = end === -1 ? text.length : end + 1;
-      out += ' ';
-    } else out += c;
-  }
-  return out;
+    ts.forEachChild(n, visit);
+  };
+  visit(sf);
+  return spans;
 }
 
-/** From `k` in `code`, to the end of a statement or block: brackets and strings balanced, ending at a `;` or line end at depth 0 (or the block's closing brace). */
-function scanBody(code, k, block) {
-  let depth = 0;
-  let quote = null;
-  const start = k;
-  for (; k < code.length && k - start < 20_000; k++) {
-    const c = code[k];
-    if (quote) {
-      if (c === '\\') k++;
-      else if (c === quote) quote = null;
-      continue;
-    }
-    if (c === "'" || c === '"' || c === '`') quote = c;
-    else if (c === '(' || c === '[' || c === '{') depth++;
-    else if (c === ')' || c === ']' || c === '}') {
-      depth--;
-      if (block && depth === 0) return code.slice(start, k + 1);
-      if (depth < 0) break;
-    } else if (!block && depth === 0 && (c === ';' || (c === '\n' && !/[=+\-*/%&|^?:,(<>!~]\s*$/.test(code.slice(start, k)) && !/^\s*[.?:)\]&|+\-*/,]/.test(code.slice(k + 1, k + 40))))) break;
-  }
-  return code.slice(start, k);
-}
-
-/** Each name `code` declares (`const`/`let`/`var`, a function, an arrow), with its whole initializer or body (scanBody). */
-function declarations(code) {
+/**
+ * Each place `text` (the file `path`) holds systemd's sign outside the places it may (R1169k), as `line: token`. It
+ * may be only in a `const systemCi =` declaration's value in a *.test.ts file, a gate's reason, a test()'s or it()'s
+ * name, or that test's own function when it skips nothing. Anywhere else (a constant, a helper, a function, an
+ * import, src/) it's a use: a skip could read it under another name, at any number of steps, so each use must be
+ * one the allowlist names (systemd-acceptance-allow.json). `ts`: the typescript package, which parses the file.
+ */
+export function signUses(ts, path, text) {
+  if (!new RegExp(SIGN.source).test(text)) return [];
+  const kind = /\.[cm]?jsx?$/.test(path) ? ts.ScriptKind.JS : /\.tsx$/.test(path) ? ts.ScriptKind.TSX : ts.ScriptKind.TS;
+  const sf = ts.createSourceFile(path, text, ts.ScriptTarget.Latest, true, kind);
+  const spans = allowedSpans(ts, sf, path.endsWith('.test.ts'));
   const out = [];
-  for (const m of code.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=;\n]*)?=(?![=>])/g)) out.push([m[1], scanBody(code, m.index + m[0].length, false)]);
-  for (const m of code.matchAll(/\bfunction\s*\*?\s*([A-Za-z_$][\w$]*)\s*\(/g)) {
-    const params = scanBody(code, m.index + m[0].length - 1, true);
-    const open = code.indexOf('{', m.index + m[0].length - 1 + params.length);
-    out.push([m[1], params + (open === -1 ? '' : scanBody(code, open, true))]);
-  }
+  const leafText = (n) => {
+    if (ts.isIdentifier(n) || ts.isPrivateIdentifier(n)) return n.text;
+    if (ts.isStringLiteralLike(n) || ts.isRegularExpressionLiteral(n) || ts.isTemplateLiteralToken?.(n) || ts.isTemplateHead(n) || ts.isTemplateMiddle(n) || ts.isTemplateTail(n) || ts.isNumericLiteral(n) || n.kind === ts.SyntaxKind.JsxText) return n.getText(sf);
+    return null;
+  };
+  const visit = (n) => {
+    const t = leafText(n);
+    if (t !== null) {
+      const m = SIGN.exec(t);
+      const at = n.getStart(sf);
+      if (m && !spans.some(([a, b]) => at >= a && n.end <= b)) out.push(`${sf.getLineAndCharacterOfPosition(at).line + 1}: ${m[0]}`);
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(sf);
   return out;
 }
 
 /**
- * The names that stand for systemd's sign, per file (R1169j): in a file, a declaration whose initializer or body
- * reads the sign, or reads a name that stands for it there (a constant holding the path, a function returning the
- * check). Across files only through an import: a name a file exports that stands for it stands for it in a file
- * that imports that name (a helper's `export const canRun = existsSync('/run/systemd/system')`). Comments don't
- * count; strings do (a path is one). `texts`: path to text, every file of every build root.
+ * Each binding a `skip:` option in `text` (the file `path`) reads from another module, as `<module>: <name>` (R1169k):
+ * an import of any form (named, renamed, namespace as `*`, default as `default`), or a `require()` or `import()`'s
+ * result. `<module>` is the build-root path it resolves to (`./x.js` to `test/x.ts`), or the specifier as written when
+ * it isn't one of `paths`.
  */
-export function signNames(texts) {
-  const files = [...texts].map(([p, t]) => {
-    const code = withoutComments(t);
-    const imported = new Set([...code.matchAll(/^\s*import\b[\s\S]*?\bfrom\b|\brequire\s*\(/gm)].length ? (code.match(/^\s*import\s*(?:type\s+)?\{[^}]*\}|^\s*import\s+[A-Za-z_$][\w$]*|\bconst\s*\{[^}]*\}\s*=\s*require\s*\(|\b(?:import|export)\s*\{[^}]*\}\s*from/gm) ?? []).flatMap((x) => x.match(/[A-Za-z_$][\w$]*/g) ?? []) : []);
-    return { p, code, decls: declarations(code), imported, tainted: new Set() };
-  });
-  // A detector is short and near the sign: a declaration of at most MAX_DETECTOR characters that reads it (hop 0), or
-  // reads a hop-0 name of its file or one it imports (hop 1). Further hops, or a long declaration (data, a fixture, a
-  // helper that only mentions one), aren't followed: a long chain is not an accidental rename.
-  const exportedBy = (f, name) => new RegExp(`\\bexport\\s+(?:const|let|var|function\\*?|async\\s+function)\\s+${name.replace(/\$/g, '\\$')}(?![\\w$])|\\bexport\\s*\\{[^}]*(?<![\\w$])${name.replace(/\$/g, '\\$')}(?![\\w$])|\\bexports\\.${name.replace(/\$/g, '\\$')}\\s*=`).test(f.code);
-  const short = (body) => body.length <= MAX_DETECTOR;
-  for (const f of files) for (const [name, body] of f.decls) if (short(body) && SIGN.test(body)) f.tainted.add(name);
-  const exported = new Set();
-  for (const f of files) {
-    const hop0 = [...f.tainted];
-    const re = hop0.length ? new RegExp(`(?<![\\w$])(?:${hop0.map((n) => n.replace(/\$/g, '\\$')).join('|')})(?![\\w$])`) : null;
-    if (re) for (const [name, body] of f.decls) if (short(body) && re.test(body)) f.tainted.add(name);
-    for (const n of f.tainted) if (exportedBy(f, n)) exported.add(n);
-  }
-  for (const f of files) {
-    const fromImports = [...f.imported].filter((n) => exported.has(n));
-    for (const n of fromImports) f.tainted.add(n);
-    const re = fromImports.length ? new RegExp(`(?<![\\w$])(?:${fromImports.map((n) => n.replace(/\$/g, '\\$')).join('|')})(?![\\w$])`) : null;
-    if (re) for (const [name, body] of f.decls) if (short(body) && re.test(body)) f.tainted.add(name);
-  }
-  return new Map(files.map((f) => [f.p, new Set([...f.tainted].filter((n) => n !== 'systemCi'))]));
+export function skipImports(ts, path, text, paths) {
+  if (!/\bskip\b/.test(text)) return [];
+  const kind = /\.[cm]?jsx?$/.test(path) ? ts.ScriptKind.JS : ts.ScriptKind.TS;
+  const sf = ts.createSourceFile(path, text, ts.ScriptTarget.Latest, true, kind);
+  const dir = path.split('/').slice(0, -1);
+  const resolve = (spec) => {
+    if (!spec.startsWith('.')) return spec;
+    const parts = [...dir];
+    for (const x of spec.split('/')) {
+      if (x === '..') parts.pop();
+      else if (x !== '.') parts.push(x);
+    }
+    const p = parts.join('/');
+    for (const c of [p, p.replace(/\.([cm]?)js$/, '.$1ts'), `${p}.ts`, `${p}/index.ts`]) if (paths.has(c)) return c;
+    return p;
+  };
+  const bound = new Map();
+  const bindAll = (name, module, imported) => {
+    if (ts.isIdentifier(name)) bound.set(name.text, `${module}: ${imported}`);
+    else for (const e of name.elements ?? []) if (!ts.isOmittedExpression(e)) bindAll(e.name, module, e.propertyName && ts.isIdentifier(e.propertyName) ? e.propertyName.text : ts.isIdentifier(e.name) ? e.name.text : imported);
+  };
+  const loads = (n) => {
+    let spec = null;
+    const walk = (x) => {
+      if (spec) return;
+      if (ts.isCallExpression(x) && (x.expression.kind === ts.SyntaxKind.ImportKeyword || (ts.isIdentifier(x.expression) && x.expression.text === 'require')) && x.arguments[0] && ts.isStringLiteralLike(x.arguments[0])) spec = x.arguments[0].text;
+      else ts.forEachChild(x, walk);
+    };
+    walk(n);
+    return spec;
+  };
+  const visit = (n) => {
+    if (ts.isImportDeclaration(n) && ts.isStringLiteral(n.moduleSpecifier) && n.importClause) {
+      const m = resolve(n.moduleSpecifier.text);
+      const c = n.importClause;
+      if (c.name) bound.set(c.name.text, `${m}: default`);
+      const nb = c.namedBindings;
+      if (nb && ts.isNamespaceImport(nb)) bound.set(nb.name.text, `${m}: *`);
+      else if (nb) for (const e of nb.elements) bound.set(e.name.text, `${m}: ${(e.propertyName ?? e.name).text}`);
+    } else if (ts.isImportEqualsDeclaration(n) && ts.isExternalModuleReference(n.moduleReference) && ts.isStringLiteral(n.moduleReference.expression)) {
+      bound.set(n.name.text, `${resolve(n.moduleReference.expression.text)}: *`);
+    } else if (ts.isVariableDeclaration(n) && n.initializer) {
+      const spec = loads(n.initializer);
+      if (spec) bindAll(n.name, resolve(spec), '*');
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(sf);
+  const out = new Set();
+  const read = (n) => {
+    if (ts.isIdentifier(n) && bound.has(n.text) && !(n.parent && ts.isPropertyAccessExpression(n.parent) && n.parent.name === n)) out.add(bound.get(n.text));
+    ts.forEachChild(n, read);
+  };
+  const skips = (n) => {
+    if (ts.isPropertyAssignment(n) && (ts.isIdentifier(n.name) || ts.isStringLiteral(n.name)) && n.name.text === 'skip') read(n.initializer);
+    else if (ts.isShorthandPropertyAssignment(n) && n.name.text === 'skip') read(n.name);
+    ts.forEachChild(n, skips);
+  };
+  skips(sf);
+  return [...out];
 }
 
 /**
- * The names in `text`'s `skip:` options that stand for systemd's sign (`signs`, signNames over every build root, or
- * this file alone): each must be systemCi, so a check one step away (a constant, a helper, a function) stops the job.
+ * The sign rule over every file the build compiles (R1169k), as problems ([] when it holds). `texts`: path to text.
+ * `allow` (systemd-acceptance-allow.json): `uses`, the files where the sign is data no skip reads, each with its count
+ * of uses and why; `skipImports`, the `<module>: <name>` bindings a skip may read from src/ or from a file in `uses`,
+ * each with why. Any other use, a count that changed, a skip reading such a binding unnamed, or an entry with nothing
+ * left to name, is a problem.
  */
-export const detectorNames = (text, signs = signNames([['', text]]).get('')) => {
-  const used = new Set(skipExprs(withoutComments(text)).flatMap((e) => unquoted(e).match(/[A-Za-z_$][\w$]*/g) ?? []));
-  return [...signs].filter((n) => used.has(n));
-};
-
-/** How many `skip:` options read systemd's sign inline (`skip: !existsSync('/run/systemd/system')`): each must be a read gate. */
-export const inlineSignCount = (text) => skipExprs(text).filter((e) => SIGN.test(e)).length;
+export function signProblems(ts, texts, allow = {}) {
+  const uses = allow.uses ?? {};
+  const okImports = allow.skipImports ?? {};
+  const out = [];
+  const holders = new Set();
+  const paths = new Set(texts.keys());
+  for (const [p, t] of texts) {
+    const u = signUses(ts, p, t);
+    if (u.length) holders.add(p);
+    const want = uses[p]?.n ?? 0;
+    if (u.length !== want) out.push(`${p}: ${u.length} use(s) of systemd's sign outside a systemCi declaration, a gate's reason or a test's own function, ${want} named in scripts/ci/systemd-acceptance-allow.json (${u.slice(0, 6).join(', ')}${u.length > 6 ? ', ...' : ''}): gate a test that needs systemd on systemCi, as \`test(<name>, { skip: !systemCi ...\`; data no skip reads goes in the allowlist with its count and why`);
+  }
+  for (const p of Object.keys(uses)) if (!texts.has(p)) out.push(`${p}: named in scripts/ci/systemd-acceptance-allow.json, but the build has no such file`);
+  for (const [p, t] of texts) {
+    for (const b of skipImports(ts, p, t, paths)) {
+      const m = b.slice(0, b.lastIndexOf(': '));
+      if ((m.startsWith('src/') || holders.has(m)) && !(b in okImports)) out.push(`${p}: a skip reads ${b}, from ${m.startsWith('src/') ? 'src/' : 'a file that holds systemd\'s sign'}: gate a test that needs systemd on systemCi; another check goes in the allowlist's skipImports with why`);
+    }
+  }
+  for (const b of Object.keys(okImports)) if (![...texts].some(([p, t]) => skipImports(ts, p, t, paths).includes(b))) out.push(`${b}: named in the allowlist's skipImports, but no skip reads it`);
+  return out;
+}
 
 /** Code that can register a test under a location it makes up (R1169h: `vm.runInThisContext` with a filename). */
 const FORGES = /\bfrom\s+['"](?:node:)?vm['"]|\brequire\s*\(\s*['"](?:node:)?vm['"]\s*\)|\bnew\s+Function\b|(?<![\w$.])eval\s*\(/;
 
 /**
  * Every gated test under `dir` (test/), at any depth, by its path from `dir` ('/'-separated). Throws when a mention
- * of systemCi isn't a gate in a test() call this can read, when a skip that looks like a systemd gate isn't one, when
- * a flag read from systemd's sign isn't named systemCi, or when any of that is in a file under test/ that isn't a
- * `*.test.ts` (a helper module that registers tests, R1169d): the run is by file, so a gated test must be in one.
+ * of systemCi isn't a gate in a test() call this can read, when a skip that looks like a systemd gate isn't one, or
+ * when any of that is in a file under test/ that isn't a `*.test.ts` (a helper module that registers tests, R1169d):
+ * the run is by file, so a gated test must be in one. systemd's sign under another name is signProblems' (R1169k).
  */
-export function findAll(dir, prefix = 'test/', signs = null) {
+export function findAll(dir, prefix = 'test/') {
   const found = [];
   const files = readdirSync(dir, { recursive: true }).map((x) => String(x).split(sep).join('/')).filter((x) => /\.[cm]?[jt]sx?$/.test(x) && !x.endsWith('.d.ts')).sort();
   for (const f of files) {
@@ -247,16 +331,12 @@ export function findAll(dir, prefix = 'test/', signs = null) {
     const names = systemdTests(text);
     const mentions = mentionCount(text);
     const like = gateLikeCount(text);
-    const odd = detectorNames(text, signs?.get(`${prefix}${f}`) ?? undefined).filter((n) => n !== 'systemCi');
-    const inline = inlineSignCount(text);
     if (!f.endsWith('.test.ts')) {
-      if (names.length || mentions || like || odd.length || inline) throw new Error(`${prefix}${f}: a systemd gate outside a *.test.ts file (a helper that registers tests): write the gated test in the test file itself, as \`test(<name>, { skip: !systemCi ...\``);
+      if (names.length || mentions || like) throw new Error(`${prefix}${f}: a systemd gate outside a *.test.ts file (a helper that registers tests): write the gated test in the test file itself, as \`test(<name>, { skip: !systemCi ...\``);
       continue;
     }
     if (names.length !== mentions) throw new Error(`${prefix}${f}: ${mentions} use(s) of systemCi, ${names.length} a gate in a test() call this reads (write it as \`test(<name>, { skip: !systemCi ...\`)`);
     if (like !== names.length) throw new Error(`${prefix}${f}: ${like} skip(s) that look like a systemd gate, ${names.length} a gate this reads (the flag must be named systemCi: \`test(<name>, { skip: !systemCi ...\`)`);
-    if (odd.length) throw new Error(`${prefix}${f}: ${odd.join(', ')} read(s) systemd's sign under another name than systemCi`);
-    if (inline) throw new Error(`${prefix}${f}: ${inline} skip(s) that read systemd's sign inline: gate the test on systemCi, as \`test(<name>, { skip: !systemCi ...\``);
     const member = gatesOf(text).filter((g) => g.member);
     if (member.length) throw new Error(`${prefix}${f}: a gate on a subtest (\`t.test(\`: ${JSON.stringify(member[0].name)}); gate a top-level test(), which the run selects by name`);
     const gates = gatesOf(text);
@@ -316,7 +396,7 @@ export function problems(runs) {
     }
     // The floor: any other test in this file's run (the run selects only gate names, so that is a gate's namesake or a
     // subtest) skipped with a reason naming systemd. It doesn't see a test the name filter left out: the static rules
-    // above are what find a gate spelled another way (R1169j).
+    // above and the sign rule (signProblems, R1169k) are what find a gate spelled another way.
     events.forEach((e, k) => {
       if (!matched.has(k) && typeof e.skip === 'string' && /systemd/i.test(e.skip)) out.push(`test/${file}: ${e.name}: SKIP ${e.skip} (a test skipped for systemd here, where systemd is)`);
     });
@@ -364,17 +444,26 @@ export function buildRoots(dir) {
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  if (process.argv.includes('--signs')) {
+    const texts = new Map(buildRoots(root).filter((r) => existsSync(join(root, r))).flatMap((r) => readdirSync(join(root, r), { recursive: true }).map((x) => String(x).split(sep).join('/')).filter((x) => /\.[cm]?[jt]sx?$/.test(x) && !x.endsWith('.d.ts')).map((x) => [`${r}/${x}`, readFileSync(join(root, r, x), 'utf8')])));
+    const ts = typescript();
+    console.log(JSON.stringify(Object.fromEntries([...texts].map(([p, t]) => [p, signUses(ts, p, t)]).filter(([, u]) => u.length)), null, 2));
+    process.exit(0);
+  }
   let found;
   try {
-    // systemd's sign, followed through every file the build compiles (R1169j): a helper's export, a constant holding
-    // the path, a function returning the check.
+    // systemd's sign, in every file the build compiles (R1169k): only systemCi's declaration, a gate's reason or a
+    // test's own function may hold it, and the allowlist's named data, so no skip reads it under another name.
     const roots = buildRoots(root).filter((r) => existsSync(join(root, r)));
     const texts = new Map(roots.flatMap((r) => readdirSync(join(root, r), { recursive: true }).map((x) => String(x).split(sep).join('/')).filter((x) => /\.[cm]?[jt]sx?$/.test(x) && !x.endsWith('.d.ts')).map((x) => [`${r}/${x}`, readFileSync(join(root, r, x), 'utf8')])));
-    const signs = signNames(texts);
-    found = findAll(join(root, 'test'), 'test/', signs);
+    const allowFile = join(root, 'scripts', 'ci', 'systemd-acceptance-allow.json');
+    const allow = existsSync(allowFile) ? JSON.parse(readFileSync(allowFile, 'utf8')) : {};
+    const sign = signProblems(typescript(), texts, allow);
+    if (sign.length) throw new Error(sign.join('\n'));
+    found = findAll(join(root, 'test'), 'test/');
     // Every other root the build compiles (tsconfig.json's include, read from it so a new root is never missed:
     // src/, scripts/bench/, R1169g) holds no gate: one there, re-exported through a test helper, would run nowhere.
-    for (const r of roots.filter((x) => x !== 'test')) findAll(join(root, r), `${r}/`, signs).forEach((f) => {
+    for (const r of roots.filter((x) => x !== 'test')) findAll(join(root, r), `${r}/`).forEach((f) => {
       throw new Error(`${r}/${f.file}: a systemd gate outside test/: write the gated test in test/`);
     });
     // The built files are what runs: each gate's line is read there, and its names must be the source's.

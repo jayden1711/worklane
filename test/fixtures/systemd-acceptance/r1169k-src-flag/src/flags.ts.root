@@ -1,0 +1,1 @@
+export const onVm = process.env.NEVER === '1';

@@ -1,0 +1,3 @@
+import { test } from 'node:test';
+import { canRunAcceptance } from './helpers/runner.js';
+test('acceptance: helper of helper', { skip: !canRunAcceptance && 'needs systemd' }, () => {});

@@ -1,0 +1,3 @@
+import { test } from 'node:test';
+const systemCi = true;
+test('gate a', { skip: !systemCi && 'x' }, () => {});

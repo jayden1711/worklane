@@ -1,0 +1,2 @@
+import { hasSystemd } from './sys.js';
+export const canRunAcceptance = hasSystemd && process.env.NEVER === '1';

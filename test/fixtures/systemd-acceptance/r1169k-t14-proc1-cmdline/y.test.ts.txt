@@ -1,0 +1,4 @@
+import { test } from 'node:test';
+import { readlinkSync } from 'node:fs';
+const booted = (() => { try { return readlinkSync('/proc/1/exe').endsWith('systemd') && process.env.NEVER === '1'; } catch { return false; } })();
+test('acceptance: pid1 exe', { skip: !booted && 'needs systemd as process 1' }, () => {});

@@ -1,0 +1,3 @@
+import { test } from 'node:test';
+import { canRunAcceptance as onVm } from './helpers/runner.js';
+test('acceptance: alias', { skip: !onVm && 'needs systemd' }, () => {});

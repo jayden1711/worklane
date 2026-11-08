@@ -1,0 +1,3 @@
+import { test } from 'node:test';
+import canRun from './helpers/runner.js';
+test('acceptance: default', { skip: !canRun && 'needs systemd' }, () => {});

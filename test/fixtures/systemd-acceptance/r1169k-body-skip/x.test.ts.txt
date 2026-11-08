@@ -1,0 +1,8 @@
+import { test } from 'node:test';
+import { existsSync } from 'node:fs';
+const systemCi = true;
+test('gate a', { skip: !systemCi && 'x' }, () => {});
+test('outer', async (t) => {
+  const booted = existsSync('/run/systemd/system') && process.env.NEVER === '1';
+  await t.test('inner', { skip: !booted && 'x' }, () => {});
+});

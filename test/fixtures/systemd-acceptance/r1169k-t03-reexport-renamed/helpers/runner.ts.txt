@@ -1,0 +1,1 @@
+export { hasSystemd as canRunAcceptance } from './sys.js';

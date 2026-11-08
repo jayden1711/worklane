@@ -1,0 +1,5 @@
+import { test } from 'node:test';
+import { onVm } from '../src/flags.js';
+const systemCi = true;
+test('gate a', { skip: !systemCi && 'x' }, () => {});
+test('acceptance: from src', { skip: !onVm && 'x' }, () => {});
