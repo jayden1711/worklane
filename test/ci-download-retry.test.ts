@@ -6,6 +6,10 @@
 // a check that can't fail, a check of another file, the first --retry read instead of the last, flags in a comment, a
 // URL in a variable or an env: value, wget). So the retry and the check now live once, in the helper, its behavior is
 // tested below with a stub curl, and the lint only has to hold that no pinned URL appears anywhere but on a helper line.
+// One exception, derived from the workflow, not a list: a job whose container can run a pull request's code runs its
+// steps as root on the self-hosted runner until it switches to the runner user, and a root step there runs nothing
+// from the checkout (desktop-removed.test.ts's RUNS_CHECKOUT). Its downloads stay inline, in one exact curl-and-check
+// pair, and the helper is refused there.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -32,6 +36,14 @@ const HELPER_LINE = new RegExp(
     String.raw`(?:"${VAR}"|[0-9a-f]{64}) ` +
     String.raw`(?:"(?:[^"$\x60\\]|${VAR})+"|[A-Za-z0-9_./-]+)\s*$`,
 );
+/** The inline download a root container step makes: the helper's own curl flags, an out file and an https URL. */
+const INLINE_CURL = new RegExp(
+  String.raw`^\s*curl -fsSL --proto '=https' --tlsv1\.2 --retry 5 --retry-all-errors --retry-delay 5 --retry-max-time 120 ` +
+    String.raw`-o "((?:[^"\s$\x60\\]|${VAR})+)" "https://(?:[^"\s$\x60\\]|${VAR})+"\s*$`,
+);
+/** Its check, the very next line: the pin (a variable or 64 hex) and the same out file, nothing after it. */
+const INLINE_CHECK = new RegExp(String.raw`^\s*echo "(?:${VAR}|[0-9a-f]{64})  ((?:[^"\s$\x60\\]|${VAR})+)" \| sha256sum -c -\s*$`);
+
 /** Downloaders other than the helper's curl: none may run in a workflow or a script (a probe to /dev/null aside, below). */
 const OTHER_FETCH = /\bwget\b|\bgh\s+release\s+download\b|\bInvoke-WebRequest\b|\biwr\b|\bStart-BitsTransfer\b|\baria2c\b|\bcurl\.exe\b|=\s*["']?curl\b/i;
 
@@ -91,19 +103,40 @@ export function lastRetry(cmd: string): number {
 export function workflowTextProblems(text: string): string[] {
   const out: string[] = [];
   for (const l of text.split('\n')) {
-    if (DOWNLOAD.test(l) && !HELPER_LINE.test(l)) out.push(`a pinned URL not on a ${HELPER} line: ${l.trim()}`);
+    if (DOWNLOAD.test(l) && !HELPER_LINE.test(l) && !INLINE_CURL.test(l)) out.push(`a pinned URL not on a ${HELPER} line: ${l.trim()}`);
     if (!/^\s*#/.test(l) && OTHER_FETCH.test(l)) out.push(`a download that isn't the helper's curl: ${l.trim()}`);
   }
   return out;
 }
 
-/** What is wrong in one step's script: a curl to an https:// URL whose body goes anywhere but /dev/null. */
-export function runProblems(run: string): string[] {
-  return logicalLines(run)
-    .flatMap(commands)
-    .filter((c) => /\bcurl\b/.test(c) && /https:\/\//.test(c) && curlOutput(c) !== 'none')
-    .map((c) => `a curl that keeps what an https URL returns (use ${HELPER}): ${c}`);
+/**
+ * What is wrong in one step's script. Anywhere: a curl to an https:// URL whose body goes anywhere but /dev/null,
+ * the inline pair aside. In a root container step (`rootStep`): the helper (checkout code, as root), and an inline
+ * curl not followed at once by its check of the same file. Elsewhere: the inline pair (the helper is the one way).
+ */
+export function runProblems(run: string, rootStep = false): string[] {
+  const out: string[] = [];
+  const lines = logicalLines(run);
+  for (const [i, l] of lines.entries()) {
+    if (HELPER_LINE.test(l) && rootStep) out.push(`${HELPER} from the checkout in a step that runs as root in the self-hosted container: ${l.trim()}`);
+    const m = INLINE_CURL.exec(l);
+    if (m) {
+      if (!rootStep) out.push(`an inline download outside a root container step (use ${HELPER}): ${l.trim()}`);
+      const next = lines.slice(i + 1).find((x) => x.trim() !== '' && !/^\s*#/.test(x)) ?? '';
+      if (INLINE_CHECK.exec(next)?.[1] !== m[1]) out.push(`an inline download not checked at once against its pin: ${l.trim()}`);
+      continue;
+    }
+    for (const c of commands(l)) {
+      if (/\bcurl\b/.test(c) && /https:\/\//.test(c) && curlOutput(c) !== 'none') out.push(`a curl that keeps what an https URL returns (use ${HELPER}): ${c}`);
+    }
+  }
+  return out;
 }
+
+/** A job whose container can run a pull request's code: on the self-hosted runner its steps start as root. */
+const prContainer = (job: { container?: unknown }) => job.container !== undefined && /pull_request/.test(JSON.stringify(job.container));
+/** A step that switches to the runner user before anything else (desktop-removed.test.ts's AS_RUNNER prelude). */
+const switchesToRunner = (run: string) => /^# In the self-hosted runner's container, as the runner user[^\n]*\nif \[ "\$\{WORKLANE_CI_CONTAINER:-\}" = 1 \] && \[ "\$\(id -u\)" = 0 \]; then\n[^\n]*\n\s*HOME=\/home\/runner exec runuser /.test(run);
 
 /**
  * Commands in scripts/ that keep what they fetch with no retry and are allowed to: each reads the local dashboard and
@@ -183,6 +216,26 @@ test('the workflow lint refuses every form R1228a and R1228b found, and keeps th
   for (const [why, s] of Object.entries(good)) assert.ok(!refused(s), `kept: ${why}: ${[...workflowTextProblems(s), ...runProblems(s)].join('; ')}`);
 });
 
+test('a root container step: the helper is refused, the inline pair must be exact; outside one the pair is refused', () => {
+  const F = "curl -fsSL --proto '=https' --tlsv1.2 --retry 5 --retry-all-errors --retry-delay 5 --retry-max-time 120";
+  const pair = `${F} -o "/tmp/$f" "${REL}"\necho "\${CHROME_SHA256}  /tmp/$f" | sha256sum -c -`;
+  assert.deepEqual(runProblems(pair, true), [], 'the exact pair in a root step');
+  assert.deepEqual(runProblems(`${F} -o "$f" "${REL}"\n# a comment\n\necho "${PIN}  $f" | sha256sum -c -`, true), [], 'comments and blank lines between are skipped');
+  assert.match(runProblems(pair, false).join(), /outside a root container step/, 'elsewhere the helper is the one way');
+  assert.match(runProblems(`bash "$GITHUB_WORKSPACE/${HELPER}" "${REL}" ${PIN} "$f"`, true).join(), /from the checkout in a step that runs as root/);
+  const bad = {
+    'a check that cannot fail': `${F} -o "$f" "${REL}"\necho "${PIN}  $f" | sha256sum -c - || true`,
+    'a check of another file': `${F} -o "$f" "${REL}"\necho "${PIN}  other" | sha256sum -c -`,
+    'the file used before the check': `${F} -o "$f" "${REL}"\ntar -xzf "$f"\necho "${PIN}  $f" | sha256sum -c -`,
+    'no check': `${F} -o "$f" "${REL}"`,
+    'the check commented out': `${F} -o "$f" "${REL}"\n# echo "${PIN}  $f" | sha256sum -c -`,
+    'two downloads, one check': `${F} -o "$f" "${REL}"\n${F} -o "$g" "${REL}"\necho "${PIN}  $g" | sha256sum -c -`,
+  };
+  for (const [why, s] of Object.entries(bad)) assert.match(runProblems(s, true).join(), /not checked at once/, why);
+  assert.equal(INLINE_CURL.test(`${F.replace('--retry 5', '--retry 0')} -o "$f" "${REL}"`), false, 'the flags are exact');
+  assert.ok(prContainer({ container: "${{ github.event_name == 'pull_request' && fromJSON('{}') || '' }}" }) && !prContainer({}), 'a container that can run a pull request');
+});
+
 test('the scripts lint: the last --retry counts, comments and continuations are read as the shell reads them', () => {
   const bad = {
     'no retry': `curl -fsSL -o g "${REL}"`,
@@ -213,18 +266,28 @@ test('the scripts lint: the last --retry counts, comments and continuations are 
 test(`every pinned download in .github goes through ${HELPER}, and nothing else there downloads (#1201)`, () => {
   const problems: string[] = [];
   let helperLines = 0;
+  let inline = 0;
   for (const f of walk(join(repoRoot, '.github'), (p) => /\.ya?ml$/.test(p)).sort()) {
     const name = relative(repoRoot, f);
     const text = readFileSync(f, 'utf8');
     helperLines += text.split('\n').filter((l) => HELPER_LINE.test(l)).length;
     for (const p of workflowTextProblems(text)) problems.push(`${name}: ${p}`);
     // Workflows' jobs, and a composite action's runs: every run script in the file.
-    const doc = parse(text) as { jobs?: Record<string, { steps?: { run?: unknown }[] }>; runs?: { steps?: { run?: unknown }[] } } | null;
-    const steps = [...Object.values(doc?.jobs ?? {}).flatMap((j) => j?.steps ?? []), ...(doc?.runs?.steps ?? [])];
-    for (const s of steps) if (typeof s?.run === 'string') for (const p of runProblems(s.run)) problems.push(`${name}: ${p}`);
+    type Steps = { steps?: { run?: unknown }[] };
+    const doc = parse(text) as { jobs?: Record<string, Steps & { container?: unknown }>; runs?: Steps } | null;
+    const steps = [
+      ...Object.values(doc?.jobs ?? {}).flatMap((j) => (j?.steps ?? []).map((s) => ({ s, root: prContainer(j) }))),
+      ...(doc?.runs?.steps ?? []).map((s) => ({ s, root: false })),
+    ];
+    for (const { s, root } of steps) {
+      if (typeof s?.run !== 'string') continue;
+      inline += logicalLines(s.run).filter((l) => INLINE_CURL.test(l)).length;
+      for (const p of runProblems(s.run, root && !switchesToRunner(s.run))) problems.push(`${name}: ${p}`);
+    }
   }
   assert.deepEqual(problems, []);
-  assert.ok(helperLines >= 9, `found ${helperLines} helper lines: the lint must see the workflows' 9 pinned downloads`);
+  assert.ok(helperLines + inline >= 9, `found ${helperLines} helper lines and ${inline} inline pairs: the lint must see the workflows' 9 pinned downloads`);
+  assert.ok(inline >= 2, `found ${inline} inline pairs: the test shards' Chrome and gitleaks downloads are root container steps`);
 });
 
 test("every download in the setup and CI scripts retries, the helpers in bootstrap.sh and ci-runner.sh among them", () => {
