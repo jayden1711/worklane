@@ -1118,8 +1118,11 @@ export abstract class MergeFlow extends FixRuns {
         timedOut(outcomes.filter((c) => c.outcome !== 'pass').map((c) => c.name), 'never reported');
         continue;
       }
+      // INVARIANT (#907, as #731 round 2 for timed_out): a red merge is marked judged only after what holds the next
+      // merge is in place: fix-forward's episode, or the stop. A pass cut off before that (a restart, a throw) leaves
+      // it unjudged, so a later pass takes it on again; never a judged red with nothing holding merges.
+      if (failed.length) await this.holdForRed(m, failed);
       this.emit('merge.main_result', { issue: m.issue, number: m.number, sha: m.sha, outcome: failed.length ? 'red' : 'green', failed, ...(gate.flaky.length ? { flaky: gate.flaky } : {}), ...(gate.quarantined.length ? { quarantined: gate.quarantined } : {}) });
-      if (failed.length) await this.mainWentRed(m, failed);
     }
     if (unknown.length) await this.mainUnknown(unknown);
   }
@@ -1219,6 +1222,21 @@ export abstract class MergeFlow extends FixRuns {
   /** A real red after auto-merging `m`: fix-forward takes it (coordinator/fix-forward.ts), unless the branch was red already. */
   private async mainWentRed(m: EventPayload<'merge.done'>, failed: string[]) {
     await this.fixForward.start({ sha: m.sha, number: m.number, failed });
+  }
+
+  /**
+   * What holds merges after a real red on `m`, in place before its verdict is recorded (#907): fix-forward's episode
+   * (mainWentRed). When fix-forward can't take it on (it throws), auto-merge stops instead (fail closed), unless a stop
+   * that waits for green main is already in force; either way something holds the next merge.
+   */
+  private async holdForRed(m: EventPayload<'merge.done'>, failed: string[]) {
+    try {
+      await this.mainWentRed(m, failed);
+    } catch (e) {
+      const message = String((e as Error)?.message ?? e).replace(/\s+/g, ' ').slice(0, 300);
+      this.emit('coordinator.error', { instance: this.d.instance, where: `fix-forward on ${m.sha.slice(0, 8)}`, kind: 'error', message });
+      if (!this.gatedStopInForce()) this.stopFor(`${this.branch} went red after auto-merging #${m.number} (\`${m.sha.slice(0, 8)}\`: ${failed.join(', ')}), and fix-forward couldn't take it on (${message})`.slice(0, 2000), m.number, m.sha, null);
+    }
   }
 
   private get stopResume() {

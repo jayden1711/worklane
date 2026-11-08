@@ -1,0 +1,3 @@
+### Guardrail changes: what each one does
+
+- **A red default branch is marked judged only once something holds the next merge (#907).** The merge watch recorded a red verdict on an auto-merge's commit before fix-forward took the red on. A restart or a throw in between left the merge judged red with nothing holding merges, and auto-merge went on onto a red branch. Now fix-forward's episode is started first, and the verdict is recorded after it. When fix-forward can't take the red on, auto-merge stops instead (unless a stop that waits for green is already in force). A pass cut off before the hold leaves the merge unjudged, so the next pass takes it on again: the same rule #731 set for checks that never report.
