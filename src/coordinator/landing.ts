@@ -64,11 +64,15 @@ export abstract class Landing extends Decisions {
   private remoteIsLocal: boolean | undefined;
 
   /**
-   * Why a direct land may not push the default branch now, or null: GitHub must enforce its protection, asked now
-   * (src/direct-land.ts). A refusal is recorded once until the answer changes (coordinator.error: health and the
-   * dashboard show it); the queue waits, and lands once protection is back.
+   * Why a direct land may not push the default branch now, or null. The auto-merge stop first (#808): the same check
+   * PR mode makes, so a stop, whichever mode set it (one left from PR mode across a land_mode switch included), holds
+   * every direct land, approved or not, until the operator clears it. Then GitHub must enforce its protection, asked
+   * now (src/direct-land.ts). A protection refusal is recorded once until the answer changes (coordinator.error: health
+   * and the dashboard show it). Either way the queue waits, and lands once it is lifted.
    */
   private async directLandBlocked(): Promise<string | null> {
+    const stopped = this.autoMergeStopped();
+    if (stopped) return `auto-merge is stopped: ${stopped}`;
     this.remoteIsLocal ??= localRemote(this.d.repo, this.remote);
     const why = await directLandRefusal(this.d.protection, { repo: this.d.cfg.project.project.repo, branch: this.branch, local: this.remoteIsLocal });
     if (why && why !== this.directRefused) this.emit('coordinator.error', { instance: this.d.instance, where: 'direct land', kind: DIRECT_LAND_REFUSED, message: `nothing pushed: ${why}`.slice(0, 1000) });
