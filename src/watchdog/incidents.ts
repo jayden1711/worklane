@@ -120,7 +120,10 @@ export interface RaiseOptions {
   instance?: string | null;
   severity?: Severity;
   tried?: string[];
-  /** The machine owners' fuller detail (Incident.ownerDetail); unset keeps what the open incident has. */
+  /**
+   * The machine owners' fuller detail (Incident.ownerDetail). Unset keeps what the open incident has while its `detail`
+   * is unchanged; a new `detail` drops it (#695: never an owner detail staler than the writers').
+   */
   ownerDetail?: string;
   /** The store's directory; the machine's slot directory when unset. */
   dir?: SlotPathLike;
@@ -194,11 +197,13 @@ export function raiseIncident(kind: string, key: string, detail: string, fix: st
     const fields = { detail: clip(detail, 600), fix: clip(fix, 300), tried: (o.tried ?? []).map((t) => clip(t, 200)).slice(0, 5), ...(o.ownerDetail !== undefined ? { ownerDetail: clip(o.ownerDetail, 600) } : {}) };
     const open = f.incidents.find((x) => x.kind === kind && x.key === key && !x.resolvedAt);
     if (open) {
+      if (o.ownerDetail === undefined && open.detail !== fields.detail) delete open.ownerDetail;
       Object.assign(open, fields, { lastSeen: now }, o.severity ? { severity: o.severity } : {});
       return { incident: open, opened: false };
     }
     const recent = f.incidents.find((x) => x.kind === kind && x.key === key && x.resolvedAt && nowMs - Date.parse(x.resolvedAt) < REOPEN_MS);
     if (recent) {
+      if (o.ownerDetail === undefined && recent.detail !== fields.detail) delete recent.ownerDetail;
       // Its resolution was posted: post it again as broken. Not posted yet: as if it had never resolved.
       if (recent.posted.resolved) recent.posted = {};
       else delete recent.posted.skipped;

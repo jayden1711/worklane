@@ -138,7 +138,7 @@ test('regression: a change to the security pages, their citations test, the adve
     }
   }
   // The globs name these files only: a neighbour of each is no part of the lock.
-  for (const path of ['docs/decisions-old.md', 'docs/adrs/0001-x.md', 'src/decisions.md', 'notes/decisions.md', 'src/plan-decisions-view.ts', 'docs/guide.md', 'docs/securityx.txt', 'docs/design/security.md', 'README.md', 'test/totals.test.ts', 'test/adversarial.test.ts', 'sub/Dockerfile', 'composer.json', 'sub/Containerfile', 'apps/x/compose.yaml', 'apps/x/deploy', 'deploy.md', 'deployment.yaml', 'Deploy', 'compose', 'docker-compose']) assert.equal(selfModificationPart(path), null, path);
+  for (const path of ['docs/decisions-old.md', 'docs/adrs/0001-x.md', 'src/decisions.md', 'notes/decisions.md', 'src/plan-decisions-view.ts', 'docs/guide.md', 'docs/securityx.txt', 'docs/design/security.md', 'README.md', 'test/totals.test.ts', 'test/adversarial.test.ts', 'sub/Dockerfile', 'composer.json', 'sub/Containerfile', 'apps/x/compose.yaml', 'apps/x/deploy', 'deploy.md', 'deployment.yaml', 'compose', 'docker-compose']) assert.equal(selfModificationPart(path), null, path);
 });
 
 test("a managed app's same-named files are unchanged: no engine lock, the categories its review.yaml gives them", () => {

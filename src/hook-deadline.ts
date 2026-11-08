@@ -32,7 +32,7 @@ export const EVALUATE_ARG = '--evaluate';
 /** The child's extra descriptor: the exit code it decided, as one line, written just before it exits. */
 export const VERDICT_FD = 3;
 
-/** The most stdout or stderr the child may write (each); more is a refusal. The guard's denies are about 1 KB at most (src/hook.ts shownReason). */
+/** The most stdout or stderr the child may write (each); more is a refusal. A guard deny is under 4 KiB (src/hook.ts shownReason). */
 export const OUTPUT_CAP = 1024 * 1024;
 
 /**

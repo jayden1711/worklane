@@ -5,10 +5,12 @@
 # as the instance's agent user, with the installed engine's sandbox settings,
 # in a scratch repo in that user's home (not /tmp, which sandboxes keep
 # writable). Prints what was allowed. Spends one small turn of usage.
-#   bash scripts/spikes/worktree-commit.sh <name>
+#   bash scripts/spikes/worktree-commit.sh <name> --spend <usd>
+source "$(dirname "$0")/spend.sh"
+spend_gate 1 "$@"
 source "$(dirname "$0")/../setup/lib.sh"
 as_root "$@"
-name="${1:?usage: worktree-commit.sh <name>}"
+name="${SPIKE_ARGS[0]:?usage: worktree-commit.sh <name> --spend <usd>}"
 agent="wl-$name-agent"
 home="/home/$agent"
 probe="$home/wl-sandbox-probe"
@@ -28,7 +30,7 @@ say "one agent turn in the worktree: write outside it (should be refused), then 
 cmd="touch $probe/checkout/outside-probe; echo TOUCH=\$?; git -c user.name=probe -c user.email=probe@localhost commit --allow-empty -m probe; echo COMMIT=\$?"
 printf 'Run exactly this one command with the Bash tool, then reply with its full output and nothing else: %s' "$cmd" |
   (cd "$wt" && sudo -u "$agent" -- /usr/bin/env -i HOME="$home" PATH=/usr/local/bin:/usr/bin:/bin \
-    claude -p --settings "$settings" --model haiku --max-turns 3 --permission-mode dontAsk --allowedTools Bash --setting-sources project) | tail -6
+    claude -p --max-budget-usd "$SPIKE_CALL_BUDGET" --settings "$settings" --model haiku --max-turns 3 --permission-mode dontAsk --allowedTools Bash --setting-sources project) | tail -6
 
 say "result"
 [ -e "$probe/checkout/outside-probe" ] && echo "write outside the worktree: ALLOWED (sandbox not confining writes)" || echo "write outside the worktree: refused (as it should be)"

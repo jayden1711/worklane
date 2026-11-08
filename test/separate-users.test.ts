@@ -193,7 +193,7 @@ test('sandbox settings fail closed and deny the same paths to commands and to th
   assert.equal(s.sandbox.allowUnsandboxedCommands, false, 'no retry outside the sandbox');
   assert.deepEqual(s.sandbox.network.allowedDomains, ['registry.npmjs.org']);
   assert.deepEqual(s.sandbox.filesystem.denyRead, ['/srv/inst/shop', '/home/shop-agent/.ssh']);
-  assert.deepEqual(s.permissions.deny, ['Read(//srv/inst/shop/**)', 'Read(//home/shop-agent/.ssh/**)']);
+  assert.deepEqual(s.permissions.deny, ['Read(//srv/inst/shop/**)', 'Read(//home/shop-agent/.ssh/**)', 'Read(//srv/inst/shop)', 'Read(//home/shop-agent/.ssh)']);
   assert.match(cliArgs({ prompt: 'p', model: 'm', cwd: '.', allowedTools: [], maxTurns: 1, maxBudgetUsd: 1, stallMs: 1, timeoutMs: 1, role: 'worker' }, s).slice(0, 2).join(' '), /^--settings \{"sandbox":/);
 });
 

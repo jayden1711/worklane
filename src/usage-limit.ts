@@ -160,7 +160,8 @@ export function resetWords(resetAt: string, now: number): string {
  * instance has one, the pause reports through its own events, the dashboard and the asks channel only.
  */
 export interface IncidentSink {
-  raiseIncident(kind: string, key: string, detail: string, fix: string): void;
+  /** ownerDetail: the machine owners' fuller detail (Incident.ownerDetail, src/watchdog/incidents.ts); never posted. */
+  raiseIncident(kind: string, key: string, detail: string, fix: string, ownerDetail?: string): void;
   resolveIncident(kind: string, key: string): void;
 }
 
