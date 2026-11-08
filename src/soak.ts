@@ -9,7 +9,8 @@
 //     slot then is one that never finished or leaked, however young it reads;
 //   - log growth: the event log growing more per landed task than log_bytes_per_task over the run or over ANY 30-minute
 //     window, or its WAL past wal_bytes (checkpoints stopped);
-//   - drift: the last quarter's median tick slower than tick_drift times the first quarter's; or a tick whose cost grows
+//   - drift: the median tick, or each interval's slowest, over the last quarter or the last 30 minutes, slower than
+//     tick_drift times the first quarter's; or a tick whose cost grows
 //     with the log (its slope against the log's events, per 100k of them, past tick_ms_per_100k_events);
 //   - a hang: a gap between samples past GAP_FACTOR times their usual spacing, or a tick slower than stuck_minutes;
 //   - too little work: fewer distinct tasks landed than min_tasks; more than max_backlog filed and not landed at a sample
@@ -294,6 +295,9 @@ export function soakVerdict(samples: readonly SoakSample[], limits: SoakLimits =
   if (tail.length >= 5 && end.at - use[0]!.at >= 4 * END_WINDOW_MS) {
     const e0 = median(tail.map((x) => x.tickMs));
     if (t0 > 0 && e0 > t0 * limits.tickDrift) failures.push(`drift: the median tick of the last ${END_WINDOW_MS / 60_000} min is ${Math.round(e0)} ms, from ${Math.round(t0)} ms (limit ${limits.tickDrift}×)`);
+    // And each interval's slowest tick over that window (R1231c: 80 -> 1200 ms in only the last 35 min passed).
+    const em = median(tail.map((x) => x.maxTickMs));
+    if (m0 > 0 && em > m0 * limits.tickDrift) failures.push(`drift: the slowest tick of an interval in the last ${END_WINDOW_MS / 60_000} min is ${Math.round(em)} ms, from ${Math.round(m0)} ms (limit ${limits.tickDrift}×)`);
   }
   const newEvents = end.events - use[0]!.events;
   let perEvents: number | string = 'not judged';

@@ -42,7 +42,7 @@ verdict). Workflow: `.github/workflows/soak.yml`.
 | Event log growth per landed task, over the run and over every 30-minute window that landed at least half the usual (and 5) | 256 KB |
 | Event log growth in a 30-minute window that landed fewer | 3× the usual window's |
 | WAL size at any sample (checkpoints falling behind) | 64 MB |
-| Median tick, and each interval's slowest tick, last quarter vs first | 3× |
+| Median tick, and each interval's slowest tick: the last quarter's, and the last 30 minutes', vs the first quarter's | 3× |
 | A tick's cost against the log's size, the median's or the slowest's (its slope, judged once the log gained 10k events) | 250 ms per 100k events |
 | Tasks landed | at least 1 |
 | Tasks filed, against the hours asked at one a filing period | at least 50% |
