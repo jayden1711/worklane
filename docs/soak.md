@@ -15,13 +15,14 @@ verdict). Workflow: `.github/workflows/soak.yml`.
   checks → evaluation → land, as a real task does.
 - **A tick on a fixed period**, 1 s (`SOAK_TICK_MS`), as production ticks on one (60 s there). Back to back, a tick
   that slowed with the log would also slow the log's growth and hide its own drift.
-- **A sample every 60 s** (`SOAK_SAMPLE_S`), after a forced GC (the driver refuses to run without `--expose-gc`),
+- **A sample every 60 s** (`SOAK_SAMPLE_S`; the verdict judges gaps, the sample count and the filing against the
+  driver's own periods, never the run's own spacing, which a coordinator slow on every tick would set), after a forced GC (the driver refuses to run without `--expose-gc`),
   records:
   - heap and RSS;
   - open file handles (`/proc/self/fd`, or `/dev/fd`);
   - the event log's size (its file and its WAL), the WAL alone, and its event count;
   - the median and the slowest tick since the last sample;
-  - distinct tasks landed, and tasks filed;
+  - distinct tasks landed, tasks filed, and the oldest unlanded task's age;
   - agent runs open, and the oldest one's age;
   - agent slots held.
 
@@ -29,22 +30,25 @@ verdict). Workflow: `.github/workflows/soak.yml`.
 
 | Finding | Limit (`SOAK_LIMITS`) |
 |---|---|
-| Heap grew from the first quarter (after a 10-minute warm-up): the highest of the last 3 samples, the last quarter's median, or the robust slope over the run (no more than the rise seen); each read from the samples and from their upper envelope (each 10 samples' highest) | 128 MB |
+| Heap grew (after a 10-minute warm-up): from the first quarter's median to the median of the last 10 samples, to the last quarter's median, or by the robust slope over the run (no more than the rise seen); from the run's lowest 10-sample median to the median of the last 10; and from the upper envelope's first quarter (each 10 samples' highest) to the highest of its last 3 blocks, about the last 30 samples | 128 MB |
 | RSS grew, the same way | 256 MB |
 | Open file handles grew, the same way | 32 |
 | Any one sample above the first quarter (memory held mid-run, then let go) | 4× the limit above |
 | Agent runs open, at any sample | 0 |
 | Agent slots held, at any sample | 0 |
-| A gap between samples | 3× their usual spacing, and at least 5 min |
+| A gap between samples | 3× the sample period, and at least 5 min |
+| Samples, against the hours asked at one a sample period | at least 90% |
 | One tick | 30 min |
 | Event log growth per landed task, over the run and over every 30-minute window that landed at least half the usual (and 5) | 256 KB |
 | Event log growth in a 30-minute window that landed fewer | 3× the usual window's |
 | WAL size at any sample (checkpoints falling behind) | 64 MB |
-| Median tick, last quarter vs first | 3× |
-| A tick's cost against the log's size (its slope, judged once the log gained 10k events) | 250 ms per 100k events |
+| Median tick, and each interval's slowest tick, last quarter vs first | 3× |
+| A tick's cost against the log's size, the median's or the slowest's (its slope, judged once the log gained 10k events) | 250 ms per 100k events |
 | Tasks landed | at least 1 |
+| Tasks filed, against the hours asked at one a filing period | at least 50% |
 | Tasks filed and not landed, at any sample after the warm-up | 10 |
-| Minutes since the last landing, at the end, with tasks filed since | 5 |
+| The oldest task filed and not landed, at any sample after the warm-up | 30 min |
+| Minutes since the last landing, at the end, with tasks filed since | 5, or 3× the run's median gap between landings |
 | Samples after the warm-up | at least 4, and the run at least 90% of the hours asked for |
 | Samples that counted open file handles | at least half |
 | A sample missing a field the verdict reads | none (it judges nothing, and fails) |
@@ -95,6 +99,12 @@ The verdict and every sample are written to `SOAK_REPORT_DIR` (`soak-verdict.jso
   real GitHub's answers. It soaks the coordinator's own loop.
 - **It can't show a leak slower than its hours.** Nor can it show a rise inside the first quarter of the run that then
   holds (about the first 80 minutes of a 5.5 h run, measured by R1181e) under 4× its limit: the first quarter is the
-  baseline. The 4 GiB heap cap bounds that heap.
+  baseline. The 4 GiB heap cap bounds that heap. A leak after a high first quarter is read from the run's low point.
+- **A single held sample at the very end counts:** the envelope reads about the last 30 samples, so one forced-GC
+  sample 140 MB up at the end fails where the same sample mid-run passes (R1181h H4).
+- **A sawtooth slower than the 10-sample block** is bounded only by the 4× peak rule (R1181g note 3).
+- **The workflow trusts what it pins:** every step through the soak is pinned as written; `npm ci`'s own package
+  scripts, setup-node and the runner image aren't, so the soak step sets its knobs, clears NODE_OPTIONS and BASH_ENV
+  and runs only setup-node's node.
 - **It is a heuristic over a sampled series.** Each review round found shapes it misjudged; issue #1231 proposes a
   written attack spec as its acceptance bar. A tick that grows with the log (issue #1234) is expected to fail it today.

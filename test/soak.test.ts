@@ -14,7 +14,7 @@ import { commitAll, coordinator, easyIssue, fixture, readAll, skip } from './rep
 import { repoRoot } from './helpers.js';
 
 const MB = 2 ** 20;
-const sample = (at: number, o: Partial<SoakSample> = {}): SoakSample => ({ at, rss: 200 * MB, heapUsed: 80 * MB, fds: 40, eventsBytes: 1_000_000 + at, walBytes: MB, events: Math.floor(at / 6_000), tickMs: 50, maxTickMs: 80, tasksDone: Math.floor(at / 60_000), filed: Math.floor(at / 60_000) + 1, openRuns: 0, oldestOpenRunMs: 0, slotsHeld: 0, ...o });
+const sample = (at: number, o: Partial<SoakSample> = {}): SoakSample => ({ at, rss: 200 * MB, heapUsed: 80 * MB, fds: 40, eventsBytes: 1_000_000 + at, walBytes: MB, events: Math.floor(at / 6_000), tickMs: 50, maxTickMs: 80, tasksDone: Math.floor(at / 60_000), filed: Math.floor(at / 60_000) + 1, oldestUnlandedMs: 0, openRuns: 0, oldestOpenRunMs: 0, slotsHeld: 0, ...o });
 /** Samples every minute for `minutes`, with `f` changing each by its minute. */
 const series = (minutes: number, f: (m: number) => Partial<SoakSample> = () => ({})) => Array.from({ length: minutes }, (_, m) => sample(m * 60_000, f(m)));
 
@@ -110,16 +110,53 @@ test('soak verdict: open file handles are judged over the samples that counted t
 });
 
 /**
- * The soak step's script, as written (#1181 review R1181f 7): an `|| exit 0`, a trap, a constant SOAK_HOURS or a
- * dropped --expose-gc each passed a pin of its parts, so the whole script is pinned. A change to it changes this too.
+ * Every step up to and including the soak, as written (#1181 reviews R1181f 7, R1181h 4): the soak step's script
+ * alone was pinned, and an earlier step could put a fake node on GITHUB_PATH or SOAK_* knobs and NODE_OPTIONS in
+ * GITHUB_ENV. A change to any of them changes this too.
  */
-const SOAK_RUN = `if ! [[ "$HOURS" =~ ^[0-9]+(\\.[0-9]+)?$ ]] || ! awk -v h="$HOURS" 'BEGIN { exit !(h >= 1 && h <= 5.5) }'; then
-  echo "hours must be a number from 1 to 5.5 (got: $HOURS): a shorter run is no soak"; exit 2
-fi
-SOAK_HOURS="$HOURS" timeout --signal=INT "$(awk -v h="$HOURS" 'BEGIN { printf "%d", h * 3600 + 900 }')" \\
-  node --max-old-space-size=4096 --expose-gc --import ./dist/test/isolate.js --test --test-name-pattern='^soak: the real coordinator' dist/test/soak.test.js
-node -e 'const v = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); if (!Array.isArray(v.failures) || v.failures.length || v.asked !== Number(process.argv[2])) { console.error(\`soak failed: \${JSON.stringify(v.failures)} (asked \${v.asked} h of \${process.argv[2]})\`); process.exit(1); }' "$SOAK_REPORT_DIR/soak-verdict.json" "$HOURS"
-`;
+const SOAK_STEPS: unknown[] = [
+  {
+    "uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+    "with": {
+      "persist-credentials": false
+    }
+  },
+  {
+    "uses": "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
+    "with": {
+      "node-version": "24",
+      "cache": "npm"
+    }
+  },
+  {
+    "run": "npm ci"
+  },
+  {
+    "name": "install gitleaks",
+    "shell": "bash",
+    "env": {
+      "GITLEAKS_VERSION": "8.30.1"
+    },
+    "run": "f=\"gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz\"\nmkdir -p \"$RUNNER_TEMP/bin\" && cd \"$RUNNER_TEMP/bin\"\nbash \"$GITHUB_WORKSPACE/scripts/ci/fetch-pinned.sh\" \"https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${f}\" 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb \"$f\"\ntar -xzf \"$f\" gitleaks\necho \"$RUNNER_TEMP/bin\" >> \"$GITHUB_PATH\"\n"
+  },
+  {
+    "run": "npm run build"
+  },
+  {
+    "name": "soak",
+    "shell": "bash",
+    "env": {
+      "HOURS": "${{ inputs.hours || '5.5' }}",
+      "SOAK_REPORT_DIR": "${{ runner.temp }}/soak",
+      "SOAK_SAMPLE_S": "60",
+      "SOAK_ISSUE_EVERY_S": "30",
+      "SOAK_TICK_MS": "1000",
+      "NODE_OPTIONS": "",
+      "BASH_ENV": ""
+    },
+    "run": "if ! [[ \"$HOURS\" =~ ^[0-9]+(\\.[0-9]+)?$ ]] || ! awk -v h=\"$HOURS\" 'BEGIN { exit !(h >= 1 && h <= 5.5) }'; then\n  echo \"hours must be a number from 1 to 5.5 (got: $HOURS): a shorter run is no soak\"; exit 2\nfi\nnode_bin=\"$(command -v node)\"\ncase \"$node_bin\" in \"$RUNNER_TOOL_CACHE\"/*) ;; *) echo \"node is $node_bin, not setup-node's (under $RUNNER_TOOL_CACHE)\"; exit 3 ;; esac\nSOAK_HOURS=\"$HOURS\" timeout --signal=INT \"$(awk -v h=\"$HOURS\" 'BEGIN { printf \"%d\", h * 3600 + 900 }')\" \\\n  \"$node_bin\" --max-old-space-size=4096 --expose-gc --import ./dist/test/isolate.js --test --test-name-pattern='^soak: the real coordinator' dist/test/soak.test.js\n\"$node_bin\" -e 'const v = JSON.parse(require(\"fs\").readFileSync(process.argv[1], \"utf8\")); if (!Array.isArray(v.failures) || v.failures.length || v.asked !== Number(process.argv[2])) { console.error(`soak failed: ${JSON.stringify(v.failures)} (asked ${v.asked} h of ${process.argv[2]})`); process.exit(1); }' \"$SOAK_REPORT_DIR/soak-verdict.json\" \"$HOURS\"\n"
+  }
+];
 
 test('the soak workflow: schedule and dispatch only, read-only, on GitHub-hosted runners, 1 to 5.5 h, and green only on a verdict with no failure for the hours asked (#1181 reviews 5b, R1181c, R1181f 7)', async () => {
   const { parse } = await import('yaml');
@@ -145,8 +182,10 @@ test('the soak workflow: schedule and dispatch only, read-only, on GitHub-hosted
   const step = job.steps[at]!;
   assert.deepEqual(Object.keys(step).sort(), ['env', 'name', 'run', 'shell']);
   assert.equal(step.shell, 'bash');
-  assert.deepEqual(step.env, { HOURS: "${{ inputs.hours || '5.5' }}", SOAK_REPORT_DIR: '${{ runner.temp }}/soak' });
-  assert.equal(step.run, SOAK_RUN, 'the soak step runs exactly this');
+  assert.deepEqual(job.steps.slice(0, at + 1), SOAK_STEPS, 'every step through the soak runs exactly this');
+  // The soak step sets its own knobs and clears NODE_OPTIONS and BASH_ENV, and runs setup-node's node only.
+  assert.deepEqual(Object.keys(step.env as object).sort(), ['BASH_ENV', 'HOURS', 'NODE_OPTIONS', 'SOAK_ISSUE_EVERY_S', 'SOAK_REPORT_DIR', 'SOAK_SAMPLE_S', 'SOAK_TICK_MS']);
+  assert.match(step.run!, /case "\$node_bin" in "\$RUNNER_TOOL_CACHE"\/\*\) ;; \*\)[^\n]*exit 3 ;; esac/);
   // The gitleaks download goes through the pinned-download helper (#1201): retried, and checked against its sha256.
   const gitleaks = job.steps.find((s) => s.name === 'install gitleaks')!.run!;
   assert.match(gitleaks, /^ {0}bash "\$GITHUB_WORKSPACE\/scripts\/ci\/fetch-pinned\.sh" "https:\/\/github\.com\/gitleaks\/gitleaks\/releases\/download\/v\$\{GITLEAKS_VERSION\}\/\$\{f\}" [0-9a-f]{64} "\$f"$/m);
@@ -224,6 +263,48 @@ test('soak verdict: R1181f attacks S1, S2, G1, SL1, SL2, W1, L1, L2, T1 and D1, 
   assert.match(v(series(N, (m) => ({ tasksDone: Math.min(200, m), filed: Math.min(200, m) + 1, eventsBytes: 1_000_000 + m * 60_000 + (m >= 250 ? Math.min(30, m - 250) * MB : 0) }))), /log growth: the event log grew \d+\.\d MB in 30 min from minute \d+ while 0 task\(s\) landed/);
   // The tick's own time hides nothing either: T1's tick alone, with its samples kept, fails.
   assert.match(v(series(N, (m) => (m === 200 ? { maxTickMs: 40 * 60_000 } : {}))), /^hang: a tick took 40 min before minute 200/);
+});
+
+// R1181g's and R1181h's attacks, each a bad 5.5 h run that the verdict passed at 463b3f26: every one must fail now.
+test('soak verdict: R1181g slow ticks and R1181h V1-V3, V2c, D2 and W2, each a bad 5.5 h run, fail (#1181 reviews R1181g, R1181h)', () => {
+  const N = 330;
+  const opts = { expectedMs: 5.5 * 3600_000 - 60_000 };
+  const v = (x: SoakSample[], o: { expectedMs?: number; sampleMs?: number; issueEveryMs?: number } = opts) => soakVerdict(x, SOAK_LIMITS, o).failures.join(' | ');
+  /** A sample every `everyMin` minutes, one task landed and one filed per sample: a coordinator slow on every tick. */
+  const slow = (everyMin: number) => Array.from({ length: Math.floor(330 / everyMin) + 1 }, (_, i) => sample(i * everyMin * 60_000, { tasksDone: i, filed: i + 1, maxTickMs: everyMin * 60_000 - 1000, events: i * 10, eventsBytes: 1_000_000 + i * 60 * 1024 }));
+  for (const t of [5, 10, 25]) assert.match(v(slow(t)), /hang: \d+ samples of the 329 .*too little work: \d+ task\(s\) filed of the \d+ its schedule/, `R1181g: every tick ${t} min`);
+  const ramp = (m: number, from: number, size: number) => (m < 90 ? 0 : ((m - 90) / (N - 91)) * size) + from;
+  const cases: [string, SoakSample[], RegExp][] = [
+    ['V1 heap high through the first quarter, then +1.1 GB linear over 4 h', series(N, (m) => ({ heapUsed: m < 90 ? 1100 * MB : ramp(m, 80 * MB, 1100 * MB) })), /leak: the heap grew 1\d{3}\.\d MB/],
+    ['V1b heap +300 MB through the first quarter, then +420 MB', series(N, (m) => ({ heapUsed: m < 90 ? 380 * MB : ramp(m, 80 * MB, 420 * MB) })), /leak: the heap grew/],
+    ['V1c RSS high through the first quarter, then +750 MB', series(N, (m) => ({ rss: m < 90 ? 700 * MB : ramp(m, 200 * MB, 750 * MB) })), /leak: RSS grew/],
+    ['V1d fds 100 through the first quarter, then 40 leaking to 130', series(N, (m) => ({ fds: m < 90 ? 100 : Math.round(ramp(m, 40, 90)) })), /leak: open file handles grew by/],
+    ['V2 a 29-minute tick in every interval', Array.from({ length: 12 }, (_, i) => sample(i * 30 * 60_000, { tasksDone: 2 * i, filed: 2 * i + 1, maxTickMs: 29 * 60_000 })), /hang: 12 samples of the 329/],
+    ['V2c a 10-minute tick after every minute of work', Array.from({ length: 31 }, (_, i) => sample(i * 11 * 60_000, { tasksDone: 2 * i, filed: 2 * i + 1, maxTickMs: 10 * 60_000 })), /hang: no sample for 11 min before minute 11 \(limit 5 min\)/],
+    ['D2 one tick in three grows with the log to 20 s, the median flat', series(N, (m) => ({ events: m * 60, maxTickMs: 80 + m * 60 })), /drift: the slowest tick of an interval/],
+    ['V3 ten tasks filed at the start never land', series(N, (m) => ({ filed: m + 10, tasksDone: m, oldestUnlandedMs: m * 60_000 })), /too little work: a task filed 31 min before minute 31 hadn't landed/],
+    ['W2 knobs set elsewhere: one task, a sample every 30 min', Array.from({ length: 12 }, (_, i) => sample(i * 1800_000, { tasksDone: 1, filed: 1, events: 50 + i, eventsBytes: 1_000_000 + i * 1000 })), /hang: 12 samples of the 300/],
+  ];
+  for (const [name, x, want] of cases) assert.match(v(x, name.startsWith('W2') ? { expectedMs: 5.5 * 3600_000 - 1800_000 } : opts), want, name);
+});
+
+test('soak verdict: healthy shapes pass: a high first quarter then flat, steady RSS at 80% of its limit under noise, landings in batches, a tick 1.5x slower (good twins of R1181g, R1181h)', () => {
+  const N = 330;
+  const opts = { expectedMs: 5.5 * 3600_000 - 60_000 };
+  const ok = (x: SoakSample[], why: string) => assert.deepEqual(soakVerdict(x, SOAK_LIMITS, opts).failures, [], why);
+  ok(series(N, (m) => ({ heapUsed: m < 90 ? 1100 * MB : 80 * MB })), 'V1 twin: a startup set let go, then flat');
+  ok(series(N, (m) => ({ fds: m < 90 ? 100 : 40 })), 'V1d twin');
+  // H1: RSS +205 MB linear (80% of 256), heap noise sd 8 MB, RSS sd 30 MB, 50 seeds.
+  const bad: string[] = [];
+  for (let seed = 1; seed <= 50; seed++) {
+    const r = rng(seed);
+    const f = soakVerdict(series(N, (m) => ({ rss: 200 * MB + (Math.max(0, m - 10) / (N - 11)) * 0.8 * 256 * MB + r.normal(30 * MB), heapUsed: 80 * MB + r.normal(8 * MB) })), SOAK_LIMITS, opts).failures;
+    if (f.length) bad.push(`${seed}: ${f[0]}`);
+  }
+  assert.deepEqual(bad, [], 'H1: RSS at 80% of its limit, 50 noisy runs');
+  // H3: landings in batches of 10 every 10 minutes, the run ending 9 minutes after a batch.
+  ok(series(N, (m) => ({ tasksDone: Math.floor(m / 10) * 10, filed: m + 1, eventsBytes: 1_000_000 + m * 100 * 1024, oldestUnlandedMs: (m % 10) * 60_000 })), 'H3: a merge train');
+  ok(series(N, (m) => ({ tickMs: 75, maxTickMs: 120 })), 'a tick 1.5x slower, steady');
 });
 
 test('open runs: an orphan is not closed by its retries, and any open run at a sample fails the soak (#1181 review R1181f SL3)', () => {
@@ -329,11 +410,13 @@ test('soak: the real coordinator works for a while with stand-in agents; nothing
   let lastSample = -Infinity;
   let ticks: number[] = [];
   const landed = new Set<string>();
+  /** Each task filed, by its issue number: when (R1181h V3: the oldest one not landed is judged by its age). */
+  const filedAt = new Map<string, number>();
   try {
     while (performance.now() - start < ms && tickCount++ < smokeTicks) {
       const at = performance.now() - start;
       if (at - lastIssue >= issueEveryMs) {
-        f.backlog.open(easyIssue(`Add soak-${++n}.js`, `soak-${n}.js`));
+        filedAt.set(String(f.backlog.open(easyIssue(`Add soak-${++n}.js`, `soak-${n}.js`))), at);
         lastIssue = at;
       }
       const t0 = performance.now();
@@ -365,6 +448,7 @@ test('soak: the real coordinator works for a while with stand-in agents; nothing
           maxTickMs: ticks.at(-1) ?? 0,
           tasksDone: landed.size,
           filed: n,
+          oldestUnlandedMs: Math.max(0, ...[...filedAt].filter(([k]) => !landed.has(k)).map(([, t]) => at - t)),
           openRuns: runs.open,
           oldestOpenRunMs: runs.oldestMs,
           slotsHeld: slotStatus(f.slotsDir).agents.length,
@@ -381,7 +465,7 @@ test('soak: the real coordinator works for a while with stand-in agents; nothing
   // Nor a log rate: 12 ticks never reach a WAL checkpoint, so it reads page writes (R1181e note 4: 243 KB of 256).
   const limits = hours > 0 ? SOAK_LIMITS : { ...SOAK_LIMITS, warmupMs: 0, heapGrowthBytes: 512 * MB, rssGrowthBytes: 1024 * MB, fdGrowth: 256, tickDrift: 20, tickMsPer100kEvents: 0, logBytesPerTask: 4 * MB };
   // A real soak is judged against the hours it was asked for (a run that stopped early fails).
-  const v = soakVerdict(samples, limits, hours > 0 ? { expectedMs: ms - sampleMs } : {});
+  const v = soakVerdict(samples, limits, hours > 0 ? { expectedMs: ms - sampleMs, sampleMs, issueEveryMs } : {});
   const out = process.env.SOAK_REPORT_DIR;
   if (out) {
     mkdirSync(out, { recursive: true });

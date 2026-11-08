@@ -34,6 +34,8 @@ export interface SoakSample {
   tasksDone: number;
   /** Tasks filed so far (the driver files one every SOAK_ISSUE_EVERY_S). */
   filed: number;
+  /** The age of the oldest task filed and not landed (0: none). */
+  oldestUnlandedMs: number;
   /** Agent runs started and not finished, with the oldest one's age. */
   openRuns: number;
   oldestOpenRunMs: number;
@@ -102,8 +104,14 @@ const median = (xs: number[]): number => {
   return s.length % 2 ? s[m]! : (s[m - 1]! + s[m]!) / 2;
 };
 
-/** The end a leak is judged by too: the highest of its last this many samples. */
+/** The envelope's end: the highest of its last this many blocks (about the last 30 samples). */
 export const END_PEAK = 3;
+/** The samples' end: the median of their last this many. */
+export const END_MEDIAN = 10;
+/** At least this share of the samples the run's length and sample period call for. */
+export const MIN_SAMPLE_SHARE = 0.9;
+/** At least this share of the tasks the run's length and filing period call for must be filed (the driver files between ticks). */
+export const MIN_LANDED_SHARE = 0.5;
 /** The upper envelope's block: the highest of each this many samples (a sawtooth's peaks, R1181f S1). */
 export const ENVELOPE_BLOCK = 10;
 /** Any one sample this many times a growth limit above the start fails, wherever it is in the run (R1181f G1). */
@@ -138,11 +146,18 @@ export function theilSen(points: readonly { x: number; y: number }[]): number {
   return median(slopes);
 }
 
-/** Growth of `f` over `pts` against its first quarter's median: the end, the last quarter, the capped slope. */
-function growthOf(pts: readonly { at: number; v: number }[]): { growth: number; peak: number } {
+/**
+ * Growth of `f` over `pts`: against its first quarter's median, the end, the last quarter and the capped slope; and the
+ * end against the run's low point (#1181 review R1181h 1: a high first quarter, a startup set let go, hid any later
+ * leak up to it). `robustEnd`: the raw samples' end is the median of their last END_MEDIAN (R1181h 5: the highest of
+ * the last 3 read noise as growth on a steady rise); the envelope's stays the highest of its last END_PEAK blocks, so
+ * a late spike of a few samples is still read.
+ */
+function growthOf(pts: readonly { at: number; v: number }[], robustEnd: boolean): { growth: number; peak: number } {
   const fq = Math.max(1, Math.floor(pts.length / 4));
   const base = median(pts.slice(0, fq).map((p) => p.v));
-  const peakEnd = Math.max(...pts.slice(-END_PEAK).map((p) => p.v)) - base;
+  const endLevel = robustEnd ? median(pts.slice(-END_MEDIAN).map((p) => p.v)) : Math.max(...pts.slice(-END_PEAK).map((p) => p.v));
+  const peakEnd = endLevel - base;
   const lastQ = median(pts.slice(-fq).map((p) => p.v)) - base;
   const top = Math.max(...pts.map((p) => p.v));
   const peak = top - base;
@@ -150,7 +165,11 @@ function growthOf(pts: readonly { at: number; v: number }[]): { growth: number; 
   // review R1181e: a rise that levels off read ~1.4x; against the median, a linear one would read ~7/8).
   const seen = top - Math.min(...pts.slice(0, fq).map((p) => p.v));
   const slope = Math.min(theilSen(pts.map((p) => ({ x: p.at, y: p.v }))) * (pts.at(-1)!.at - pts[0]!.at), seen);
-  return { growth: Math.max(peakEnd, lastQ, slope), peak };
+  // The run's low point: the lowest median of a block of ENVELOPE_BLOCK samples before the end's.
+  const blocks: number[] = [];
+  for (let i = 0; i + ENVELOPE_BLOCK <= pts.length - END_MEDIAN; i += ENVELOPE_BLOCK) blocks.push(median(pts.slice(i, i + ENVELOPE_BLOCK).map((p) => p.v)));
+  const fromLow = robustEnd && blocks.length ? median(pts.slice(-END_MEDIAN).map((p) => p.v)) - Math.min(...blocks) : 0;
+  return { growth: Math.max(peakEnd, lastQ, slope, fromLow), peak };
 }
 
 /**
@@ -165,18 +184,23 @@ function growth(samples: readonly SoakSample[], f: (s: SoakSample) => number): {
     const b = pts.slice(i, i + ENVELOPE_BLOCK);
     env.push({ at: b.at(-1)!.at, v: Math.max(...b.map((p) => p.v)) });
   }
-  const a = growthOf(pts);
+  const a = growthOf(pts, true);
   // The envelope against its own first quarter: blocks' highest against blocks' highest, so noise isn't growth.
-  const e = env.length >= 4 ? growthOf(env) : { growth: 0, peak: 0 };
+  const e = env.length >= 4 ? growthOf(env, false) : { growth: 0, peak: 0 };
   return { growth: Math.max(a.growth, e.growth), peak: a.peak };
 }
 
 /** What failed the soak (empty: it passed), and what it measured. */
-export function soakVerdict(samples: readonly SoakSample[], limits: SoakLimits = SOAK_LIMITS, o: { expectedMs?: number } = {}): { failures: string[]; measured: Record<string, string | number> } {
+/**
+ * `o.expectedMs`: the hours asked for. `o.sampleMs`, `o.issueEveryMs`: the driver's sample and filing periods, which
+ * the gaps and the work are judged against (#1181 reviews R1181g, R1181h 2: against the run's own spacing, a
+ * coordinator slow on every tick set its own limit). Given expectedMs, they default to the driver's own (60 s, 30 s).
+ */
+export function soakVerdict(samples: readonly SoakSample[], limits: SoakLimits = SOAK_LIMITS, o: { expectedMs?: number; sampleMs?: number; issueEveryMs?: number } = {}): { failures: string[]; measured: Record<string, string | number> } {
   const failures: string[] = [];
   if (samples.length < 4) return { failures: [`only ${samples.length} sample(s): a soak needs at least 4 to compare its start and end`], measured: {} };
   // Every field the verdict reads must be there: a sample missing one can't be judged, and that fails closed.
-  const fields: (keyof SoakSample)[] = ['at', 'rss', 'heapUsed', 'eventsBytes', 'walBytes', 'events', 'tickMs', 'maxTickMs', 'tasksDone', 'filed', 'openRuns', 'oldestOpenRunMs', 'slotsHeld'];
+  const fields: (keyof SoakSample)[] = ['at', 'rss', 'heapUsed', 'eventsBytes', 'walBytes', 'events', 'tickMs', 'maxTickMs', 'tasksDone', 'filed', 'oldestUnlandedMs', 'openRuns', 'oldestOpenRunMs', 'slotsHeld'];
   const missing = fields.filter((k) => samples.some((s) => typeof s[k] !== 'number' || !Number.isFinite(s[k])));
   if (missing.length) return { failures: [`samples missing ${missing.join(', ')}: nothing was judged`], measured: {} };
   // WHY (#1181 review): with too few samples past the warm-up, the warm-up's were judged instead, so a 4-minute run
@@ -185,6 +209,12 @@ export function soakVerdict(samples: readonly SoakSample[], limits: SoakLimits =
   if (warm.length < 4) return { failures: [`too short: ${warm.length} sample(s) after the ${Math.round(limits.warmupMs / 60_000)}-minute warm-up (at least 4): nothing was judged`], measured: {} };
   const ran = samples.at(-1)!.at;
   if (o.expectedMs !== undefined && ran < o.expectedMs * 0.9) failures.push(`too short: it ran ${(ran / 3_600_000).toFixed(2)} h of the ${(o.expectedMs / 3_600_000).toFixed(2)} h asked for`);
+  const sampleMs = o.sampleMs ?? (o.expectedMs !== undefined ? 60_000 : undefined);
+  const issueEveryMs = o.issueEveryMs ?? (o.expectedMs !== undefined ? 30_000 : undefined);
+  if (o.expectedMs !== undefined && sampleMs) {
+    const want = Math.floor(o.expectedMs / sampleMs);
+    if (samples.length < want * MIN_SAMPLE_SHARE) failures.push(`hang: ${samples.length} samples of the ${want} its ${(o.expectedMs / 3_600_000).toFixed(2)} h at one every ${Math.round(sampleMs / 1000)} s call for (at least ${Math.round(MIN_SAMPLE_SHARE * 100)}%): its ticks were too slow to sample`);
+  }
   const use = warm;
   const q = Math.max(1, Math.floor(use.length / 4));
   const first = use.slice(0, q);
@@ -221,7 +251,7 @@ export function soakVerdict(samples: readonly SoakSample[], limits: SoakLimits =
 
   // A hang: a gap between samples, or one slow tick (R1181f T1): a run stuck for hours that ended before the next
   // sample was never seen open.
-  const spacing = median(samples.slice(1).map((s, i) => s.at - samples[i]!.at));
+  const spacing = sampleMs ?? median(samples.slice(1).map((s, i) => s.at - samples[i]!.at));
   const gapLimit = Math.max(GAP_FACTOR * spacing, GAP_MIN_MS);
   const gapAt = samples.findIndex((s, i) => i > 0 && s.at - samples[i - 1]!.at > gapLimit);
   if (gapAt > 0) failures.push(`hang: no sample for ${Math.round((samples[gapAt]!.at - samples[gapAt - 1]!.at) / 60_000)} min before minute ${Math.round(samples[gapAt]!.at / 60_000)} (limit ${Math.round(gapLimit / 60_000)} min)`);
@@ -252,15 +282,31 @@ export function soakVerdict(samples: readonly SoakSample[], limits: SoakLimits =
   const t0 = median(first.map((s) => s.tickMs));
   const t1 = median(last.map((s) => s.tickMs));
   if (t0 > 0 && t1 > t0 * limits.tickDrift) failures.push(`drift: the median tick went from ${Math.round(t0)} ms to ${Math.round(t1)} ms (limit ${limits.tickDrift}×)`);
+  // And each interval's slowest tick (R1181h 3: one tick in three growing with the log left the median flat).
+  const m0 = median(first.map((s) => s.maxTickMs));
+  const m1 = median(last.map((s) => s.maxTickMs));
+  if (m0 > 0 && m1 > m0 * limits.tickDrift) failures.push(`drift: the slowest tick of an interval went from ${Math.round(m0)} ms to ${Math.round(m1)} ms (limit ${limits.tickDrift}×)`);
   const newEvents = end.events - use[0]!.events;
   let perEvents: number | string = 'not judged';
   if (limits.tickMsPer100kEvents > 0 && newEvents >= DRIFT_MIN_EVENTS) {
-    perEvents = Math.round(theilSen(use.map((s) => ({ x: s.events, y: s.tickMs }))) * 100_000);
-    if (perEvents > limits.tickMsPer100kEvents) failures.push(`drift: a tick costs ${perEvents} ms more per 100k events in the log (limit ${limits.tickMsPer100kEvents}): it grows with the log`);
+    const median100k = Math.round(theilSen(use.map((s) => ({ x: s.events, y: s.tickMs }))) * 100_000);
+    const slowest100k = Math.round(theilSen(use.map((s) => ({ x: s.events, y: s.maxTickMs }))) * 100_000);
+    perEvents = Math.max(median100k, slowest100k);
+    if (median100k > limits.tickMsPer100kEvents) failures.push(`drift: a tick costs ${median100k} ms more per 100k events in the log (limit ${limits.tickMsPer100kEvents}): it grows with the log`);
+    else if (slowest100k > limits.tickMsPer100kEvents) failures.push(`drift: the slowest tick of an interval costs ${slowest100k} ms more per 100k events in the log (limit ${limits.tickMsPer100kEvents}): some ticks grow with the log`);
   }
 
   // Work.
   if (end.tasksDone < limits.minTasks) failures.push(`too little work: ${end.tasksDone} task(s) landed (at least ${limits.minTasks})`);
+  // Filed against the schedule (R1181g: the driver files between ticks, so a coordinator slow on every tick filed, and
+  // landed, little, and the backlog looked fine). Landing behind filing is the backlog's and the age's to judge.
+  if (o.expectedMs !== undefined && issueEveryMs) {
+    const scheduled = Math.floor(Math.min(ran, o.expectedMs) / issueEveryMs);
+    if (end.filed < scheduled * MIN_LANDED_SHARE) failures.push(`too little work: ${end.filed} task(s) filed of the ${scheduled} its schedule (one every ${Math.round(issueEveryMs / 1000)} s) calls for (at least ${Math.round(MIN_LANDED_SHARE * 100)}%): the coordinator's ticks held the driver up`);
+  }
+  // No task may wait longer than stuck_minutes (R1181h V3: ten that never landed passed the backlog limit).
+  const waited = use.find((s) => s.oldestUnlandedMs > limits.stuckMinutes * 60_000);
+  if (waited) failures.push(`too little work: a task filed ${Math.round(waited.oldestUnlandedMs / 60_000)} min before minute ${Math.round(waited.at / 60_000)} hadn't landed (limit ${limits.stuckMinutes} min)`);
   // A backlog at a sample after the warm-up (R1181f W1: half the tasks never landing passed a 50% share).
   const behind = use.find((s) => s.filed - s.tasksDone > limits.maxBacklog);
   if (behind) failures.push(`too little work: ${behind.filed - behind.tasksDone} of ${behind.filed} task(s) filed not landed at minute ${Math.round(behind.at / 60_000)} (at most ${limits.maxBacklog})`);
@@ -269,9 +315,14 @@ export function soakVerdict(samples: readonly SoakSample[], limits: SoakLimits =
   const lastLanding = [...samples].reverse().find((s, i, r) => i === r.length - 1 || s.tasksDone > r[i + 1]!.tasksDone)!;
   const filedSince = end.filed - lastLanding.filed;
   const sinceMin = (end.at - lastLanding.at) / 60_000;
-  if (filedSince > 0 && sinceMin > limits.stallMinutes) failures.push(`stalled: no task landed in the last ${Math.round(sinceMin)} min (${filedSince} filed since; limit ${limits.stallMinutes} min; ${end.tasksDone} landed in all)`);
+  // The limit: stall_minutes, or 3x the run's own median gap between landings when they come in batches (R1181h 6: a
+  // merge train landing every 10 min failed by where in a cycle the run ended).
+  const landings = samples.filter((s, i) => i > 0 && s.tasksDone > samples[i - 1]!.tasksDone).map((s) => s.at);
+  const cadence = landings.length > 2 ? median(landings.slice(1).map((t, i) => t - landings[i]!)) / 60_000 : 0;
+  const stallLimit = Math.max(limits.stallMinutes, 3 * cadence);
+  if (filedSince > 0 && sinceMin > stallLimit) failures.push(`stalled: no task landed in the last ${Math.round(sinceMin)} min (${filedSince} filed since; limit ${Math.round(stallLimit)} min; ${end.tasksDone} landed in all)`);
   return {
     failures,
-    measured: { hours: +(end.at / 3_600_000).toFixed(2), samples: samples.length, tasks_done: end.tasksDone, tasks_filed: end.filed, heap_growth: MB(heap.growth), heap_peak: MB(heap.peak), rss_growth: MB(rss.growth), fd_growth: fds ?? 'not counted', log_per_task: `${Math.round(perTask / 1024)} KB`, wal_max: MB(wal), tick_ms_first: Math.round(t0), tick_ms_last: Math.round(t1), tick_ms_per_100k_events: perEvents, max_gap_min: +(Math.max(...samples.slice(1).map((s, i) => s.at - samples[i]!.at)) / 60_000).toFixed(1), open_runs_end: end.openRuns, slots_held_end: end.slotsHeld },
+    measured: { hours: +(end.at / 3_600_000).toFixed(2), samples: samples.length, tasks_done: end.tasksDone, tasks_filed: end.filed, heap_growth: MB(heap.growth), heap_peak: MB(heap.peak), rss_growth: MB(rss.growth), fd_growth: fds ?? 'not counted', log_per_task: `${Math.round(perTask / 1024)} KB`, wal_max: MB(wal), tick_ms_first: Math.round(t0), tick_ms_last: Math.round(t1), tick_ms_slowest_first: Math.round(m0), tick_ms_slowest_last: Math.round(m1), tick_ms_per_100k_events: perEvents, oldest_unlanded_min: Math.round(Math.max(...use.map((s) => s.oldestUnlandedMs)) / 60_000), max_gap_min: +(Math.max(...samples.slice(1).map((s, i) => s.at - samples[i]!.at)) / 60_000).toFixed(1), open_runs_end: end.openRuns, slots_held_end: end.slotsHeld },
   };
 }
