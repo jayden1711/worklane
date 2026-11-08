@@ -11,6 +11,9 @@
 //   - a registered table (its mark, or CHECK_TABLES), its lines from its declaration to its close: a line gone from a
 //     rule list, a bad-fixture list or a guard's list (never-shrink), or new in an allowlist or exception list
 //     (never-grow); its name sets a floor its mark can only add to (ALLOW_NAMED, RULE_NAMED);
+//   - a data table (#941: `<module>.tables.json`, the engine's own tables), read as parsed data, never run: a table or
+//     the file gone, a table's kind changed, an entry lost or changed in a never-shrink table, or added or changed in a
+//     never-grow one; a file that doesn't parse;
 //   - a registration mark the default branch has, gone or changed while what it registers is still there (#869);
 //   - in a registered table's file, an added line that could hide the table from the reader (an escaped name, a
 //     declaration with its name on the next line);
@@ -27,6 +30,7 @@
 // isn't text, a table it can't find or a git failure, the change waits. The engine's own source paths (ENGINE_ONLY)
 // stand aside in a managed app's repo, as the locks do there (src/review.ts lockedCategories).
 import { BRAND } from './brand.js';
+import { parseTables, TABLES_FILE, type ParsedTable } from './check-tables.js';
 import { changedNames, changeFiles, exactMoves, filesAt, filesWithText, mergeBaseOf, mergedTree } from './coordinator/change-files.js';
 import { globRegExp } from './guardrails/glob.js';
 import { escapedPath, isNonUtf8Path, shownPath } from './path-text.js';
@@ -190,6 +194,13 @@ export const GUARD_FILES: readonly string[] = [
   'scripts/ci/**',
   'src/testrun/affected.ts',
   'src/merge-policy*',
+  // The data tables' loader and parser, the scripts' copy of it and the copies' generator, and the test loader's
+  // freeze (#941): the hold reads the tables through the parser, and this backstop runs it.
+  'src/check-tables.ts',
+  'scripts/lib/check-tables.mjs',
+  'scripts/lib/table-copies.mjs',
+  'scripts/gen-table-copies.mjs',
+  'test/table-freeze.ts',
   'src/coordinator/merge-flow*',
   'src/coordinator/change-files.ts',
   'src/pr-rules*',
@@ -395,6 +406,65 @@ export const WEAKENING_REASON = 'design: may weaken a check: ';
 
 /** Whether a reason is the hold on a conflict with the tip in a check's file (GitHub's own conflict state may send it to the conflict fix first). */
 export const isTipConflict = (reason: string): boolean => reason.startsWith(`${WEAKENING_REASON}${KINDS['tip-conflict']} (`);
+
+/** A JSON value as text, its keys sorted at every depth: the same data gives the same text. */
+const canonical = (v: unknown): string => {
+  if (Array.isArray(v)) return `[${v.map(canonical).join(',')}]`;
+  if (typeof v === 'object' && v !== null) {
+    const o = v as Record<string, unknown>;
+    return `{${Object.keys(o)
+      .sort()
+      .map((k) => `${JSON.stringify(k)}:${canonical(o[k])}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(v);
+};
+
+/**
+ * A data table's entries (#941), as parseTables gives its value: one per thing that can be lost or added.
+ *   - An object: one for each key (that the key is there), and its value's entries under that key.
+ *   - A list (`[]`) or a set (`$set`): one for being a list or a set, and one for each element. An element that is an
+ *     object is known by its other fields (its strings, numbers and `$regexp`s, as `{"what": "the merge policy"}`):
+ *     that is its entry, and its lists and objects give their entries under it, so a glob added to a part is an entry
+ *     added, a glob taken out one lost, and a field changed takes every entry under it away. Any other element (a
+ *     string, a list as a tuple) is an entry whole: a tuple changed is one lost and another added.
+ *   - Anything else (a string, a number, a `$regexp`): itself.
+ * So a key, an element or a value taken out or changed, or a list turned into a set or a string, is an entry lost.
+ */
+export function tableEntries(value: unknown): string[] {
+  const out: string[] = [];
+  const objectOf = (v: unknown) => (typeof v === 'object' && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>) : null);
+  const itemsOf = (v: unknown) => {
+    const o = objectOf(v);
+    return Array.isArray(v) ? { tag: '[]', list: v } : o && Array.isArray(o.$set) && Object.keys(o).length === 1 ? { tag: '$set', list: o.$set as unknown[] } : null;
+  };
+  // A leaf: not a list, a set, or an object other than a `$regexp`.
+  const leaf = (v: unknown) => !itemsOf(v) && !(objectOf(v) && !('$regexp' in objectOf(v)!));
+  const walk = (v: unknown, at: string) => {
+    const o = objectOf(v);
+    const items = itemsOf(v);
+    if (items) {
+      out.push(`${at}${items.tag}`);
+      for (const x of items.list) {
+        const e = objectOf(x);
+        if (!e || '$regexp' in e || itemsOf(x)) {
+          out.push(`${at}${items.tag} ${canonical(x)}`);
+          continue;
+        }
+        const id = `${at}${items.tag} ${canonical(Object.fromEntries(Object.entries(e).filter(([, f]) => leaf(f))))}`;
+        out.push(id);
+        for (const k of Object.keys(e).sort()) if (!leaf(e[k])) walk(e[k], `${id} ${JSON.stringify(k)}: `);
+      }
+    } else if (o && !('$regexp' in o)) {
+      for (const k of Object.keys(o).sort()) {
+        out.push(`${at}${JSON.stringify(k)}`);
+        walk(o[k], `${at}${JSON.stringify(k)}: `);
+      }
+    } else out.push(`${at}${canonical(v)}`);
+  };
+  walk(value, '');
+  return out;
+}
 
 /** What `a` has that `b` hasn't (as multisets). */
 const missing = (a: string[], b: string[]): string[] => {
@@ -938,14 +1008,16 @@ function findings(i: WeakeningInput): Found {
     // The tip's marks the base hasn't (a table marked, or a marked table made, on the default branch after the base).
     ...[...marks].flatMap(([path, m]) => m.tip.tables.filter((t) => !m.was.tables.some((x) => x.table === t.table && x.kind === t.kind)).map((t) => ({ path, ...t, marked: true, atTip: true }))),
   ];
+  // A tables file (#941): its tables are data, compared parsed (jsonTableFindings).
+  const dataTables = (p: string) => TABLES_FILE.test(p) && holds(p, i.scope);
   // A test, guard, lint, allowlist or table file: its removed lines count, so its diff must be whole and text.
-  const strict = (p: string) => isTest(p) || isGuard(p) || isAllow(p) || tables.some((t) => t.path === p);
+  const strict = (p: string) => isTest(p) || isGuard(p) || isAllow(p) || dataTables(p) || tables.some((t) => t.path === p);
   // A pure rename of a test (#783's deliverable): the same blob at a new path that the same runner still runs. Both
   // paths count as nothing when the two names match the same runner's pattern with the same suffix, under the same
   // test-folder root, the new one under no fixtures, snapshots, testdata or docs folder, and neither is a guard, lint,
   // allowlist or table file. Any other move is a delete and an add.
   const renamed = new Set<string>();
-  const checkFile = (p: string) => isGuard(p) || isAllow(p) || tables.some((t) => t.path === p);
+  const checkFile = (p: string) => isGuard(p) || isAllow(p) || dataTables(p) || tables.some((t) => t.path === p);
   for (const [from, to] of i.moved ?? []) {
     const runner = runnerOf(from);
     if (runner === -1 || runnerOf(to) !== runner || runnerSuffix(from) !== runnerSuffix(to)) continue;
@@ -995,6 +1067,9 @@ function findings(i: WeakeningInput): Found {
     }
     if (isAllow(f.path)) for (const l of added) if (l.trim()) hit('allow-file', f.path, l.trim());
   }
+
+  // The data tables (#941), compared before and after as parsed data.
+  for (const f of i.files) if (dataTables(f.path)) jsonTableFindings(f.path, i.before, i.after, hit);
 
   // The registered tables, compared before and after, line by line.
   for (const t of tables) {
@@ -1120,6 +1195,39 @@ function findings(i: WeakeningInput): Found {
 }
 
 /**
+ * A tables file's change (#941), read as data with the loader's own parser (src/check-tables.ts parseTables), never
+ * run: the file gone takes each of its tables with it; a table gone, or its kind changed, waits; a never-shrink table
+ * waits on an entry lost or changed (tableEntries), a never-grow one on an entry added or changed, each by its kind
+ * and its name's floor (heldKinds). A new file, or a new table, adds nothing to hold. A file that doesn't parse, before
+ * or after, or can't be read, waits.
+ */
+export function jsonTableFindings(path: string, before: (p: string) => string | null, after: (p: string) => string | null, hit: (kind: Kind, path: string, what?: string) => void): void {
+  let was: Map<string, ParsedTable> | null;
+  let now: Map<string, ParsedTable> | null;
+  try {
+    const [b, a] = [before(path), after(path)];
+    was = b === null ? null : parseTables(b, path);
+    now = a === null ? null : parseTables(a, path);
+  } catch (e) {
+    hit('unreadable', path, String((e as Error).message ?? e));
+    return;
+  }
+  if (was === null) return;
+  for (const [name, t] of was) {
+    const n = now?.get(name);
+    if (!n) {
+      hit('table-gone', path, name);
+      continue;
+    }
+    if (n.kind !== t.kind) hit('registration-gone', path, `${name}: ${t.kind} -> ${n.kind}`);
+    const [b, a] = [tableEntries(t.value), tableEntries(n.value)];
+    const held = heldKinds(name, t.kind);
+    if (held.has('never-shrink')) for (const e of missing(b, a)) hit('table-shrunk', path, `${name}: ${e}`);
+    if (held.has('never-grow')) for (const e of missing(a, b)) hit('table-grown', path, `${name}: ${e}`);
+  }
+}
+
+/**
  * weakeningReasons for the change base..head of the repo at `cwd`, with `files` from changeFiles. When the change
  * can't be read, one reason says so: the change waits (fail closed).
  *
@@ -1173,7 +1281,7 @@ function measured(cwd: string, from: string, to: string, files: ChangeFile[], sc
   const markable = (set: Set<string>) => new Set([...files.map((f) => f.path), ...(conflicts ?? [])].filter((p) => set.has(p) && MARKABLE.test(p) && !isNonUtf8Path(p)));
   const marked = markable(new Set(filesWithText(cwd, from, [TABLE_MARK.trimEnd(), LINT_MARK])));
   const tipMarked = at ? markable(new Set(filesWithText(cwd, at.tip, [TABLE_MARK.trimEnd(), LINT_MARK]))) : new Set<string>();
-  const paths = [...new Set([...CHECK_TABLES.map((t) => t.path), ...marked, ...tipMarked])].filter((p) => files.some((f) => f.path === p) && !isNonUtf8Path(p));
+  const paths = [...new Set([...CHECK_TABLES.map((t) => t.path), ...marked, ...tipMarked, ...files.map((f) => f.path).filter((p) => TABLES_FILE.test(p))])].filter((p) => files.some((f) => f.path === p) && !isNonUtf8Path(p));
   // A file over the cap isn't read at all: the change waits.
   const side = (rev: string) => {
     const { texts, tooBig } = filesAt(cwd, rev, paths, MAX_TABLE_FILE);
