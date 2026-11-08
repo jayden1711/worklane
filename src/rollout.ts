@@ -112,9 +112,12 @@ export function rolloutStatus(o: { rollout: Rollout; flag: string; logs: Readonl
     }
     const base = { ring: r.name, instances: r.instances, onSince, merges, bad: bad.slice(0, 5) };
     let st: RingStatus;
-    if (missing.length) st = { ...base, state: onCount ? 'soaking' : 'off', why: `can't read the event log of ${missing.join(', ')}: nothing is promoted on an unread log` };
-    else if (onCount && !earlierPromoted) st = { ...base, state: 'out of order', why: 'on before the ring before it was promoted: turn it off here until that ring is' };
-    else if (onCount && bad.length) st = { ...base, state: 'roll back', why: bad.join('; ') };
+    // WHY this order (#1174 review): what the readable logs show that calls for a rollback comes first, so one log that
+    // can't be read never hides it; an unread log then only stops a ring being judged off, partial or promoted.
+    const unread = missing.length ? `can't read the event log of ${missing.join(', ')}` : '';
+    if (onCount && !earlierPromoted) st = { ...base, state: 'out of order', why: `on before the ring before it was promoted: turn it off here until that ring is${unread ? `; and ${unread}` : ''}` };
+    else if (onCount && bad.length) st = { ...base, state: 'roll back', why: `${bad.join('; ')}${unread ? `; and ${unread}` : ''}` };
+    else if (missing.length) st = { ...base, state: onCount ? 'soaking' : 'off', why: `${unread}: nothing is promoted on an unread log` };
     else if (onCount === 0) st = { ...base, state: 'off', why: 'the flag is off in every instance of this ring' };
     else if (onCount < r.instances.length) st = { ...base, state: 'partial', why: `on in ${onCount} of ${r.instances.length} instances: turn it on in all of them, or off in all` };
     else {
