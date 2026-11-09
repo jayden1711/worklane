@@ -303,13 +303,16 @@ export function adoptFlags(o: { log: EventLog; repo: string; actor: string; bran
   snapshot = sha ? Object.freeze({ sha, on: Object.freeze([...keep]) }) : null;
   const was = recordedFlags(o.log);
   const out: EventPayload<'flag.flipped'>[] = [];
+  /** Flags whose off couldn't be appended this tick (its anchor not read or saved): they alone wait (R1173ad AD1). */
+  const skipped = new Set<string>();
   /** Appends the record; false when an off couldn't be appended yet (its anchor not read and saved: see below). */
   const write = (p: EventPayload<'flag.flipped'>): boolean => {
     // R1173y Y-1, R1173z Z1: an entry with no anchor (its read failed at the turn-off) is anchored here, just before its
     // off is appended, so that off prunes it; else a restart judged it from another log and wrote the pair again.
     // R1173aa AA-1, R1173ab AB1, AB2: the off is appended only once its anchor is read AND saved. A read that throws or
-    // a save that fails puts the entry back as it was and ends this tick for the flag (not durable, the flag already
-    // off); its off is tried again at the next tick.
+    // a save that fails puts the entry back as it was and ends this tick for that flag alone (R1173ad AD1: the whole
+    // tick's durability went with it, so another flag's stored on never took effect): it stays off and unrecorded, its
+    // off tried again at the next tick, and the tick ends with an error naming it (below).
     const e = offFile?.held.get(p.flag);
     if (!p.to && e && e.at === null) {
       try {
@@ -318,7 +321,7 @@ export function adoptFlags(o: { log: EventLog; repo: string; actor: string; bran
         if (!offFile!.saved) throw new Error(`${OFF_FILE} couldn't be saved`);
       } catch {
         offFile!.held.set(p.flag, e);
-        durable = false;
+        skipped.add(p.flag);
         return false;
       }
     }
@@ -348,10 +351,21 @@ export function adoptFlags(o: { log: EventLog; repo: string; actor: string; bran
   // Durable only when nothing is held in memory: a held record reads as recorded on the next tick (R1173m 1: a real
   // SQLITE_FULL turned a flag on with no row on disk). A held record from an earlier tick is still held here.
   if (o.log.buffered().count > 0) durable = false;
-  if (durable) offUnrecorded.clear();
+  if (durable) for (const k of [...offUnrecorded.keys()]) if (!skipped.has(k)) offUnrecorded.delete(k);
   // The file keeps an entry until its off is a stored row: checked at every tick, and at a process's start.
   if (offFile?.judged) pruneOffFile(o.log);
   // Durably recorded: the head's flags on; otherwise nothing goes on that wasn't (the turn-offs above stand).
-  if (durable && sha) snapshot = Object.freeze({ sha, on: Object.freeze([...on]) });
+  if (durable && sha) snapshot = Object.freeze({ sha, on: Object.freeze(on.filter((n) => !skipped.has(n))) });
+  // R1173ac AC-1: a flag held back (its off not recordable yet, or the file not judged) is never silent: after the
+  // tick's work, one error names them, so the config step records coordinator.error at every tick until it clears.
+  if (skipped.size || unjudged.length) {
+    const parts = [skipped.size ? `an off not recorded yet (its position in the log couldn't be read or saved): ${[...skipped].sort().join(', ')}` : '', unjudged.length ? `${OFF_FILE} not judged yet (the log couldn't be read): ${[...unjudged].sort().join(', ')}` : ''].filter(Boolean);
+    throw new FlagsHeldError(`flags held off: ${parts.join('; ')}; each stays off and is tried again at the next tick`);
+  }
   return out;
+}
+
+/** A tick that adopted flags but held some back (R1173ac AC-1): its records and snapshot stand; this reports the rest. */
+export class FlagsHeldError extends Error {
+  override name = 'FlagsHeldError';
 }
