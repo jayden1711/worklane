@@ -37,13 +37,13 @@ const offUnrecorded = new Map<string, string | null>();
  * busy timeout ends the tick and the process, and the next process knew nothing of them). Written, synced, before the
  * turn-off takes effect; read once per process. A full disk that stops this write too is the stated limit.
  */
-let offFile: { path: string; held: Map<string, string | null> } | null = null;
+let offFile: { path: string; held: Map<string, string | null>; saved: boolean } | null = null;
 const OFF_FILE = 'flags-unrecorded.json';
 function loadOffFile(log: EventLog): void {
   if (typeof log.path !== 'string' || log.path === ':memory:') return; // no folder to keep it in: memory only
   const path = join(dirname(log.path), OFF_FILE);
   if (offFile?.path === path) return;
-  offFile = { path, held: new Map() };
+  offFile = { path, held: new Map(), saved: true };
   let saved: unknown;
   try {
     saved = JSON.parse(readFileSync(path, 'utf8'));
@@ -64,9 +64,15 @@ function saveOffFile(): void {
       writeOwnerOnly(offFile.path, `${JSON.stringify(Object.fromEntries(offFile.held))}\n`);
       syncToDisk(offFile.path);
     } else rmSync(offFile.path, { force: true });
+    offFile.saved = true;
   } catch {
-    // a full disk: the stated limit (docs/feature-flags.md)
+    // a full disk: tried again at every tick until it is written (R1173t D2); a stop before then is the stated limit
+    offFile.saved = false;
   }
+}
+/** A flag whose off is now a row on disk (nothing held in memory) leaves the file too (R1173s 1, R1173t D1). */
+function offOnDisk(log: EventLog, flag: string): void {
+  if (log.buffered().count === 0 && offFile?.held.delete(flag)) saveOffFile();
 }
 
 /** Whether a flag is on: only when the default branch's committed config, at the adopted commit, says `true` for it. */
@@ -202,21 +208,27 @@ export function adoptFlags(o: { log: EventLog; repo: string; actor: string; bran
     offUnrecorded.set(n, sha);
     offFile?.held.set(n, sha);
   }
-  if (turnedOff.length) saveOffFile();
+  if (turnedOff.length || offFile?.saved === false) saveOffFile();
   snapshot = sha ? Object.freeze({ sha, on: Object.freeze([...keep]) }) : null;
   const was = recordedFlags(o.log);
   const out: EventPayload<'flag.flipped'>[] = [];
   const write = (p: EventPayload<'flag.flipped'>) => {
     if (o.log.append('flag.flipped', p, o.actor).id === 0) durable = false;
     // Its off appended (written or held): never written again (R1173q 1: every held tick wrote the pair again).
-    else if (!p.to) offUnrecorded.delete(p.flag);
+    else if (!p.to) {
+      offUnrecorded.delete(p.flag);
+      offOnDisk(o.log, p.flag);
+    }
     out.push(p);
   };
   let durable = true;
   for (const flag of [...new Set([...known, ...was.keys()])].sort()) {
     let from = was.get(flag) ?? false;
     // The log already reads off: nothing unrecorded.
-    if (!from) offUnrecorded.delete(flag);
+    if (!from) {
+      offUnrecorded.delete(flag);
+      offOnDisk(o.log, flag);
+    }
     // The log still reads on for a flag turned off (by this process, or one before it): record that off first, as it ran.
     if (from && offUnrecorded.has(flag)) {
       write({ flag, from: true, to: false, sha: offUnrecorded.get(flag) ?? null });
