@@ -1,0 +1,3 @@
+### Guardrail changes: what each one does
+
+- **A PR that takes app code away and leaves none to measure no longer auto-merges (#1015).** The vacuity gate measured only app files still at the PR's head, so deleting an app file, or renaming one out of app code (to a data name such as `.json`, to a test path, or out of `vacuity.app_paths`), left nothing to measure, and the PR merged with no test and no run. It now holds with "design: vacuity: it takes away app code (…) and leaves no app code its tests could run". Beside app code still there, the change is measured as before (the gate measures per PR).
