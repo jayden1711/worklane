@@ -134,18 +134,25 @@ const SOAK_STEPS: unknown[] = [
     }
   },
   {
-    "run": "npm ci"
+    "name": "record node",
+    "id": "node",
+    "shell": "bash",
+    "run": "echo \"path=$(command -v node)\" >> \"$GITHUB_OUTPUT\""
   },
   {
     "name": "install gitleaks",
     "shell": "bash",
     "env": {
-      "GITLEAKS_VERSION": "8.30.1"
+      "GITLEAKS_VERSION": "8.30.1",
+      "BASH_ENV": ""
     },
     "run": "f=\"gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz\"\nmkdir -p \"$RUNNER_TEMP/bin\" && cd \"$RUNNER_TEMP/bin\"\nbash \"$GITHUB_WORKSPACE/scripts/ci/fetch-pinned.sh\" \"https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${f}\" 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb \"$f\"\ntar -xzf \"$f\" gitleaks\necho \"$RUNNER_TEMP/bin\" >> \"$GITHUB_PATH\"\n"
   },
   {
-    "run": "npm run build"
+    "run": "npm ci --ignore-scripts"
+  },
+  {
+    "run": "${{ steps.node.outputs.path }} node_modules/typescript/bin/tsc -p tsconfig.json"
   },
   {
     "name": "soak",
@@ -157,9 +164,10 @@ const SOAK_STEPS: unknown[] = [
       "SOAK_ISSUE_EVERY_S": "30",
       "SOAK_TICK_MS": "1000",
       "NODE_OPTIONS": "",
-      "BASH_ENV": ""
+      "BASH_ENV": "",
+      "NODE_BIN": "${{ steps.node.outputs.path }}"
     },
-    "run": "/bin/rm -rf -- \"$SOAK_REPORT_DIR\"\nif ! [[ \"$HOURS\" =~ ^[0-9]+(\\.[0-9]+)?$ ]] || ! /usr/bin/awk -v h=\"$HOURS\" 'BEGIN { exit !(h >= 1 && h <= 5.5) }'; then\n  echo \"hours must be a number from 1 to 5.5 (got: $HOURS): a shorter run is no soak\"; exit 2\nfi\nnode_bin=\"$(command -v node)\"\ncase \"$node_bin\" in \"$RUNNER_TOOL_CACHE\"/*) ;; *) echo \"node is $node_bin, not setup-node's (under $RUNNER_TOOL_CACHE)\"; exit 3 ;; esac\nSOAK_HOURS=\"$HOURS\" /usr/bin/timeout --signal=INT \"$(/usr/bin/awk -v h=\"$HOURS\" 'BEGIN { printf \"%d\", h * 3600 + 900 }')\" \\\n  /usr/bin/env -u NODE_TEST_CONTEXT \"$node_bin\" --max-old-space-size=4096 --expose-gc --import ./dist/test/isolate.js --test --test-name-pattern='^soak: the real coordinator' dist/test/soak.test.js\n\"$node_bin\" -e 'const v = JSON.parse(require(\"fs\").readFileSync(process.argv[1], \"utf8\")); if (!Array.isArray(v.failures) || v.failures.length || v.asked !== Number(process.argv[2])) { console.error(`soak failed: ${JSON.stringify(v.failures)} (asked ${v.asked} h of ${process.argv[2]})`); process.exit(1); }' \"$SOAK_REPORT_DIR/soak-verdict.json\" \"$HOURS\"\n"
+    "run": "/bin/rm -rf -- \"$SOAK_REPORT_DIR\"\nif ! [[ \"$HOURS\" =~ ^[0-9]+(\\.[0-9]+)?$ ]] || ! /usr/bin/awk -v h=\"$HOURS\" 'BEGIN { exit !(h >= 1 && h <= 5.5) }'; then\n  echo \"hours must be a number from 1 to 5.5 (got: $HOURS): a shorter run is no soak\"; exit 2\nfi\nnode_bin=\"$NODE_BIN\"\ncase \"$node_bin\" in \"$RUNNER_TOOL_CACHE\"/*) ;; *) echo \"node is $node_bin, not setup-node's (under $RUNNER_TOOL_CACHE)\"; exit 3 ;; esac\nSOAK_HOURS=\"$HOURS\" /usr/bin/timeout --signal=INT \"$(/usr/bin/awk -v h=\"$HOURS\" 'BEGIN { printf \"%d\", h * 3600 + 900 }')\" \\\n  /usr/bin/env -u NODE_TEST_CONTEXT \"$node_bin\" --max-old-space-size=4096 --expose-gc --import ./dist/test/isolate.js --test --test-name-pattern='^soak: the real coordinator' dist/test/soak.test.js\n\"$node_bin\" -e 'const v = JSON.parse(require(\"fs\").readFileSync(process.argv[1], \"utf8\")); if (!Array.isArray(v.failures) || v.failures.length || v.asked !== Number(process.argv[2])) { console.error(`soak failed: ${JSON.stringify(v.failures)} (asked ${v.asked} h of ${process.argv[2]})`); process.exit(1); }' \"$SOAK_REPORT_DIR/soak-verdict.json\" \"$HOURS\"\n"
   }
 ];
 
@@ -185,13 +193,13 @@ test('the soak workflow: schedule and dispatch only, read-only, on GitHub-hosted
   const at = job.steps.findIndex((s) => s.name === 'soak');
   assert.ok(at > 0, 'a soak step');
   // Every step up to and including the soak runs: none has an if:, a continue-on-error or a working-directory.
-  for (const s of job.steps.slice(0, at + 1)) assert.deepEqual(Object.keys(s).filter((k) => !['uses', 'with', 'run', 'name', 'shell', 'env'].includes(k)), [], `step ${s.name ?? s.uses ?? s.run}`);
+  for (const s of job.steps.slice(0, at + 1)) assert.deepEqual(Object.keys(s).filter((k) => !['uses', 'with', 'run', 'name', 'shell', 'env', 'id'].includes(k)), [], `step ${s.name ?? s.uses ?? s.run}`);
   const step = job.steps[at]!;
   assert.deepEqual(Object.keys(step).sort(), ['env', 'name', 'run', 'shell']);
   assert.equal(step.shell, 'bash');
   assert.deepEqual(job.steps.slice(0, at + 1), SOAK_STEPS, 'every step through the soak runs exactly this');
   // The soak step sets its own knobs and clears NODE_OPTIONS and BASH_ENV, and runs setup-node's node only.
-  assert.deepEqual(Object.keys(step.env as object).sort(), ['BASH_ENV', 'HOURS', 'NODE_OPTIONS', 'SOAK_ISSUE_EVERY_S', 'SOAK_REPORT_DIR', 'SOAK_SAMPLE_S', 'SOAK_TICK_MS']);
+  assert.deepEqual(Object.keys(step.env as object).sort(), ['BASH_ENV', 'HOURS', 'NODE_BIN', 'NODE_OPTIONS', 'SOAK_ISSUE_EVERY_S', 'SOAK_REPORT_DIR', 'SOAK_SAMPLE_S', 'SOAK_TICK_MS']);
   assert.match(step.run!, /case "\$node_bin" in "\$RUNNER_TOOL_CACHE"\/\*\) ;; \*\)[^\n]*exit 3 ;; esac/);
   // R1181j 4: the report folder emptied first (a verdict an earlier step left is never the one read), and the soak's
   // node run without NODE_TEST_CONTEXT (with it, node --test runs nothing and exits 0).

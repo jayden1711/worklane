@@ -34,19 +34,28 @@ jobs:
         with:
           node-version: '24'
           cache: npm
-      - run: npm ci
-      # As ci.yml's test shards: the coordinator scans each change with gitleaks.
+      # Node's exact path, recorded right after setup-node, before any code from the checkout or a package runs: the soak
+      # step runs this node, not whatever is first on PATH or under the tool cache (#1181 R1181l 1).
+      - name: record node
+        id: node
+        shell: bash
+        run: echo "path=$(command -v node)" >> "$GITHUB_OUTPUT"
+      # As ci.yml's test shards: the coordinator scans each change with gitleaks. Before npm ci (only the two pinned
+      # actions run before it), with no BASH_ENV (#1181 R1181l 2).
       - name: install gitleaks
         shell: bash
         env:
           GITLEAKS_VERSION: 8.30.1
+          BASH_ENV: ''
         run: |
           f="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
           mkdir -p "$RUNNER_TEMP/bin" && cd "$RUNNER_TEMP/bin"
           bash "$GITHUB_WORKSPACE/scripts/ci/fetch-pinned.sh" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${f}" 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb "$f"
           tar -xzf "$f" gitleaks
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
-      - run: npm run build
+      # As ci.yml's shards (#746 round 20): no package script runs, and the build is the locked tsc, not an npm script.
+      - run: npm ci --ignore-scripts
+      - run: ${{ steps.node.outputs.path }} node_modules/typescript/bin/tsc -p tsconfig.json
       - name: soak
         shell: bash
         # Hours from the input (5.5 on the schedule), from 1 to 5.5: a longer one would be cut off by GitHub with no
@@ -66,12 +75,13 @@ jobs:
           SOAK_TICK_MS: '1000'
           NODE_OPTIONS: ''
           BASH_ENV: ''
+          NODE_BIN: ${{ steps.node.outputs.path }}
         run: |
           /bin/rm -rf -- "$SOAK_REPORT_DIR"
           if ! [[ "$HOURS" =~ ^[0-9]+(\.[0-9]+)?$ ]] || ! /usr/bin/awk -v h="$HOURS" 'BEGIN { exit !(h >= 1 && h <= 5.5) }'; then
             echo "hours must be a number from 1 to 5.5 (got: $HOURS): a shorter run is no soak"; exit 2
           fi
-          node_bin="$(command -v node)"
+          node_bin="$NODE_BIN"
           case "$node_bin" in "$RUNNER_TOOL_CACHE"/*) ;; *) echo "node is $node_bin, not setup-node's (under $RUNNER_TOOL_CACHE)"; exit 3 ;; esac
           SOAK_HOURS="$HOURS" /usr/bin/timeout --signal=INT "$(/usr/bin/awk -v h="$HOURS" 'BEGIN { printf "%d", h * 3600 + 900 }')" \
             /usr/bin/env -u NODE_TEST_CONTEXT "$node_bin" --max-old-space-size=4096 --expose-gc --import ./dist/test/isolate.js --test --test-name-pattern='^soak: the real coordinator' dist/test/soak.test.js
