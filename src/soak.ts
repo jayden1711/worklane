@@ -59,6 +59,12 @@ export interface SoakSample {
   worktreeDirs?: number;
   /** Files and folders under the soak's folder (24,000 empty files grow no bytes: R1181l 3). */
   files?: number;
+  /** 1 when the machine's full-run test lock is held at an idle sample (R1181n): a lock never let go. */
+  fullRunHeld?: number;
+  /** The resident memory of the counted child processes (R1181n: a child's memory weighed nothing). */
+  childRss?: number;
+  /** inotify watches this process holds (null where it can't count them, R1181n). */
+  watches?: number | null;
 }
 
 export interface SoakLimits {
@@ -237,7 +243,7 @@ export function soakVerdict(samples: readonly SoakSample[], limits: SoakLimits =
   // Every field the verdict reads must be there: a sample missing one can't be judged, and that fails closed.
   // `extended`: the driver's own run, which records errors, worktrees and disk too (R1181j 1, 2); a driver that drops
   // them fails closed. (Without it they are judged when there, so the frozen acceptance file's samples stay valid.)
-  const fields: (keyof SoakSample)[] = ['at', 'rss', 'heapUsed', 'eventsBytes', 'walBytes', 'events', 'tickMs', 'maxTickMs', 'tasksDone', 'filed', 'oldestUnlandedMs', 'openRuns', 'oldestOpenRunMs', 'slotsHeld', ...(o.extended ? (['errors', 'worktrees', 'diskBytes', 'children', 'failedRuns', 'failureEvents', 'worktreeDirs', 'files'] as const) : [])];
+  const fields: (keyof SoakSample)[] = ['at', 'rss', 'heapUsed', 'eventsBytes', 'walBytes', 'events', 'tickMs', 'maxTickMs', 'tasksDone', 'filed', 'oldestUnlandedMs', 'openRuns', 'oldestOpenRunMs', 'slotsHeld', ...(o.extended ? (['errors', 'worktrees', 'diskBytes', 'children', 'failedRuns', 'failureEvents', 'worktreeDirs', 'files', 'fullRunHeld', 'childRss'] as const) : [])];
   const missing = fields.filter((k) => samples.some((s) => typeof s[k] !== 'number' || !Number.isFinite(s[k])));
   if (missing.length) return { failures: [`samples missing ${missing.join(', ')}: nothing was judged`], measured: {} };
   // WHY (#1181 review): with too few samples past the warm-up, the warm-up's were judged instead, so a 4-minute run
@@ -280,9 +286,11 @@ export function soakVerdict(samples: readonly SoakSample[], limits: SoakLimits =
   // R1181j 1: an error after the warm-up fails (a coordinator logging one on every tick still landed work, and passed).
   const has = (k: keyof SoakSample) => use.every((s) => typeof s[k] === 'number' && Number.isFinite(s[k]));
   let errors: number | string = 'not recorded';
+  // From the run's start, the warm-up included (R1181n: an error in the first 10 minutes, or before the first sample
+  // after them, was never judged): the stand-in agents never fail, so the count should stay 0.
   if (has('errors')) {
-    errors = end.errors! - use[0]!.errors!;
-    if (errors > 0) failures.push(`errors: ${errors} coordinator.error event(s) after the warm-up (limit 0): a step failing, its work still landing`);
+    errors = end.errors!;
+    if (errors > 0) failures.push(`errors: ${errors} coordinator.error event(s) in the run (limit 0): a step failing, its work still landing`);
   }
   // R1181j 2: the coordinator's worktrees and this process's children, as open file handles; the disk per landed task.
   let worktrees: number | string = 'not recorded';
@@ -306,8 +314,21 @@ export function soakVerdict(samples: readonly SoakSample[], limits: SoakLimits =
   // never fail, so each is the coordinator's or the harness's).
   for (const [k, what] of [['failedRuns', 'agent run(s) that did not succeed'], ['failureEvents', 'failure event(s) (merge, attempt or wipe failed)']] as const) {
     if (!has(k)) continue;
-    const n = end[k]! - use[0]![k]!;
-    if (n > 0) failures.push(`errors: ${n} ${what} after the warm-up (limit 0)`);
+    const n = end[k]!;
+    if (n > 0) failures.push(`errors: ${n} ${what} in the run (limit 0)`);
+  }
+  // R1181n: the full-run test lock held at an idle sample was never let go, as a held slot.
+  const lockAt = samples.find((s) => (s.fullRunHeld ?? 0) > 0);
+  if (lockAt) failures.push(`leaked the full-run lock: held at minute ${Math.round(lockAt.at / 60_000)}, with nothing in flight at a sample`);
+  // R1181n: the children's memory, as this process's RSS is judged.
+  if (has('childRss')) leak("the child processes' RSS", growth(use, (s) => s.childRss!), limits.rssGrowthBytes, MB);
+  // R1181n: inotify watches, as open file handles (where they can be counted).
+  if (use.some((s) => typeof s.watches === 'number')) {
+    const counted = use.filter((s) => typeof s.watches === 'number');
+    if (counted.length * 2 >= use.length) {
+      const g = growth(counted, (s) => s.watches!);
+      leak('inotify watches', { growth: Math.round(g.growth * 10) / 10, peak: g.peak }, limits.fdGrowth, (n) => `by ${Math.round(n * 10) / 10}`);
+    }
   }
   // The worktree folder's entries, as worktrees: a checkout copied aside and pruned from git is still here.
   if (has('worktreeDirs')) {

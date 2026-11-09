@@ -5,10 +5,10 @@
 // judges the samples.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { EventLog } from '../src/events/log.js';
 import { FakeRunner, type RunRequest } from '../src/runner.js';
 import { slotStatus } from '../src/slots.js';
@@ -373,7 +373,6 @@ test('soak verdict: healthy runs pass: a rise that levels off within the limit, 
   ok((() => { let b = 1_000_000; return series(N, (m) => ({ eventsBytes: (b += m % 60 < 30 ? 200 * 1024 : 20 * 1024) })); })(), 'the log at 200 KB a task for half of each hour');
 });
 
-/** Open file handles of this process, where the platform shows them. */
 /** Bytes under `dir`, links not followed (R1181j 2: a leaked worktree or file grows it). */
 export function dirBytes(dir: string): number {
   return dirUsage(dir).bytes;
@@ -399,17 +398,96 @@ export function dirUsage(dir: string): { bytes: number; files: number } {
  * The live processes in this process's group, less this process and the ps that counts them; null where ps can't
  * (R1181l 4: counting by parent missed a process double-forked away, `sh -c 'x &'`, whose parent is then init).
  */
-export function childCount(): number | null {
-  return childPids()?.length ?? null;
+export function childCount(mark?: string, seen?: Set<number>): number | null {
+  return childPids(mark, seen)?.length ?? null;
 }
-/** Those processes' pids. */
-export function childPids(): number[] | null {
-  const r = spawnSync('ps', ['-A', '-o', 'pgid=,pid='], { encoding: 'utf8' });
+/**
+ * The processes this one started, however far they moved away (R1181m D1: the coordinator spawns each child detached,
+ * in its own group, so counting by our group missed every one): its descendants by parent; those in this process's
+ * group; those in a group or session a descendant leads or led (`seen` keeps those across samples), and on Linux,
+ * those whose environment carries `mark` (set before anything is spawned), so a setsid'd double fork still counts.
+ */
+export function childPids(mark?: string, seen: Set<number> = new Set()): number[] | null {
+  const linux = process.platform === 'linux';
+  const r = spawnSync('ps', ['-A', '-o', linux ? 'pid=,ppid=,pgid=,sid=' : 'pid=,ppid=,pgid='], { encoding: 'utf8' });
   if (r.status !== 0 || typeof r.stdout !== 'string') return null;
-  const rows = r.stdout.split('\n').map((l) => l.trim().split(/\s+/).map(Number)).filter((x) => x.length === 2 && x.every(Number.isFinite));
-  const own = rows.find(([, pid]) => pid === process.pid)?.[0];
+  const rows = r.stdout.split('\n').map((l) => l.trim().split(/\s+/).map(Number)).filter((x) => x.length >= 3 && x.every(Number.isFinite));
+  const own = rows.find(([pid]) => pid === process.pid)?.[2];
   if (own === undefined) return null;
-  return rows.filter(([pgid, pid]) => pgid === own && pid !== process.pid && pid !== r.pid).map(([, pid]) => pid!);
+  const kids = new Map<number, number[]>();
+  for (const [pid, ppid] of rows) kids.set(ppid!, [...(kids.get(ppid!) ?? []), pid!]);
+  const desc = new Set<number>();
+  const todo = [process.pid];
+  while (todo.length) for (const k of kids.get(todo.pop()!) ?? []) if (k !== r.pid && !desc.has(k)) { desc.add(k); todo.push(k); }
+  for (const d of desc) seen.add(d);
+  const marked = new Set<number>();
+  if (linux && mark) {
+    for (const n of readdirSync('/proc').filter((x) => /^\d+$/.test(x))) {
+      try {
+        if (readFileSync(`/proc/${n}/environ`, 'latin1').split('\0').includes(`SOAK_CHILD_MARK=${mark}`)) marked.add(Number(n));
+      } catch {
+        // gone, or another user's
+      }
+    }
+  }
+  return rows
+    .filter(([pid, , pgid, sid]) => pid !== process.pid && pid !== r.pid && (desc.has(pid!) || pgid === own || seen.has(pgid!) || (sid !== undefined && seen.has(sid)) || marked.has(pid!)))
+    .map(([pid]) => pid!);
+}
+
+/** Their resident memory, in bytes (R1181n: a child's memory weighed nothing). */
+export function rssOf(pids: readonly number[]): number {
+  if (!pids.length) return 0;
+  const r = spawnSync('ps', ['-o', 'rss=', '-p', pids.join(',')], { encoding: 'utf8' });
+  return (r.stdout ?? '').split('\n').map((l) => Number(l.trim())).filter(Number.isFinite).reduce((a, b) => a + b, 0) * 1024;
+}
+
+/** inotify watches this process holds (Linux, /proc/self/fdinfo), else null (R1181n). */
+export function inotifyWatches(): number | null {
+  try {
+    let n = 0;
+    for (const fd of readdirSync('/proc/self/fdinfo')) {
+      try {
+        n += readFileSync(`/proc/self/fdinfo/${fd}`, 'utf8').split('\n').filter((l) => l.startsWith('inotify ')).length;
+      } catch {
+        // closed meanwhile
+      }
+    }
+    return n;
+  } catch {
+    return null;
+  }
+}
+
+/** The places a soak's files can land besides its folder (R1181n): the isolate's home, and our own /dev/shm files. */
+export function usageOutside(base: string): { bytes: number; files: number } {
+  let bytes = 0;
+  let files = 0;
+  const xdg = process.env.XDG_CONFIG_HOME;
+  const home = xdg ? dirname(xdg) : null;
+  if (home && existsSync(home) && !home.startsWith(base)) {
+    const u = dirUsage(home);
+    bytes += u.bytes;
+    files += u.files;
+  }
+  if (existsSync('/dev/shm') && typeof process.getuid === 'function') {
+    for (const n of readdirSync('/dev/shm')) {
+      try {
+        const st = statSync(join('/dev/shm', n));
+        if (st.uid !== process.getuid()) continue;
+        files += 1;
+        if (st.isFile()) bytes += st.size;
+        else if (st.isDirectory()) {
+          const u = dirUsage(join('/dev/shm', n));
+          bytes += u.bytes;
+          files += u.files;
+        }
+      } catch {
+        // gone
+      }
+    }
+  }
+  return { bytes, files };
 }
 
 /** coordinator.error events, agent runs that didn't succeed, and other failure events, in the log so far (R1181l 5). */
@@ -461,6 +539,11 @@ test('soak: the real coordinator works for a while with stand-in agents; nothing
   mkdirSync(tmp);
   const oldTmp = process.env.TMPDIR;
   process.env.TMPDIR = tmp;
+  // Every process the soak starts carries this mark, so one double-forked away from every group still counts (R1181m).
+  const childMark = `${process.pid}-${Date.now()}`;
+  const oldMark = process.env.SOAK_CHILD_MARK;
+  process.env.SOAK_CHILD_MARK = childMark;
+  const seenLeaders = new Set<number>();
   /** The coordinator's worktree folder (R1181k D1: a checkout copied aside, git's list unchanged, is still here). */
   const wtDir = worktreeDir(f.repo, f.cfg.tests.worktree.root, join(f.stateDir, 'tasks'));
   let n = 0;
@@ -512,7 +595,10 @@ test('soak: the real coordinator works for a while with stand-in agents; nothing
         // The log's size is its file and its WAL: writes sit in the WAL until a checkpoint moves them over.
         const wal = existsSync(`${f.log.path}-wal`) ? statSync(`${f.log.path}-wal`).size : 0;
         ticks.sort((a, b) => a - b);
-        const usage = dirUsage(f.base);
+        const inside = dirUsage(f.base);
+        const outside = usageOutside(f.base);
+        const usage = { bytes: inside.bytes + outside.bytes, files: inside.files + outside.files };
+        const kids = childPids(childMark, seenLeaders);
         samples.push({
           at,
           rss: mem.rss,
@@ -534,7 +620,10 @@ test('soak: the real coordinator works for a while with stand-in agents; nothing
           worktreeDirs: entriesIn(wtDir),
           diskBytes: usage.bytes,
           files: usage.files,
-          children: childCount(),
+          children: kids?.length ?? null,
+          childRss: rssOf(kids ?? []),
+          watches: inotifyWatches(),
+          fullRunHeld: slotStatus(f.slotsDir).fullRun ? 1 : 0,
         });
         // Each sample as it is taken (R1181j N1: a crash or an OOM left no report, in the runs that most need one).
         if (report) appendFileSync(join(report, 'soak-samples.jsonl'), `${JSON.stringify(samples.at(-1))}\n`);
@@ -547,6 +636,8 @@ test('soak: the real coordinator works for a while with stand-in agents; nothing
     await c.idle();
     if (oldTmp === undefined) delete process.env.TMPDIR;
     else process.env.TMPDIR = oldTmp;
+    if (oldMark === undefined) delete process.env.SOAK_CHILD_MARK;
+    else process.env.SOAK_CHILD_MARK = oldMark;
   }
   // The short smoke run has no warm-up to leave out and too little time to judge a slope: its limits say so.
   // Nor a log rate: 12 ticks never reach a WAL checkpoint, so it reads page writes (R1181e note 4: 243 KB of 256).
@@ -574,10 +665,12 @@ test('soak verdict: coordinator errors after the warm-up fail; none, or only in 
   const opts = { expectedMs: 5.5 * 3600_000 - 60_000 };
   const v = (x: SoakSample[]) => soakVerdict(x, SOAK_LIMITS, opts).failures;
   // A step failing on every tick (R1181j's audit-chain throw), its work still landing.
-  assert.match(v(series(330, (m) => ({ errors: m }))).join(' | '), /^errors: 319 coordinator\.error event\(s\) after the warm-up \(limit 0\)/);
+  assert.match(v(series(330, (m) => ({ errors: m }))).join(' | '), /^errors: 329 coordinator\.error event\(s\) in the run \(limit 0\)/);
   assert.match(v(series(330, (m) => ({ errors: m >= 200 ? 1 : 0 }))).join(' | '), /^errors: 1 coordinator\.error/);
   assert.deepEqual(v(series(330, () => ({ errors: 0 }))), []);
-  assert.deepEqual(v(series(330, (m) => ({ errors: Math.min(m, 3) }))), [], 'three in the warm-up only');
+  // R1181n: from the run's start, the warm-up included (an error in the first 10 minutes was never judged).
+  assert.match(v(series(330, (m) => ({ errors: Math.min(m, 3) }))).join(' | '), /^errors: 3 coordinator\.error/, 'three in the warm-up');
+  assert.match(v(series(330, (m) => ({ errors: m >= 10 ? 1 : 0 }))).join(' | '), /^errors: 1 coordinator\.error/, 'one before the first sample after the warm-up');
 });
 
 test('soak verdict: worktrees, child processes and disk are judged like open file handles; steady counts pass (#1181 review R1181j 2)', () => {
@@ -596,9 +689,9 @@ test('soak verdict: worktrees, child processes and disk are judged like open fil
 });
 
 test("soak verdict: the driver's run (extended) fails closed on a sample missing errors, worktrees or disk (#1181 review R1181j)", () => {
-  const full = (m: number) => ({ errors: 0, worktrees: 2, diskBytes: 50 * MB, children: 1 + 0 * m, failedRuns: 0, failureEvents: 0, worktreeDirs: 1, files: 400 });
+  const full = (m: number) => ({ errors: 0, worktrees: 2, diskBytes: 50 * MB, children: 1 + 0 * m, failedRuns: 0, failureEvents: 0, worktreeDirs: 1, files: 400, fullRunHeld: 0, childRss: 50 * MB });
   assert.deepEqual(soakVerdict(series(330, full), SOAK_LIMITS, { expectedMs: 5.5 * 3600_000 - 60_000, extended: true }).failures, []);
-  for (const k of ['errors', 'worktrees', 'diskBytes', 'children', 'failedRuns', 'failureEvents', 'worktreeDirs', 'files'] as const) {
+  for (const k of ['errors', 'worktrees', 'diskBytes', 'children', 'failedRuns', 'failureEvents', 'worktreeDirs', 'files', 'fullRunHeld', 'childRss'] as const) {
     const x = series(330, full).map((s, i) => (i === 200 ? { ...s, [k]: undefined } : s));
     assert.match(soakVerdict(x, SOAK_LIMITS, { expectedMs: 5.5 * 3600_000 - 60_000, extended: true }).failures.join(), new RegExp(`^samples missing ${k}: nothing was judged`), k);
   }
@@ -653,9 +746,10 @@ test('soak verdict: the disk outside the log, files and the worktree folder are 
 test('soak verdict: an agent run that did not succeed, or another failure event, after the warm-up fails (#1181 review R1181l 5)', () => {
   const opts = { expectedMs: 5.5 * 3600_000 - 60_000 };
   const v = (x: SoakSample[]) => soakVerdict(x, SOAK_LIMITS, opts).failures.join(' | ');
-  assert.match(v(series(330, (m) => ({ failedRuns: m >= 200 ? 1 : 0 }))), /^errors: 1 agent run\(s\) that did not succeed after the warm-up/);
+  assert.match(v(series(330, (m) => ({ failedRuns: m >= 200 ? 1 : 0 }))), /^errors: 1 agent run\(s\) that did not succeed in the run/);
   assert.match(v(series(330, (m) => ({ failureEvents: Math.floor(m / 100) }))), /^errors: 3 failure event\(s\)/);
-  assert.equal(v(series(330, (m) => ({ failedRuns: Math.min(m, 2), failureEvents: 0 }))), '', 'two in the warm-up only');
+  assert.match(v(series(330, (m) => ({ failedRuns: Math.min(m, 2), failureEvents: 0 }))), /^errors: 2 agent run/, 'two in the warm-up (R1181n)');
+  assert.equal(v(series(330, () => ({ failedRuns: 0, failureEvents: 0 }))), '', 'none');
 });
 
 test("the soak driver's counts read what they claim: failures in a log, worktrees, bytes and files, the worktree folder, and grouped processes (#1181 review R1181k D2)", async () => {
@@ -706,8 +800,71 @@ test("the soak driver's counts read what they claim: failures in a log, worktree
 
 test('the soak driver takes each count from those helpers (#1181 review R1181k D2: a constant in their place passed every test)', () => {
   const src = readFileSync(join(repoRoot, 'test', 'soak.test.ts'), 'utf8');
-  for (const line of ['...failureCounts(f.log),', 'worktrees: worktreeCount(f.repo),', 'worktreeDirs: entriesIn(wtDir),', 'diskBytes: usage.bytes,', 'files: usage.files,', 'children: childCount(),']) assert.ok(src.includes(`\n          ${line}\n`), line);
-  assert.match(src, /\n {8}const usage = dirUsage\(f\.base\);\n/);
+  for (const line of ['...failureCounts(f.log),', 'worktrees: worktreeCount(f.repo),', 'worktreeDirs: entriesIn(wtDir),', 'diskBytes: usage.bytes,', 'files: usage.files,', 'children: kids?.length ?? null,', 'childRss: rssOf(kids ?? []),', 'watches: inotifyWatches(),', 'fullRunHeld: slotStatus(f.slotsDir).fullRun ? 1 : 0,']) assert.ok(src.includes(`\n          ${line}\n`), line);
+  assert.match(src, /\n {8}const inside = dirUsage\(f\.base\);\n {8}const outside = usageOutside\(f\.base\);\n {8}const usage = \{ bytes: inside\.bytes \+ outside\.bytes, files: inside\.files \+ outside\.files \};\n {8}const kids = childPids\(childMark, seenLeaders\);\n/);
+  assert.match(src, /\n {2}process\.env\.SOAK_CHILD_MARK = childMark;\n/);
   // R1181l 3: temp files are made inside the measured folder.
   assert.match(src, /\n {2}const tmp = join\(f\.base, 'tmp'\);\n {2}mkdirSync\(tmp\);\n {2}const oldTmp = process\.env\.TMPDIR;\n {2}process\.env\.TMPDIR = tmp;\n/);
+});
+
+// --- R1181m, R1181n: detached and setsid'd children, the full-run lock, children's memory, watches ---
+test('soak verdict: the full-run lock held at an idle sample, the children\'s memory grown, and inotify watches grown fail; steady passes (#1181 review R1181n)', () => {
+  const opts = { expectedMs: 5.5 * 3600_000 - 60_000 };
+  const v = (x: SoakSample[]) => soakVerdict(x, SOAK_LIMITS, opts).failures.join(' | ');
+  assert.match(v(series(330, (m) => ({ fullRunHeld: m === 200 ? 1 : 0 }))), /^leaked the full-run lock: held at minute 200/);
+  assert.match(v(series(330, (m) => ({ childRss: 50 * MB + m * 2 * MB }))), /leak: the child processes' RSS grew/);
+  assert.match(v(series(330, (m) => ({ watches: 10 + m }))), /leak: inotify watches grew/);
+  assert.equal(v(series(330, () => ({ fullRunHeld: 0, childRss: 50 * MB, watches: 10 }))), '');
+});
+
+test("the soak driver counts a detached child and, on Linux, a setsid'd double fork; children's memory, watches and the outside places are read (#1181 reviews R1181m D1, R1181n)", async () => {
+  if (process.platform === 'win32') return;
+  const mark = `t-${process.pid}-${Date.now()}`;
+  const old = process.env.SOAK_CHILD_MARK;
+  process.env.SOAK_CHILD_MARK = mark;
+  const seen = new Set<number>();
+  const pids: number[] = [];
+  try {
+    // A detached child (the coordinator spawns detached: its own group).
+    const c = spawn('sleep', ['30'], { detached: true, stdio: 'ignore' });
+    c.unref();
+    pids.push(c.pid!);
+    assert.ok(childPids(mark, seen)!.includes(c.pid!), 'a detached child');
+    assert.ok(rssOf([c.pid!]) > 0, 'its memory is read');
+    if (process.platform === 'linux') {
+      // A setsid'd double fork: its parent gone, its session's leader never seen; the mark finds it.
+      const pid = Number(spawnSync('setsid', ['sh', '-c', 'sleep 30 >/dev/null 2>&1 & echo $!'], { encoding: 'utf8' }).stdout.trim());
+      pids.push(pid);
+      assert.ok(childPids(mark, seen)!.includes(pid), "a setsid'd double fork");
+      assert.equal(typeof inotifyWatches(), 'number');
+    }
+    // A file in the isolate's home (XDG_*) counts toward the disk.
+    const xdg = process.env.XDG_CONFIG_HOME;
+    if (xdg) {
+      const before = usageOutside('/nonexistent').bytes;
+      mkdirSync(xdg, { recursive: true });
+      const f = join(xdg, `soak-test-${process.pid}`);
+      writeFileSync(f, 'x'.repeat(8192));
+      try {
+        assert.ok(usageOutside('/nonexistent').bytes >= before + 8192, 'the isolate home');
+      } finally {
+        rmSync(f, { force: true });
+      }
+    }
+    // Our own files in /dev/shm count toward the disk (Linux).
+    if (existsSync('/dev/shm')) {
+      const shm = join('/dev/shm', `soak-test-${process.pid}`);
+      const before = usageOutside('/nonexistent').bytes;
+      writeFileSync(shm, 'x'.repeat(4096));
+      try {
+        assert.ok(usageOutside('/nonexistent').bytes >= before + 4096);
+      } finally {
+        rmSync(shm, { force: true });
+      }
+    }
+  } finally {
+    for (const p of pids) if (p > 0) try { process.kill(p); } catch { /* gone */ }
+    if (old === undefined) delete process.env.SOAK_CHILD_MARK;
+    else process.env.SOAK_CHILD_MARK = old;
+  }
 });
