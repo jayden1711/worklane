@@ -42,14 +42,14 @@ test("#958: ci-slow.yml's add-project job runs the setting-sources probe on the 
   assert.match(step.run ?? '', /npm install -g --prefix "\$cc" .*"@anthropic-ai\/claude-code@\$v"/);
   assert.match(step.run ?? '', /node scripts\/ci\/setting-sources-probe\.mjs "\$cc\/bin\/claude"/);
   // The must-fail wrappers around the real claude (R1185n): the probe must exit 1 on each, naming its leak.
-  for (const [w, says] of [['env', 'guarded run'], ['resume', 'guarded resumed run'], ['perm', 'a guarded run ran Bash'], ['tool-env', 'guarded worker run'], ['role-prompt', 'guarded worker run'], ['resume-worker', 'guarded resumed run'], ['second-turn', "a guarded run's request"], ['helper', "a guarded run ran the local settings' apiKeyHelper"]]) {
+  for (const [w, says] of [['env', 'guarded run'], ['resume', 'guarded resumed run'], ['perm', 'a guarded run ran Write'], ['tool-env', 'guarded worker run'], ['role-prompt', 'guarded worker run'], ['resume-worker', 'guarded resumed run'], ['second-turn', "a guarded run's request"], ['helper', "a guarded run ran the local settings' apiKeyHelper"], ['lane-sandbox', "a guarded run's request"], ['plugin-locks', "a guarded run's request"], ['task-file', "a guarded run's request"]]) {
     assert.match(step.run ?? '', new RegExp(`(^|\\s)${w}:"[^"]*${says}`), `wrap-${w}-leak.cjs runs, and must fail naming its leak`);
     assert.ok(existsSync(join(repoRoot, 'test', 'fixtures', 'setting-sources', `wrap-${w}-leak.cjs`)), `wrap-${w}-leak.cjs is there`);
   }
   assert.match(step.run ?? '', /SETTING_SOURCES_REAL_CLAUDE="\$cc\/bin\/claude" node scripts\/ci\/setting-sources-probe\.mjs "\$f"/);
   assert.match(step.run ?? '', /then cat [^;]+; echo "the probe passed \$f, which leaks" >&2; exit 1; fi/);
   assert.doesNotMatch(JSON.stringify(step), /secrets\.|ANTHROPIC_API_KEY/, 'no secret: the probe gives claude a dummy key against its own stand-in');
-  assert.ok(steps.indexOf(step) <= steps.findIndex((s) => /machine\.sh/.test(s.name ?? '')), 'before the machine steps, right after the build');
+  assert.ok(steps.indexOf(step) === steps.findIndex((s) => /machine\.sh/.test(s.name ?? '')) + 1, 'right after machine.sh: production-shaped runs have the lane sandbox on, which needs its bubblewrap');
   // A pull request that changes the runner or the probe runs that job (scripts/ci/slow-jobs.sh).
   const scope = readFileSync(join(repoRoot, 'scripts', 'ci', 'slow-jobs.sh'), 'utf8');
   assert.match(scope, /MACHINE="[^"]*add-project-real-systemd/);

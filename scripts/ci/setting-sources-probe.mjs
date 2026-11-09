@@ -57,7 +57,7 @@ const repoRoot = join(import.meta.dirname, '..', '..');
  * (spawned, so no import reaches it, R1185r D1). Not cli.js, which the runner names by URL only for MCP runs: the
  * probe starts none, and it imports nearly all of src/.
  */
-const LOADS = ['runner', 'install', 'agent-settings', 'brand', 'roles'];
+const LOADS = ['runner', 'install', 'agent-settings', 'brand', 'roles', 'sandbox'];
 const ROOTS = [...LOADS, /\bexport const HOOK_ENTRY = '([\w/-]+)\.js'/.exec(readFileSync(join(repoRoot, 'src', 'install.ts'), 'utf8'))?.[1] ?? 'hook-main'];
 /**
  * The probe's import closure (R1185p D3): ROOTS and every src/ module they import, statically or by a literal
@@ -106,6 +106,7 @@ const { install } = await dist('install.js');
 const { guardrailSettings } = await dist('agent-settings.js');
 const { BRAND } = await dist('brand.js');
 const { rolePrompt, WORKER_SCHEMA } = await dist('roles.js');
+const { sandboxSettings } = await dist('sandbox.js');
 /** A coordinator worker run's tools (src/coordinator/fix-runs.ts), for the worker-shaped run (R1185p D2). */
 const WORKER_TOOLS = ['Read', 'Edit', 'Write', 'Glob', 'Grep', 'Bash'];
 
@@ -162,7 +163,8 @@ function plant() {
   const repo = join(parent, 'repo');
   const home = join(root, 'home');
   const cfg = join(home, '.claude');
-  const ran = join(root, 'ran');
+  // Inside the checkout: the lane's sandbox lets a tool or an MCP server write there and nowhere else above it.
+  const ran = join(repo, '.probe-ran');
   const instances = join(root, 'instances');
   const instanceHome = join(instances, 'probe');
   cpSync(join(repoRoot, 'examples', 'basic'), repo, { recursive: true });
@@ -173,6 +175,11 @@ function plant() {
   git('config', 'commit.gpgsign', 'false');
   git('add', '-A');
   git('commit', '-q', '-m', 'example');
+  // What a production task run has (R1185t D1): the default branch's ref, a task file, a state dir, worktree places.
+  git('update-ref', 'refs/remotes/origin/main', 'HEAD');
+  mkdirSync(join(root, 'state'), { recursive: true });
+  mkdirSync(join(root, 'places'), { recursive: true });
+  writeFileSync(join(root, 'task.json'), JSON.stringify({ id: 'task-7', done_when: [{ manual: 'probe' }], frozen: [], hidden: ['secret/'] }));
   mkdirSync(instanceHome, { recursive: true, mode: 0o700 });
   writeFileSync(join(instanceHome, 'instance.yaml'), `version: 1\nname: probe\nrepos:\n  - path: ${JSON.stringify(repo)}\n    repo: example-org/example-probe\n`);
   const w = (p, t) => {
@@ -336,11 +343,20 @@ async function run(control = null, o = {}) {
     const keyFile = join(p.root, 'api-key');
     writeFileSync(keyFile, 'sk-ant-not-a-key\n', { mode: 0o600 });
     const base = { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: p.home, CLAUDE_CONFIG_DIR: p.cfg, ...(o.worker ? {} : { ANTHROPIC_API_KEY: 'sk-ant-not-a-key' }), [varName]: p.instances };
-    const runner = new CliRunner('api_key', base, shim(p.root, api.url, control), undefined, undefined, undefined, {}, () => guardrailSettings(p.instanceHome, 'probe', p.repo), o.worker ? keyFile : undefined);
+    // Shaped as production builds every guarded run (src/service.ts, R1185t D1): a default lane with the sandbox on
+    // (policy.sandbox defaults to true), a plugins function (so --settings carries PLUGIN_LOCKS, plugin or not), the
+    // repository and its worktree places (read denials); and a task run's fields below (lane, task file, state dir,
+    // issue), so the env carries the task file and state dir.
+    const lanes = { default: { settings: sandboxSettings({ lane: { allowedDomains: [] }, denyRead: [p.instanceHome] }) } };
+    // The plugins function on guarded runs only: with it the runner locks MCP servers (allowedMcpServers) and stops a
+    // session that loads one it didn't pass, so a control with it could never show the planted server starting.
+    const plugins = control ? undefined : () => ({ dirs: [], ids: [], pluginRoot: null });
+    const runner = new CliRunner('api_key', base, shim(p.root, api.url, control), undefined, lanes, undefined, {}, () => guardrailSettings(p.instanceHome, 'probe', p.repo), o.worker ? keyFile : undefined, undefined, plugins, undefined, p.repo, 'main', undefined, [join(p.root, 'places')]);
+    const task = { lane: 'default', taskFile: join(p.root, 'task.json'), stateDir: join(p.root, 'state'), issue: 7 };
     const shape = o.worker ? { appendSystemPrompt: rolePrompt(p.repo, 'worker'), jsonSchema: WORKER_SCHEMA, allowedTools: WORKER_TOOLS } : { allowedTools: ['Read'] };
     // A second turn, as the runner delivers a held message once the first ends (onControl's send, R1185r D2).
     const second = o.second ? { onControl: (c) => c.send('probe-2', `${SECOND_TURN}: nothing more to do.`) } : {};
-    r = await runner.run({ ...second, prompt: 'Do the task.', model: 'claude-sonnet-4-5', cwd: p.repo, maxTurns: 6, maxBudgetUsd: 1, stallMs: 120_000, timeoutMs: 180_000, role: 'worker', ...shape, ...(o.resume ? { resume: o.resume } : {}) });
+    r = await runner.run({ ...second, ...task, prompt: 'Do the task.', model: 'claude-sonnet-4-5', cwd: p.repo, maxTurns: 6, maxBudgetUsd: 1, stallMs: 120_000, timeoutMs: 180_000, role: 'worker', ...shape, ...(o.resume ? { resume: o.resume } : {}) });
   } finally {
     if (before === undefined) delete process.env[varName];
     else process.env[varName] = before;
@@ -378,7 +394,8 @@ const ranName = (f) => (f === 'mcp' ? "the checkout's MCP server" : f.startsWith
 const leaks = (what, r, readOnly) => {
   for (const k of r.reached) problems.push(`${what}'s request carries ${k} (${MARKS[k]}): that was loaded`);
   for (const f of hooksOf(r.ran)) problems.push(`${what} ran ${ranName(f)}`);
-  if (readOnly) for (const f of r.ran.filter((x) => TOOL_FILES.includes(x))) problems.push(`${what} ran ${f === 'tool-bash' ? 'Bash' : 'Write'}, which it doesn't allow: a settings file's allow rule was loaded`);
+  // Write only: in production's lane sandbox, Bash is allowed when sandboxed (autoAllowBashIfSandboxed).
+  if (readOnly && r.ran.includes('tool-write')) problems.push(`${what} ran Write, which it doesn't allow: a settings file's allow rule was loaded`);
 };
 
 const project = await run({ sources: 'project' });
@@ -396,7 +413,7 @@ for (const who of ['project', 'local', 'home']) for (const e of TURN_EVENTS) if 
 if (!all.ran.includes('mcp')) problems.push("with every source and no --strict-mcp-config, the checkout's MCP server didn't start: its plant is broken");
 if (!all.ran.includes('helper-local')) problems.push("with every source, the local settings' apiKeyHelper didn't run: its plant is broken");
 if (!all.secondTurn) problems.push("the every-source control's second turn never reached the stand-in, so a second turn's loading is unmeasured");
-for (const f of TOOL_FILES) if (!all.ran.includes(f)) problems.push(`with every source, the settings' allow rules didn't let ${f === 'tool-bash' ? 'Bash' : 'Write'} run in a Read-only run: their plant is broken`);
+if (!all.ran.includes('tool-write')) problems.push("with every source, the settings' allow rules didn't let Write run in a Read-only run: their plant is broken");
 
 const user = await run({ sources: 'user' });
 say('control (--setting-sources user)', user);
@@ -414,6 +431,9 @@ const sources = guarded.given.args[guarded.given.args.indexOf('--setting-sources
 say(`guarded, Read only (the runner's own argv and env: --setting-sources ${JSON.stringify(sources)}, --settings, CLAUDE_CODE_DISABLE_AUTO_MEMORY=${guarded.given.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY})`, guarded);
 measured('the guarded run', guarded);
 if (!guarded.given.args.includes('--settings')) problems.push("the guarded run's argv has no --settings: the instance's agent settings weren't passed");
+// Production-shaped (R1185t D1): the lane sandbox and the plugin locks in --settings, a task file in the env.
+const guardedSettings = JSON.parse(guarded.given.args[guarded.given.args.indexOf('--settings') + 1] ?? '{}');
+if (guardedSettings.sandbox?.enabled !== true || guardedSettings.disableSkillShellExecution !== true || !Object.keys(guarded.given.env).some((k) => k.endsWith('_TASK_FILE'))) problems.push("the guarded run isn't production-shaped: its --settings lacks the lane sandbox or the plugin locks, or its env a task file");
 if (!guarded.secondTurn) problems.push("the guarded run's second turn never reached the stand-in, so a second turn is unmeasured");
 leaks('a guarded run', guarded, true);
 

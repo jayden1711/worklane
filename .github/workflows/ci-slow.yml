@@ -804,27 +804,6 @@ jobs:
           node-version: '24'
           cache: npm
       - run: npm ci && npm run build && npm run build:web
-      # #958 (the owner's decision, 2026-11-08): a guarded run loads nothing planted in its checkout, a parent folder or
-      # the agent's home (hooks, settings, MCP, CLAUDE.md, rules, skills, agents, commands), on the real claude the
-      # machine installs, with the runner's own argv. A dummy key against a local stand-in for the API: no secret, so it
-      # runs on a pull request too. scripts/ci/setting-sources-probe.mjs says what it plants and its controls.
-      - name: "#958: a guarded run's real claude (--setting-sources '') loads nothing planted in its checkout, parent folder or home"
-        run: |
-          v="$(sed -n 's/^CLAUDE_VERSION=//p' scripts/bootstrap.sh)"
-          cc="$(mktemp -d)"
-          npm install -g --prefix "$cc" --no-audit --no-fund "@anthropic-ai/claude-code@$v" > /dev/null
-          "$cc/bin/claude" --version
-          node scripts/ci/setting-sources-probe.mjs "$cc/bin/claude"
-          # Must fail (R1185n, R1185p): wrappers around this claude that, under '', leak a settings env, every source on
-          # --resume, a settings file's allow rule, a settings env to the tools, every source on a run with a role
-          # prompt, or every source on a resumed run with one (a fix run), a CLAUDE.md on a second turn, or a settings
-          # file's apiKeyHelper. The probe must exit 1 on each, naming that leak.
-          for w in env:"guarded run's request carries localEnv" resume:"guarded resumed run's request carries projectClaudeMd" perm:"a guarded run ran Bash, which it doesn't allow" tool-env:"guarded worker run's request carries localToolEnv" role-prompt:"guarded worker run's request carries projectClaudeMd" resume-worker:"guarded resumed run's request carries projectClaudeMd" second-turn:"a guarded run's request carries projectClaudeMd" helper:"a guarded run ran the local settings' apiKeyHelper"; do
-            f="test/fixtures/setting-sources/wrap-${w%%:*}-leak.cjs"
-            if SETTING_SOURCES_REAL_CLAUDE="$cc/bin/claude" node scripts/ci/setting-sources-probe.mjs "$f" > "$RUNNER_TEMP/must-fail.log" 2>&1; then cat "$RUNNER_TEMP/must-fail.log"; echo "the probe passed $f, which leaks" >&2; exit 1; fi
-            grep -F "${w#*:}" "$RUNNER_TEMP/must-fail.log" || { cat "$RUNNER_TEMP/must-fail.log"; echo "the probe failed $f, but not for its leak" >&2; exit 1; }
-          done
-          rm -rf "$cc"
       - name: the machine (machine.sh) and this commit's engine, root-owned, as engine.sh installs it
         run: |
           sudo apt-get update -q && sudo apt-get install -y -q acl
@@ -841,6 +820,29 @@ jobs:
           sudo chmod 0755 "/opt/worklane/$sha/dist/src/cli.js"
           sudo ln -sfn /opt/worklane/current/dist/src/cli.js /usr/local/bin/worklane
           worklane --version
+      # #958 (the owner's decision, 2026-11-08): a guarded run loads nothing planted in its checkout, a parent folder or
+      # the agent's home (hooks, settings, MCP, CLAUDE.md, rules, skills, agents, commands), on the real claude the
+      # machine installs, with the runner's own argv. A dummy key against a local stand-in for the API: no secret, so it
+      # runs on a pull request too. scripts/ci/setting-sources-probe.mjs says what it plants and its controls. After
+      # machine.sh: its runs are production-shaped, the lane sandbox on (failIfUnavailable), which needs bubblewrap.
+      - name: "#958: a guarded run's real claude (--setting-sources '') loads nothing planted in its checkout, parent folder or home"
+        run: |
+          v="$(sed -n 's/^CLAUDE_VERSION=//p' scripts/bootstrap.sh)"
+          cc="$(mktemp -d)"
+          npm install -g --prefix "$cc" --no-audit --no-fund "@anthropic-ai/claude-code@$v" > /dev/null
+          "$cc/bin/claude" --version
+          node scripts/ci/setting-sources-probe.mjs "$cc/bin/claude"
+          # Must fail (R1185n, R1185p): wrappers around this claude that, under '', leak a settings env, every source on
+          # --resume, a settings file's allow rule, a settings env to the tools, every source on a run with a role
+          # prompt, or every source on a resumed run with one (a fix run), a CLAUDE.md on a second turn, or a settings
+          # file's apiKeyHelper, or every source on a production-shaped run (its lane sandbox, its plugin locks, its task
+          # file: R1185t). The probe must exit 1 on each, naming that leak.
+          for w in env:"guarded run's request carries localEnv" resume:"guarded resumed run's request carries projectClaudeMd" perm:"a guarded run ran Write, which it doesn't allow" tool-env:"guarded worker run's request carries localToolEnv" role-prompt:"guarded worker run's request carries projectClaudeMd" resume-worker:"guarded resumed run's request carries projectClaudeMd" second-turn:"a guarded run's request carries projectClaudeMd" helper:"a guarded run ran the local settings' apiKeyHelper" lane-sandbox:"a guarded run's request carries projectClaudeMd" plugin-locks:"a guarded run's request carries projectClaudeMd" task-file:"a guarded run's request carries projectClaudeMd"; do
+            f="test/fixtures/setting-sources/wrap-${w%%:*}-leak.cjs"
+            if SETTING_SOURCES_REAL_CLAUDE="$cc/bin/claude" node scripts/ci/setting-sources-probe.mjs "$f" > "$RUNNER_TEMP/must-fail.log" 2>&1; then cat "$RUNNER_TEMP/must-fail.log"; echo "the probe passed $f, which leaks" >&2; exit 1; fi
+            grep -F "${w#*:}" "$RUNNER_TEMP/must-fail.log" || { cat "$RUNNER_TEMP/must-fail.log"; echo "the probe failed $f, but not for its leak" >&2; exit 1; }
+          done
+          rm -rf "$cc"
       - name: a fake GitHub, with the repo (examples/basic) behind the App's installation token
         run: |
           f="$RUNNER_TEMP/fake" && mkdir -p "$f/git/example"
