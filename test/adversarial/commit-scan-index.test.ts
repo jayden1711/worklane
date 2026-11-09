@@ -569,6 +569,35 @@ test("#983 option (b), R1124p F1: the checkout's own config names its hooks dir,
   assert.equal(head(d), was, 'nothing was committed');
 });
 
+test("R1124s F1: a commit in a worktree whose repository was swapped (commondir, or the worktree's .git file) for one of the agent's own is refused; a plain worktree's isn't", { skip }, async () => {
+  const d = checkout();
+  const root = dirname(d);
+  const wt = join(root, 'task-1');
+  git(d, 'worktree', 'add', '-q', '-b', 'task-1', wt);
+  const admin = join(d, '.git', 'worktrees', 'task-1');
+  writeFileSync(join(wt, 'ok.js'), 'export const y = 2;\n');
+  git(wt, 'add', 'ok.js');
+  assert.equal(await decide(wt, 'Bash', { command: 'git commit -m wip' }), 'allow', 'control: a plain linked worktree');
+  // The agent's own common dir: the checkout's config without the pin, its own hooks, the real objects and refs linked.
+  const fake = join(root, 'fake-common');
+  mkdirSync(join(fake, 'hooks'), { recursive: true });
+  for (const p of ['objects', 'refs', 'logs']) symlinkSync(join(d, '.git', p), join(fake, p));
+  writeFileSync(join(fake, 'config'), readFileSync(join(d, '.git', 'config'), 'utf8').split('\n').filter((l) => !/hookspath/i.test(l)).join('\n'));
+  writeFileSync(join(fake, 'HEAD'), 'ref: refs/heads/main\n');
+  // Route 1 (R1124s e2e-s2): the admin dir's commondir names it.
+  writeFileSync(join(admin, 'commondir'), `${fake}\n`);
+  assert.equal(await decide(wt, 'Bash', { command: 'git commit -m wip' }), 'deny', 'commondir rewritten');
+  writeFileSync(join(admin, 'commondir'), '../..\n');
+  assert.equal(await decide(wt, 'Bash', { command: 'git commit -m wip' }), 'allow', 'restored');
+  // Route 2: the worktree's .git file names an admin dir inside the fake common dir, which links the real refs.
+  const fakeAdmin = join(fake, 'worktrees', 'task-1');
+  mkdirSync(fakeAdmin, { recursive: true });
+  cpSync(admin, fakeAdmin, { recursive: true });
+  writeFileSync(join(fakeAdmin, 'commondir'), '../..\n');
+  writeFileSync(join(wt, '.git'), `gitdir: ${fakeAdmin}\n`);
+  assert.equal(await decide(wt, 'Bash', { command: 'git commit -m wip' }), 'deny', "the worktree's .git file rewritten");
+});
+
 test('R1124p F2: every word of sort, uniq and tree is a write destination, however their options are spelt', { skip }, async () => {
   const d = checkout();
   for (const line of [

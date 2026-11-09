@@ -50,8 +50,10 @@
 // owner's own commands) keep their git as it was: the owner's own config is theirs to trust.
 // LIMIT: the read and the run are two processes, but both are pinned to the same dirs, so a link rewritten between
 // them changes nothing; a file in those dirs edited in between is read by the run: the checkout's .git/ is the
-// coordinator's alone (scripts/setup/checkout.sh, git-dir-lock.ts), and an agent-writable worktree admin dir holds no
-// config git reads unless the checkout's own config turns extensions.worktreeConfig on. remote.<name>.url is the
+// coordinator's alone (scripts/setup/checkout.sh, git-dir-lock.ts). An agent-writable worktree admin dir holds no
+// config file git reads unless the checkout's own config turns extensions.worktreeConfig on, but its `commondir` names
+// which repository (config, hooks, refs) git uses: a guarded git is pinned to the checkout's (GIT_GUARD_VAR), and an
+// agent's commit is refused when it names another (src/scan/secrets.ts repositoryElsewhere, R1124s). remote.<name>.url is the
 // checkout's own setting, never refused: the locked .git/config is what keeps it.
 import { execFile, execFileSync, spawn, spawnSync } from './child-process.js';
 import { BRAND } from '../brand.js';

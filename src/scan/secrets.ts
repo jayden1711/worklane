@@ -4,7 +4,7 @@ import { spawn, spawnSync } from '../os/child-process.js';
 import { createHash } from 'node:crypto';
 import { accessSync, constants, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { delimiter, dirname, isAbsolute, join, resolve as resolvePath } from 'node:path';
+import { basename, delimiter, dirname, isAbsolute, join, resolve as resolvePath } from 'node:path';
 import { BRAND } from '../brand.js';
 import { foldName, gitConfigRefusal, gitEnv, gitExecFileSync, gitGuarded, gitSnapshot, gitSpawnSync, type GitSnapshot } from '../os/git.js';
 import { ignoredNames, presentNames, rawChanges, untrackedNames } from '../coordinator/change-files.js';
@@ -118,9 +118,11 @@ export const GIT_HOOK_MARKER = `# managed by ${BRAND.cli}`;
  */
 export function commitHookSkipped(top: string): string | null {
   if (gitGuarded()) return "this process's git reads no global config (it runs for an instance), so it can't say which pre-commit hook a commit here would run";
-  const r = gitSpawnSync(['rev-parse', '--path-format=absolute', '--git-common-dir', '--git-path', 'hooks/pre-commit'], { cwd: top, encoding: 'utf8', timeout: 5_000 });
-  const [common, runs] = r.error || r.status !== 0 ? [] : String(r.stdout).split('\n');
-  if (!common || !runs) return "git can't say which pre-commit hook it runs here";
+  const r = gitSpawnSync(['rev-parse', '--path-format=absolute', '--git-dir', '--git-common-dir', '--git-path', 'hooks/pre-commit'], { cwd: top, encoding: 'utf8', timeout: 5_000 });
+  const [gitDir, common, runs] = r.error || r.status !== 0 ? [] : String(r.stdout).split('\n');
+  if (!gitDir || !common || !runs) return "git can't say which pre-commit hook it runs here";
+  const elsewhere = repositoryElsewhere(gitDir, common);
+  if (elsewhere) return elsewhere;
   const engine = join(common, 'hooks', 'pre-commit');
   if (!existsSync(engine) || !readFileSync(engine, 'utf8').includes(GIT_HOOK_MARKER)) return null;
   if (!existsSync(runs) || realpathSync(runs) !== realpathSync(engine)) return `git would run ${runs} as the pre-commit hook, not the engine's (core.hooksPath, set in config or a file it includes, points elsewhere)`;
@@ -128,6 +130,40 @@ export function commitHookSkipped(top: string): string | null {
     accessSync(engine, constants.X_OK);
   } catch {
     return `the engine's pre-commit hook ${engine} isn't executable, so git would skip it`;
+  }
+  return null;
+}
+
+/**
+ * R1124s F1: why the repository git commits into from `gitDir` isn't the one it lives in, or null. A linked worktree's
+ * admin dir is `<common>/worktrees/<id>` (git worktree add), and its `commondir` names that `<common>`. An agent can
+ * write the admin dir (checkout.sh leaves it writable for the index and HEAD), so it can point `commondir` at a common
+ * dir of its own (its own config without the hooks pin, its own hooks) whose objects and refs are links to the real
+ * ones: the commit lands on the real branch with no engine hook. So: a linked worktree's common dir must be the one
+ * its admin dir sits in, and no common dir's objects, refs, heads or logs may be a link (git never makes one). Checked
+ * when the decision is made; a rewrite after it is the race the changelog lists.
+ */
+function repositoryElsewhere(gitDir: string, common: string): string | null {
+  const real = (p: string) => {
+    try {
+      return realpathSync(p);
+    } catch {
+      return null;
+    }
+  };
+  const dir = real(gitDir);
+  const com = real(common);
+  if (!dir || !com) return `git names a repository that isn't there (${gitDir}, ${common})`;
+  if (dir !== com) {
+    const parent = dirname(dir);
+    if (basename(parent) !== 'worktrees' || real(dirname(parent)) !== com) return `this worktree's commondir names ${common}, not the repository its admin dir ${gitDir} is in`;
+  }
+  for (const part of ['objects', 'refs', join('refs', 'heads'), 'logs']) {
+    try {
+      if (lstatSync(join(com, part)).isSymbolicLink()) return `the repository ${common} has ${part} as a link elsewhere; git never makes one, so its commits would land in another repository`;
+    } catch {
+      // absent (a fresh repo's logs): nothing to follow
+    }
   }
   return null;
 }
