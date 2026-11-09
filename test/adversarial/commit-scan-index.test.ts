@@ -664,7 +664,7 @@ test("R1124t: a repository of the agent's own whose links reach the checkout's r
   assert.match(await decideWhy(r, 'git commit -m wip'), /^deny: .*as a link elsewhere/, 'git init --separate-git-dir, links below the top level');
 });
 
-test("R1124v: a repository of the agent's own is refused for a refs link deeper than the guard reads, for objects/xx alone linked, and for an objects/pack file alone linked", { skip }, async () => {
+test("R1124v: a repository of the agent's own is refused for a refs link deeper than the guard reads, for objects/xx alone linked, for an objects/pack file alone linked, and for objects/info/alternates alone linked", { skip }, async () => {
   const d = checkout();
   const root = dirname(d);
   const real = join(d, '.git');
@@ -700,6 +700,12 @@ test("R1124v: a repository of the agent's own is refused for a refs link deeper 
   const packFile = readdirSync(join(real, 'objects', 'pack')).find((n) => n.endsWith('.pack'))!;
   symlinkSync(join(real, 'objects', 'pack', packFile), join(pack.f, 'objects', 'pack', packFile));
   assert.match(await decideWhy(pack.r, 'git commit -m wip'), new RegExp(`^deny: .*objects/pack/${packFile} as a link elsewhere`), 'only an objects/pack file linked');
+  // R1124w F1: only objects/info/alternates linked (to a file naming the checkout's objects).
+  const info = own('info');
+  const alt = join(root, 'alternates-file');
+  writeFileSync(alt, `${join(real, 'objects')}\n`);
+  symlinkSync(alt, join(info.f, 'objects', 'info', 'alternates'));
+  assert.match(await decideWhy(info.r, 'git commit -m wip'), /^deny: .*objects\/info\/alternates as a link elsewhere/, 'only objects/info/alternates linked');
   // Control: the same kind of repository with nothing linked commits.
   const plain = own('plain');
   assert.equal(await decideWhy(plain.r, 'git commit -m wip'), 'allow', 'control: a repository of its own with no links');
