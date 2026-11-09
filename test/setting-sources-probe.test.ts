@@ -1,8 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { parse } from 'yaml';
 import { repoRoot } from './helpers.js';
@@ -42,10 +43,16 @@ test("#958: ci-slow.yml's add-project job runs the setting-sources probe on the 
   assert.match(step.run ?? '', /npm install -g --prefix "\$cc" .*"@anthropic-ai\/claude-code@\$v"/);
   assert.match(step.run ?? '', /node scripts\/ci\/setting-sources-probe\.mjs "\$cc\/bin\/claude"/);
   // The must-fail wrappers around the real claude (R1185n): the probe must exit 1 on each, naming its leak.
-  for (const [w, says] of [['env', 'guarded run'], ['resume', 'guarded resumed run'], ['perm', 'a guarded run ran Write'], ['tool-env', 'guarded worker run'], ['role-prompt', 'guarded worker run'], ['resume-worker', 'guarded resumed run'], ['second-turn', "a guarded run's request"], ['helper', "a guarded run ran the local settings' apiKeyHelper"], ['lane-sandbox', "a guarded run's request"], ['plugin-locks', "a guarded run's request"], ['task-file', "a guarded run's request"]]) {
+  for (const [w, says] of [['env', 'guarded run'], ['resume', 'guarded resumed run'], ['perm', 'a guarded run ran Write'], ['tool-env', 'guarded worker run'], ['role-prompt', 'guarded worker run'], ['resume-worker', 'guarded resumed run'], ['second-turn', "a guarded run's request"], ['helper', "a guarded run ran the local settings' apiKeyHelper"], ['lane-sandbox', "a guarded run's request carries homeClaudeMd"], ['plugin-locks', "a guarded run's request carries memory"], ['task-file', "a guarded run's request carries rules"], ['no-sandbox', "the guarded run without the sandbox's request"], ['bash-allow', 'the guarded run without the sandbox ran Bash']]) {
     assert.match(step.run ?? '', new RegExp(`(^|\\s)${w}:"[^"]*${says}`), `wrap-${w}-leak.cjs runs, and must fail naming its leak`);
     assert.ok(existsSync(join(repoRoot, 'test', 'fixtures', 'setting-sources', `wrap-${w}-leak.cjs`)), `wrap-${w}-leak.cjs is there`);
   }
+  // Every wrapper fixture is in the loop, and the leaks keyed to one run's shape each grep a line of its own (R1185u N2).
+  const loop = [...(step.run ?? '').matchAll(/(?:^|\s)([\w-]+):"([^"]+)"/g)].map((m) => [m[1]!, m[2]!] as const);
+  const fixtures = readdirSync(join(repoRoot, 'test', 'fixtures', 'setting-sources')).filter((f) => /^wrap-.*-leak\.cjs$/.test(f)).map((f) => f.slice(5, -9));
+  assert.deepEqual(loop.map(([w]) => w).sort(), fixtures.sort(), 'every wrap-*-leak.cjs runs in the must-fail loop');
+  const shapeKeyed = loop.filter(([w]) => ['second-turn', 'lane-sandbox', 'plugin-locks', 'task-file', 'no-sandbox'].includes(w)).map(([, l]) => l);
+  assert.equal(new Set(shapeKeyed).size, shapeKeyed.length, `each shape-keyed wrapper's line is its own: ${shapeKeyed.join(' | ')}`);
   assert.match(step.run ?? '', /SETTING_SOURCES_REAL_CLAUDE="\$cc\/bin\/claude" node scripts\/ci\/setting-sources-probe\.mjs "\$f"/);
   assert.match(step.run ?? '', /then cat [^;]+; echo "the probe passed \$f, which leaks" >&2; exit 1; fi/);
   assert.doesNotMatch(JSON.stringify(step), /secrets\.|ANTHROPIC_API_KEY/, 'no secret: the probe gives claude a dummy key against its own stand-in');
@@ -115,6 +122,12 @@ test("#958 (R1185s S1): the probe loads src/ only through dist(), only what LOAD
   // Its code, comments out (line and block), strings kept.
   const code = text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
   assert.equal((code.match(/\bimport\s*\(/g) ?? []).length, 1, 'one import(), the one inside dist()');
+  // Static imports and re-exports too (R1185u U2): node's own modules and the git runner only, so no dist/ module (or
+  // any other) is loaded past dist() and the closure list.
+  const ts = createRequire(join(repoRoot, 'package.json'))('typescript') as { createSourceFile: (f: string, t: string, v: number, p: boolean) => { statements: { moduleSpecifier?: { text: string } }[] }; ScriptTarget: { Latest: number } };
+  const specs = ts.createSourceFile(probe, text, ts.ScriptTarget.Latest, true).statements.flatMap((st) => (st.moduleSpecifier ? [st.moduleSpecifier.text] : []));
+  assert.ok(specs.length > 0, 'its static imports are read');
+  for (const m of specs) assert.ok(/^node:/.test(m) || m === '../lib/git.cjs', `a static import or re-export of ${m}: only node:* and ../lib/git.cjs (anything else, a dist/ module above all, is outside the closure)`);
   // Outside shim(), whose text is the source of the child it writes: no require() or createRequire beside it.
   const shimAt = code.indexOf('function shim(');
   const outside = shimAt < 0 ? code : code.slice(0, shimAt) + code.slice(code.indexOf('\n}\n', shimAt));

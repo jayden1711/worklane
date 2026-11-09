@@ -22,15 +22,18 @@
 //   - `project` (an unguarded run's sources): the checkout's markers, the lazy ones included, and its hooks on every
 //     event a turn with a tool fires;
 //   - every source, without --strict-mcp-config and without CLAUDE_CODE_DISABLE_AUTO_MEMORY: every marker, the memory
-//     and both tool env variables included, every settings file's hooks, the MCP server, and Bash and Write run under
-//     the planted allow rules in a Read-only run;
+//     and both tool env variables included, every settings file's hooks, the MCP server, and Write run under the
+//     planted allow rules in a Read-only run; and the same without the sandbox, where Bash runs under them too;
 //   - `user`: the home's CLAUDE.md and its env (the local env replaces the home's header under every source);
 //   - the guarded run's own argv without CLAUDE_CODE_DISABLE_AUTO_MEMORY: the memory is loaded, so the runner's
 //     variable is what keeps it out.
-// Then the guarded runs, exactly as the runner starts them, must each run the tool, reach no marker, and run no
-// planted hook and no MCP server:
-//   - a Read-only run, where Bash and Write must also stay denied, with a second turn (a held message the runner
-//     delivers once the first ends, R1185r D2);
+// Then the guarded runs, exactly as the runner starts them and shaped as production builds them (the lane sandbox,
+// the plugin locks, a task run's fields: R1185t D1), must each run the tool, reach no marker, and run no planted hook
+// and no MCP server:
+//   - a Read-only run, where Write must also stay denied (in the lane sandbox Bash is allowed when sandboxed), with a
+//     second turn (a held message the runner delivers once the first ends, R1185r D2);
+//   - the same without the sandbox, as a `policy.sandbox: false` instance runs it, where Bash too must stay denied
+//     (R1185u U1);
 //   - one shaped as a coordinator worker run (its role prompt, JSON schema, tools and an apiKeyHelper key file);
 //   - a resumed session, shaped as a fix run is (worker-shaped, R1185q): a guarded worker run, then one resuming it in
 //     the same tree, with every source (a control: it loads the plants, sub2/CLAUDE.md included) and guarded.
@@ -347,7 +350,9 @@ async function run(control = null, o = {}) {
     // (policy.sandbox defaults to true), a plugins function (so --settings carries PLUGIN_LOCKS, plugin or not), the
     // repository and its worktree places (read denials); and a task run's fields below (lane, task file, state dir,
     // issue), so the env carries the task file and state dir.
-    const lanes = { default: { settings: sandboxSettings({ lane: { allowedDomains: [] }, denyRead: [p.instanceHome] }) } };
+    // `o.noSandbox`: an instance with `policy.sandbox: false` (src/instance.ts), whose lane has no settings, so its
+    // Bash is governed by permission rules alone (R1185u U1).
+    const lanes = o.noSandbox ? { default: {} } : { default: { settings: sandboxSettings({ lane: { allowedDomains: [] }, denyRead: [p.instanceHome] }) } };
     // The plugins function on guarded runs only: with it the runner locks MCP servers (allowedMcpServers) and stops a
     // session that loads one it didn't pass, so a control with it could never show the planted server starting.
     const plugins = control ? undefined : () => ({ dirs: [], ids: [], pluginRoot: null });
@@ -390,12 +395,22 @@ const measured = (what, r) => {
   else if (!r.toolRan) problems.push(`${what}: the stand-in's Read never ran in this run, so nothing loaded by a tool or a turn's end is measured`);
 };
 const ranName = (f) => (f === 'mcp' ? "the checkout's MCP server" : f.startsWith('helper-') ? `the ${f.slice('helper-'.length)} settings' apiKeyHelper` : `the ${f.split('-')[0]} settings' ${f.split('-').slice(1).join('-')} hook`);
-/** A guarded run's leaks: a marker in a request, a planted hook or the MCP server run, and (`readOnly`) Bash or Write run. */
-const leaks = (what, r, readOnly) => {
+/**
+ * A guarded run's leaks: a marker in a request, a planted hook or the MCP server run, and (`readOnly`) Write run, and
+ * (`bash`, a run without the sandbox) Bash run: in the lane sandbox Bash is allowed (autoAllowBashIfSandboxed), so
+ * only a run without it shows a planted Bash allow rule (R1185u U1).
+ */
+const leaks = (what, r, readOnly, bash = false) => {
   for (const k of r.reached) problems.push(`${what}'s request carries ${k} (${MARKS[k]}): that was loaded`);
   for (const f of hooksOf(r.ran)) problems.push(`${what} ran ${ranName(f)}`);
-  // Write only: in production's lane sandbox, Bash is allowed when sandboxed (autoAllowBashIfSandboxed).
   if (readOnly && r.ran.includes('tool-write')) problems.push(`${what} ran Write, which it doesn't allow: a settings file's allow rule was loaded`);
+  if (readOnly && bash && r.ran.includes('tool-bash')) problems.push(`${what} ran Bash, which it doesn't allow: a settings file's allow rule was loaded`);
+};
+/** Production's shape (R1185t D1, R1185u N1): the plugin locks in --settings, a task file in the env, and the lane sandbox on, or (`noSandbox`) no sandbox at all. */
+const shaped = (what, r, noSandbox = false) => {
+  const settings = JSON.parse(r.given.args[r.given.args.indexOf('--settings') + 1] ?? '{}');
+  const sandbox = noSandbox ? !('sandbox' in settings) : settings.sandbox?.enabled === true;
+  if (!sandbox || settings.disableSkillShellExecution !== true || !Object.keys(r.given.env).some((k) => k.endsWith('_TASK_FILE'))) problems.push(`${what} isn't production-shaped: its --settings lacks the plugin locks or ${noSandbox ? 'carries a sandbox' : 'the lane sandbox'}, or its env a task file`);
 };
 
 const project = await run({ sources: 'project' });
@@ -415,6 +430,13 @@ if (!all.ran.includes('helper-local')) problems.push("with every source, the loc
 if (!all.secondTurn) problems.push("the every-source control's second turn never reached the stand-in, so a second turn's loading is unmeasured");
 if (!all.ran.includes('tool-write')) problems.push("with every source, the settings' allow rules didn't let Write run in a Read-only run: their plant is broken");
 
+// Without the sandbox (R1185u U1): every source lets the planted allow rules run Bash in a Read-only run, so the guarded
+// run without it shows whether one leaked.
+const allBare = await run({ sources: 'user,project,local', mcp: true, memory: true }, { noSandbox: true });
+say('control (every source, no sandbox: a policy.sandbox: false instance)', allBare);
+measured('the every-source control without the sandbox', allBare);
+if (!allBare.ran.includes('tool-bash')) problems.push("with every source and no sandbox, the settings' allow rules didn't let Bash run in a Read-only run: their plant is broken");
+
 const user = await run({ sources: 'user' });
 say('control (--setting-sources user)', user);
 measured('the user control', user);
@@ -431,11 +453,17 @@ const sources = guarded.given.args[guarded.given.args.indexOf('--setting-sources
 say(`guarded, Read only (the runner's own argv and env: --setting-sources ${JSON.stringify(sources)}, --settings, CLAUDE_CODE_DISABLE_AUTO_MEMORY=${guarded.given.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY})`, guarded);
 measured('the guarded run', guarded);
 if (!guarded.given.args.includes('--settings')) problems.push("the guarded run's argv has no --settings: the instance's agent settings weren't passed");
-// Production-shaped (R1185t D1): the lane sandbox and the plugin locks in --settings, a task file in the env.
-const guardedSettings = JSON.parse(guarded.given.args[guarded.given.args.indexOf('--settings') + 1] ?? '{}');
-if (guardedSettings.sandbox?.enabled !== true || guardedSettings.disableSkillShellExecution !== true || !Object.keys(guarded.given.env).some((k) => k.endsWith('_TASK_FILE'))) problems.push("the guarded run isn't production-shaped: its --settings lacks the lane sandbox or the plugin locks, or its env a task file");
+shaped('the guarded run', guarded);
 if (!guarded.secondTurn) problems.push("the guarded run's second turn never reached the stand-in, so a second turn is unmeasured");
 leaks('a guarded run', guarded, true);
+
+// A guarded Read-only run as a `policy.sandbox: false` instance runs it (R1185u U1): no lane sandbox, so Bash too must
+// stay denied.
+const bare = await run(null, { noSandbox: true });
+say('guarded, Read only, no sandbox (a policy.sandbox: false instance)', bare);
+measured('the guarded run without the sandbox', bare);
+shaped('the guarded run without the sandbox', bare, true);
+leaks('the guarded run without the sandbox', bare, true, true);
 
 // Shaped as a coordinator worker run (R1185p D2): its role prompt, schema, tools and apiKeyHelper. Bash and Write are
 // its own here, so the stand-in's Bash shows what the tools' environment holds.
@@ -445,6 +473,7 @@ measured('the guarded worker run', worker);
 const arg = (k) => worker.given.args[worker.given.args.indexOf(k) + 1] ?? '';
 if (!worker.given.args.includes('--append-system-prompt-file') || !worker.given.args.includes('--json-schema') || !/"apiKeyHelper"/.test(arg('--settings'))) problems.push("the guarded worker run isn't shaped as a worker's: its argv lacks --append-system-prompt-file, --json-schema or apiKeyHelper in --settings");
 if (!worker.ran.includes('tool-bash')) problems.push("the guarded worker run's Bash didn't run, so what its tools see is unmeasured");
+shaped('the guarded worker run', worker);
 leaks('the guarded worker run', worker, false);
 
 // Resumed (R1185n C3): the only runs that resume are fix runs (src/coordinator/fix-runs.ts), which are worker-shaped,
@@ -464,7 +493,10 @@ for (const [what, control] of [['control', { sources: 'user,project,local', mcp:
   if (control) {
     // What loads at a session's start, and sub2/CLAUDE.md, loaded when the resumed session reads that folder.
     for (const k of ['projectClaudeMd', 'dotClaudeMd', 'localClaudeMd', 'parentClaudeMd', 'rules', 'skill', 'agent', 'command', 'homeClaudeMd', 'localEnv', 'resumeNested']) if (!r.reached.includes(k)) problems.push(`a resumed run with every source didn't reach ${k} (${MARKS[k]}): its plant is broken, so the guarded resume proves nothing`);
-  } else leaks('the guarded resumed run', r, false);
+  } else {
+    shaped('the guarded resumed run', r);
+    leaks('the guarded resumed run', r, false);
+  }
 }
 
 if (problems.length) {

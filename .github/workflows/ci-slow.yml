@@ -835,9 +835,11 @@ jobs:
           # Must fail (R1185n, R1185p): wrappers around this claude that, under '', leak a settings env, every source on
           # --resume, a settings file's allow rule, a settings env to the tools, every source on a run with a role
           # prompt, or every source on a resumed run with one (a fix run), a CLAUDE.md on a second turn, or a settings
-          # file's apiKeyHelper, or every source on a production-shaped run (its lane sandbox, its plugin locks, its task
-          # file: R1185t). The probe must exit 1 on each, naming that leak.
-          for w in env:"guarded run's request carries localEnv" resume:"guarded resumed run's request carries projectClaudeMd" perm:"a guarded run ran Write, which it doesn't allow" tool-env:"guarded worker run's request carries localToolEnv" role-prompt:"guarded worker run's request carries projectClaudeMd" resume-worker:"guarded resumed run's request carries projectClaudeMd" second-turn:"a guarded run's request carries projectClaudeMd" helper:"a guarded run ran the local settings' apiKeyHelper" lane-sandbox:"a guarded run's request carries projectClaudeMd" plugin-locks:"a guarded run's request carries projectClaudeMd" task-file:"a guarded run's request carries projectClaudeMd"; do
+          # file's apiKeyHelper, or a leak keyed to a production-shaped run (its lane sandbox, its plugin locks, its task
+          # file: R1185t, each its own leak so each line is its own, R1185u N2), every source on a run without the sandbox
+          # (a policy.sandbox: false instance), or only the settings' Bash allow rules (R1185u U1). The probe must exit 1
+          # on each, naming that leak.
+          for w in env:"guarded run's request carries localEnv" resume:"guarded resumed run's request carries projectClaudeMd" perm:"a guarded run ran Write, which it doesn't allow" tool-env:"guarded worker run's request carries localToolEnv" role-prompt:"guarded worker run's request carries projectClaudeMd" resume-worker:"guarded resumed run's request carries projectClaudeMd" second-turn:"a guarded run's request carries projectClaudeMd" helper:"a guarded run ran the local settings' apiKeyHelper" lane-sandbox:"a guarded run's request carries homeClaudeMd" plugin-locks:"a guarded run's request carries memory" task-file:"a guarded run's request carries rules" no-sandbox:"the guarded run without the sandbox's request carries projectClaudeMd" bash-allow:"the guarded run without the sandbox ran Bash, which it doesn't allow"; do
             f="test/fixtures/setting-sources/wrap-${w%%:*}-leak.cjs"
             if SETTING_SOURCES_REAL_CLAUDE="$cc/bin/claude" node scripts/ci/setting-sources-probe.mjs "$f" > "$RUNNER_TEMP/must-fail.log" 2>&1; then cat "$RUNNER_TEMP/must-fail.log"; echo "the probe passed $f, which leaks" >&2; exit 1; fi
             grep -F "${w#*:}" "$RUNNER_TEMP/must-fail.log" || { cat "$RUNNER_TEMP/must-fail.log"; echo "the probe failed $f, but not for its leak" >&2; exit 1; }
