@@ -14,12 +14,15 @@
 //     makes the config invalid (the coordinator keeps running on the last good one); here it turns nothing on.
 //   - Every flip is audited: adoptFlags records a `flag.flipped` event (the flag, from, to, the commit) whenever a
 //     flag's state differs from the last one recorded, so a flip made while the coordinator was down is recorded too.
+import { readFileSync, rmSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { parseDocument } from 'yaml';
 import { BRAND } from './brand.js';
 import type { EventLog } from './events/log.js';
 import type { EventPayload } from './events/types.js';
 import { FLAG_NAME, knownFlags, retiredFlags } from './config/schema.js';
 import { gitSpawnSync } from './os/git.js';
+import { syncToDisk, writeOwnerOnly } from './os/index.js';
 import { gitRemote } from './git-remote.js';
 import { loadConfigAt, type Config, type ConfigError } from './config/load.js';
 
@@ -29,6 +32,42 @@ export { FLAG_NAME, FLAGS, RETIRED_FLAGS, flagsSchema, type FlagInfo } from './c
 let snapshot: Readonly<{ sha: string; on: readonly string[] }> | null = null;
 /** Flags this process turned off whose off record isn't durable yet, each with the commit that turned it off. */
 const offUnrecorded = new Map<string, string | null>();
+/**
+ * The same offs, kept on disk beside the event log until a tick is durable (R1173r 1: a SQLITE_BUSY longer than the
+ * busy timeout ends the tick and the process, and the next process knew nothing of them). Written, synced, before the
+ * turn-off takes effect; read once per process. A full disk that stops this write too is the stated limit.
+ */
+let offFile: { path: string; held: Map<string, string | null> } | null = null;
+const OFF_FILE = 'flags-unrecorded.json';
+function loadOffFile(log: EventLog): void {
+  if (typeof log.path !== 'string' || log.path === ':memory:') return; // no folder to keep it in: memory only
+  const path = join(dirname(log.path), OFF_FILE);
+  if (offFile?.path === path) return;
+  offFile = { path, held: new Map() };
+  let saved: unknown;
+  try {
+    saved = JSON.parse(readFileSync(path, 'utf8'));
+  } catch {
+    return; // none (or unreadable: nothing to add)
+  }
+  if (!saved || typeof saved !== 'object' || Array.isArray(saved)) return;
+  for (const [flag, sha] of Object.entries(saved as Record<string, unknown>)) {
+    if (!FLAG_NAME.test(flag) || !(sha === null || (typeof sha === 'string' && /^[0-9a-f]{40,64}$/.test(sha)))) continue;
+    offFile.held.set(flag, sha);
+    if (!offUnrecorded.has(flag)) offUnrecorded.set(flag, sha);
+  }
+}
+function saveOffFile(): void {
+  if (!offFile) return;
+  try {
+    if (offFile.held.size) {
+      writeOwnerOnly(offFile.path, `${JSON.stringify(Object.fromEntries(offFile.held))}\n`);
+      syncToDisk(offFile.path);
+    } else rmSync(offFile.path, { force: true });
+  } catch {
+    // a full disk: the stated limit (docs/feature-flags.md)
+  }
+}
 
 /** Whether a flag is on: only when the default branch's committed config, at the adopted commit, says `true` for it. */
 export function flagOn(name: string): boolean {
@@ -45,6 +84,7 @@ export function flagState(): { sha: string | null; on: string[] } {
 export function clearFlags(): void {
   snapshot = null;
   offUnrecorded.clear();
+  offFile = null;
 }
 
 /**
@@ -155,19 +195,29 @@ export function adoptFlags(o: { log: EventLog; repo: string; actor: string; bran
   // log said off): only what is on now and still on at the head stays on until the records are written.
   const keep = on.filter((n) => before.includes(n));
   // A flag turned off here is off unrecorded until its record is durable (R1173p 2: its off record lost, then main
-  // turned it on again, and the log, still reading on, recorded no change).
-  for (const n of before) if (!keep.includes(n) && !offUnrecorded.has(n)) offUnrecorded.set(n, sha);
+  // turned it on again, and the log, still reading on, recorded no change), kept on disk first (R1173r 1).
+  loadOffFile(o.log);
+  const turnedOff = before.filter((n) => !keep.includes(n) && !offUnrecorded.has(n));
+  for (const n of turnedOff) {
+    offUnrecorded.set(n, sha);
+    offFile?.held.set(n, sha);
+  }
+  if (turnedOff.length) saveOffFile();
   snapshot = sha ? Object.freeze({ sha, on: Object.freeze([...keep]) }) : null;
   const was = recordedFlags(o.log);
   const out: EventPayload<'flag.flipped'>[] = [];
   const write = (p: EventPayload<'flag.flipped'>) => {
     if (o.log.append('flag.flipped', p, o.actor).id === 0) durable = false;
+    // Its off appended (written or held): never written again (R1173q 1: every held tick wrote the pair again).
+    else if (!p.to) offUnrecorded.delete(p.flag);
     out.push(p);
   };
   let durable = true;
   for (const flag of [...new Set([...known, ...was.keys()])].sort()) {
     let from = was.get(flag) ?? false;
-    // The log still reads on for a flag this process turned off: record that off first, as it ran.
+    // The log already reads off: nothing unrecorded.
+    if (!from) offUnrecorded.delete(flag);
+    // The log still reads on for a flag turned off (by this process, or one before it): record that off first, as it ran.
     if (from && offUnrecorded.has(flag)) {
       write({ flag, from: true, to: false, sha: offUnrecorded.get(flag) ?? null });
       from = false;
@@ -178,7 +228,13 @@ export function adoptFlags(o: { log: EventLog; repo: string; actor: string; bran
   // Durable only when nothing is held in memory: a held record reads as recorded on the next tick (R1173m 1: a real
   // SQLITE_FULL turned a flag on with no row on disk). A held record from an earlier tick is still held here.
   if (o.log.buffered().count > 0) durable = false;
-  if (durable) offUnrecorded.clear();
+  if (durable) {
+    offUnrecorded.clear();
+    if (offFile?.held.size) {
+      offFile.held.clear();
+      saveOffFile();
+    }
+  }
   // Durably recorded: the head's flags on; otherwise nothing goes on that wasn't (the turn-offs above stand).
   if (durable && sha) snapshot = Object.freeze({ sha, on: Object.freeze([...on]) });
   return out;
