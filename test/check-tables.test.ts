@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { BRAND } from '../src/brand.js';
-import { parseTables, regExpOf, TABLES_FILE, tablesFrom, tablesOf, type Pattern } from '../src/check-tables.js';
+import { frameFile, isCaller, parseTables, regExpOf, TABLES_FILE, tablesFrom, tablesOf, type Pattern } from '../src/check-tables.js';
 import * as review from '../src/review.js';
 import { BUILTIN_PROTECTED } from '../src/guardrails/engine.js';
 import { GIT_GUARD_PAIRS } from '../src/os/git.js';
@@ -152,6 +152,9 @@ test("a module reads only its own tables file, by its own URL: no path is writte
         await assert.rejects(mod(name, write, one(['a', 'b'])), /is not the calling module/, `${k}: ${name}`);
       }
     }
+    // The stack's frame, in V8's two formats, and a source-mapped frame of the same module (src/x.ts for dist/src/x.js).
+    assert.deepEqual([frameFile('Error\n    at f (file:///a/dist/src/x.js:3:9)\n'), frameFile('Error\n    at file:///a/x.mjs:1:2'), frameFile('Error\n    at async file:///a/x.mjs:1:2'), frameFile('Error')], ['file:///a/dist/src/x.js', 'file:///a/x.mjs', 'file:///a/x.mjs', undefined]);
+    assert.deepEqual([isCaller('file:///a/src/x.ts', 'file:///a/dist/src/x.js'), isCaller('file:///a/src/y.ts', 'file:///a/dist/src/x.js'), isCaller('file:///a/src/x.ts', 'file:///a/src/x.ts.js'), isCaller(undefined, 'file:///a/x.js')], [true, false, false, false]);
     // A call with another module's URL, from here, is refused too.
     assert.throws(() => tablesOf(pathToFileURL(join(repoRoot, 'dist', 'src', 'review.js')).href), /is not the calling module/);
   } finally {

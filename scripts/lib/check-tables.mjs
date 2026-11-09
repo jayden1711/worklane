@@ -125,20 +125,28 @@ export function tablesFrom(text, file, fill = (s) => s) {
 /** Where the script at `moduleUrl` keeps its tables: its path with the extension replaced by `.tables.json`. */
 export const tablesFileOf = (moduleUrl) => fileURLToPath(moduleUrl).replace(/\.[cm]?[jt]s$/, '') + '.tables.json';
 
-/** The file of the code that called `fn`, from the call stack (no write to `import.meta.url` changes it). */
+/** The file of the code that called `fn`, from the call stack's text (no write to `import.meta.url` changes it). */
 export function callerFile(fn) {
-  const [keep, limit] = [Error.prepareStackTrace, Error.stackTraceLimit];
+  const limit = Error.stackTraceLimit;
+  const o = {};
   try {
-    Error.prepareStackTrace = (_e, sites) => sites;
     Error.stackTraceLimit = 1;
-    const o = {};
     Error.captureStackTrace(o, fn);
-    return o.stack?.[0]?.getFileName() ?? undefined;
   } finally {
-    Error.prepareStackTrace = keep;
     Error.stackTraceLimit = limit;
   }
+  return typeof o.stack === 'string' ? frameFile(o.stack) : undefined;
 }
+
+/** The file of a stack text's first frame (`    at f (file:///x.js:1:2)` or `    at file:///x.js:1:2`). */
+export function frameFile(stack) {
+  const at = stack.split('\n').find((l) => /^ {4}at /.test(l));
+  const m = at === undefined ? null : (/\((\S[^()]*):\d+:\d+\)$/.exec(at) ?? /^ {4}at (?:async )?([^\s()]+):\d+:\d+$/.exec(at));
+  return m?.[1];
+}
+
+/** Whether the stack's `caller` is the script at `url`: the same URL (scripts run unbuilt, with no source map). */
+export const isCaller = (caller, url) => caller !== undefined && caller === url;
 
 /**
  * The tables of the script at `moduleUrl` (its `import.meta.url`), from its own tables file. Throws when it can't, or
@@ -146,7 +154,7 @@ export function callerFile(fn) {
  */
 export function tablesOf(moduleUrl) {
   const caller = callerFile(tablesOf);
-  if (caller !== moduleUrl) throw new Error(`tablesOf: ${moduleUrl} is not the calling module (${caller ?? 'no stack frame'}); a module loads only its own tables, as tablesOf(import.meta.url)`);
+  if (!isCaller(caller, moduleUrl)) throw new Error(`tablesOf: ${moduleUrl} is not the calling module (${caller ?? 'no stack frame'}); a module loads only its own tables, as tablesOf(import.meta.url)`);
   const file = tablesFileOf(moduleUrl);
   return tablesFrom(readFileSync(file, 'utf8'), file);
 }

@@ -193,23 +193,40 @@ export function tablesFrom(text: string, file: string): Tables {
 export const tablesFileOf = (moduleUrl: string): string => fileURLToPath(moduleUrl).replace(/\.[cm]?[jt]s$/, '') + '.tables.json';
 
 /**
- * The file of the code that called `fn`, from the call stack: the module V8 is running, which no write to
- * `import.meta.url` changes. Undefined when the stack has no frame for it.
+ * The file of the code that called `fn`, read from the call stack's text: the module V8 is running, which no write to
+ * `import.meta.url` changes. Undefined when the stack has no frame for it, or a frame not in V8's own format (code
+ * that replaced V8's stack hook: the built-in class, open, #1251). It never sets that hook itself (src/ may not:
+ * test/slot-path.test.ts, #806).
  */
 export function callerFile(fn: (...a: never[]) => unknown): string | undefined {
-  const [keep, limit] = [Error.prepareStackTrace, Error.stackTraceLimit];
+  const limit = Error.stackTraceLimit;
+  const o: { stack?: unknown } = {};
   try {
-    Error.prepareStackTrace = (_e, sites) => sites;
     Error.stackTraceLimit = 1;
-    const o: { stack?: unknown } = {};
     Error.captureStackTrace(o, fn);
-    const sites = o.stack as NodeJS.CallSite[] | undefined;
-    return sites?.[0]?.getFileName() ?? undefined;
   } finally {
-    Error.prepareStackTrace = keep;
     Error.stackTraceLimit = limit;
   }
+  return typeof o.stack === 'string' ? frameFile(o.stack) : undefined;
 }
+
+/** The file of a stack text's first frame (`    at f (file:///x.js:1:2)` or `    at file:///x.js:1:2`). */
+export function frameFile(stack: string): string | undefined {
+  const at = stack.split('\n').find((l) => /^ {4}at /.test(l));
+  const m = at === undefined ? null : (/\((\S[^()]*):\d+:\d+\)$/.exec(at) ?? /^ {4}at (?:async )?([^\s()]+):\d+:\d+$/.exec(at));
+  return m?.[1];
+}
+
+/**
+ * Whether the stack's `caller` is the module at `url`: the same URL, or, with source maps on, its source's name
+ * (`dist/src/x.js` shown as `src/x.ts`, whose tables file is the same data at the same commit).
+ */
+export const isCaller = (caller: string | undefined, url: string): boolean => {
+  if (caller === undefined) return false;
+  if (caller === url) return true;
+  const stem = (u: string) => u.replace(/\/dist\//, '/').replace(/\.[cm]?[jt]s$/, '');
+  return /\.[cm]?ts$/.test(caller) && /\.[cm]?js$/.test(url) && stem(caller) === stem(url);
+};
 
 /**
  * The tables of the module at `moduleUrl` (its `import.meta.url`), read from its own tables file. Throws when it can't,
@@ -219,7 +236,7 @@ export function callerFile(fn: (...a: never[]) => unknown): string | undefined {
  */
 export function tablesOf(moduleUrl: string): Tables {
   const caller = callerFile(tablesOf);
-  if (caller !== moduleUrl) throw new Error(`tablesOf: ${moduleUrl} is not the calling module (${caller ?? 'no stack frame'}); a module loads only its own tables, as tablesOf(import.meta.url)`);
+  if (!isCaller(caller, moduleUrl)) throw new Error(`tablesOf: ${moduleUrl} is not the calling module (${caller ?? 'no stack frame'}); a module loads only its own tables, as tablesOf(import.meta.url)`);
   const file = tablesFileOf(moduleUrl);
   return tablesFrom(readFileSync(file, 'utf8'), file);
 }
