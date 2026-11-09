@@ -817,8 +817,9 @@ jobs:
           node scripts/ci/setting-sources-probe.mjs "$cc/bin/claude"
           # Must fail (R1185n, R1185p): wrappers around this claude that, under '', leak a settings env, every source on
           # --resume, a settings file's allow rule, a settings env to the tools, every source on a run with a role
-          # prompt, or every source on a resumed run with one (a fix run). The probe must exit 1 on each, naming that leak.
-          for w in env:"guarded run's request carries localEnv" resume:"guarded resumed run's request carries projectClaudeMd" perm:"a guarded run ran Bash, which it doesn't allow" tool-env:"guarded worker run's request carries localToolEnv" role-prompt:"guarded worker run's request carries projectClaudeMd" resume-worker:"guarded resumed run's request carries projectClaudeMd"; do
+          # prompt, or every source on a resumed run with one (a fix run), a CLAUDE.md on a second turn, or a settings
+          # file's apiKeyHelper. The probe must exit 1 on each, naming that leak.
+          for w in env:"guarded run's request carries localEnv" resume:"guarded resumed run's request carries projectClaudeMd" perm:"a guarded run ran Bash, which it doesn't allow" tool-env:"guarded worker run's request carries localToolEnv" role-prompt:"guarded worker run's request carries projectClaudeMd" resume-worker:"guarded resumed run's request carries projectClaudeMd" second-turn:"a guarded run's request carries projectClaudeMd" helper:"a guarded run ran the local settings' apiKeyHelper"; do
             f="test/fixtures/setting-sources/wrap-${w%%:*}-leak.cjs"
             if SETTING_SOURCES_REAL_CLAUDE="$cc/bin/claude" node scripts/ci/setting-sources-probe.mjs "$f" > "$RUNNER_TEMP/must-fail.log" 2>&1; then cat "$RUNNER_TEMP/must-fail.log"; echo "the probe passed $f, which leaks" >&2; exit 1; fi
             grep -F "${w#*:}" "$RUNNER_TEMP/must-fail.log" || { cat "$RUNNER_TEMP/must-fail.log"; echo "the probe failed $f, but not for its leak" >&2; exit 1; }

@@ -12,7 +12,8 @@
 // InstructionsLoaded in each of the checkout's, the local and the home's settings; files loaded only when a tool
 // touches a folder (sub/CLAUDE.md, sub/.claude/CLAUDE.md, a skill under sub/.claude/, a rule scoped to `sub/**`, and
 // sub2/CLAUDE.md, which only a resumed session reads); in the local and home settings, an env (ANTHROPIC_CUSTOM_HEADERS,
-// shown as a request header, and a variable a tool sees) and an allow rule for Bash and Write; and an auto-memory file
+// shown as a request header, and a variable a tool sees), an allow rule for Bash and Write and an apiKeyHelper (a
+// command, R1185r D3); and an auto-memory file
 // for the checkout. The stand-in answers its model calls with a Read of a planted folder's file, a Bash that prints the
 // environment, a Write, then end_turn, each tool id this run's own: so a tool runs, a turn ends, and what the tools'
 // environment holds is in a request.
@@ -28,7 +29,8 @@
 //     variable is what keeps it out.
 // Then the guarded runs, exactly as the runner starts them, must each run the tool, reach no marker, and run no
 // planted hook and no MCP server:
-//   - a Read-only run, where Bash and Write must also stay denied;
+//   - a Read-only run, where Bash and Write must also stay denied, with a second turn (a held message the runner
+//     delivers once the first ends, R1185r D2);
 //   - one shaped as a coordinator worker run (its role prompt, JSON schema, tools and an apiKeyHelper key file);
 //   - a resumed session, shaped as a fix run is (worker-shaped, R1185q): a guarded worker run, then one resuming it in
 //     the same tree, with every source (a control: it loads the plants, sub2/CLAUDE.md included) and guarded.
@@ -48,8 +50,13 @@ import { pathToFileURL } from 'node:url';
 import { gitExecFileSync } from '../lib/git.cjs';
 
 const repoRoot = join(import.meta.dirname, '..', '..');
-/** The src/ modules the probe loads; with what they import, at any depth, the files a change to which runs it. */
-const ROOTS = ['runner', 'install', 'agent-settings', 'brand', 'roles'];
+/**
+ * The src/ modules the probe runs: every module it loads with dist() below (read from this file, so a new one is never
+ * missed), and the guard's hook entry, src/hook-main.ts, which the instance's agent settings spawn on every guarded
+ * run's hooks (install.ts HOOK_ENTRY; spawned, so no import reaches it, R1185r D1). Not cli.js, which the runner
+ * names by URL only for MCP runs: the probe starts none, and it imports nearly all of src/.
+ */
+const ROOTS = [...new Set([...readFileSync(new URL(import.meta.url), 'utf8').matchAll(/\bdist\('([\w/-]+)\.js'\)/g)].map((m) => m[1])), 'hook-main'];
 /**
  * The probe's import closure (R1185p D3): ROOTS and every src/ module they import, statically or by a literal
  * import(), at any depth, plus this script and scripts/lib/git.cjs. scripts/ci/setting-sources-probe.files holds it
@@ -123,6 +130,8 @@ const MARKS = {
   // A CLAUDE.md in a folder only the resumed session reads, so a resume's folder-loaded files are measured (R1185p).
   resumeNested: 'PLANTED-SUB2-CLAUDE-MD',
 };
+/** The second turn's text, as a request carries it once the runner delivered it. */
+const SECOND_TURN = 'PROBE-SECOND-TURN';
 /** Files a tool leaves under ran/ (the stand-in's Bash and Write), beside the hooks' and the MCP server's. */
 const TOOL_FILES = ['tool-bash', 'tool-write'];
 const hooksOf = (ran) => ran.filter((f) => !TOOL_FILES.includes(f));
@@ -188,7 +197,8 @@ function plant() {
   // local and home files also turn the checkout's MCP servers on and set an env.
   const hookSet = (who) => Object.fromEntries(EVENTS.map((e) => [e, [{ ...(e === 'PreToolUse' || e === 'PostToolUse' ? { matcher: '*' } : {}), hooks: [{ type: 'command', command: `touch '${join(ran, `${who}-${e}`)}'` }] }]]));
   // The local and home files also allow Bash and Write (R1185p D1): a run that doesn't allow them must not get them.
-  const hooks = (who) => ({ hooks: hookSet(who), enableAllProjectMcpServers: true, permissions: { allow: ['Bash', 'Write'] }, env: { ANTHROPIC_CUSTOM_HEADERS: `x-planted-${who}: ${MARKS[`${who}Env`]}`, [`PLANTED_TOOL_ENV_${who.toUpperCase()}`]: MARKS[`${who}ToolEnv`] } });
+  // And an apiKeyHelper, a second key that runs a command (R1185r D3): run, it leaves ran/helper-<who>.
+  const hooks = (who) => ({ hooks: hookSet(who), apiKeyHelper: `touch '${join(ran, `helper-${who}`)}'; echo sk-ant-not-a-key`, enableAllProjectMcpServers: true, permissions: { allow: ['Bash', 'Write'] }, env: { ANTHROPIC_CUSTOM_HEADERS: `x-planted-${who}: ${MARKS[`${who}Env`]}`, [`PLANTED_TOOL_ENV_${who.toUpperCase()}`]: MARKS[`${who}ToolEnv`] } });
   w(join(repo, '.claude', 'settings.json'), JSON.stringify({ hooks: hookSet('project') }));
   w(join(repo, '.claude', 'settings.local.json'), JSON.stringify(hooks('local')));
   w(join(cfg, 'settings.json'), JSON.stringify(hooks('home')));
@@ -306,7 +316,9 @@ async function run(control = null, o = {}) {
     const base = { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: p.home, CLAUDE_CONFIG_DIR: p.cfg, ...(o.worker ? {} : { ANTHROPIC_API_KEY: 'sk-ant-not-a-key' }), [varName]: p.instances };
     const runner = new CliRunner('api_key', base, shim(p.root, api.url, control), undefined, undefined, undefined, {}, () => guardrailSettings(p.instanceHome, 'probe', p.repo), o.worker ? keyFile : undefined);
     const shape = o.worker ? { appendSystemPrompt: rolePrompt(p.repo, 'worker'), jsonSchema: WORKER_SCHEMA, allowedTools: WORKER_TOOLS } : { allowedTools: ['Read'] };
-    r = await runner.run({ prompt: 'Do the task.', model: 'claude-sonnet-4-5', cwd: p.repo, maxTurns: 6, maxBudgetUsd: 1, stallMs: 120_000, timeoutMs: 180_000, role: 'worker', ...shape, ...(o.resume ? { resume: o.resume } : {}) });
+    // A second turn, as the runner delivers a held message once the first ends (onControl's send, R1185r D2).
+    const second = o.second ? { onControl: (c) => c.send('probe-2', `${SECOND_TURN}: nothing more to do.`) } : {};
+    r = await runner.run({ ...second, prompt: 'Do the task.', model: 'claude-sonnet-4-5', cwd: p.repo, maxTurns: 6, maxBudgetUsd: 1, stallMs: 120_000, timeoutMs: 180_000, role: 'worker', ...shape, ...(o.resume ? { resume: o.resume } : {}) });
   } finally {
     if (before === undefined) delete process.env[varName];
     else process.env[varName] = before;
@@ -329,6 +341,7 @@ async function run(control = null, o = {}) {
     toolRan: model.some((s) => s.body.includes('tool_result') && s.body.includes(`toolu_${api.tag}_1`)),
     reached: Object.entries(MARKS).filter(([, m]) => text.includes(m)).map(([k]) => k),
     ran: readdirSync(p.ran).filter((f) => !ranBefore.has(f)),
+    secondTurn: model.some((x) => x.body.includes(SECOND_TURN)),
   };
 }
 
@@ -338,7 +351,7 @@ const measured = (what, r) => {
   if (!r.model.length) problems.push(`${what}: no model call reached the stand-in, so nothing is measured (${r.result?.reason}: ${String(r.result?.detail).slice(0, 300)})`);
   else if (!r.toolRan) problems.push(`${what}: the stand-in's Read never ran in this run, so nothing loaded by a tool or a turn's end is measured`);
 };
-const ranName = (f) => (f === 'mcp' ? "the checkout's MCP server" : `the ${f.split('-')[0]} settings' ${f.split('-').slice(1).join('-')} hook`);
+const ranName = (f) => (f === 'mcp' ? "the checkout's MCP server" : f.startsWith('helper-') ? `the ${f.slice('helper-'.length)} settings' apiKeyHelper` : `the ${f.split('-')[0]} settings' ${f.split('-').slice(1).join('-')} hook`);
 /** A guarded run's leaks: a marker in a request, a planted hook or the MCP server run, and (`readOnly`) Bash or Write run. */
 const leaks = (what, r, readOnly) => {
   for (const k of r.reached) problems.push(`${what}'s request carries ${k} (${MARKS[k]}): that was loaded`);
@@ -352,30 +365,34 @@ measured('the project control', project);
 for (const k of PROJECT_MARKS) if (!project.reached.includes(k)) problems.push(`with project sources, ${k} (${MARKS[k]}) didn't reach a request: its plant is broken, so its absence proves nothing`);
 for (const e of TURN_EVENTS) if (!project.ran.includes(`project-${e}`)) problems.push(`with project sources, the checkout's ${e} hook didn't run: its plant is broken`);
 
-const all = await run({ sources: 'user,project,local', mcp: true, memory: true });
+const all = await run({ sources: 'user,project,local', mcp: true, memory: true }, { second: true });
 say('control (every source, no --strict-mcp-config, no CLAUDE_CODE_DISABLE_AUTO_MEMORY)', all);
 measured('the every-source control', all);
 // One header wins: the local settings' ANTHROPIC_CUSTOM_HEADERS replaces the home's, so the home's is shown alone below.
 for (const k of Object.keys(MARKS).filter((x) => x !== 'homeEnv' && x !== 'resumeNested')) if (!all.reached.includes(k)) problems.push(`with every source, ${k} (${MARKS[k]}) didn't reach a request: its plant is broken, so its absence proves nothing`);
 for (const who of ['project', 'local', 'home']) for (const e of TURN_EVENTS) if (!all.ran.includes(`${who}-${e}`)) problems.push(`with every source, the ${who} settings' ${e} hook didn't run: its plant is broken`);
 if (!all.ran.includes('mcp')) problems.push("with every source and no --strict-mcp-config, the checkout's MCP server didn't start: its plant is broken");
+if (!all.ran.includes('helper-local')) problems.push("with every source, the local settings' apiKeyHelper didn't run: its plant is broken");
+if (!all.secondTurn) problems.push("the every-source control's second turn never reached the stand-in, so a second turn's loading is unmeasured");
 for (const f of TOOL_FILES) if (!all.ran.includes(f)) problems.push(`with every source, the settings' allow rules didn't let ${f === 'tool-bash' ? 'Bash' : 'Write'} run in a Read-only run: their plant is broken`);
 
 const user = await run({ sources: 'user' });
 say('control (--setting-sources user)', user);
 measured('the user control', user);
 for (const k of ['homeClaudeMd', 'homeEnv', 'homeToolEnv']) if (!user.reached.includes(k)) problems.push(`with user sources, ${k} (${MARKS[k]}) didn't reach a request: its plant is broken, so its absence proves nothing`);
+if (!user.ran.includes('helper-home')) problems.push("with user sources, the home settings' apiKeyHelper didn't run: its plant is broken");
 
 const memory = await run({ memory: true });
 say("control (the guarded run's argv, no CLAUDE_CODE_DISABLE_AUTO_MEMORY)", memory);
 measured('the memory control', memory);
 if (!memory.reached.includes('memory')) problems.push("without CLAUDE_CODE_DISABLE_AUTO_MEMORY, the guarded argv didn't load the auto memory: its plant is broken, so its absence proves nothing");
 
-const guarded = await run(null);
+const guarded = await run(null, { second: true });
 const sources = guarded.given.args[guarded.given.args.indexOf('--setting-sources') + 1];
 say(`guarded, Read only (the runner's own argv and env: --setting-sources ${JSON.stringify(sources)}, --settings, CLAUDE_CODE_DISABLE_AUTO_MEMORY=${guarded.given.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY})`, guarded);
 measured('the guarded run', guarded);
 if (!guarded.given.args.includes('--settings')) problems.push("the guarded run's argv has no --settings: the instance's agent settings weren't passed");
+if (!guarded.secondTurn) problems.push("the guarded run's second turn never reached the stand-in, so a second turn is unmeasured");
 leaks('a guarded run', guarded, true);
 
 // Shaped as a coordinator worker run (R1185p D2): its role prompt, schema, tools and apiKeyHelper. Bash and Write are

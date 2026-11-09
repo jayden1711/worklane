@@ -42,7 +42,7 @@ test("#958: ci-slow.yml's add-project job runs the setting-sources probe on the 
   assert.match(step.run ?? '', /npm install -g --prefix "\$cc" .*"@anthropic-ai\/claude-code@\$v"/);
   assert.match(step.run ?? '', /node scripts\/ci\/setting-sources-probe\.mjs "\$cc\/bin\/claude"/);
   // The must-fail wrappers around the real claude (R1185n): the probe must exit 1 on each, naming its leak.
-  for (const [w, says] of [['env', 'guarded run'], ['resume', 'guarded resumed run'], ['perm', 'a guarded run ran Bash'], ['tool-env', 'guarded worker run'], ['role-prompt', 'guarded worker run'], ['resume-worker', 'guarded resumed run']]) {
+  for (const [w, says] of [['env', 'guarded run'], ['resume', 'guarded resumed run'], ['perm', 'a guarded run ran Bash'], ['tool-env', 'guarded worker run'], ['role-prompt', 'guarded worker run'], ['resume-worker', 'guarded resumed run'], ['second-turn', "a guarded run's request"], ['helper', "a guarded run ran the local settings' apiKeyHelper"]]) {
     assert.match(step.run ?? '', new RegExp(`(^|\\s)${w}:"[^"]*${says}`), `wrap-${w}-leak.cjs runs, and must fail naming its leak`);
     assert.ok(existsSync(join(repoRoot, 'test', 'fixtures', 'setting-sources', `wrap-${w}-leak.cjs`)), `wrap-${w}-leak.cjs is there`);
   }
@@ -80,7 +80,8 @@ test("#958 (R1185p D3): a pull request touching anything the probe loads runs ad
   const listed = readFileSync(join(repoRoot, 'scripts', 'ci', 'setting-sources-probe.files'), 'utf8');
   const now = spawnSync(process.execPath, [probe, '--files'], { encoding: 'utf8' });
   assert.equal(listed, now.stdout, 'the list is the closure as it is now: run `node scripts/ci/setting-sources-probe.mjs --files > scripts/ci/setting-sources-probe.files`');
-  for (const f of ['src/runner.ts', 'src/sandbox.ts', 'src/plugins/run.ts', 'src/brand.ts', 'src/guardrails/push-hook.ts', 'src/agent-settings.ts', 'src/install.ts', 'src/network.ts', 'scripts/lib/git.cjs']) assert.ok(listed.split('\n').includes(f), `${f} is in the closure`);
+  // The guard's hook entry and what it imports (R1185r D1): spawned by every guarded run's hooks, never imported.
+  for (const f of ['src/runner.ts', 'src/sandbox.ts', 'src/plugins/run.ts', 'src/brand.ts', 'src/guardrails/push-hook.ts', 'src/agent-settings.ts', 'src/install.ts', 'src/network.ts', 'scripts/lib/git.cjs', 'src/hook-main.ts', 'src/hook.ts', 'src/hook-deadline.ts', 'src/guard/commit.ts']) assert.ok(listed.split('\n').includes(f), `${f} is in the closure`);
   // slow-jobs.sh, on a pull request in a scratch repo, for a change to one file of the list each.
   const d = mkdtempSync(join(tmpdir(), 'slow-jobs-'));
   const git = (...a: string[]) => spawnSync('git', a, { cwd: d, encoding: 'utf8' });

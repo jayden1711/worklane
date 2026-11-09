@@ -12,13 +12,16 @@ src/check-source.ts
 src/checkout.ts
 src/ci-none.ts
 src/claude-auth-failure.ts
+src/comment-policy.ts
 src/config/load.ts
 src/config/schema.ts
 src/confusables-data.ts
 src/confusables.ts
 src/contract.ts
+src/coordinator/change-files.ts
 src/cross-eval.ts
 src/dashboard-auth.ts
+src/dashboard-key-paths.ts
 src/delegation.ts
 src/deploy-gate/config.ts
 src/domain-requests.ts
@@ -27,8 +30,11 @@ src/events/open.ts
 src/events/read-only.ts
 src/events/redact.ts
 src/events/types.ts
+src/experiments/paths.ts
 src/governor-holds.ts
 src/guard/chat.ts
+src/guard/commit.ts
+src/guard/intake.ts
 src/guard/research.ts
 src/guardrails/access.ts
 src/guardrails/checkouts.ts
@@ -39,7 +45,11 @@ src/guardrails/glob.ts
 src/guardrails/push-hook.ts
 src/guardrails/reach.ts
 src/guardrails/shell.ts
+src/held-out-paths.ts
+src/hook-deadline.ts
 src/hook-imports.ts
+src/hook-main.ts
+src/hook.ts
 src/install.ts
 src/instance-name.ts
 src/instance.ts
@@ -68,6 +78,7 @@ src/os/own-env.ts
 src/os/process-links.ts
 src/os/root-file.ts
 src/os/system-paths.ts
+src/os/system-root-guard.ts
 src/path-text.ts
 src/plugins/approval.ts
 src/plugins/run.ts
@@ -79,6 +90,7 @@ src/project-env.ts
 src/provider-hosts.ts
 src/providers.ts
 src/push-guard.ts
+src/quiet-sqlite.ts
 src/read-denials.ts
 src/research.ts
 src/review.ts
@@ -88,6 +100,7 @@ src/run-feed.ts
 src/run-record.ts
 src/runner.ts
 src/sandbox.ts
+src/scan/secrets.ts
 src/slot-file.ts
 src/stage-names.ts
 src/stuck.ts
