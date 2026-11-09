@@ -381,7 +381,7 @@ test('questionLines: 1500 judged files with 255-character names fit one issue co
   const out = questionLines(held, listed, 'review.level_set event 7');
   const chars = out.reduce((k, l) => k + l.length + 3, 0);
   assert.ok(chars < 40_000, `${chars} characters`);
-  assert.ok(out.slice(0, 3).every((l) => /… \(cut; sha256 [0-9a-f]{16}; in full in review\.level_set event 7\)$/.test(l)), 'a long reason is cut and says where it is in full');
+  assert.ok(out.slice(0, 3).every((l) => /… \(cut; sha256 [0-9a-f]{32}; in full in review\.level_set event 7\)$/.test(l)), 'a long reason is cut and says where it is in full');
   assert.match(out.at(-1)!, /^and \d+ more judged files \(1500 in all\), every one named in review\.level_set event 7$/);
   assert.deepEqual(questionLines(['r'], ['a', 'b'], 'w'), ['r', 'a', 'b'], 'a short question is unchanged');
 });
