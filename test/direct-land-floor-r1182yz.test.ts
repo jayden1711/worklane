@@ -393,13 +393,15 @@ test("Z3b (not the review's): a command naming an id no decision on the issue ha
   assert.equal(errors(f).filter((e) => e.kind === 'reply_unknown_id').length, 1, 'no note for the real id');
 });
 
-test("Z4b (not the review's): with two pending questions, a bare reply answers the nearest one above it, and naming the other's id answers that one", async () => {
+test("Z4b (not the review's): with two pending questions, a bare reply answers neither and says which ids to use (R1182ab); naming an id answers that one", async () => {
   const f = unit();
   const d1 = await ask(f);
   const d2 = await ask(f);
   f.backlog.humanComment(1, 'example-owner', '/worklane approve');
   assert.equal(await commentAnswer(f, d1), null, 'not the earlier question');
-  assert.equal((await commentAnswer(f, d2))?.answer, 'approve', 'the nearest question above the reply');
+  assert.equal(await commentAnswer(f, d2), null, 'nor the nearest one: two questions are open');
+  const notes = errors(f).filter((e) => e.kind === 'reply_ambiguous');
+  assert.ok(notes.length >= 1 && notes.some((e) => e.message.includes(d1.id) && e.message.includes(d2.id)), JSON.stringify(notes));
   f.backlog.humanComment(1, 'example-owner', `/worklane reject ${d1.id}`);
   assert.equal((await commentAnswer(f, d1))?.answer, 'reject');
 });
