@@ -8,7 +8,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { makePlace } from './worktrees.js';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
-import { join, posix } from 'node:path';
+import { dirname, join, posix } from 'node:path';
 import { agentSettingsFileOf, projectSettingsRefusal, runSettings, settingsAppliedProblem, settingsCheckValue, type Settings, withRunCheck } from './agent-settings.js';
 import { BRAND } from './brand.js';
 import type { CliAgentName } from './providers.js';
@@ -243,11 +243,11 @@ export function agentGitConfig(path: string): string {
     // gone (a tmp cleaner): written again below
   }
   const dir = mkdtempSync(join(tmpdir(), `${BRAND.cli}-agent-`));
-  mkdirSync(join(dir, 'git'));
-  const file = join(dir, 'git', 'config');
+  const file = join(dir, 'git/config');
+  mkdirSync(dirname(file));
   writeFileSync(file, text);
   chmodSync(file, 0o444);
-  chmodSync(join(dir, 'git'), 0o555);
+  chmodSync(dirname(file), 0o555);
   chmodSync(dir, 0o555);
   agentGitConfigs.set(text, engineGitConfig(file));
   return file;
