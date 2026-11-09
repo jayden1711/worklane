@@ -49,8 +49,8 @@ A ring is **promoted** when all of these hold:
 - the flag is on in **every** instance of the ring (on in some is `partial`);
 - it has been on for at least `soak_hours` (counted from the latest instance to turn it on), less any time its
   coordinator wasn't seen running: a clean stop to the next start, and any gap of more than `live_minutes` between
-  two of its ticks after the flip, or from its last tick to a stop (a suspended host, a paused VM, a frozen or hung
-  coordinator, a clock stepped forward). Each gap is from the tick before, as stamped: a tick stamped ahead hides
+  two of its ticks after the flip, from a start to its first tick, or from its last tick to a stop (a suspended
+  host, a paused VM, a frozen or hung coordinator, a clock stepped forward). Each gap is from the tick before, as stamped: a tick stamped ahead hides
   nothing after it, and one stamped back can only hold the ring longer;
 - **each** of the ring's instances merged at least `min_merges` PRs since then (`merge.done`, one per PR number; a
   merge with no number never counts), so an instance that does no work isn't promoted on the others'. `min_merges: 0`
@@ -144,10 +144,10 @@ acceptance file's healthy CLI cases run with `--file` and expect 0); read the no
   a desktop instance in another user's home is read only when it's in a ring.
 - **It can't keep an admin's edit of `rollout.json` safe from a rename at the same moment:** the rename rewrites the
   file whole (atomically for readers), and the machine lock doesn't cover a hand edit.
-- **It can't see silence from the flip, or from a coordinator start, to the first tick after it:** the gaps it takes
-  off are between two ticks, or from a tick to a stop, so a coordinator that hung right after logging the flip, or
-  after starting, has that time counted until its next tick. A test pins this; closing it needs the frozen acceptance
-  file's sparse healthy logs changed, which is the owner's decision.
+- **It can't see silence from the flip to the first tick after it:** a start is life only once a tick follows it (the
+  owner's decision (b): its time to the first tick, or to a stop with none, is no soak), but the flip is not, so a
+  coordinator that hung right after logging the flip has that time counted until its next tick. A test pins this;
+  closing it needs every sparse healthy log in the frozen acceptance file changed.
 - **It can't tell a clock that was behind at boot:** the soak counts wall-clock time, so a host booted with its clock
   at the time it shut down (no RTC), then stepped forward by NTP after the flip, has its downtime counted as soak.
   Keep the host clock synced at boot. A test pins this limit, so a fix shows up as a change.

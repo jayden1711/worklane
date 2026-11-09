@@ -109,7 +109,8 @@ test('rollout: silence is not health: no recent tick holds a ring; an unclean re
   assert.match(s.rings[0]!.why, /the coordinator restarted without a clean stop/);
   // A clean stop before the restart is fine.
   const stopped = ev('coordinator.stopped', { instance: 'e1', clean: true, ms: 1, pending: [] }, hoursAgo(20));
-  assert.equal(status({ e1: [started(61, 1), on(60), ...merges(3, 30), stopped, started(20, 2), tick()], p1: [], p2: [], p3: [] }).rings[0]!.state, 'promoted');
+  // A start is life only once a tick follows (the owner's decision (b)): the restarted coordinator ticks, as a live one does.
+  assert.equal(status({ e1: [started(61, 1), on(60), ...merges(3, 30), stopped, started(20, 2), ...everyMin(19.95, 0.02)], p1: [], p2: [], p3: [] }).rings[0]!.state, 'promoted');
   // No tick in the last 30 min: held.
   s = status({ e1: [on(60), ...merges(3, 30), tick(2)], p1: [], p2: [], p3: [] });
   assert.equal(s.rings[0]!.state, 'soaking');
@@ -407,8 +408,8 @@ test('R1174i: each threshold at its boundary: 48 h, a 30-min tick, a tick ahead,
 test('R1174j J3: a coordinator stopped cleanly for most of the soak is not promoted: the stopped time is no soak', () => {
   assert.equal(ring0([started(51), on(50), tick(49.9), stopped(49.5), started(1), tick(0.9), ...merges(3, 0.5), tick()]), 'soaking');
   // A short stop (an engine update) costs only its own time.
-  assert.equal(ring0([started(60), on(50), ...merges(3, 30), stopped(20), started(19.9), tick()]), 'promoted');
-  assert.equal(ring0([started(50), on(48.3), ...merges(3, 30), stopped(20), started(19), tick()]), 'soaking', '48.3 h less a 1 h stop is under 48 h');
+  assert.equal(ring0([started(60), on(50), ...merges(3, 30), stopped(20), started(19.9), ...everyMin(19.85, 0.02)]), 'promoted');
+  assert.equal(ring0([started(50), on(48.3), ...merges(3, 30), stopped(20), started(19), ...everyMin(18.95, 0.02)]), 'soaking', '48.3 h less a 1 h stop is under 48 h');
 });
 
 test('R1174j J2: a ring whose clock was ahead at its flip, fixed after, is judged by its earliest stamp: out of order', () => {
@@ -557,9 +558,17 @@ test('R1174m D2 (J2h): an event other than a tick, logged after the flip but sta
   assert.equal(ring0([on(50), ev('config.applied', { sha: 'a'.repeat(40) }, hoursAgo(50 + 0.5 / 3600)), ...merges(3, 40), tick()]), 'promoted', '30 s before: within the tolerance');
 });
 
-test('stated limit (R1174m D3, R1174n N2, docs/rollout.md): the flip, or a coordinator start, to the first tick is counted; a fix shows up here as a change', () => {
-  // A restart whose first tick comes 48 h later (the owner's decision is pending: the frozen file's healthy logs tick once).
-  assert.equal(ring0([started(52), on(51), ...everyMin(50.95, 50.9), stopped(50.85), started(50.8), tick(2), ...merges(3, 1), ...everyMin(0.9, 0.02)]), 'promoted');
+test('R1174m D3, R1174n N2 (the owner\'s decision (b)): a start is life only once a tick follows it: the start to its first tick, or to a stop with none, is no soak', () => {
+  // A restart whose first tick comes 48 h later.
+  assert.equal(ring0([started(52), on(51), ...everyMin(50.95, 50.9), stopped(50.85), started(50.8), tick(2), ...merges(3, 1), ...everyMin(0.9, 0.02)]), 'soaking');
+  // A start that hung 47 h, then a clean stop and a restart that ticks (R1174o O12's shape).
+  assert.equal(ring0([started(52), on(51), ...everyMin(50.95, 50.9), stopped(50.85), started(50.8), stopped(3.5), started(3.45), ...everyMin(3.4, 0.02), ...merges(3, 2)]), 'soaking');
+  // Control: the restart ticks within live_minutes: promoted.
+  assert.equal(ring0([started(52), on(51), ...everyMin(50.95, 50.9), stopped(50.85), started(50.8), ...everyMin(50.75, 0.02), ...merges(3, 1)]), 'promoted');
+});
+
+test('stated limit (R1174m D3, docs/rollout.md): the flip to its first tick is still counted (the frozen file\'s healthy logs tick once after the flip); a fix shows up here as a change', () => {
+  assert.equal(ring0([on(50), tick(2), ...merges(3, 1), ...everyMin(0.9, 0.02)]), 'promoted');
 });
 
 test('R1174n N3: a newline in --file forges no output line, on stdout or stderr', () => {

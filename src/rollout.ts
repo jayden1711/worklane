@@ -204,7 +204,11 @@ export function readInstance(events: readonly StoredEvent[], flag: string, maxEr
     // suspended for 46 h, then a clean stop and restart on resume, promoted); the stop's own time to the next start is
     // the clean stop's (above). A start ends a run too, so nothing is counted twice.
     if (after && e.type === 'coordinator.stopped' && prevTick !== null && Number.isFinite(ts) && ts - prevTick > liveMs) downMs += ts - prevTick;
-    if (after && (e.type === 'coordinator.stopped' || e.type === 'coordinator.started')) prevTick = null;
+    if (after && e.type === 'coordinator.stopped') prevTick = null;
+    // R1174m D3, R1174n N2 (the owner's decision (b)): a start is life only once a tick follows it, so its time to the
+    // first tick (or to a stop with none) is a gap like any other: a coordinator that hung right after starting soaked
+    // nothing. The flip to the first tick stays a stated limit.
+    if (after && e.type === 'coordinator.started') prevTick = Number.isFinite(ts) ? ts : null;
     if (after && e.type === 'coordinator.tick' && Number.isFinite(ts)) {
       if (prevTick !== null && ts - prevTick > liveMs) downMs += ts - prevTick;
       // R1174p D1: each gap from the tick before as stamped, never the furthest stamp seen: a tick stamped ahead (the
