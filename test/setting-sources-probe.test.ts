@@ -42,7 +42,7 @@ test("#958: ci-slow.yml's add-project job runs the setting-sources probe on the 
   assert.match(step.run ?? '', /npm install -g --prefix "\$cc" .*"@anthropic-ai\/claude-code@\$v"/);
   assert.match(step.run ?? '', /node scripts\/ci\/setting-sources-probe\.mjs "\$cc\/bin\/claude"/);
   // The must-fail wrappers around the real claude (R1185n): the probe must exit 1 on each, naming its leak.
-  for (const [w, says] of [['env', 'guarded run'], ['resume', 'guarded resumed run'], ['perm', 'a guarded run ran Bash'], ['tool-env', 'guarded worker run'], ['role-prompt', 'guarded worker run']]) {
+  for (const [w, says] of [['env', 'guarded run'], ['resume', 'guarded resumed run'], ['perm', 'a guarded run ran Bash'], ['tool-env', 'guarded worker run'], ['role-prompt', 'guarded worker run'], ['resume-worker', 'guarded resumed run']]) {
     assert.match(step.run ?? '', new RegExp(`(^|\\s)${w}:"[^"]*${says}`), `wrap-${w}-leak.cjs runs, and must fail naming its leak`);
     assert.ok(existsSync(join(repoRoot, 'test', 'fixtures', 'setting-sources', `wrap-${w}-leak.cjs`)), `wrap-${w}-leak.cjs is there`);
   }

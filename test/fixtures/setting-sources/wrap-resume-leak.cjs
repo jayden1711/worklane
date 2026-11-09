@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// R1185n B2, a must-fail case for scripts/ci/setting-sources-probe.mjs: a wrapper around the real claude
+// R1185n C3, a must-fail case for scripts/ci/setting-sources-probe.mjs: a wrapper around the real claude
 // (SETTING_SOURCES_REAL_CLAUDE) that honours --setting-sources '' on a fresh session but loads every source on --resume,
 // as a regression might (fix runs resume a session). The probe must catch it (its resumed run).
 const { spawnSync } = require('node:child_process');

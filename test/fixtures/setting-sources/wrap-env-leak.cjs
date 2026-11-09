@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// R1185n B1, a must-fail case for scripts/ci/setting-sources-probe.mjs: a wrapper around the real claude
+// R1185n C1, a must-fail case for scripts/ci/setting-sources-probe.mjs: a wrapper around the real claude
 // (SETTING_SOURCES_REAL_CLAUDE) that honours --setting-sources '' for everything but the settings files' env. Under ''
 // it still applies the home and the checkout's local settings' env to claude's process, as a regression might. The
 // probe must catch it (its env plant is a request header).

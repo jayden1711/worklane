@@ -1,30 +1,37 @@
 // #958 (the owner's decision, 2026-11-08): a guarded run loads nothing from its checkout, its parent folders or the
 // agent's own home, because it starts claude with --setting-sources '' (and CLAUDE_CODE_DISABLE_AUTO_MEMORY=1). This
-// proves it on the REAL claude binary, through the runner's own path: a guarded `CliRunner.run()` (dist/src/runner.js)
-// with an instance's agent settings installed as `install --instance` writes them, so claude gets production's argv,
-// --settings and environment. Between the runner and claude stands one wrapper, which only answers `auth status`, logs
+// proves it on the REAL claude binary, through the runner's own path: guarded `CliRunner.run()`s (dist/src/runner.js)
+// with an instance's agent settings installed as `install --instance` writes them, so claude gets the runner's argv,
+// --settings and environment. Between the runner and claude stands one shim, which only answers `auth status`, logs
 // what it was given, and adds ANTHROPIC_BASE_URL (the runner drops every redirecting variable) pointing at a local
-// stand-in for the API that records every request.
+// stand-in for the API that records every request, headers and body.
 //
 // It plants, under a marker each: CLAUDE.md in the checkout, in .claude/, as CLAUDE.local.md, in a parent folder and
 // in the agent's home; a rules file; a skill, an agent and a command, in the checkout and the home; an MCP server
 // (.mcp.json); a hook on SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, Stop, SessionEnd and
 // InstructionsLoaded in each of the checkout's, the local and the home's settings; files loaded only when a tool
-// touches a folder (sub/CLAUDE.md, sub/.claude/CLAUDE.md, a skill under sub/.claude/, a rule scoped to `sub/**`); an
-// env in the local and home settings (ANTHROPIC_CUSTOM_HEADERS, so a loaded env shows as a request header, which the
-// stand-in records with the body); and an auto-memory file for the checkout. The stand-in answers the first model call with a Read of sub/x.txt and the
-// rest with end_turn, so a tool runs and a turn ends: the lazy files and the tool and stop hooks get their chance.
+// touches a folder (sub/CLAUDE.md, sub/.claude/CLAUDE.md, a skill under sub/.claude/, a rule scoped to `sub/**`, and
+// sub2/CLAUDE.md, which only a resumed session reads); in the local and home settings, an env (ANTHROPIC_CUSTOM_HEADERS,
+// shown as a request header, and a variable a tool sees) and an allow rule for Bash and Write; and an auto-memory file
+// for the checkout. The stand-in answers its model calls with a Read of a planted folder's file, a Bash that prints the
+// environment, a Write, then end_turn, each tool id this run's own: so a tool runs, a turn ends, and what the tools'
+// environment holds is in a request.
 //
 // Controls run first, so a marker's absence below is measured, not a broken plant (R1185l):
 //   - `project` (an unguarded run's sources): the checkout's markers, the lazy ones included, and its hooks on every
 //     event a turn with a tool fires;
-//   - every source, without --strict-mcp-config and without CLAUDE_CODE_DISABLE_AUTO_MEMORY: every marker, the
-//     memory included, and every settings file's hooks, and the MCP server;
+//   - every source, without --strict-mcp-config and without CLAUDE_CODE_DISABLE_AUTO_MEMORY: every marker, the memory
+//     and both tool env variables included, every settings file's hooks, the MCP server, and Bash and Write run under
+//     the planted allow rules in a Read-only run;
+//   - `user`: the home's CLAUDE.md and its env (the local env replaces the home's header under every source);
 //   - the guarded run's own argv without CLAUDE_CODE_DISABLE_AUTO_MEMORY: the memory is loaded, so the runner's
 //     variable is what keeps it out.
-// Then the guarded run, exactly as the runner starts it, must run the tool, reach no marker, run no hook (but the
-// instance's own) and no MCP server. Last, a session resumed (as fix runs resume one): a guarded run, then a run
-// resuming its session in the same tree, with every source (a control: it loads the plants) and guarded (nothing).
+// Then the guarded runs, exactly as the runner starts them, must each run the tool, reach no marker, and run no
+// planted hook and no MCP server:
+//   - a Read-only run, where Bash and Write must also stay denied;
+//   - one shaped as a coordinator worker run (its role prompt, JSON schema, tools and an apiKeyHelper key file);
+//   - a resumed session, shaped as a fix run is (worker-shaped, R1185q): a guarded worker run, then one resuming it in
+//     the same tree, with every source (a control: it loads the plants, sub2/CLAUDE.md included) and guarded.
 //
 // No real API key: a dummy one, and the stand-in, which never calls out. So nothing leaves the machine and no secret
 // is needed (it runs on a pull request).
@@ -381,23 +388,24 @@ if (!worker.given.args.includes('--append-system-prompt-file') || !worker.given.
 if (!worker.ran.includes('tool-bash')) problems.push("the guarded worker run's Bash didn't run, so what its tools see is unmeasured");
 leaks('the guarded worker run', worker, false);
 
-// Resumed (R1185n C3: fix runs resume a session, src/coordinator/fix-runs.ts): a guarded run, then a run resuming its
-// session in the same planted tree, whose stand-in reads sub2/, a folder the first run never read (R1185p).
+// Resumed (R1185n C3): the only runs that resume are fix runs (src/coordinator/fix-runs.ts), which are worker-shaped,
+// so both runs of each pair are (R1185q): a guarded worker run, then a run resuming its session in the same planted
+// tree, whose stand-in reads sub2/, a folder the first run never read (R1185p).
 for (const [what, control] of [['control', { sources: 'user,project,local', mcp: true, memory: true }], ['guarded', null]]) {
-  const first = await run(null);
+  const first = await run(null, { worker: true });
   const id = first.result?.sessionId;
   if (!id) {
     problems.push(`the ${what} resume: the first run gave no session id to resume (${first.result?.reason}: ${String(first.result?.detail).slice(0, 200)})`);
     continue;
   }
-  const r = await run(control, { p: first.p, resume: id, sub: 'sub2' });
+  const r = await run(control, { p: first.p, resume: id, sub: 'sub2', worker: true });
   say(`${what} resumed run (--resume ${id})`, r);
   measured(`the ${what} resumed run`, r);
   if (!r.given.args.includes('--resume')) problems.push(`the ${what} resumed run's argv has no --resume`);
   if (control) {
     // What loads at a session's start, and sub2/CLAUDE.md, loaded when the resumed session reads that folder.
     for (const k of ['projectClaudeMd', 'dotClaudeMd', 'localClaudeMd', 'parentClaudeMd', 'rules', 'skill', 'agent', 'command', 'homeClaudeMd', 'localEnv', 'resumeNested']) if (!r.reached.includes(k)) problems.push(`a resumed run with every source didn't reach ${k} (${MARKS[k]}): its plant is broken, so the guarded resume proves nothing`);
-  } else leaks('the guarded resumed run', r, true);
+  } else leaks('the guarded resumed run', r, false);
 }
 
 if (problems.length) {
