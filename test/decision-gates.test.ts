@@ -48,8 +48,13 @@ function askLand(f: Fixture, kind: EventPayload<'decision.asked'>['kind'] = 'lan
   const id = `d-${kind}-${n}`;
   f.log.append('decision.asked', { id, kind, issue: n, owner: OWNER, question: 'Land it?', options: ['approve', 'reject'], recommendation: 'approve', receipts: [] }, 'alice');
   f.log.append('review.level_set', { issue: n, head: 'a'.repeat(40), level: 'L3', reasons: ['money-path: src/price.js'] }, 'alice');
+  questionComment(f, n, id);
   return { n, id };
 }
+
+/** The question's own comment, as ask() (src/coordinator/base.ts) posts it: a reply counts only after it (#1248, R1182x). */
+const questionComment = (f: Fixture, n: number, id: string) =>
+  f.backlog.humanComment(n, 'coordinator', `[${BRAND.cli}] @${OWNER} decision needed: **Land it?**\n\nReply \`/${BRAND.cli} approve ${id}\` or \`/${BRAND.cli} reject ${id}\`, or run \`${BRAND.cli} decide ${id} <option>\`.`);
 
 const handleDecisions = (c: Coordinator) => (c as unknown as { handleDecisions(): Promise<void> }).handleDecisions();
 const of = <T>(f: Fixture, type: Parameters<Fixture['log']['read']>[1] extends (infer U)[] | undefined ? U : never) => f.log.read(0, [type]).map((e) => e.payload as T);
@@ -317,33 +322,49 @@ test('auto-merge, not batched: a stop raised while the combined gate runs holds 
   }
 });
 
-// #1248 (found as R1182v defect 1): a reply answers only the question it replies to. On main, the latest matching reply
-// of any age answered every later question on the issue.
-test('#1248: an owner reply posted before a question never answers it; one posted after it, or naming its id, does', { skip }, async () => {
+// #1248 (found as R1182v defect 1) and R1182x: a reply answers only the question it replies to, decided by the issue's
+// comment order, never a clock. On main, the latest matching reply of any age answered every later question.
+test('#1248: a reply answers a question only after its comment, or by naming its id; never by its time', { skip }, async () => {
+  const later = new Date(Date.now() + 90_000).toISOString();
+  const earlier = new Date(Date.now() - 90_000).toISOString();
+  const answered = (f: Fixture) => of<EventPayload<'decision.answered'>>(f, 'decision.answered').map((a) => [a.id, a.by]);
   for (const kind of ['land', 'question'] as const) {
     const f = fixture();
     const c = coordinator(f, new FakeRunner(() => ({ structured: {} })), { roleOf: exampleRoles });
     const n = f.backlog.open({ title: 'Totals', body: 'b', author: OWNER, labels: [] });
-    // An approval of an earlier question on the same issue, a minute before this one is asked.
-    f.backlog.humanComment(n, OWNER, `/${BRAND.cli} approve`, new Date(Date.now() - 60_000).toISOString());
+    // An approval of an earlier question, stamped by a tracker clock 90 s ahead of this instance's (R1182x X2).
+    f.backlog.humanComment(n, OWNER, `/${BRAND.cli} approve`, later);
     const id = `d-${kind}-old-${n}`;
     f.log.append('decision.asked', { id, kind, issue: n, owner: OWNER, question: 'Land it?', options: ['approve', 'reject'], recommendation: 'approve', receipts: [] }, 'alice');
     f.log.append('review.level_set', { issue: n, head: 'a'.repeat(40), level: 'L3', reasons: ['money-path: src/price.js'] }, 'alice');
+    questionComment(f, n, id);
     await handleDecisions(c);
-    assert.deepEqual(of(f, 'decision.answered'), [], `${kind}: the older reply answered a question asked after it`);
-    // A reply after the question answers it.
-    f.backlog.humanComment(n, OWNER, `/${BRAND.cli} approve`);
+    assert.deepEqual(answered(f), [], `${kind}: a reply before the question's comment answered it`);
+    // A reply naming another decision answers nothing here, though it comes after the question (R1182x X3).
+    f.backlog.humanComment(n, OWNER, `/${BRAND.cli} approve d-${kind}-other-${n}`);
     await handleDecisions(c);
-    assert.deepEqual(of<EventPayload<'decision.answered'>>(f, 'decision.answered').map((a) => [a.id, a.by]), [[id, OWNER]], `${kind}: the reply after it`);
+    assert.deepEqual(answered(f), [], `${kind}: a reply naming another decision answered this one`);
+    // A bare reply after the question's comment answers it, though its stamp is 90 s earlier (R1182x X2b).
+    f.backlog.humanComment(n, OWNER, `/${BRAND.cli} approve`, earlier);
+    await handleDecisions(c);
+    assert.deepEqual(answered(f), [[id, OWNER]], `${kind}: the reply after it`);
   }
-  // A reply that names the question's id answers it whatever its time says.
+  // No question comment (it couldn't be posted): a bare reply answers nothing; one naming the id answers it.
   const f = fixture();
   const c = coordinator(f, new FakeRunner(() => ({ structured: {} })), { roleOf: exampleRoles });
   const n = f.backlog.open({ title: 'Totals', body: 'b', author: OWNER, labels: [] });
-  const id = `d-land-named-${n}`;
-  f.backlog.humanComment(n, OWNER, `/${BRAND.cli} approve ${id}`, new Date(Date.now() - 60_000).toISOString());
+  const id = `d-land-unposted-${n}`;
   f.log.append('decision.asked', { id, kind: 'land', issue: n, owner: OWNER, question: 'Land it?', options: ['approve', 'reject'], recommendation: 'approve', receipts: [] }, 'alice');
   f.log.append('review.level_set', { issue: n, head: 'a'.repeat(40), level: 'L3', reasons: ['money-path: src/price.js'] }, 'alice');
+  f.backlog.humanComment(n, OWNER, `/${BRAND.cli} approve`);
   await handleDecisions(c);
-  assert.deepEqual(of<EventPayload<'decision.answered'>>(f, 'decision.answered').map((a) => a.id), [id]);
+  await handleDecisions(c);
+  assert.deepEqual(answered(f), [], 'no question comment: a bare reply answers nothing');
+  // ...and says so, once, where health and the dashboard show it.
+  const notes = of<{ kind: string; message: string }>(f, 'coordinator.error').filter((e) => e.kind === 'reply_without_id');
+  assert.equal(notes.length, 1, JSON.stringify(notes));
+  assert.ok(notes[0]!.message.includes(id) && notes[0]!.message.includes(`/${BRAND.cli} <option> ${id}`), notes[0]!.message);
+  f.backlog.humanComment(n, OWNER, `/${BRAND.cli} approve ${id}`);
+  await handleDecisions(c);
+  assert.deepEqual(answered(f), [[id, OWNER]], 'a reply naming the id answers it');
 });

@@ -240,19 +240,33 @@ export abstract class Decisions extends Recovery {
    * `approvals` as the default branch has it. A reply from anyone else answers nothing: a writer's `approve` of a
    * high-risk merge (`land`) or a held plan waits for an owner, as on the dashboard.
    *
-   * R1182v: only a reply to this question counts, one posted at or after it was asked (in whole seconds, as a tracker
-   * stamps a comment) or one that names its id. An older reply (an approval of an earlier question on the same issue: a
-   * landing re-ask after the output changed, or a review-time approval) never answers a new one. A reply with no time
-   * that doesn't name the id counts for nothing (fails closed).
+   * Only a reply to this question counts (#1248, R1182v, R1182x), decided by the tracker's own order, never by a clock:
+   * - a reply whose command names a decision id (`/<cli> approve d-…`) answers that decision and no other;
+   * - a reply that names none answers this question only if it comes after the question's own comment (the one ask()
+   *   posted, holding `decide <id> `) in the issue's comment order. Without that comment (it couldn't be posted), only
+   *   a reply naming the id counts.
+   * So an older reply (an approval of an earlier question on the same issue: a landing re-ask after the output changed,
+   * or a review-time approval) never answers a new one, whatever the instance's or the tracker's clock says.
    */
   private async commentAnswer(n: number, q: EventPayload<'decision.asked'>, writers: Set<string>, cmd: RegExp): Promise<{ by: string; body: string; answer: string; role: 'owner' | 'writer' } | null> {
-    const asked = this.d.log.read(0, ['decision.asked']).find((e) => (e.payload as EventPayload<'decision.asked'>).id === q.id);
-    const askedAt = asked ? Math.floor(Date.parse(asked.ts) / 1000) * 1000 : NaN;
-    const named = new RegExp(`(?:^|[^\\w-])${q.id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:$|[^\\w-])`);
-    const toThis = (c: { body: string; at?: string }) => named.test(c.body) || (c.at !== undefined && Date.parse(c.at) >= askedAt);
-    const replies = (await this.d.backlog.comments(n))
-      .filter((c) => writers.has(c.author.toLowerCase()) && toThis(c))
-      .map((c) => ({ by: c.author, body: c.body, m: c.body.match(cmd) }))
+    const comments = await this.d.backlog.comments(n);
+    const question = comments.findIndex((c) => c.body.includes(`decide ${q.id} `));
+    // The token after the option, when it is a decision id: `/<cli> approve d-12-a3f9c1`.
+    const arg = new RegExp(`${cmd.source}[ \\t]+(d-\\S+)`, cmd.flags);
+    const toThis = (c: { body: string }, i: number) => {
+      const id = c.body.match(arg)?.[2];
+      return id !== undefined ? id === q.id : question >= 0 && i > question;
+    };
+    // A writer's bare reply set aside because the question's own comment isn't there: said once, where health and the
+    // dashboard show it, never ignored without a word (R1182x).
+    if (question < 0 && comments.some((c) => writers.has(c.author.toLowerCase()) && q.options.includes(c.body.match(cmd)?.[1] ?? '') && c.body.match(arg) === null)) {
+      const said = this.d.log.read(0, ['coordinator.error']).some((e) => (e.payload as { kind: string; message: string }).kind === 'reply_without_id' && (e.payload as { message: string }).message.includes(q.id));
+      if (!said) this.emit('coordinator.error', { instance: this.d.instance, where: 'decision reply', kind: 'reply_without_id', message: `#${n}: a reply to decision ${q.id} doesn't name it, and the question's comment isn't on the issue, so it answers nothing; reply \`/${BRAND.cli} <option> ${q.id}\`, answer on the dashboard, or run \`${BRAND.cli} decide ${q.id} <option>\`` });
+    }
+    const replies = comments
+      .map((c, i) => ({ c, ok: writers.has(c.author.toLowerCase()) && toThis(c, i) }))
+      .filter((x) => x.ok)
+      .map(({ c }) => ({ by: c.author, body: c.body, m: c.body.match(cmd) }))
       .filter((x) => x.m && q.options.includes(x.m[1]!));
     for (const r of replies.reverse()) {
       const role = await this.commenterRole(r.by);

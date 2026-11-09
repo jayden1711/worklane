@@ -624,13 +624,20 @@ export abstract class CoordinatorBase {
     // What it rests on (src/decision-context.ts), for the dashboard's detail view: never a viewer's (src/viewer-events.ts).
     this.emit('decision.asked', { id, kind, issue, owner, question, options, recommendation, receipts, ...(context ? { context } : {}) });
     if (issue === null) return id; // not tied to an issue: answered from the dashboard or CLI
-    await this.d.backlog.addLabels(issue, ['needs:decision']);
-    // R1182v: each line redacted on its own, as the tracker redacts (the backlog redacts the body again): a redaction that
-    // runs to an end marker (a private key's) can't cross from one line into the next and hide the lines between.
-    await this.d.backlog.comment(
-      issue,
-      `[${BRAND.cli}] @${owner} decision needed: **${question}**\n\nOptions: ${options.join(' / ')}.${recommendation ? ` Recommendation: **${recommendation}**.` : ''}\n\n${receipts.map((r) => `- ${redactString(r, TRACKER)}`).join('\n')}\n\nReply \`/${BRAND.cli} ${options.join('` or `/' + BRAND.cli + ' ')}\` (owner or a writer), or run \`${BRAND.cli} decide ${id} <option>\`.`,
-    );
+    try {
+      await this.d.backlog.addLabels(issue, ['needs:decision']);
+      // R1182v: each line redacted on its own, as the tracker redacts (the backlog redacts the body again): a redaction that
+      // runs to an end marker (a private key's) can't cross from one line into the next and hide the lines between.
+      await this.d.backlog.comment(
+        issue,
+        `[${BRAND.cli}] @${owner} decision needed: **${question}**\n\nOptions: ${options.join(' / ')}.${recommendation ? ` Recommendation: **${recommendation}**.` : ''}\n\n${receipts.map((r) => `- ${redactString(r, TRACKER)}`).join('\n')}\n\nReply \`${options.map((o) => `/${BRAND.cli} ${o} ${id}`).join('` or `')}\` (owner or a writer; a reply after this comment may leave out the id), or run \`${BRAND.cli} decide ${id} <option>\`.`,
+      );
+    } catch (e) {
+      // R1182x: with no question comment, only a reply naming the id answers it (decisions.ts commentAnswer). Say so where
+      // health and the dashboard show it, so a bare reply is never ignored without a word.
+      this.emit('coordinator.error', { instance: this.d.instance, where: 'decision question', kind: 'question_not_posted', message: `#${issue}: decision ${id} is recorded, but its comment could not be posted (${(e as Error).message.slice(0, 300)}); answer it on the dashboard, with \`${BRAND.cli} decide ${id} <option>\`, or by a reply naming the id (\`/${BRAND.cli} <option> ${id}\`)` });
+      throw e;
+    }
     return id;
   }
 
