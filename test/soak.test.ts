@@ -400,12 +400,16 @@ export function dirUsage(dir: string): { bytes: number; files: number } {
  * (R1181l 4: counting by parent missed a process double-forked away, `sh -c 'x &'`, whose parent is then init).
  */
 export function childCount(): number | null {
+  return childPids()?.length ?? null;
+}
+/** Those processes' pids. */
+export function childPids(): number[] | null {
   const r = spawnSync('ps', ['-A', '-o', 'pgid=,pid='], { encoding: 'utf8' });
   if (r.status !== 0 || typeof r.stdout !== 'string') return null;
   const rows = r.stdout.split('\n').map((l) => l.trim().split(/\s+/).map(Number)).filter((x) => x.length === 2 && x.every(Number.isFinite));
   const own = rows.find(([, pid]) => pid === process.pid)?.[0];
   if (own === undefined) return null;
-  return Math.max(0, rows.filter(([pgid, pid]) => pgid === own && pid !== process.pid && pid !== r.pid).length);
+  return rows.filter(([pgid, pid]) => pgid === own && pid !== process.pid && pid !== r.pid).map(([, pid]) => pid!);
 }
 
 /** coordinator.error events, agent runs that didn't succeed, and other failure events, in the log so far (R1181l 5). */
@@ -686,12 +690,11 @@ test("the soak driver's counts read what they claim: failures in a log, worktree
     assert.equal(worktreeCount(repo), 2);
     // A process double-forked away (its parent is then init) still counts: same process group.
     if (process.platform !== 'win32') {
-      const before = childCount();
-      assert.notEqual(before, null);
+      assert.notEqual(childCount(), null);
       const pid = Number(spawnSync('sh', ['-c', 'sleep 30 >/dev/null 2>&1 & echo $!'], { encoding: 'utf8' }).stdout.trim());
       try {
-        const after = childCount();
-        assert.ok(after! >= before! + 1, `${before} -> ${after}`);
+        // By its pid, not a total: other processes of the group (a test runner's) come and go meanwhile.
+        assert.ok(childPids()!.includes(pid), `${pid} in ${JSON.stringify(childPids())}`);
       } finally {
         if (pid > 0) process.kill(pid);
       }
