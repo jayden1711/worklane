@@ -65,7 +65,8 @@ test('fetch-pinned: a matching download lands at its out file, over https only, 
   const a = r.curlArgs!;
   assert.equal(a[0], '-q', 'curl reads no ~/.curlrc');
   for (const flag of ['-fsSL', '--retry-all-errors', '--tlsv1.2']) assert.ok(a.includes(flag), `curl gets ${flag}`);
-  assert.equal(a[a.indexOf('--proto') + 1], '=https', 'a redirect never leaves https');
+  assert.equal(a[a.indexOf('--proto') + 1], '=https', 'https only');
+  assert.equal(a[a.indexOf('--proto-redir') + 1], '=https', 'a redirect never leaves https (R1181n)');
   for (const insecure of ['-k', '--insecure']) assert.equal(a.includes(insecure), false, `no ${insecure}`);
   assert.ok(a.includes('--strict') || readFileSync(join(repoRoot, HELPER), 'utf8').includes('sha256sum -c - --strict'), 'the check is --strict');
   assert.ok(Number(a[a.lastIndexOf('--retry') + 1]) >= 3, 'curl retries at least 3 times');
@@ -105,7 +106,7 @@ test('fetch-pinned: a failed download exits non-zero and leaves nothing; a non-h
   }
 });
 
-test('fetch-pinned: every tool is called by its absolute path, so a stand-in first on PATH or a function from BASH_ENV never checks the download (#1181 review R1181l 2)', { skip }, () => {
+test('fetch-pinned: every tool is called by its absolute path, so a stand-in first on PATH, or a function named sha256sum from BASH_ENV, never checks the download (#1181 reviews R1181l 2, R1181m D2)', { skip }, () => {
   const text = readFileSync(join(repoRoot, HELPER), 'utf8');
   for (const line of text.split('\n').filter((l) => !l.startsWith('#'))) {
     for (const t of TOOLS) assert.ok(!new RegExp(`(^|[\\s|;&(\'"$])${t}(\\s|$)`).test(line.replaceAll(`/usr/bin/${t}`, '')), `${t} named bare: ${line}`);
@@ -125,4 +126,12 @@ test('fetch-pinned: every tool is called by its absolute path, so a stand-in fir
   }, { body: 'tampered', env: (d) => ({ BASH_ENV: join(d, 'env.sh') }) });
   assert.equal(viaBashEnv.status, 1, viaBashEnv.stderr);
   assert.equal(viaBashEnv.out, null);
+});
+
+test('stated limit (R1181m D2): a BASH_ENV that defines a function by the absolute path still checks the download, so the caller must clear BASH_ENV; a fix shows up here as a change', { skip }, () => {
+  const r = runHelper((d) => {
+    writeFileSync(join(d, 'env.sh'), `${local.sha256sum}() { cat >/dev/null; return 0; }\n`);
+    return [REL, sha('expected'), join(d, 'out.bin')];
+  }, { body: 'tampered', env: (d) => ({ BASH_ENV: join(d, 'env.sh') }) });
+  assert.equal(r.status, 0, 'today: the function runs in the absolute path\'s place (soak.yml clears BASH_ENV: pending the owner)');
 });
