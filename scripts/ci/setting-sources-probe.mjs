@@ -33,7 +33,9 @@
 //   - a Read-only run, where Write must also stay denied (in the lane sandbox Bash is allowed when sandboxed), with a
 //     second turn (a held message the runner delivers once the first ends, R1185r D2);
 //   - the same without the sandbox, as a `policy.sandbox: false` instance runs it, where Bash too must stay denied
-//     (R1185u U1);
+//     (R1185u U1), with its second turn; and the worker-shaped and resumed runs below in both lane shapes (R1185w W1),
+//     in a git worktree (`git worktree add`, under the instance's places), as production's workers and fix runs are
+//     (R1185v D2), with an every-source control there;
 //   - one shaped as a coordinator worker run (its role prompt, JSON schema, tools and an apiKeyHelper key file);
 //   - a resumed session, shaped as a fix run is (worker-shaped, R1185q): a guarded worker run, then one resuming it in
 //     the same tree, with every source (a control: it loads the plants, sub2/CLAUDE.md included) and guarded.
@@ -191,41 +193,54 @@ function plant() {
   };
   const skill = (dir, name) => w(join(dir, name, 'SKILL.md'), `---\nname: ${name}\ndescription: ${name} does a planted thing\n---\n${name}\n`);
   const agent = (dir, name) => w(join(dir, 'a.md'), `---\nname: ${name}\ndescription: ${name} is a planted agent\n---\n${name}\n`);
-  mkdirSync(ran, { recursive: true });
+  // A worker's or a fix run's cwd, as production makes it (R1185v D2): a git worktree under the instance's places
+  // (src/worktrees.ts), whose `.git` is a file. Its tree gets the same plants as the checkout, its own `ran/` (a tool
+  // writes inside its cwd only), and the folder above it a CLAUDE.md, as the checkout's parent has.
+  const work = join(root, 'places', 'wl-task-7');
+  git('worktree', 'add', '-q', '-b', 'task-7', work, 'HEAD');
+  const workRan = join(work, '.probe-ran');
   w(join(parent, 'CLAUDE.md'), `# Parent\n${MARKS.parentClaudeMd}\n`);
-  w(join(repo, 'CLAUDE.md'), `# Project\n${MARKS.projectClaudeMd}\n`);
-  w(join(repo, '.claude', 'CLAUDE.md'), `# Project, .claude\n${MARKS.dotClaudeMd}\n`);
-  w(join(repo, 'CLAUDE.local.md'), `# Local\n${MARKS.localClaudeMd}\n`);
-  w(join(repo, '.claude', 'rules', 'r.md'), `# Rule\n${MARKS.rules}\n`);
-  w(join(repo, '.claude', 'rules', 'paths.md'), `---\npaths: ["sub/**"]\n---\n${MARKS.pathRule}\n`);
-  skill(join(repo, '.claude', 'skills'), MARKS.skill);
-  agent(join(repo, '.claude', 'agents'), MARKS.agent);
-  w(join(repo, '.claude', 'commands', `${MARKS.command}.md`), `---\ndescription: ${MARKS.command} is a planted command\n---\n${MARKS.command}\n`);
-  w(join(repo, 'sub', 'x.txt'), 'a file the stand-in has claude read\n');
-  w(join(repo, 'sub2', 'x.txt'), 'a file only a resumed session reads\n');
-  w(join(repo, 'sub2', 'CLAUDE.md'), `# Read on resume\n${MARKS.resumeNested}\n`);
-  w(join(repo, 'sub3', 'x.txt'), 'a file only a second turn reads\n');
-  w(join(repo, 'sub3', 'CLAUDE.md'), `# Read on the second turn\n${MARKS.secondNested}\n`);
-  w(join(repo, 'sub', 'CLAUDE.md'), `# Nested\n${MARKS.nestedClaudeMd}\n`);
-  w(join(repo, 'sub', '.claude', 'CLAUDE.md'), `# Nested, .claude\n${MARKS.nestedDotClaudeMd}\n`);
-  skill(join(repo, 'sub', '.claude', 'skills'), MARKS.nestedSkill);
+  w(join(root, 'places', 'CLAUDE.md'), `# Parent\n${MARKS.parentClaudeMd}\n`);
+  // A hook on every event, in each settings file: each touches its own file under ran/. The checkout's settings.json
+  // holds hooks only, which the runner's first line (projectSettingsRefusal) lets through, so the run starts; the
+  // local and home files also turn the checkout's MCP servers on and set an env.
+  const hookSet = (who, r) => Object.fromEntries(EVENTS.map((e) => [e, [{ ...(e === 'PreToolUse' || e === 'PostToolUse' ? { matcher: '*' } : {}), hooks: [{ type: 'command', command: `touch '${join(r, `${who}-${e}`)}'` }] }]]));
+  // The local and home files also allow Bash and Write (R1185p D1): a run that doesn't allow them must not get them.
+  // And an apiKeyHelper, a second key that runs a command (R1185r D3): run, it leaves ran/helper-<who>.
+  const hooks = (who, r) => ({ hooks: hookSet(who, r), apiKeyHelper: `touch '${join(r, `helper-${who}`)}'; echo sk-ant-not-a-key`, enableAllProjectMcpServers: true, permissions: { allow: ['Bash', 'Write'] }, env: { ANTHROPIC_CUSTOM_HEADERS: `x-planted-${who}: ${MARKS[`${who}Env`]}`, [`PLANTED_TOOL_ENV_${who.toUpperCase()}`]: MARKS[`${who}ToolEnv`] } });
+  // The checkout's own plants, in the checkout and in the worktree, each with its ran/.
+  const tree = (dir, r) => {
+    mkdirSync(r, { recursive: true });
+    w(join(dir, 'CLAUDE.md'), `# Project\n${MARKS.projectClaudeMd}\n`);
+    w(join(dir, '.claude', 'CLAUDE.md'), `# Project, .claude\n${MARKS.dotClaudeMd}\n`);
+    w(join(dir, 'CLAUDE.local.md'), `# Local\n${MARKS.localClaudeMd}\n`);
+    w(join(dir, '.claude', 'rules', 'r.md'), `# Rule\n${MARKS.rules}\n`);
+    w(join(dir, '.claude', 'rules', 'paths.md'), `---\npaths: ["sub/**"]\n---\n${MARKS.pathRule}\n`);
+    skill(join(dir, '.claude', 'skills'), MARKS.skill);
+    agent(join(dir, '.claude', 'agents'), MARKS.agent);
+    w(join(dir, '.claude', 'commands', `${MARKS.command}.md`), `---\ndescription: ${MARKS.command} is a planted command\n---\n${MARKS.command}\n`);
+    w(join(dir, 'sub', 'x.txt'), 'a file the stand-in has claude read\n');
+    w(join(dir, 'sub2', 'x.txt'), 'a file only a resumed session reads\n');
+    w(join(dir, 'sub2', 'CLAUDE.md'), `# Read on resume\n${MARKS.resumeNested}\n`);
+    w(join(dir, 'sub3', 'x.txt'), 'a file only a second turn reads\n');
+    w(join(dir, 'sub3', 'CLAUDE.md'), `# Read on the second turn\n${MARKS.secondNested}\n`);
+    w(join(dir, 'sub', 'CLAUDE.md'), `# Nested\n${MARKS.nestedClaudeMd}\n`);
+    w(join(dir, 'sub', '.claude', 'CLAUDE.md'), `# Nested, .claude\n${MARKS.nestedDotClaudeMd}\n`);
+    skill(join(dir, 'sub', '.claude', 'skills'), MARKS.nestedSkill);
+    w(join(cfg, 'projects', projectFolder(dir), 'memory', 'MEMORY.md'), `- ${MARKS.memory}\n`);
+    w(join(dir, '.claude', 'settings.json'), JSON.stringify({ hooks: hookSet('project', r) }));
+    w(join(dir, '.claude', 'settings.local.json'), JSON.stringify(hooks('local', r)));
+    w(join(dir, '.mcp.json'), JSON.stringify({ mcpServers: { planted: { type: 'stdio', command: 'touch', args: [join(r, 'mcp')] } } }));
+  };
+  tree(repo, ran);
+  tree(work, workRan);
   w(join(cfg, 'CLAUDE.md'), `# Home\n${MARKS.homeClaudeMd}\n`);
   w(join(cfg, 'rules', 'r.md'), `# Home rule\n${MARKS.homeRules}\n`);
   skill(join(cfg, 'skills'), MARKS.homeSkill);
   agent(join(cfg, 'agents'), MARKS.homeAgent);
-  w(join(cfg, 'projects', projectFolder(repo), 'memory', 'MEMORY.md'), `- ${MARKS.memory}\n`);
-  // A hook on every event, in each settings file: each touches its own file under ran/. The checkout's settings.json
-  // holds hooks only, which the runner's first line (projectSettingsRefusal) lets through, so the run starts; the
-  // local and home files also turn the checkout's MCP servers on and set an env.
-  const hookSet = (who) => Object.fromEntries(EVENTS.map((e) => [e, [{ ...(e === 'PreToolUse' || e === 'PostToolUse' ? { matcher: '*' } : {}), hooks: [{ type: 'command', command: `touch '${join(ran, `${who}-${e}`)}'` }] }]]));
-  // The local and home files also allow Bash and Write (R1185p D1): a run that doesn't allow them must not get them.
-  // And an apiKeyHelper, a second key that runs a command (R1185r D3): run, it leaves ran/helper-<who>.
-  const hooks = (who) => ({ hooks: hookSet(who), apiKeyHelper: `touch '${join(ran, `helper-${who}`)}'; echo sk-ant-not-a-key`, enableAllProjectMcpServers: true, permissions: { allow: ['Bash', 'Write'] }, env: { ANTHROPIC_CUSTOM_HEADERS: `x-planted-${who}: ${MARKS[`${who}Env`]}`, [`PLANTED_TOOL_ENV_${who.toUpperCase()}`]: MARKS[`${who}ToolEnv`] } });
-  w(join(repo, '.claude', 'settings.json'), JSON.stringify({ hooks: hookSet('project') }));
-  w(join(repo, '.claude', 'settings.local.json'), JSON.stringify(hooks('local')));
-  w(join(cfg, 'settings.json'), JSON.stringify(hooks('home')));
-  w(join(repo, '.mcp.json'), JSON.stringify({ mcpServers: { planted: { type: 'stdio', command: 'touch', args: [join(ran, 'mcp')] } } }));
-  return { root, repo, home, cfg, ran, instances, instanceHome };
+  // The home's hooks touch the checkout's ran/ (a hook isn't sandboxed), whatever the run's cwd.
+  w(join(cfg, 'settings.json'), JSON.stringify(hooks('home', ran)));
+  return { root, repo, home, cfg, ran, work, workRan, instances, instanceHome };
 }
 
 /**
@@ -335,8 +350,11 @@ process.exit(r.status ?? 1);
  */
 async function run(control = null, o = {}) {
   const p = o.p ?? plant();
-  const ranBefore = new Set(readdirSync(p.ran));
-  const api = await standIn(p.repo, p.ran, o.sub);
+  // `o.work`: in the worktree, as a worker or a fix run is (R1185v D2); else in the checkout.
+  const cwd = o.work ? p.work : p.repo;
+  const ranDirs = [p.ran, p.workRan];
+  const ranBefore = new Set(ranDirs.flatMap((d) => readdirSync(d)));
+  const api = await standIn(cwd, o.work ? p.workRan : p.ran, o.sub);
   const varName = `${BRAND.envPrefix}_INSTANCES_DIR`;
   const before = process.env[varName];
   process.env[varName] = p.instances;
@@ -361,7 +379,7 @@ async function run(control = null, o = {}) {
     const shape = o.worker ? { appendSystemPrompt: rolePrompt(p.repo, 'worker'), jsonSchema: WORKER_SCHEMA, allowedTools: WORKER_TOOLS } : { allowedTools: ['Read'] };
     // A second turn, as the runner delivers a held message once the first ends (onControl's send, R1185r D2).
     const second = o.second ? { onControl: (c) => c.send('probe-2', `${SECOND_TURN}: nothing more to do.`) } : {};
-    r = await runner.run({ ...second, ...task, prompt: 'Do the task.', model: 'claude-sonnet-4-5', cwd: p.repo, maxTurns: 6, maxBudgetUsd: 1, stallMs: 120_000, timeoutMs: 180_000, role: 'worker', ...shape, ...(o.resume ? { resume: o.resume } : {}) });
+    r = await runner.run({ ...second, ...task, prompt: 'Do the task.', model: 'claude-sonnet-4-5', cwd, maxTurns: 6, maxBudgetUsd: 1, stallMs: 120_000, timeoutMs: 180_000, role: 'worker', ...shape, ...(o.resume ? { resume: o.resume } : {}) });
   } finally {
     if (before === undefined) delete process.env[varName];
     else process.env[varName] = before;
@@ -383,7 +401,7 @@ async function run(control = null, o = {}) {
     model,
     toolRan: model.some((s) => s.body.includes('tool_result') && s.body.includes(`toolu_${api.tag}_1`)),
     reached: Object.entries(MARKS).filter(([, m]) => text.includes(m)).map(([k]) => k),
-    ran: readdirSync(p.ran).filter((f) => !ranBefore.has(f)),
+    ran: [...new Set(ranDirs.flatMap((d) => readdirSync(d)))].filter((f) => !ranBefore.has(f)),
     secondTurn: model.some((x) => x.body.includes(SECOND_TURN)),
   };
 }
@@ -458,44 +476,62 @@ if (!guarded.secondTurn) problems.push("the guarded run's second turn never reac
 leaks('a guarded run', guarded, true);
 
 // A guarded Read-only run as a `policy.sandbox: false` instance runs it (R1185u U1): no lane sandbox, so Bash too must
-// stay denied.
-const bare = await run(null, { noSandbox: true });
+// stay denied; with its second turn too (R1185w W1).
+const bare = await run(null, { noSandbox: true, second: true });
 say('guarded, Read only, no sandbox (a policy.sandbox: false instance)', bare);
 measured('the guarded run without the sandbox', bare);
 shaped('the guarded run without the sandbox', bare, true);
+if (!bare.secondTurn) problems.push("the guarded run without the sandbox: its second turn never reached the stand-in, so a second turn is unmeasured there");
 leaks('the guarded run without the sandbox', bare, true, true);
+
+// In the worktree a worker or a fix run has as its cwd (R1185v D2): every source loads each plant there too, so a
+// guarded worker or fix run below, run there, shows whether one leaked.
+const allWork = await run({ sources: 'user,project,local', mcp: true, memory: true }, { worker: true, work: true });
+say('control (every source, in a worktree, as a worker runs)', allWork);
+measured('the every-source control in a worktree', allWork);
+for (const k of Object.keys(MARKS).filter((x) => !['homeEnv', 'resumeNested', 'secondNested'].includes(x))) if (!allWork.reached.includes(k)) problems.push(`with every source in a worktree, ${k} (${MARKS[k]}) didn't reach a request: its plant is broken, so its absence proves nothing`);
+for (const who of ['project', 'local', 'home']) for (const e of TURN_EVENTS) if (!allWork.ran.includes(`${who}-${e}`)) problems.push(`with every source in a worktree, the ${who} settings' ${e} hook didn't run: its plant is broken`);
+if (!allWork.ran.includes('mcp')) problems.push("with every source in a worktree, its MCP server didn't start: its plant is broken");
+
+// Every guarded shape below runs in both lane shapes (R1185w W1): the lane sandbox on, and off (`policy.sandbox: false`).
+// The worker-shaped and resumed runs run in the worktree, as production's workers and fix runs do (R1185v D2).
+const LANES = [['', false], [' without the sandbox', true]];
 
 // Shaped as a coordinator worker run (R1185p D2): its role prompt, schema, tools and apiKeyHelper. Bash and Write are
 // its own here, so the stand-in's Bash shows what the tools' environment holds.
-const worker = await run(null, { worker: true });
-say('guarded, as a worker runs (--append-system-prompt-file, --json-schema, its tools, apiKeyHelper)', worker);
-measured('the guarded worker run', worker);
-const arg = (k) => worker.given.args[worker.given.args.indexOf(k) + 1] ?? '';
-if (!worker.given.args.includes('--append-system-prompt-file') || !worker.given.args.includes('--json-schema') || !/"apiKeyHelper"/.test(arg('--settings'))) problems.push("the guarded worker run isn't shaped as a worker's: its argv lacks --append-system-prompt-file, --json-schema or apiKeyHelper in --settings");
-if (!worker.ran.includes('tool-bash')) problems.push("the guarded worker run's Bash didn't run, so what its tools see is unmeasured");
-shaped('the guarded worker run', worker);
-leaks('the guarded worker run', worker, false);
+for (const [lane, noSandbox] of LANES) {
+  const what = `the guarded worker run${lane}`;
+  const worker = await run(null, { worker: true, noSandbox, work: true });
+  say(`guarded, as a worker runs${lane} (--append-system-prompt-file, --json-schema, its tools, apiKeyHelper)`, worker);
+  measured(what, worker);
+  const arg = (k) => worker.given.args[worker.given.args.indexOf(k) + 1] ?? '';
+  if (!worker.given.args.includes('--append-system-prompt-file') || !worker.given.args.includes('--json-schema') || !/"apiKeyHelper"/.test(arg('--settings'))) problems.push(`${what} isn't shaped as a worker's: its argv lacks --append-system-prompt-file, --json-schema or apiKeyHelper in --settings`);
+  if (!worker.ran.includes('tool-bash')) problems.push(`${what}'s Bash didn't run, so what its tools see is unmeasured`);
+  shaped(what, worker, noSandbox);
+  leaks(what, worker, false);
+}
 
 // Resumed (R1185n C3): the only runs that resume are fix runs (src/coordinator/fix-runs.ts), which are worker-shaped,
 // so both runs of each pair are (R1185q): a guarded worker run, then a run resuming its session in the same planted
 // tree, whose stand-in reads sub2/, a folder the first run never read (R1185p).
-for (const [what, control] of [['control', { sources: 'user,project,local', mcp: true, memory: true }], ['guarded', null]]) {
-  const first = await run(null, { worker: true });
+for (const [what, control, noSandbox] of [['control', { sources: 'user,project,local', mcp: true, memory: true }, false], ['guarded', null, false], ['guarded', null, true]]) {
+  const lane = noSandbox ? ' without the sandbox' : '';
+  const first = await run(null, { worker: true, noSandbox, work: true });
   const id = first.result?.sessionId;
   if (!id) {
     problems.push(`the ${what} resume: the first run gave no session id to resume (${first.result?.reason}: ${String(first.result?.detail).slice(0, 200)})`);
     continue;
   }
-  const r = await run(control, { p: first.p, resume: id, sub: 'sub2', worker: true });
-  say(`${what} resumed run (--resume ${id})`, r);
-  measured(`the ${what} resumed run`, r);
-  if (!r.given.args.includes('--resume')) problems.push(`the ${what} resumed run's argv has no --resume`);
+  const r = await run(control, { p: first.p, resume: id, sub: 'sub2', worker: true, noSandbox, work: true });
+  say(`${what} resumed run${lane} (--resume ${id})`, r);
+  measured(`the ${what} resumed run${lane}`, r);
+  if (!r.given.args.includes('--resume')) problems.push(`the ${what} resumed run${lane}'s argv has no --resume`);
   if (control) {
     // What loads at a session's start, and sub2/CLAUDE.md, loaded when the resumed session reads that folder.
     for (const k of ['projectClaudeMd', 'dotClaudeMd', 'localClaudeMd', 'parentClaudeMd', 'rules', 'skill', 'agent', 'command', 'homeClaudeMd', 'localEnv', 'resumeNested']) if (!r.reached.includes(k)) problems.push(`a resumed run with every source didn't reach ${k} (${MARKS[k]}): its plant is broken, so the guarded resume proves nothing`);
   } else {
-    shaped('the guarded resumed run', r);
-    leaks('the guarded resumed run', r, false);
+    shaped(`the guarded resumed run${lane}`, r, noSandbox);
+    leaks(`the guarded resumed run${lane}`, r, false);
   }
 }
 
@@ -503,4 +539,4 @@ if (problems.length) {
   console.error(`setting-sources probe (${bin}):\n${problems.map((x) => `  ${x}`).join('\n')}`);
   process.exit(1);
 }
-console.log("a guarded run loaded nothing planted, Read-only, worker-shaped or resumed: no CLAUDE.md (checkout, .claude/, local, parent, home, nested, read on resume), rules (path-scoped included), skill (nested included), agent, command, hook on any event, MCP server, settings env (headers or a tool's), allow rule or auto memory");
+console.log("a guarded run loaded nothing planted, Read-only, worker-shaped or resumed, with the lane sandbox and without: no CLAUDE.md (checkout, .claude/, local, parent, home, nested, read on resume), rules (path-scoped included), skill (nested included), agent, command, hook on any event, MCP server, settings env (headers or a tool's), allow rule or auto memory");
