@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path';
 import { BRAND } from '../src/brand.js';
 import type { StoredEvent } from '../src/events/types.js';
 import { readEvents } from '../src/events/read-only.js';
-import { ROLLOUT_FILE, RolloutFile, readRollout, ringZeroProblem, rolloutStatus, type Rollout } from '../src/rollout.js';
+import { ROLLOUT_FILE, RolloutFile, readInstance, readRollout, ringZeroProblem, rolloutStatus, type Rollout } from '../src/rollout.js';
 import { rolloutCommand, type RolloutDeps } from '../src/rollout-cli.js';
 import { EventLog } from '../src/events/log.js';
 import { onRealMachine } from './isolate.js';
@@ -576,4 +576,57 @@ test('R1174n N3: a newline in --file forges no output line, on stdout or stderr'
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// --- R1174p D1: each tick gap from the tick before as stamped; R1174o L2: the live_minutes threshold on the stop gap;
+// R1174p D2: control characters escaped in every error line (ported from the reviewers' probes) ---
+const atTs = (ts: string) => ev('coordinator.tick', { instance: 'i', dispatched: 0, reconciled: 0 }, ts);
+const minTicks = (from: number, to: number, step = 1 / 60) => {
+  const o: StoredEvent[] = [];
+  for (let h = from; h >= to - 1e-9; h -= step) o.push(tick(h));
+  return o;
+};
+const merges3 = (h: number) => merges(3, h);
+const downOf = (e: StoredEvent[]) => readInstance(e, 'f', 2, 30 * 60_000).downMs / 3_600_000;
+const p1b = () => [started(51), on(50), atTs(hoursAgo(50 - 0.01 - 47)), ...minTicks(49.98, 49.4), ...merges3(49.45), ...minTicks(2, 0.02)];
+
+test('R1174p D1 (P1b): the first tick after the flip stamped 47 h ahead, then the clock fixed, hides no silence; the same log stamped right is held too', () => {
+  const control = [started(51), on(50), tick(49.99), ...minTicks(49.98, 49.4), ...merges3(49.45), ...minTicks(2, 0.02)];
+  assert.equal(ring0(control), 'soaking');
+  assert.notEqual(ring0(p1b()), 'promoted', `downMs ${downOf(p1b()).toFixed(2)} h`);
+});
+
+test('R1174p D1 (P1b order): ring 1 turned on 0.5 h ago reads out of order against the P1b log (about 3 h really running)', () => {
+  const s = status({ e1: p1b(), p1: [started(0.6), on(0.5), ...minTicks(0.45, 0.02)] }, { rollout: R2 });
+  assert.equal(s.rings[1]!.state, 'out of order', s.rings[1]!.why);
+});
+
+test('R1174p D1 (P1c): 100 forward blips, each under live_minutes, ratchet nothing: the silence after them is counted', () => {
+  const l: StoredEvent[] = [started(51), on(50), tick(49.99)];
+  let ahead = 0;
+  for (let k = 0; k < 100; k++) {
+    ahead += 29 / 60;
+    const real = 49.98 - k / 600;
+    l.push(atTs(hoursAgo(real - ahead)), tick(real - 0.0005));
+  }
+  l.push(...merges3(49.7), ...minTicks(1.5, 0.02));
+  assert.notEqual(ring0(l), 'promoted', `downMs ${downOf(l).toFixed(2)} h`);
+  assert.ok(downOf(l) > 45, `downMs ${downOf(l)} h`);
+});
+
+test('R1174o L2 (O8): a tick-to-stop gap just under live_minutes (29 min) is not taken off; just over (31 min) is', () => {
+  const mk = (gapMin: number) => [started(61), on(60), ...minTicks(59.9, 30 + gapMin / 60), stopped(30), started(30 - 1 / 60), ...minTicks(29.95, 0.02)];
+  const near = (a: number, b: number, msg: string) => assert.ok(Math.abs(a - b) < 1e-6, `${msg}: ${a} h, expected ${b} h`);
+  near(downOf(mk(29)), 1 / 60, '29 min');
+  near(downOf(mk(31)), 31 / 60 + 1 / 60, '31 min');
+});
+
+test('R1174p D2: a CR, an ESC or a line separator in --file reaches no error line raw; each is escaped', () => {
+  const errs: string[] = [];
+  const bad = join(tmpdir(), `no-such\r\u001b[2J\u2028-${process.pid}.json`);
+  assert.equal(rolloutCommand('status', ['--flag', 'f', '--file', bad], { out: () => {}, err: (s) => errs.push(s), eventsOf: () => [], instances: () => [], now: NOW }), 1);
+  assert.ok(errs.length > 0);
+  for (const s of errs) assert.doesNotMatch(s, /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/, JSON.stringify(s));
+  assert.match(errs.join('\n'), /\\u000d|\\r/);
+  assert.match(errs.join('\n'), /\\u001b/);
 });

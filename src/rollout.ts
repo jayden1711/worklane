@@ -207,7 +207,9 @@ export function readInstance(events: readonly StoredEvent[], flag: string, maxEr
     if (after && (e.type === 'coordinator.stopped' || e.type === 'coordinator.started')) prevTick = null;
     if (after && e.type === 'coordinator.tick' && Number.isFinite(ts)) {
       if (prevTick !== null && ts - prevTick > liveMs) downMs += ts - prevTick;
-      prevTick = prevTick === null ? ts : Math.max(prevTick, ts);
+      // R1174p D1: each gap from the tick before as stamped, never the furthest stamp seen: a tick stamped ahead (the
+      // first after a flip or start, or a ratchet of steps under live_minutes) hid the silence after it.
+      prevTick = ts;
     }
     if (after && e.type === 'coordinator.started' && stoppedAt !== null) {
       if (Number.isFinite(stoppedAt) && Number.isFinite(ts)) downMs += Math.max(0, ts - stoppedAt);

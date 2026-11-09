@@ -92,7 +92,10 @@ const entries = (dir: string): string[] => {
 
 export function rolloutCommand(sub: string | undefined, args: readonly string[], o: { out?: (s: string) => void; err?: (s: string) => void; eventsOf?: (instance: string) => StoredEvent[]; instances?: () => string[]; now?: Date; deps?: Partial<RolloutDeps> } = {}): number {
   const out = o.out ?? console.log;
-  const err = o.err ?? console.error;
+  // R1174p D2: every error line has its control characters escaped (a path in Node's own message is repeated raw, so a
+  // CR or an ESC reached the terminal).
+  const rawErr = o.err ?? console.error;
+  const err = (s: string) => rawErr(s.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`));
   const d: RolloutDeps = { ...DEFAULT_DEPS, ...o.deps };
   // Options as pairs, each once: anything else is a usage error (a stray word is never skipped).
   const given = new Map<string, string>();
