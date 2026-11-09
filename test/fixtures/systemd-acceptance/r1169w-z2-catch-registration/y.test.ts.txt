@@ -1,0 +1,3 @@
+import { test } from 'node:test';
+import { lingerEnabled } from '../src/os/probe.js';
+try { if (lingerEnabled() === null) JSON.parse(''); } catch { test.skip('acceptance: linger', () => {}); }

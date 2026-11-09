@@ -1,0 +1,8 @@
+import { test, describe, it, beforeEach } from 'node:test';
+import { existsSync } from 'node:fs';
+let booted = false;
+test('probe', () => { booted = existsSync('/run/systemd/system') && !!process.env.NEVER; });
+describe('engine', () => {
+  const starts = (t) => { if (!booted) { t.skip('not a booted host'); return; } };
+  it('acceptance: the engine unit starts', starts);
+});

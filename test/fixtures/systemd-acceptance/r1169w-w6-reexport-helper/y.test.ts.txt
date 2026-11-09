@@ -1,0 +1,3 @@
+import { check } from './nt.js';
+import { lingerEnabled } from '../src/os/probe.js';
+check('acceptance: linger', { skip: lingerEnabled() === null }, () => {});

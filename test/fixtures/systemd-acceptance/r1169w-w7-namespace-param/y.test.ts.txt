@@ -1,0 +1,3 @@
+import * as nt from 'node:test';
+import { lingerEnabled } from '../src/os/probe.js';
+for (const t of [nt.test]) t('acceptance: linger', { skip: lingerEnabled() === null }, () => {});

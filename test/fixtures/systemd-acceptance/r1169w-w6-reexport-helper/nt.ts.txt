@@ -1,0 +1,1 @@
+export { test as check } from 'node:test';

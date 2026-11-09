@@ -575,7 +575,7 @@
       ]
     },
     "src/guardrails/push-hook.ts: RUNNERS": {
-      "why": "the push guard's table of runner programs and their options, a const literal in product code: the loop registers one test per row, a fixed set, and no row is a service manager check (R1169v D4 reads a loop's table)"
+      "why": "the push guard's table of runner programs and their options, a const literal in product code: the loop registers one test per row, a fixed set, and no row is a service manager check (R1169v D4 reads a loop's table). An import key applies to every file that imports it; today only test/runner-option-tables.test.ts does (test/git-runner.test.ts has a RUNNERS of its own)"
     },
     "test/adversarial/adversarial.test.ts: controls": {
       "why": "the adversarial suite's case files under test/adversarial/ (cases/*.json, controls.json, todo.json), read with readFileSync: one test per case in the repo's own data, none a service manager check (R1169v D4 reads a loop's table)",
@@ -635,6 +635,10 @@
     "test/security-fixed.test.ts: #859: on a checkout with the whole history, each merge commit the table names is an ancestor of HEAD": {
       "why": "skips on a shallow checkout (git rev-parse --is-shallow-repository), which this job's checkout is, as the shards' are; the security-fixed job checks it on full history. Picked only by R1169v's fail-closed rule (its function reads scripts/ci/security-fixed.mjs, a module named at run time, and holds a skip), never for systemd. Caveat: that job runs only on pull requests that touch docs/security.md, scripts/ci/security-fixed.mjs or its workflow (its paths filter), not on every PR or on main",
       "runsIn": "security-fixed"
+    },
+    "test/no-late-shift.test.ts: `in a real Chrome: ${held} answering last moves no control on the Settings page, and a link there still opens its page`": {
+      "why": "a web-UI test (real Chrome against the built dist/web): it skips where the UI isn't built or Chrome is missing (webUiSkip), as this job doesn't build it; the shards run it with CI_REQUIRE_WEB=1. Picked only by R1169w's fail-closed rules, never for systemd",
+      "runsIn": "web"
     }
   }
 }

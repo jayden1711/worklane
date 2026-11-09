@@ -703,5 +703,130 @@
   "r1169w-w2c-control-getbuiltin-call": [
     0,
     "^$"
+  ],
+  "r1169w-r13a-object-method": [
+    2,
+    "registers a test inside a method, a constructor or a function kept as a property"
+  ],
+  "r1169w-r13b-class-constructor": [
+    2,
+    "registers a test inside a method, a constructor or a function kept as a property"
+  ],
+  "r1169w-r13c-class-static-method": [
+    2,
+    "registers a test inside a method, a constructor or a function kept as a property"
+  ],
+  "r1169w-r13d-function-call-control": [
+    2,
+    "a skip reads src/os/probe\\.ts: lingerEnabled, which carries systemd's sign"
+  ],
+  "r1169w-r14-try-catch-throw": [
+    0,
+    "^$"
+  ],
+  "r1169w-r3-process-exit": [
+    2,
+    "a skip reads src/os/probe\\.ts: lingerEnabled, which carries systemd's sign"
+  ],
+  "r1169w-w0-control-s0": [
+    2,
+    "a skip reads src/os/probe\\.ts: lingerEnabled, which carries systemd's sign"
+  ],
+  "r1169w-w3-block-helper-param": [
+    2,
+    "registers a test whose function isn't one this file defines|a skip reads test/y\\.test\\.ts: skip"
+  ],
+  "r1169w-w4-import-then-guard": [
+    2,
+    "names node:test where this can't bind it"
+  ],
+  "r1169w-w5-promise-resolve-module": [
+    2,
+    "uses node:test's nt as a value"
+  ],
+  "r1169w-w6-reexport-helper": [
+    2,
+    "names node:test where this can't bind it"
+  ],
+  "r1169w-w7-namespace-param": [
+    2,
+    "uses node:test's nt as a value"
+  ],
+  "r1169w-x0-control-b0": [
+    1,
+    "acceptance: the engine unit starts: SKIP not a booted host",
+    "test/y\\.test\\.ts:\\d+: acceptance: the engine unit starts"
+  ],
+  "r1169w-x1-toplevel-beforeeach": [
+    1,
+    "probe: SKIP not a booted host"
+  ],
+  "r1169w-x4-named-function-body": [
+    1,
+    "acceptance: the engine unit starts: SKIP not a booted host",
+    "test/y\\.test\\.ts:\\d+: acceptance: the engine unit starts"
+  ],
+  "r1169w-x4b-const-arrow-body": [
+    1,
+    "acceptance: the engine unit starts: SKIP not a booted host",
+    "test/y\\.test\\.ts:\\d+: acceptance: the engine unit starts"
+  ],
+  "r1169w-x4c-named-body-in-describe": [
+    1,
+    "acceptance: the engine unit starts: SKIP not a booted host",
+    "test/y\\.test\\.ts:\\d+: acceptance: the engine unit starts"
+  ],
+  "r1169w-x4d-named-body-holds-sign": [
+    2,
+    "test/y\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside"
+  ],
+  "r1169w-x6-object-method": [
+    1,
+    "acceptance: the engine unit starts: SKIP not a booted host",
+    "test/y\\.test\\.ts:\\d+: acceptance: the engine unit starts"
+  ],
+  "r1169w-x7-class-static": [
+    1,
+    "acceptance: the engine unit starts: SKIP not a booted host",
+    "test/y\\.test\\.ts:\\d+: acceptance: the engine unit starts"
+  ],
+  "r1169w-x8-hook-in-outer-describe": [
+    1,
+    "acceptance: the engine unit starts: SKIP not a booted host",
+    "test/y\\.test\\.ts:\\d+: acceptance: the engine unit starts"
+  ],
+  "r1169w-xw1-import-then-param": [
+    2,
+    "names node:test where this can't bind it"
+  ],
+  "r1169w-xw2-getbuiltinmodule": [
+    2,
+    "a skip reads src/os/probe\\.ts: lingerEnabled, which carries systemd's sign"
+  ],
+  "r1169w-y1-subtest-loop-guard": [
+    1,
+    "the user services: (didn't run|failed|ran no subtest)",
+    "test/y\\.test\\.ts:\\d+: the user services"
+  ],
+  "r1169w-y1b-control-subtest-return": [
+    1,
+    "the user services: (didn't run|failed|ran no subtest)",
+    "test/y\\.test\\.ts:\\d+: the user services"
+  ],
+  "r1169w-y1c-control-subtest-if": [
+    2,
+    "a skip reads src/os/probe\\.ts: lingerEnabled, which carries systemd's sign"
+  ],
+  "r1169w-z1-switch-registration": [
+    2,
+    "a skip reads src/os/probe\\.ts: lingerEnabled, which carries systemd's sign"
+  ],
+  "r1169w-z1b-switch-no-break": [
+    2,
+    "a skip reads src/os/probe\\.ts: lingerEnabled, which carries systemd's sign"
+  ],
+  "r1169w-z2-catch-registration": [
+    2,
+    "a skip reads src/os/probe\\.ts: lingerEnabled, which carries systemd's sign"
   ]
 }

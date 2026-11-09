@@ -1,0 +1,6 @@
+import { test, describe, it, beforeEach } from 'node:test';
+import { existsSync } from 'node:fs';
+let booted = false;
+test('probe', () => { booted = existsSync('/run/systemd/system') && !!process.env.NEVER; });
+class Host { static need(t) { if (!booted) t.skip('not a booted host'); } }
+test('acceptance: the engine unit starts', (t) => { Host.need(t); });

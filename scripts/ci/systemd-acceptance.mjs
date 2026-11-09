@@ -16,7 +16,9 @@
 // closed) runs code that reads what carries the sign and mentions skip or todo in any form (a property, a key, a
 // string): its own function with every function in it, each same-file function that code names, at any depth, and
 // the hooks (before, beforeEach, after, afterEach) of each block around it, so a stop through a helper, a bound or
-// computed t.skip, a loop, a label or a hook is judged here too. Each runs here. Its whole
+// computed t.skip, a loop, a label or a hook is judged here too; a function passed by name is its own, and a
+// same-file object or class it names brings all its methods (R1169w D1); and code that reads what carries the sign
+// and starts subtests (R1169w D4: a loop or an exit around them is the zero-subtest rule's here). Each runs here. Its whole
 // file runs at once with no name filter, and each such test must have run and passed with no skip or todo, all of it,
 // matched by built file, line and column as a gate is; and one whose function reads `test` on its context (a subtest)
 // must have run one (the owner's option (b): no zero subtests). So a test that detects systemd and skips, marks itself
@@ -47,8 +49,13 @@
 // it is a fixed table: a const array or object literal with no spread); each earlier statement in any block around it
 // (a function's, a label's, the file's) that can return, break, continue or throw under a condition; and through a
 // function, the same where it's called (an IIFE, a callback's call and its receiver, a same-file function at each
-// call; one used otherwise as a value stops the job), and an earlier process.exit()/abort() under a condition, or a
-// same-file function that ends the process (R1169w); process.getBuiltinModule() is a load as require() is. A subtest's (`t.test`, a test() inside a test) is read up to its
+// call; one used otherwise as a value stops the job; one in a method, a constructor or kept as a property stops it
+// too, R1169w D3), and an earlier process.exit()/abort() under a condition, or a
+// same-file function that ends the process (R1169w); process.getBuiltinModule() is a load as require() is. node:test
+// re-exported, or loaded (by name, or a module named at run time) where no declaration binds it (`import(...).then`,
+// an argument), stops the job (R1169w D2); a module named at run time is read as node:test for its test/describe
+// calls. A registration's function is its own inline, or one this file declares named there; any other (an import,
+// a parameter, a call's result) stops the job (R1169w D1). A subtest's (`t.test`, a test() inside a test) is read up to its
 // test's function. A parameter is what each call passes in its place; one of a function that is exported, used as a
 // value or called with a spread, read by a skip or such a condition, stops the job. Options by name must be a const
 // object literal used only as options; any other stops the job (it could be set after: `Object.defineProperty`).
@@ -64,7 +71,9 @@
 // property of an object that holds the context, isn't counted); a registration in another module (a helper module's
 // exported function, called from here under a condition, is read only as a call); a skip or todo spelled from
 // parts (`t['sk' + 'ip']`, deliberate, as a split sign is); and a throw at load that something catches (one that
-// isn't caught fails its file, which isn't silent; a process.exit() before a registration is read, R1169w). #1250 tracks measuring the
+// isn't caught fails its file, which isn't silent; a process.exit() before a registration is read, R1169w), or an
+// expression in a try that throws on what carries the sign before a registration in it (R1169w R14: any call can
+// throw); and a module named at run time used other than through its calls (an alias of its test). #1250 tracks measuring the
 // alternative, the whole suite on the VM. A test that passes without checking (an early return on the VM's answer)
 // does run on the VM, where it checks for real.
 //
@@ -483,11 +492,13 @@ export function fileFlow(ts, path, text, source) {
           d.varDecl = n;
           const init = n.initializer && unparen(n.initializer);
           if (ts.isIdentifier(n.name) && init && (ts.isArrowFunction(init) || ts.isFunctionExpression(init))) d.fnNode = init;
+          else if (ts.isIdentifier(n.name) && init && (ts.isObjectLiteralExpression(init) || ts.isClassExpression(init))) d.holder = init;
         }
       } else add(scope, n.name, null, null);
     } else if ((ts.isFunctionDeclaration(n) || ts.isClassDeclaration(n)) && n.name) {
       const d = add(scopeOf(n), n.name, null, n);
       if (ts.isFunctionDeclaration(n) && n.body) d.fnNode = n;
+      else if (ts.isClassDeclaration(n)) d.holder = n;
     } else if (ts.isParameter(n)) {
       const ds = declAll(n.parent, n.name, n.initializer ?? null);
       for (const d of ds) d.param = true;
@@ -596,7 +607,11 @@ export function fileFlow(ts, path, text, source) {
     if (ts.isIdentifier(o) && testValue(o) === 'space') return /^(?:test|it|default)$/.test(nm) ? 'test' : /^(?:describe|suite)$/.test(nm) ? 'suite' : null;
     // Another object's test(name, ..., fn): a subtest (`t.test`, `t['test']`), not a regex's `.test(s)`.
     const last = n.arguments[n.arguments.length - 1];
-    return /^(?:test|it|describe|suite)$/.test(nm) && n.arguments.length >= 2 && last && (ts.isArrowFunction(last) || ts.isFunctionExpression(last) || (ts.isIdentifier(last) && !!resolve(last)?.fnNode)) ? 'sub' : null;
+    // A module named at run time could be node:test (R1169w D2): its test/describe calls are registrations, read in full.
+    if (ts.isIdentifier(o) && resolve(o)?.binding?.startsWith('?: ')) return /^(?:test|it|default)$/.test(nm) ? 'test' : /^(?:describe|suite)$/.test(nm) ? 'suite' : null;
+    // A function by name counts on a context (a parameter, `t.test(name, body)`), not on product code's own `this.test(...)`.
+    const named = !!last && ts.isIdentifier(last) && ts.isIdentifier(o) && (!!resolve(last)?.fnNode || !!resolve(o)?.param);
+    return /^(?:test|it|describe|suite)$/.test(nm) && n.arguments.length >= 2 && last && (ts.isArrowFunction(last) || ts.isFunctionExpression(last) || named) ? 'sub' : null;
   };
   const sourceOf = (b) => source.carries(b.slice(0, b.lastIndexOf(': ')), b);
   const tainted = new Set();
@@ -651,7 +666,24 @@ export function fileFlow(ts, path, text, source) {
     if (exported.has(name)) return one(exported.get(name)());
     return reexportAll.length ? reexportAll.some((m) => source.carries(m, `${m}: ${name}`)) : true;
   };
-  return { sf, resolve, tainted, carries, sourceOf, chain, exportCarries, refsOf, fnDecl, callbackSources, testValue, callKind };
+  /**
+   * A registration's own function (R1169w D1): its last argument when that is a function, or a function this file
+   * defines named there (`test(name, body)`); `null` when it has none (options or a name last: a todo); `undefined`
+   * when it is some other value this can't read (an import, a parameter, a call), which the static pass refuses.
+   */
+  const testFn = (n) => {
+    const last = n.arguments[n.arguments.length - 1];
+    if (!last || n.arguments.length < 2 && (ts.isStringLiteralLike(last) || ts.isTemplateExpression(last))) return null;
+    if (ts.isArrowFunction(last) || ts.isFunctionExpression(last)) return last;
+    if (ts.isObjectLiteralExpression(last) || ts.isStringLiteralLike(last) || ts.isTemplateExpression(last)) return null;
+    if (ts.isIdentifier(last)) {
+      const d = resolve(last);
+      if (d?.fnNode) return d.fnNode;
+      if (d?.varDecl?.initializer && ts.isObjectLiteralExpression(d.varDecl.initializer)) return null;
+    }
+    return undefined;
+  };
+  return { sf, resolve, tainted, carries, sourceOf, chain, exportCarries, refsOf, fnDecl, callbackSources, testValue, callKind, testFn };
 }
 
 /**
@@ -663,7 +695,7 @@ export function fileFlow(ts, path, text, source) {
 export function skipReads(ts, path, text, source) {
   const done = (out, pins, refused) => Object.defineProperties(out, { pins: { value: pins, enumerable: false }, refused: { value: refused, enumerable: false } });
   if (!/\b(?:skip|todo|test|it|describe|suite)\b|node:test/.test(text)) return done([], new Map(), []);
-  const { sf, resolve, tainted, sourceOf, chain, refsOf, fnDecl, callbackSources, testValue, callKind } = fileFlow(ts, path, text, source);
+  const { sf, resolve, tainted, sourceOf, chain, refsOf, fnDecl, callbackSources, testValue, callKind, testFn } = fileFlow(ts, path, text, source);
   const out = new Set();
   const pins = new Map();
   const refused = new Set();
@@ -749,6 +781,28 @@ export function skipReads(ts, path, text, source) {
     // Another member: on test/describe, only a hook, mock or snapshot (never .call, .apply or .bind, which register
     // a test this can't read); on the module, any export but those above.
     return v === 'space' ? !/^(?:call|apply|bind)$/.test(nm) : /^(?:before|after|beforeEach|afterEach|mock|snapshot)$/.test(nm);
+  };
+  // node:test loaded where this can't bind it (R1169w D2): re-exported (`export ... from 'node:test'`), or a load of it
+  // (or of a module named at run time, which could be it) whose result no declaration binds directly: `.then`,
+  // `Promise.resolve(import(...))`, an argument. A 'node:test' string that loads nothing (data, `.includes(...)`) is
+  // no registration.
+  const refusedLoad = (n) => {
+    if (ts.isExportDeclaration(n) && n.moduleSpecifier && ts.isStringLiteralLike(n.moduleSpecifier) && n.moduleSpecifier.text === 'node:test') return true;
+    if (!ts.isCallExpression(n) || !isLoader(n.expression) || !n.arguments.length) return false;
+    const a = n.arguments[0];
+    if (ts.isStringLiteralLike(a) && a.text !== 'node:test') return false;
+    let x = n;
+    const through = (y) => ts.isAwaitExpression(y) || ts.isParenthesizedExpression(y) || ts.isAsExpression(y) || ts.isTypeAssertionExpression?.(y) || ts.isNonNullExpression(y) || ts.isSatisfiesExpression?.(y);
+    while (x.parent && (through(x.parent) || (ts.isPropertyAccessExpression(x.parent) && x.parent.expression === x && x.parent.name.text === 'default'))) x = x.parent;
+    const p = x.parent;
+    const bound = (ts.isVariableDeclaration(p) && p.initializer === x) || (ts.isBinaryExpression(p) && p.operatorToken.kind === ts.SyntaxKind.EqualsToken && p.right === x && ts.isIdentifier(p.left));
+    // node:test by name must be bound directly; a module named at run time only escapes the binder through a promise's
+    // callback or as an argument (`import(x).then(...)`, `f(import(x))`); a member read of it is a call on it.
+    if (ts.isStringLiteralLike(a)) return !bound;
+    return !bound && ((ts.isPropertyAccessExpression(p) && p.expression === x && /^(?:then|catch|finally)$/.test(p.name.text)) || (ts.isCallExpression(p) && p.arguments.includes(x)));
+  };
+  const isLoader = (c) => {
+    return c.kind === ts.SyntaxKind.ImportKeyword || (ts.isIdentifier(c) && /^(?:require|getBuiltinModule)$/.test(c.text)) || (ts.isPropertyAccessExpression(c) && /^(?:getBuiltinModule|require)$/.test(c.name.text)) || (ts.isCallExpression(c) && ts.isIdentifier(c.expression) && c.expression.text === 'createRequire') || (ts.isIdentifier(c) && !!resolve(c)?.varDecl?.initializer && ts.isCallExpression(resolve(c).varDecl.initializer) && ts.isIdentifier(resolve(c).varDecl.initializer.expression) && resolve(c).varDecl.initializer.expression.text === 'createRequire');
   };
   const statement = (call) => {
     let x = call;
@@ -881,6 +935,9 @@ export function skipReads(ts, path, text, source) {
           continue;
         }
         const d = fnDecl(p);
+        // A method, a constructor, an accessor or a function stored as a property (R1169w D3): its callers can't be
+        // followed by name, so it isn't read: refused, failing closed.
+        if (!d) refused.add(`${at(call)}: \`${snip(call)}\` registers a test inside a method, a constructor or a function kept as a property, whose callers this can't follow: register it from a function this file declares, or at the top level`);
         if (d && !seen.has(d)) {
           seen.add(d);
           for (const r of refsOf(d)) {
@@ -904,8 +961,13 @@ export function skipReads(ts, path, text, source) {
       const v = testValue(n);
       if ((v === 'test' || v === 'suite' || v === 'space') && !allowed(n, v)) refused.add(`${at(n)}: \`${snip(n.parent)}\` uses node:test's ${n.text} as a value: register a test only by calling it (\`${n.text}(...)\`, \`${n.text}.skip(...)\`), so this can read each one`);
     }
+    // node:test named where this can't bind it (R1169w D2): a 'node:test' string that isn't a static import's, or a
+    // require(), import() or getBuiltinModule() whose result a declaration binds directly (`.then`, a re-export,
+    // `module.require`, anything later): refused, failing closed.
+    if (refusedLoad(n)) refused.add(`${at(n)}: \`${snip(n.parent)}\` names node:test where this can't bind it: import it (\`import { test } from 'node:test'\`, or a declaration of require(), import() or getBuiltinModule()), so each registration is read`);
     const kind = callKind(n);
     if (kind) {
+      if (testFn(n) === undefined) refused.add(`${at(n)}: \`${snip(n)}\` registers a test whose function isn't one this file defines (an import, a parameter, a call's result), so what it runs can't be read: pass the function inline, or one this file declares`);
       if (kind !== 'sub' && !statement(n)) refused.add(`${at(n)}: \`${snip(n)}\` registers a test inside an expression: register it as a statement of its own, so this can read what decides it`);
       const sub = kind === 'sub' || insideTest(n);
       const conds = conditionsOf(n, !sub);
@@ -1016,7 +1078,7 @@ export function signProblems(ts, texts, allow = {}) {
  */
 export function signTests(ts, path, text, source, all = false) {
   if (!all && !maySign(text) && !/\b(?:import|require)\b/.test(text)) return [];
-  const { sf, resolve, tainted, sourceOf, callKind, refsOf, testValue } = fileFlow(ts, path, text, source);
+  const { sf, resolve, tainted, sourceOf, callKind, refsOf, testValue, testFn } = fileFlow(ts, path, text, source);
   const isTestCall = (_, n) => callKind(n) === 'test';
   const isSuiteCall = (_, n) => callKind(n) === 'suite';
   const carriesHere = (node) => {
@@ -1131,7 +1193,9 @@ export function signTests(ts, path, text, source, all = false) {
       const f = stack.pop();
       const w = (y) => {
         if (ts.isIdentifier(y) && isRef(ts, y)) {
-          const g = resolve(y)?.fnNode;
+          // A same-file function, or (R1169w D1) a same-file object or class it names: all its methods with it.
+          const d = resolve(y);
+          const g = d?.fnNode ?? d?.holder;
           if (g && !seen.has(g)) (seen.add(g), stack.push(g));
         }
         ts.forEachChild(y, w);
@@ -1167,9 +1231,11 @@ export function signTests(ts, path, text, source, all = false) {
     walk(node);
     return hit;
   };
+  // R1169w D4: and a test that starts subtests in code reading what carries the sign: whether (or how many) they run
+  // may turn on it (a loop, an early return), which the zero-subtest rule and the run judge here.
   const coarse = (call, fn) => {
     const code = reach([fn, ...hooksAround(call)]);
-    return code.some(carriesHere) && code.some(mentions);
+    return code.some(carriesHere) && (code.some(mentions) || startsSubtests(fn));
   };
   const out = [];
   // A test whose name holds the sign, or any test under a suite whose name does: its function can read the name back
@@ -1181,7 +1247,8 @@ export function signTests(ts, path, text, source, all = false) {
       return ts.forEachChild(n, (x) => visit(x, signed));
     }
     if (isTestCall(ts, n)) {
-      const fn = ownFunction(ts, n);
+      // Its own function, inline or a function this file declares, named there (R1169w D1).
+      const fn = testFn(n) || null;
       const name = nameArg(ts, n);
       if (fn && (all || holdsSign(fn) || guarded(fn) || signSuite || (name && holdsSign(name)) || coarse(n, fn))) {
         const { line, character } = sf.getLineAndCharacterOfPosition(n.expression.getStart(sf));

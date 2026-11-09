@@ -1,0 +1,8 @@
+import { test } from 'node:test';
+import { lingerEnabled } from '../src/os/probe.js';
+class Reg {
+  static run() {
+    test('acceptance: linger', () => {});
+  }
+}
+if (lingerEnabled() !== null) Reg.run();
