@@ -135,3 +135,19 @@ test("a module reads only its own tables file, by its own URL: no path is writte
   assert.throws(() => tablesOf(pathToFileURL(join(repoRoot, 'dist', 'src', 'no-such-module.js')).href), /ENOENT/);
   assert.throws(() => tablesFrom(one([]), 'x.tables.json').get('MISSING'), /has no table MISSING/);
 });
+
+test("OPEN (R1184p P1, the owner's call): a built-in the loader calls, replaced before a load, changes what the load returns, frozen like any table", () => {
+  const parse = JSON.parse;
+  try {
+    JSON.parse = ((t: string) => {
+      const v = parse(t) as Record<string, { value: unknown[] }>;
+      if (v.T) v.T.value = ['a'];
+      return v;
+    }) as typeof JSON.parse;
+    const t = tablesFrom(one(['a', 'b', 'c']), 'p1.tables.json').get<readonly string[]>('T');
+    assert.deepEqual([t, Object.isFrozen(t)], [['a'], true], 'open today: the load returned the replaced data');
+  } finally {
+    JSON.parse = parse;
+  }
+  assert.deepEqual(tablesFrom(one(['a', 'b', 'c']), 'p1.tables.json').get('T'), ['a', 'b', 'c'], 'restored');
+});
