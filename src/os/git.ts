@@ -145,9 +145,11 @@ const REFUSED_KEYS: readonly (readonly [RegExp, string])[] = Object.freeze(
 /**
  * What is wrong with the git guard's tables (#941, R1184l): a key GIT_GUARD_PAIRS sets twice (git takes a key's last
  * value, so a pair added later would override the guard's own: `core.fsmonitor` set again to a command), compared
- * folded to lower case as git folds a section and a name (a subsection's case too, which only refuses more); a pattern
- * REFUSED_KEYS lists twice. So the order of distinct pairs doesn't matter, and the parsed compare's multiset reading
- * holds. Checked at load (it throws: no guarded git runs on such a table); test/check-tables-sync.test.ts tries each.
+ * folded to lower case as git folds a section and a name (a subsection's case too, which only refuses more); a key
+ * REFUSED_KEYS names (R1184m: `include.path` reads in a file whose keys come after the guard's); a pattern REFUSED_KEYS
+ * lists twice. GIT_GUARD_PAIRS is also `exact` in its data, so any pair added, taken out or changed waits for the owner
+ * (R1184n: a new key, such as a URL-scoped credential helper, adds a command with no repeat). Checked at load (it
+ * throws: no guarded git runs on such a table); test/check-tables-sync.test.ts tries each.
  */
 export function gitTableProblems(pairs: readonly (readonly [string, string])[] = GIT_GUARD_PAIRS, refused: readonly (readonly [RegExp, string])[] = REFUSED_KEYS): string[] {
   const out: string[] = [];
@@ -155,6 +157,10 @@ export function gitTableProblems(pairs: readonly (readonly [string, string])[] =
   for (const [k] of pairs) {
     if (seen.has(k.toLowerCase())) out.push(`GIT_GUARD_PAIRS sets ${k} more than once`);
     seen.add(k.toLowerCase());
+    // A key a config file may not set is one the guard may not set either (R1184m: `include.path` reads another file
+    // in, whose keys come after the guard's).
+    const refusedAs = refused.find(([re]) => re.test(k.toLowerCase()));
+    if (refusedAs) out.push(`GIT_GUARD_PAIRS sets ${k}, ${refusedAs[1]}`);
   }
   const patterns = new Set<string>();
   for (const [re] of refused) {

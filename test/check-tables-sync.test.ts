@@ -60,3 +60,9 @@ test("GIT_GUARD_PAIRS: a key set twice is refused (git takes a key's last value)
   assert.deepEqual(gitTableProblems([...GIT_GUARD_PAIRS, ['Credential.Helper', '!x']]), ['GIT_GUARD_PAIRS sets Credential.Helper more than once']);
   assert.deepEqual(gitTableProblems(GIT_GUARD_PAIRS, [[/^a$/, 'x'], [/^a$/, 'y']]), ['REFUSED_KEYS lists ^a$ more than once']);
 });
+
+test("GIT_GUARD_PAIRS may not set a key REFUSED_KEYS names: include.path or includeIf reads another file in after the guard's keys (#941, R1184m 2)", () => {
+  assert.deepEqual(gitTableProblems([...GIT_GUARD_PAIRS, ['include.path', '/tmp/evil.gitconfig']]), ['GIT_GUARD_PAIRS sets include.path, which reads another file in as config']);
+  assert.equal(gitTableProblems([...GIT_GUARD_PAIRS, ['includeIf.gitdir:/x/.path', '/tmp/e']]).length, 1);
+  assert.equal(gitTableProblems([...GIT_GUARD_PAIRS, ['url.https://evil/.insteadOf', 'https://github.com/']]).length, 1);
+});
