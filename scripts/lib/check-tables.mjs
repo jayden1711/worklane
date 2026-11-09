@@ -17,6 +17,8 @@ const isObject = (v) => typeof v === 'object' && v !== null && !Array.isArray(v)
 
 /** `v` with every comment key taken out, checked as src/check-tables.ts dataOf. */
 function dataOf(v, at) {
+  // A number JSON can't hold (1e400 parses to Infinity) or -0 would compare as another value (null, 0): refused.
+  if (typeof v === 'number' && (!Number.isFinite(v) || Object.is(v, -0))) throw new Error(`${at}: a number that isn't finite, or -0`);
   if (Array.isArray(v)) return v.map((x, k) => dataOf(x, `${at}[${k}]`));
   if (!isObject(v)) return v;
   const keys = Object.keys(v).filter((k) => k !== COMMENT);

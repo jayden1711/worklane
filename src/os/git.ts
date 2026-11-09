@@ -142,6 +142,29 @@ const REFUSED_KEYS: readonly (readonly [RegExp, string])[] = Object.freeze(
   TABLES.get<readonly (readonly [Pattern, string])[]>('REFUSED_KEYS').map(([p, why]) => Object.freeze([regExpOf(p), why] as const)),
 );
 
+/**
+ * What is wrong with the git guard's tables (#941, R1184l): a key GIT_GUARD_PAIRS sets twice (git takes a key's last
+ * value, so a pair added later would override the guard's own: `core.fsmonitor` set again to a command), compared
+ * folded to lower case as git folds a section and a name (a subsection's case too, which only refuses more); a pattern
+ * REFUSED_KEYS lists twice. So the order of distinct pairs doesn't matter, and the parsed compare's multiset reading
+ * holds. Checked at load (it throws: no guarded git runs on such a table); test/check-tables-sync.test.ts tries each.
+ */
+export function gitTableProblems(pairs: readonly (readonly [string, string])[] = GIT_GUARD_PAIRS, refused: readonly (readonly [RegExp, string])[] = REFUSED_KEYS): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const [k] of pairs) {
+    if (seen.has(k.toLowerCase())) out.push(`GIT_GUARD_PAIRS sets ${k} more than once`);
+    seen.add(k.toLowerCase());
+  }
+  const patterns = new Set<string>();
+  for (const [re] of refused) {
+    if (patterns.has(re.source)) out.push(`REFUSED_KEYS lists ${re.source} more than once`);
+    patterns.add(re.source);
+  }
+  return out;
+}
+if (gitTableProblems().length) throw new Error(`src/os/git.ts's data: ${gitTableProblems().join('; ')}`);
+
 /** A mark's value that marks: '1', or an absolute path (the checkout). */
 const marks = (v: string | undefined): v is string => v === '1' || (!!v && isAbsolute(v));
 

@@ -9,13 +9,14 @@ import { neverLoosenProblems, NEVER_LOOSEN } from '../src/delegation.js';
 import { redactTableProblems } from '../src/events/redact.js';
 import { HOOK_IMPORTS } from '../src/hook-imports.js';
 import { floorProblems } from '../src/merge-policy.js';
+import { GIT_GUARD_PAIRS, gitTableProblems } from '../src/os/git.js';
 import { DECISION_RECORD_GLOBS, DECISION_RECORDS_PART, HARNESS_CONFIG, LOCKED_CATEGORIES, lockDataProblems, SELF_MODIFICATION, SELF_MODIFICATION_PARTS, TOOL_GUARD_PART } from '../src/review.js';
 
 /** A deep, mutable copy. */
 const copy = <T>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
 
 test('the written-out tables hold what they were built from (#941)', () => {
-  assert.deepEqual([neverLoosenProblems(), floorProblems(), lockDataProblems(), redactTableProblems()], [[], [], [], []]);
+  assert.deepEqual([neverLoosenProblems(), floorProblems(), lockDataProblems(), redactTableProblems(), gitTableProblems()], [[], [], [], [], []]);
 });
 
 test('NEVER_LOOSEN and FLOOR: an odd path or the diff-hiding mark missing is named (#941)', () => {
@@ -52,4 +53,10 @@ test('BROAD_RULES, the dashboard key and the glued prefixes: a drift is named (#
   assert.deepEqual(redactTableProblems([p], [b], [p, { re: b.re, rep: '$1 {mask}' }], ['wld_']), ["BROAD_RULES isn't PATTERNS' rules then BROAD's"]);
   assert.deepEqual(redactTableProblems([{ ...p, re: { source: 'x', flags: 'g' } }], [], [{ ...p, re: { source: 'x', flags: 'g' } }], ['wld_']), ["PATTERNS' first isn't the dashboard key's"]);
   assert.deepEqual(redactTableProblems([p], [], [p], ['ghp_']), ["GLUED_PREFIXES doesn't end with DASHBOARD_KEY_PREFIX"]);
+});
+
+test("GIT_GUARD_PAIRS: a key set twice is refused (git takes a key's last value), however it is cased; so is a pattern REFUSED_KEYS lists twice (#941, R1184l)", () => {
+  assert.deepEqual(gitTableProblems([...GIT_GUARD_PAIRS, ['core.fsmonitor', '/tmp/x']]), ['GIT_GUARD_PAIRS sets core.fsmonitor more than once']);
+  assert.deepEqual(gitTableProblems([...GIT_GUARD_PAIRS, ['Credential.Helper', '!x']]), ['GIT_GUARD_PAIRS sets Credential.Helper more than once']);
+  assert.deepEqual(gitTableProblems(GIT_GUARD_PAIRS, [[/^a$/, 'x'], [/^a$/, 'y']]), ['REFUSED_KEYS lists ^a$ more than once']);
 });

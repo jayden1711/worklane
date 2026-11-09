@@ -15,7 +15,8 @@
 // A string may hold `{configDir}` or `{cli}`: BRAND's config folder and CLI name, put in at load (the product name
 // lives only in src/brand.ts); a `$regexp`'s source never has them filled in. The hold compares the text as written.
 //
-// Anything else fails to load: a key or a tag not listed here, a kind not listed, a `$regexp` that doesn't compile. (A
+// Anything else fails to load: a key or a tag not listed here, a kind not listed, a `$regexp` that doesn't compile, a
+// number that isn't finite (1e400) or is -0 (either would compare as another value). (A
 // `__proto__` key is an own key like any other: objects are made with Object.fromEntries, never by assignment.)
 // The hold reads the file with the same parser (parseTables), so a file that can't load waits.
 // scripts/lib/check-tables.mjs is the same loader for the scripts that run without a build; test/check-tables.test.ts
@@ -49,6 +50,8 @@ const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'obj
  * Throws, naming where, on anything else.
  */
 function dataOf(v: unknown, at: string): unknown {
+  // A number JSON can't hold (1e400 parses to Infinity) or -0 would compare as another value (null, 0): refused.
+  if (typeof v === 'number' && (!Number.isFinite(v) || Object.is(v, -0))) throw new Error(`${at}: a number that isn't finite, or -0`);
   if (Array.isArray(v)) return v.map((x, k) => dataOf(x, `${at}[${k}]`));
   if (!isObject(v)) return v;
   const keys = Object.keys(v).filter((k) => k !== COMMENT);
