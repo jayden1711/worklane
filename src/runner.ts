@@ -4,19 +4,20 @@
 // git credential helper, no SSH agent, so an agent can't push or write to
 // GitHub even if it tries. It proposes; the coordinator acts.
 import { spawn, spawnSync } from './os/child-process.js';
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { makePlace } from './worktrees.js';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
-import { join, posix } from 'node:path';
+import { dirname, join, posix } from 'node:path';
 import { agentSettingsFileOf, projectSettingsRefusal, runSettings, settingsAppliedProblem, settingsCheckValue, type Settings, withRunCheck } from './agent-settings.js';
 import { BRAND } from './brand.js';
 import type { CliAgentName } from './providers.js';
 import { logRefusalOnce, providerHostRefusal } from './provider-hosts.js';
 import { safeProjectEnv } from './project-env.js';
 import { withoutPushGateHatch } from './guardrails/push-hook.js';
-import { outboundEnv } from './network.js';
-import { asUser, killTree, killTreeAs, spawnDetached } from './os/index.js';
+import { engineGitConfig, outboundEnv } from './network.js';
+import { asUser, killTree, killTreeAs, spawnDetached, which } from './os/index.js';
+import { LFS_STANDARD } from './scan/secrets.js';
 import { ownEnv, type EnvSource, type OwnEnv } from './os/own-env.js';
 import { RunRecorder, runIssue } from './run-record.js';
 import { RunFeed } from './run-feed.js';
@@ -213,6 +214,46 @@ export function agentBase(base: EnvSource, route: 'provider' | 'key-file' | 'pla
 }
 
 /**
+ * The global git config of an agent run (#983, R1124p F3): the large-file filter exactly as `git lfs install` writes
+ * it (LFS_STANDARD, the one the commit scan allows) when `git-lfs` is on `path`, so an agent's commit stores an
+ * LFS-tracked file as a pointer, as the person's own git does; otherwise nothing. No other user setting.
+ */
+export function agentGitConfigText(lfs: boolean): string {
+  const lines = [`# ${BRAND.cli}: the global git config of every agent run (GIT_CONFIG_GLOBAL). Read-only.`];
+  if (lfs) {
+    lines.push('[filter "lfs"]');
+    for (const [k, v] of Object.entries(LFS_STANDARD)) lines.push(`\t${k.slice('filter.lfs.'.length)} = ${v}`);
+  }
+  return `${lines.join('\n')}\n`;
+}
+
+const agentGitConfigs = new Map<string, string>();
+
+/**
+ * The file agentGitConfigText writes, read-only in a directory of its own (0555): made by this process, so an agent
+ * user can read it but never change it. One per text per process, written again if something removed it. Named
+ * `git/config` so the guard's config shapes cover a write to it.
+ */
+export function agentGitConfig(path: string): string {
+  const text = agentGitConfigText(which('git-lfs', path) !== null);
+  const known = agentGitConfigs.get(text);
+  try {
+    if (known && readFileSync(known, 'utf8') === text) return known;
+  } catch {
+    // gone (a tmp cleaner): written again below
+  }
+  const dir = mkdtempSync(join(tmpdir(), `${BRAND.cli}-agent-`));
+  const file = join(dir, 'git/config');
+  mkdirSync(dirname(file));
+  writeFileSync(file, text);
+  chmodSync(file, 0o444);
+  chmodSync(dirname(file), 0o555);
+  chmodSync(dir, 0o555);
+  agentGitConfigs.set(text, engineGitConfig(file));
+  return file;
+}
+
+/**
  * The agent's whole environment. Anything not listed is dropped, which
  * removes GitHub tokens, cloud keys, database URLs and the SSH agent.
  */
@@ -231,6 +272,11 @@ export function agentEnv(base: EnvSource, runtime: 'cli' | 'api_key', extra: Rec
     // gh: an empty config dir means no stored login.
     GH_CONFIG_DIR: mkdtempSync(join(tmpdir(), 'no-gh-')),
     ...extra,
+    // #983 (the owner's decision 6c): git reads no user config in an agent run (~/.gitconfig, ~/.config/git/config),
+    // whatever an agent writes there, only the harness's own file (agentGitConfig). After `extra`, so nothing passed in
+    // undoes it. What an agent's shell sets it to can't move an instance checkout's hooks: the checkout's own config
+    // names them (install.ts pinCheckoutHooks), and git ranks that above any global file.
+    GIT_CONFIG_GLOBAL: agentGitConfig(ownEnv(base).get('PATH') ?? ''),
   });
   // INVARIANT: no redirecting variable, whatever `base` or `extra` holds; a proxy only from root's network.json
   // (src/network.ts). A provider run's endpoint is set by the runner after this, from agents.yaml's provider.

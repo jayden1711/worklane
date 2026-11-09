@@ -216,6 +216,7 @@ const AGENT_ENV = {
   GIT_TERMINAL_PROMPT: '0',
   GIT_ASKPASS: 'false',
   GIT_CONFIG_COUNT: '1',
+  GIT_CONFIG_GLOBAL: '<tmp>/<cli>-agent-XXXXXX/git/config',
   GIT_CONFIG_KEY_0: 'credential.helper',
   GIT_CONFIG_VALUE_0: '',
   GH_CONFIG_DIR: '<tmp>/no-gh-XXXXXX',
@@ -246,7 +247,7 @@ const sudoTo = (extra: string[]) => [
 ];
 const sudoAgentHome = [
   'CLAUDE_CONFIG_DIR=<case>/userhome/.claude', 'XDG_CONFIG_HOME=<case>/userhome/.config', 'XDG_DATA_HOME=<case>/userhome/.local/share', 'XDG_CACHE_HOME=<case>/userhome/.cache', 'XDG_STATE_HOME=<case>/userhome/.local/state',
-  'GIT_CONFIG_KEY_0=credential.helper', 'GIT_CONFIG_VALUE_0=', 'GIT_CONFIG_KEY_1=safe.directory', 'GIT_CONFIG_VALUE_1=*',
+  'GIT_CONFIG_GLOBAL=<tmp>/<cli>-agent-XXXXXX/git/config', 'GIT_CONFIG_KEY_0=credential.helper', 'GIT_CONFIG_VALUE_0=', 'GIT_CONFIG_KEY_1=safe.directory', 'GIT_CONFIG_VALUE_1=*',
 ];
 const sudoFullRequest = [...sudoTo(['PROJECT_VAR=one']), '<PREFIX>_TASK_FILE=<case>/task.md', '<PREFIX>_PROJECT_STATE_DIR=<case>/state', '<PREFIX>_ALLOW_HOSTS=example.org', ...sudoAgentHome];
 const sudoPlain = [...sudoTo([]), ...sudoAgentHome];
