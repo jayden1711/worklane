@@ -664,6 +664,47 @@ test("R1124t: a repository of the agent's own whose links reach the checkout's r
   assert.match(await decideWhy(r, 'git commit -m wip'), /^deny: .*as a link elsewhere/, 'git init --separate-git-dir, links below the top level');
 });
 
+test("R1124v: a repository of the agent's own is refused for a refs link deeper than the guard reads, for objects/xx alone linked, and for an objects/pack file alone linked", { skip }, async () => {
+  const d = checkout();
+  const root = dirname(d);
+  const real = join(d, '.git');
+  git(d, 'branch', `${BRAND.cli}/task-1`);
+  git(d, 'repack', '-adq');
+  /** `git init --separate-git-dir`: a repository of the agent's own, with a file staged to commit. */
+  const own = (name: string) => {
+    const r = join(root, `${name}-r`);
+    const f = join(root, `${name}-f`);
+    execFileSync('git', ['init', '-q', '--separate-git-dir', f, r]);
+    cpSync(join(repoRoot, 'examples', 'basic', '.worklane'), join(r, BRAND.configDir), { recursive: true });
+    writeFileSync(join(r, 'ok.js'), 'export const y = 2;\n');
+    git(r, 'add', 'ok.js');
+    return { r, f };
+  };
+  // R1124v F1: the task branches' folder linked 70 levels under refs/heads/ (past the 64 the guard reads), objects
+  // borrowed read-only through alternates (no link at all there).
+  const deep = own('deep');
+  const D = Array.from({ length: 70 }, () => 'd').join('/');
+  writeFileSync(join(deep.f, 'objects', 'info', 'alternates'), `${join(real, 'objects')}\n`);
+  mkdirSync(join(deep.f, 'refs', 'heads', D), { recursive: true });
+  symlinkSync(join(real, 'refs', 'heads', BRAND.cli), join(deep.f, 'refs', 'heads', D, BRAND.cli));
+  writeFileSync(join(deep.f, 'HEAD'), `ref: refs/heads/${D}/${BRAND.cli}/task-1\n`);
+  assert.match(await decideWhy(deep.r, 'git commit -m wip'), /^deny: .*\(deeper than the guard reads\) as a link elsewhere/, 'a refs link 70 levels down');
+  // R1124v F2: only objects/xx linked, refs all its own.
+  const obj = own('obj');
+  const xx = readdirSync(join(real, 'objects')).find((n) => /^[0-9a-f]{2}$/.test(n) && !readdirSync(join(obj.f, 'objects')).includes(n)) ?? '00';
+  mkdirSync(join(real, 'objects', xx), { recursive: true });
+  symlinkSync(join(real, 'objects', xx), join(obj.f, 'objects', xx));
+  assert.match(await decideWhy(obj.r, 'git commit -m wip'), new RegExp(`^deny: .*objects/${xx} as a link elsewhere`), 'only objects/xx linked');
+  // R1124v F2: only a pack file linked.
+  const pack = own('pack');
+  const packFile = readdirSync(join(real, 'objects', 'pack')).find((n) => n.endsWith('.pack'))!;
+  symlinkSync(join(real, 'objects', 'pack', packFile), join(pack.f, 'objects', 'pack', packFile));
+  assert.match(await decideWhy(pack.r, 'git commit -m wip'), new RegExp(`^deny: .*objects/pack/${packFile} as a link elsewhere`), 'only an objects/pack file linked');
+  // Control: the same kind of repository with nothing linked commits.
+  const plain = own('plain');
+  assert.equal(await decideWhy(plain.r, 'git commit -m wip'), 'allow', 'control: a repository of its own with no links');
+});
+
 test('R1124p F2: every word of sort, uniq and tree is a write destination, however their options are spelt', { skip }, async () => {
   const d = checkout();
   for (const line of [
