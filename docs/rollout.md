@@ -74,8 +74,11 @@ when it was merged after the flip (by its own `merged_at` when it has one).
 
 Only then is the next ring turned on. **Out of order** is judged from the flip history, not today's state: a ring
 turned on before the ring before it was promoted (its hours done and its `min_merges`-th merge) stays out of order
-once that ring is promoted, until the flag goes off there and on again. A ring that was rolled back, then turned on
-again, says so in its `why` ("rolled back before").
+once that ring is promoted, until the flag goes off there and on again. A ring rolled back for a bad sign in the log
+(auto-merge stopped, the default branch red or timed out, the config invalid, a machine fault, an unclean stop), then
+turned off and on again, says so in its `why` ("rolled back before"). A rollback for a crash loop (restarts without a
+clean stop) or too many coordinator errors leaves no such note once an off with a commit has ended that on-period:
+those are judged within the period, and the next soak starts fresh (the owner's decision, #1231 X5).
 
 A ring with an instance whose log can't be read is **unknown**, never off. It holds every step that turns a ring on,
 and a rollback names it too.
