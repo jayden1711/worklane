@@ -34,10 +34,12 @@ verdict). Workflow: `.github/workflows/soak.yml`.
 | RSS grew, the same way | 256 MB |
 | Open file handles grew, the same way | 32 |
 | Any one sample above the first quarter (memory held mid-run, then let go) | 4× the limit above |
-| `coordinator.error` events after the warm-up (a step failing on every tick, its work still landing) | 0 |
-| The coordinator's git worktrees grew, as open file handles are judged | 4 |
-| This process's live child processes grew, the same way (counted in at least half the samples) | 4 |
-| Disk under the soak's folder per landed task after the warm-up | 2 MB |
+| `coordinator.error` events, agent runs that didn't succeed (or failed to start), and `merge.failed`, `attempt.failed` or `testrun.wipe_failed` events, after the warm-up (the stand-in agents never fail) | 0 |
+| The coordinator's git worktrees grew, and the entries in its worktree folder (a checkout git no longer lists is still there), as open file handles are judged | 2 |
+| The live processes in this process's group grew (a process double-forked away still counts), the same way | 4 |
+| Disk under the soak's folder besides the event log (judged on its own above), per landed task after the warm-up | 64 KB |
+| The same disk, grown or held mid-run, as memory is judged (temp files are made inside the folder) | 256 MB, 4× held |
+| Files and folders under the soak's folder, per landed task after the warm-up | 64 |
 | Agent runs open, at any sample | 0 |
 | Agent slots held, at any sample | 0 |
 | A gap between samples | 3× the sample period, and at least 5 min |
@@ -107,6 +109,10 @@ replaces main's pending scheduled run.
 - **It can't run on a pull request's code with more than read access**, or on a self-hosted runner.
 - **It can't see leaks in what it doesn't run:** real agents' processes, the dashboard, the updater, the hub, or a
   real GitHub's answers. It soaks the coordinator's own loop.
+- **It can't stop code that runs before the soak step from changing what the soak runs, beyond what the step itself
+  holds:** the step calls its tools by absolute path and finds node in setup-node's tool cache, and the download
+  helper calls its tools by absolute path. The steps before it (`npm ci`, which runs package scripts, and the build)
+  are pinned as they are by the frozen acceptance file; tightening them is the owner's decision (#1181 R1181l 1, 2).
 - **It can't show a leak slower than its hours.** Nor can it show a rise inside the first quarter of the run that then
   holds (about the first 80 minutes of a 5.5 h run, measured by R1181e) under 4× its limit: the first quarter is the
   baseline. The 4 GiB heap cap bounds that heap. A leak after a high first quarter is read from the run's low point.

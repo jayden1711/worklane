@@ -6,10 +6,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { EventLog } from '../src/events/log.js';
 import { FakeRunner, type RunRequest } from '../src/runner.js';
 import { slotStatus } from '../src/slots.js';
+import { worktreeDir } from '../src/worktrees.js';
 import { SOAK_LIMITS, openRunsOf, soakVerdict, theilSen, type SoakSample } from '../src/soak.js';
 import { commitAll, coordinator, easyIssue, fixture, git, readAll, skip } from './repro-state-graph/harness.js';
 import { repoRoot } from './helpers.js';
@@ -155,7 +158,7 @@ const SOAK_STEPS: unknown[] = [
       "NODE_OPTIONS": "",
       "BASH_ENV": ""
     },
-    "run": "rm -rf -- \"$SOAK_REPORT_DIR\"\nif ! [[ \"$HOURS\" =~ ^[0-9]+(\\.[0-9]+)?$ ]] || ! awk -v h=\"$HOURS\" 'BEGIN { exit !(h >= 1 && h <= 5.5) }'; then\n  echo \"hours must be a number from 1 to 5.5 (got: $HOURS): a shorter run is no soak\"; exit 2\nfi\nnode_bin=\"$(command -v node)\"\ncase \"$node_bin\" in \"$RUNNER_TOOL_CACHE\"/*) ;; *) echo \"node is $node_bin, not setup-node's (under $RUNNER_TOOL_CACHE)\"; exit 3 ;; esac\nSOAK_HOURS=\"$HOURS\" timeout --signal=INT \"$(awk -v h=\"$HOURS\" 'BEGIN { printf \"%d\", h * 3600 + 900 }')\" \\\n  env -u NODE_TEST_CONTEXT \"$node_bin\" --max-old-space-size=4096 --expose-gc --import ./dist/test/isolate.js --test --test-name-pattern='^soak: the real coordinator' dist/test/soak.test.js\n\"$node_bin\" -e 'const v = JSON.parse(require(\"fs\").readFileSync(process.argv[1], \"utf8\")); if (!Array.isArray(v.failures) || v.failures.length || v.asked !== Number(process.argv[2])) { console.error(`soak failed: ${JSON.stringify(v.failures)} (asked ${v.asked} h of ${process.argv[2]})`); process.exit(1); }' \"$SOAK_REPORT_DIR/soak-verdict.json\" \"$HOURS\"\n"
+    "run": "/bin/rm -rf -- \"$SOAK_REPORT_DIR\"\nif ! [[ \"$HOURS\" =~ ^[0-9]+(\\.[0-9]+)?$ ]] || ! /usr/bin/awk -v h=\"$HOURS\" 'BEGIN { exit !(h >= 1 && h <= 5.5) }'; then\n  echo \"hours must be a number from 1 to 5.5 (got: $HOURS): a shorter run is no soak\"; exit 2\nfi\nnode_bin=\"$(command -v node)\"\ncase \"$node_bin\" in \"$RUNNER_TOOL_CACHE\"/*) ;; *) echo \"node is $node_bin, not setup-node's (under $RUNNER_TOOL_CACHE)\"; exit 3 ;; esac\nSOAK_HOURS=\"$HOURS\" /usr/bin/timeout --signal=INT \"$(/usr/bin/awk -v h=\"$HOURS\" 'BEGIN { printf \"%d\", h * 3600 + 900 }')\" \\\n  /usr/bin/env -u NODE_TEST_CONTEXT \"$node_bin\" --max-old-space-size=4096 --expose-gc --import ./dist/test/isolate.js --test --test-name-pattern='^soak: the real coordinator' dist/test/soak.test.js\n\"$node_bin\" -e 'const v = JSON.parse(require(\"fs\").readFileSync(process.argv[1], \"utf8\")); if (!Array.isArray(v.failures) || v.failures.length || v.asked !== Number(process.argv[2])) { console.error(`soak failed: ${JSON.stringify(v.failures)} (asked ${v.asked} h of ${process.argv[2]})`); process.exit(1); }' \"$SOAK_REPORT_DIR/soak-verdict.json\" \"$HOURS\"\n"
   }
 ];
 
@@ -166,6 +169,8 @@ test('the soak workflow: schedule and dispatch only, read-only, on GitHub-hosted
   const w = parse(text) as Record<string, unknown> & { on: Record<string, unknown>; permissions: unknown; jobs: Record<string, Record<string, unknown> & { steps: Step[] }> };
   // The workflow's keys, exactly: no workflow-level env: or defaults: that could change the step's shell or hours.
   assert.deepEqual(Object.keys(w).sort(), ['concurrency', 'jobs', 'name', 'on', 'permissions']);
+  // Per branch (R1181j N2): a dispatch from another branch never replaces main's pending scheduled run.
+  assert.deepEqual(w.concurrency, { group: 'soak-${{ github.ref }}', 'cancel-in-progress': false });
   assert.deepEqual(Object.keys(w.on).sort(), ['schedule', 'workflow_dispatch'], 'never on a pull request or a push');
   assert.deepEqual(w.permissions, { contents: 'read' });
   assert.deepEqual(Object.keys(w.jobs), ['soak']);
@@ -189,8 +194,11 @@ test('the soak workflow: schedule and dispatch only, read-only, on GitHub-hosted
   assert.match(step.run!, /case "\$node_bin" in "\$RUNNER_TOOL_CACHE"\/\*\) ;; \*\)[^\n]*exit 3 ;; esac/);
   // R1181j 4: the report folder emptied first (a verdict an earlier step left is never the one read), and the soak's
   // node run without NODE_TEST_CONTEXT (with it, node --test runs nothing and exits 0).
-  assert.match(step.run!, /^rm -rf -- "\$SOAK_REPORT_DIR"\n/);
-  assert.match(step.run!, /\n {2}env -u NODE_TEST_CONTEXT "\$node_bin" --max-old-space-size/);
+  assert.match(step.run!, /^\/bin\/rm -rf -- "\$SOAK_REPORT_DIR"\n/);
+  assert.match(step.run!, /\n {2}\/usr\/bin\/env -u NODE_TEST_CONTEXT "\$node_bin" --max-old-space-size/);
+  // R1181l 1: no tool the step runs is looked up on PATH (an earlier step's file in $RUNNER_TEMP/bin stood in for
+  // timeout or env, and the step went green with no soak); node is the one found, then checked against the tool cache.
+  for (const word of step.run!.split(/[\s;|&()$"`]+/)) assert.ok(!['rm', 'awk', 'timeout', 'env', 'mkdir', 'cat', 'sh', 'bash'].includes(word), `a bare ${word}`);
   // The gitleaks download goes through the pinned-download helper (#1201): retried, and checked against its sha256.
   const gitleaks = job.steps.find((s) => s.name === 'install gitleaks')!.run!;
   assert.match(gitleaks, /^ {0}bash "\$GITHUB_WORKSPACE\/scripts\/ci\/fetch-pinned\.sh" "https:\/\/github\.com\/gitleaks\/gitleaks\/releases\/download\/v\$\{GITLEAKS_VERSION\}\/\$\{f\}" [0-9a-f]{64} "\$f"$/m);
@@ -367,22 +375,51 @@ test('soak verdict: healthy runs pass: a rise that levels off within the limit, 
 
 /** Open file handles of this process, where the platform shows them. */
 /** Bytes under `dir`, links not followed (R1181j 2: a leaked worktree or file grows it). */
-function dirBytes(dir: string): number {
-  let n = 0;
-  for (const e of readdirSync(dir, { withFileTypes: true })) {
-    const p = join(dir, e.name);
-    if (e.isDirectory()) n += dirBytes(p);
-    else if (e.isFile()) n += statSync(p).size;
-  }
-  return n;
+export function dirBytes(dir: string): number {
+  return dirUsage(dir).bytes;
 }
 
-/** This process's live children (R1181j 2), less the ps that counts them; null where ps can't. */
-function childCount(): number | null {
-  const r = spawnSync('ps', ['-A', '-o', 'ppid='], { encoding: 'utf8' });
-  if (r.status !== 0 || typeof r.stdout !== 'string') return null;
-  return Math.max(0, r.stdout.split('\n').filter((l) => l.trim() === String(process.pid)).length - 1);
+/** Bytes and entries (files and folders) under `dir`, links not followed (R1181l 3: 24,000 empty files grow no bytes). */
+export function dirUsage(dir: string): { bytes: number; files: number } {
+  let bytes = 0;
+  let files = 0;
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
+    const p = join(dir, e.name);
+    files += 1;
+    if (e.isDirectory()) {
+      const u = dirUsage(p);
+      bytes += u.bytes;
+      files += u.files;
+    } else if (e.isFile()) bytes += statSync(p).size;
+  }
+  return { bytes, files };
 }
+
+/**
+ * The live processes in this process's group, less this process and the ps that counts them; null where ps can't
+ * (R1181l 4: counting by parent missed a process double-forked away, `sh -c 'x &'`, whose parent is then init).
+ */
+export function childCount(): number | null {
+  const r = spawnSync('ps', ['-A', '-o', 'pgid=,pid='], { encoding: 'utf8' });
+  if (r.status !== 0 || typeof r.stdout !== 'string') return null;
+  const rows = r.stdout.split('\n').map((l) => l.trim().split(/\s+/).map(Number)).filter((x) => x.length === 2 && x.every(Number.isFinite));
+  const own = rows.find(([, pid]) => pid === process.pid)?.[0];
+  if (own === undefined) return null;
+  return Math.max(0, rows.filter(([pgid, pid]) => pgid === own && pid !== process.pid && pid !== r.pid).length);
+}
+
+/** coordinator.error events, agent runs that didn't succeed, and other failure events, in the log so far (R1181l 5). */
+export function failureCounts(log: { read: (afterId?: number, types?: never[]) => { type: string; payload: unknown }[] }): { errors: number; failedRuns: number; failureEvents: number } {
+  const ev = log.read(0, ['coordinator.error', 'run.finished', 'run.startup_failed', 'merge.failed', 'attempt.failed', 'testrun.wipe_failed'] as never[]);
+  return {
+    errors: ev.filter((e) => e.type === 'coordinator.error').length,
+    failedRuns: ev.filter((e) => (e.type === 'run.finished' && (e.payload as { reason?: string }).reason !== 'succeeded') || e.type === 'run.startup_failed').length,
+    failureEvents: ev.filter((e) => ['merge.failed', 'attempt.failed', 'testrun.wipe_failed'].includes(e.type)).length,
+  };
+}
+
+/** Entries in a folder, 0 when it isn't there: the coordinator's worktree folder (R1181k D1). */
+export const entriesIn = (dir: string) => (existsSync(dir) ? readdirSync(dir).length : 0);
 
 /** The repo's git worktrees, the main one included (R1181j 2). */
 const worktreeCount = (repo: string) => git(repo, 'worktree', 'list', '--porcelain').split('\n').filter((l) => l.startsWith('worktree ')).length;
@@ -415,6 +452,13 @@ test('soak: the real coordinator works for a while with stand-in agents; nothing
   if (hours > 0 && typeof gc !== 'function') throw new Error('a soak needs node --expose-gc: its readings are taken after a forced GC');
   let tickCount = 0;
   const f = fixture();
+  // Temp files count too (R1181l 3: os.tmpdir() leftovers were outside the measured folder): TMPDIR inside it.
+  const tmp = join(f.base, 'tmp');
+  mkdirSync(tmp);
+  const oldTmp = process.env.TMPDIR;
+  process.env.TMPDIR = tmp;
+  /** The coordinator's worktree folder (R1181k D1: a checkout copied aside, git's list unchanged, is still here). */
+  const wtDir = worktreeDir(f.repo, f.cfg.tests.worktree.root, join(f.stateDir, 'tasks'));
   let n = 0;
   // Stand-in agents: the worker adds the file its task asks for; the evaluator approves what it read.
   const runner = new FakeRunner((req: RunRequest) => {
@@ -464,6 +508,7 @@ test('soak: the real coordinator works for a while with stand-in agents; nothing
         // The log's size is its file and its WAL: writes sit in the WAL until a checkpoint moves them over.
         const wal = existsSync(`${f.log.path}-wal`) ? statSync(`${f.log.path}-wal`).size : 0;
         ticks.sort((a, b) => a - b);
+        const usage = dirUsage(f.base);
         samples.push({
           at,
           rss: mem.rss,
@@ -480,9 +525,11 @@ test('soak: the real coordinator works for a while with stand-in agents; nothing
           openRuns: runs.open,
           oldestOpenRunMs: runs.oldestMs,
           slotsHeld: slotStatus(f.slotsDir).agents.length,
-          errors: f.log.read(0, ['coordinator.error']).length,
+          ...failureCounts(f.log),
           worktrees: worktreeCount(f.repo),
-          diskBytes: dirBytes(f.base),
+          worktreeDirs: entriesIn(wtDir),
+          diskBytes: usage.bytes,
+          files: usage.files,
           children: childCount(),
         });
         // Each sample as it is taken (R1181j N1: a crash or an OOM left no report, in the runs that most need one).
@@ -494,6 +541,8 @@ test('soak: the real coordinator works for a while with stand-in agents; nothing
   } finally {
     c.stop();
     await c.idle();
+    if (oldTmp === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = oldTmp;
   }
   // The short smoke run has no warm-up to leave out and too little time to judge a slope: its limits say so.
   // Nor a log rate: 12 ticks never reach a WAL checkpoint, so it reads page writes (R1181e note 4: 243 KB of 256).
@@ -538,14 +587,14 @@ test('soak verdict: worktrees, child processes and disk are judged like open fil
   assert.equal(v(series(330, () => ({ children: 1 }))), '');
   assert.match(v(series(330, (m) => ({ children: m % 3 ? null : 1 }))), /^child processes not counted in \d+ of 320 sample\(s\)/);
   // A file kept per task: 3 MB a landed task.
-  assert.match(v(series(330, (m) => ({ diskBytes: 50 * MB + m * 3 * MB }))), /^disk growth: \d+\.\d MB under the soak's folder after the warm-up, 3072 KB per landed task/);
+  assert.match(v(series(330, (m) => ({ diskBytes: 50 * MB + m * 3 * MB }))), /^disk growth: \d+\.\d MB under the soak's folder after the warm-up, besides the event log: \d{4} KB per landed task/);
   assert.equal(v(series(330, (m) => ({ diskBytes: 50 * MB + m * 100 * 1024 }))), '', '100 KB a task');
 });
 
 test("soak verdict: the driver's run (extended) fails closed on a sample missing errors, worktrees or disk (#1181 review R1181j)", () => {
-  const full = (m: number) => ({ errors: 0, worktrees: 2, diskBytes: 50 * MB, children: 1 + 0 * m });
+  const full = (m: number) => ({ errors: 0, worktrees: 2, diskBytes: 50 * MB, children: 1 + 0 * m, failedRuns: 0, failureEvents: 0, worktreeDirs: 1, files: 400 });
   assert.deepEqual(soakVerdict(series(330, full), SOAK_LIMITS, { expectedMs: 5.5 * 3600_000 - 60_000, extended: true }).failures, []);
-  for (const k of ['errors', 'worktrees', 'diskBytes'] as const) {
+  for (const k of ['errors', 'worktrees', 'diskBytes', 'children', 'failedRuns', 'failureEvents', 'worktreeDirs', 'files'] as const) {
     const x = series(330, full).map((s, i) => (i === 200 ? { ...s, [k]: undefined } : s));
     assert.match(soakVerdict(x, SOAK_LIMITS, { expectedMs: 5.5 * 3600_000 - 60_000, extended: true }).failures.join(), new RegExp(`^samples missing ${k}: nothing was judged`), k);
   }
@@ -574,4 +623,88 @@ test('the soak driver writes each sample as it is taken, so a crash or an OOM st
   // A text pin (the driver runs only as the smoke and the real soak, without a report folder in the unit tests).
   const src = readFileSync(join(repoRoot, 'test', 'soak.test.ts'), 'utf8');
   assert.match(src, /\n\s*\/\/ Each sample as it is taken[^\n]*\n\s*if \(report\) appendFileSync\(join\(report, 'soak-samples\.jsonl'\), `\$\{JSON\.stringify\(samples\.at\(-1\)\)\}\\n`\);/);
+});
+
+// --- R1181k, R1181l: the disk outside the log, files, the worktree folder, failed runs, and the driver's own counts ---
+test('soak verdict: the disk outside the log, files and the worktree folder are judged; a healthy run passes (#1181 reviews R1181k D1, R1181l 3)', () => {
+  const opts = { expectedMs: 5.5 * 3600_000 - 60_000 };
+  const v = (x: SoakSample[]) => soakVerdict(x, SOAK_LIMITS, opts).failures.join(' | ');
+  // The healthy shape: the disk grows with the log (240 KB a task), little else.
+  const log = (m: number) => 1_000_000 + m * 240 * 1024;
+  assert.equal(v(series(330, (m) => ({ eventsBytes: log(m), diskBytes: 30 * MB + log(m) + m * 4 * 1024, files: 500 + m * 27, worktreeDirs: 1 }))), '', 'the measured healthy rates');
+  // V2: 1.9 MB kept a task besides the log.
+  assert.match(v(series(330, (m) => ({ eventsBytes: log(m), diskBytes: 30 * MB + log(m) + m * 1.9 * MB }))), /^disk growth: .*besides the event log: \d+ KB per landed task \(limit 64 KB\)/);
+  // V1: +8 GB held for minutes 100-300, then freed; V1b: 2 GB over the run, freed in the last 2 minutes.
+  assert.match(v(series(330, (m) => ({ eventsBytes: log(m), diskBytes: 30 * MB + log(m) + (m >= 100 && m < 300 ? 8192 * MB : 0) }))), /leak: the disk under the soak's folder, besides the event log (grew|peaked)/);
+  assert.match(v(series(330, (m) => ({ eventsBytes: log(m), diskBytes: 30 * MB + log(m) + (m < 328 ? (m / 328) * 2048 * MB : 0) }))), /leak: the disk under the soak's folder, besides the event log (grew|peaked)/);
+  // 2,000 empty files a task.
+  assert.match(v(series(330, (m) => ({ files: 500 + m * 2000 }))), /^file growth: \d+ files under the soak's folder after the warm-up, 2000 per landed task \(limit 64\)/);
+  // R1181k A3: a checkout copied aside before `git worktree remove`: git's list steady, the folder +1 a task.
+  assert.match(v(series(330, (m) => ({ worktrees: 2, worktreeDirs: 1 + m }))), /leak: the worktree folder's entries grew/);
+  // The worktree limit is 2 (R1181l N1): +3 over the run fails.
+  assert.match(v(series(330, (m) => ({ worktrees: 2 + Math.floor((m * 4) / 330) }))), /leak: worktrees grew by 3/);
+  assert.equal(v(series(330, (m) => ({ worktrees: 2 + Math.floor((m * 3) / 330) }))), '', '+2 is at the limit');
+});
+
+test('soak verdict: an agent run that did not succeed, or another failure event, after the warm-up fails (#1181 review R1181l 5)', () => {
+  const opts = { expectedMs: 5.5 * 3600_000 - 60_000 };
+  const v = (x: SoakSample[]) => soakVerdict(x, SOAK_LIMITS, opts).failures.join(' | ');
+  assert.match(v(series(330, (m) => ({ failedRuns: m >= 200 ? 1 : 0 }))), /^errors: 1 agent run\(s\) that did not succeed after the warm-up/);
+  assert.match(v(series(330, (m) => ({ failureEvents: Math.floor(m / 100) }))), /^errors: 3 failure event\(s\)/);
+  assert.equal(v(series(330, (m) => ({ failedRuns: Math.min(m, 2), failureEvents: 0 }))), '', 'two in the warm-up only');
+});
+
+test("the soak driver's counts read what they claim: failures in a log, worktrees, bytes and files, the worktree folder, and grouped processes (#1181 review R1181k D2)", async () => {
+  const d = mkdtempSync(join(tmpdir(), 'soak-counts-'));
+  try {
+    // The log: two coordinator.error, a failed and a succeeded run, a startup failure, a merge.failed.
+    const log = new EventLog(join(d, 'events.db'));
+    log.append('coordinator.error', { instance: 'i', where: 'x', kind: 'TypeError', message: 'm' } as never, 'i');
+    log.append('coordinator.error', { instance: 'i', where: 'x', kind: 'TypeError', message: 'm' } as never, 'i');
+    log.append('run.finished', { issue: 1, role: 'worker', reason: 'failed', detail: 'x' } as never, 'i');
+    log.append('run.finished', { issue: 1, role: 'worker', reason: 'succeeded', detail: '' } as never, 'i');
+    log.append('run.startup_failed', { issue: 2, role: 'worker', attempt: 1, seconds: 1, turns: 0, detail: 'x' } as never, 'i');
+    log.append('merge.failed', { issue: 3, number: 9, head: 'a'.repeat(40), why: 'x' } as never, 'i');
+    assert.deepEqual(failureCounts(log), { errors: 2, failedRuns: 2, failureEvents: 1 });
+    log.close();
+    // Bytes and files.
+    const box = join(d, 'box');
+    mkdirSync(join(box, 'sub'), { recursive: true });
+    writeFileSync(join(box, 'sub', 'a'), 'x'.repeat(1000));
+    writeFileSync(join(box, 'b'), '');
+    assert.deepEqual(dirUsage(box), { bytes: 1000, files: 3 });
+    assert.equal(dirBytes(box), 1000);
+    assert.equal(entriesIn(box), 2);
+    assert.equal(entriesIn(join(d, 'not-there')), 0);
+    // Worktrees: 1, then 2.
+    const repo = join(d, 'repo');
+    mkdirSync(repo);
+    git(repo, 'init', '-q', '-b', 'main');
+    git(repo, '-c', 'user.email=a@example.com', '-c', 'user.name=a', '-c', 'commit.gpgsign=false', 'commit', '-q', '--allow-empty', '-m', 'i');
+    assert.equal(worktreeCount(repo), 1);
+    git(repo, 'worktree', 'add', '-q', join(d, 'wt'));
+    assert.equal(worktreeCount(repo), 2);
+    // A process double-forked away (its parent is then init) still counts: same process group.
+    if (process.platform !== 'win32') {
+      const before = childCount();
+      assert.notEqual(before, null);
+      const pid = Number(spawnSync('sh', ['-c', 'sleep 30 >/dev/null 2>&1 & echo $!'], { encoding: 'utf8' }).stdout.trim());
+      try {
+        const after = childCount();
+        assert.ok(after! >= before! + 1, `${before} -> ${after}`);
+      } finally {
+        if (pid > 0) process.kill(pid);
+      }
+    }
+  } finally {
+    rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test('the soak driver takes each count from those helpers (#1181 review R1181k D2: a constant in their place passed every test)', () => {
+  const src = readFileSync(join(repoRoot, 'test', 'soak.test.ts'), 'utf8');
+  for (const line of ['...failureCounts(f.log),', 'worktrees: worktreeCount(f.repo),', 'worktreeDirs: entriesIn(wtDir),', 'diskBytes: usage.bytes,', 'files: usage.files,', 'children: childCount(),']) assert.ok(src.includes(`\n          ${line}\n`), line);
+  assert.match(src, /\n {8}const usage = dirUsage\(f\.base\);\n/);
+  // R1181l 3: temp files are made inside the measured folder.
+  assert.match(src, /\n {2}const tmp = join\(f\.base, 'tmp'\);\n {2}mkdirSync\(tmp\);\n {2}const oldTmp = process\.env\.TMPDIR;\n {2}process\.env\.TMPDIR = tmp;\n/);
 });

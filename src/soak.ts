@@ -51,6 +51,14 @@ export interface SoakSample {
   diskBytes?: number;
   /** This process's live child processes (null where the platform can't count them). */
   children?: number | null;
+  /** Agent runs that didn't succeed (run.finished not succeeded, run.startup_failed) so far (R1181l 5). */
+  failedRuns?: number;
+  /** Other failure events so far: merge.failed, attempt.failed, testrun.wipe_failed (R1181l 5). */
+  failureEvents?: number;
+  /** Entries in the coordinator's worktree folder: a checkout git no longer lists is still one (R1181k D1). */
+  worktreeDirs?: number;
+  /** Files and folders under the soak's folder (24,000 empty files grow no bytes: R1181l 3). */
+  files?: number;
 }
 
 export interface SoakLimits {
@@ -69,11 +77,16 @@ export interface SoakLimits {
   maxBacklog: number;
   /** Tasks filed since the last landing, and that landing longer ago than this at the end: stalled. */
   stallMinutes: number;
-  /** Worktrees and live child processes: growth, as open file handles are judged (R1181j 2). */
+  /** Worktrees (and the worktree folder's entries) and live child processes: growth, as open file handles are judged. */
   worktreeGrowth: number;
   childGrowth: number;
-  /** Disk growth under the soak's folder per landed task after the warm-up (R1181j 2). */
+  /** The disk under the soak's folder less the event log (judged per landed task on its own): per landed task after the
+   *  warm-up, and as a growth with the 4x peak (R1181k D1, R1181l 3: the log is ~240 KB a task; a checkout kept per
+   *  task adds ~21 KB in this fixture, which the worktree folder's count catches). */
   diskBytesPerTask: number;
+  diskGrowthBytes: number;
+  /** Files and folders under the soak's folder, per landed task after the warm-up. */
+  filesPerTask: number;
 }
 
 export const SOAK_LIMITS: SoakLimits = {
@@ -89,9 +102,11 @@ export const SOAK_LIMITS: SoakLimits = {
   minTasks: 1,
   maxBacklog: 10,
   stallMinutes: 5,
-  worktreeGrowth: 4,
+  worktreeGrowth: 2,
   childGrowth: 4,
-  diskBytesPerTask: 2 * 2 ** 20,
+  diskBytesPerTask: 64 * 2 ** 10,
+  diskGrowthBytes: 256 * 2 ** 20,
+  filesPerTask: 64,
 };
 
 /**
@@ -222,7 +237,7 @@ export function soakVerdict(samples: readonly SoakSample[], limits: SoakLimits =
   // Every field the verdict reads must be there: a sample missing one can't be judged, and that fails closed.
   // `extended`: the driver's own run, which records errors, worktrees and disk too (R1181j 1, 2); a driver that drops
   // them fails closed. (Without it they are judged when there, so the frozen acceptance file's samples stay valid.)
-  const fields: (keyof SoakSample)[] = ['at', 'rss', 'heapUsed', 'eventsBytes', 'walBytes', 'events', 'tickMs', 'maxTickMs', 'tasksDone', 'filed', 'oldestUnlandedMs', 'openRuns', 'oldestOpenRunMs', 'slotsHeld', ...(o.extended ? (['errors', 'worktrees', 'diskBytes'] as const) : [])];
+  const fields: (keyof SoakSample)[] = ['at', 'rss', 'heapUsed', 'eventsBytes', 'walBytes', 'events', 'tickMs', 'maxTickMs', 'tasksDone', 'filed', 'oldestUnlandedMs', 'openRuns', 'oldestOpenRunMs', 'slotsHeld', ...(o.extended ? (['errors', 'worktrees', 'diskBytes', 'children', 'failedRuns', 'failureEvents', 'worktreeDirs', 'files'] as const) : [])];
   const missing = fields.filter((k) => samples.some((s) => typeof s[k] !== 'number' || !Number.isFinite(s[k])));
   if (missing.length) return { failures: [`samples missing ${missing.join(', ')}: nothing was judged`], measured: {} };
   // WHY (#1181 review): with too few samples past the warm-up, the warm-up's were judged instead, so a 4-minute run
@@ -287,12 +302,34 @@ export function soakVerdict(samples: readonly SoakSample[], limits: SoakLimits =
       leak('child processes', { growth: children, peak: g.peak }, limits.childGrowth, (n) => `by ${Math.round(n * 10) / 10}`);
     }
   }
+  // R1181l 5: an agent run that didn't succeed, or another failure event, after the warm-up fails (the stand-in agents
+  // never fail, so each is the coordinator's or the harness's).
+  for (const [k, what] of [['failedRuns', 'agent run(s) that did not succeed'], ['failureEvents', 'failure event(s) (merge, attempt or wipe failed)']] as const) {
+    if (!has(k)) continue;
+    const n = end[k]! - use[0]![k]!;
+    if (n > 0) failures.push(`errors: ${n} ${what} after the warm-up (limit 0)`);
+  }
+  // The worktree folder's entries, as worktrees: a checkout copied aside and pruned from git is still here.
+  if (has('worktreeDirs')) {
+    const g = growth(use, (s) => s.worktreeDirs!);
+    leak("the worktree folder's entries", { growth: Math.round(g.growth * 10) / 10, peak: g.peak }, limits.worktreeGrowth, (n) => `by ${Math.round(n * 10) / 10}`);
+  }
+  const landedSince = Math.max(1, end.tasksDone - use[0]!.tasksDone);
   let diskPerTask: number | string = 'not recorded';
   if (has('diskBytes')) {
-    const landedSince = Math.max(1, end.tasksDone - use[0]!.tasksDone);
-    diskPerTask = (end.diskBytes! - use[0]!.diskBytes!) / landedSince;
-    if (diskPerTask > limits.diskBytesPerTask) failures.push(`disk growth: ${MB(end.diskBytes! - use[0]!.diskBytes!)} under the soak's folder after the warm-up, ${Math.round(diskPerTask / 1024)} KB per landed task (limit ${Math.round(limits.diskBytesPerTask / 1024)} KB)`);
-    diskPerTask = `${Math.round(diskPerTask / 1024)} KB`;
+    // Less the event log, which is judged per task above: what's left is everything else the soak keeps on disk.
+    const other = (s: SoakSample) => s.diskBytes! - s.eventsBytes;
+    const perTask = (other(end) - other(use[0]!)) / landedSince;
+    if (perTask > limits.diskBytesPerTask) failures.push(`disk growth: ${MB(other(end) - other(use[0]!))} under the soak's folder after the warm-up, besides the event log: ${Math.round(perTask / 1024)} KB per landed task (limit ${Math.round(limits.diskBytesPerTask / 1024)} KB)`);
+    // And held, then freed (R1181l 3 V1: +8 GB for minutes 100-300 passed): growth with the 4x peak.
+    leak("the disk under the soak's folder, besides the event log", growth(use, other), limits.diskGrowthBytes, MB);
+    diskPerTask = `${Math.round(perTask / 1024)} KB`;
+  }
+  let filesPerTask: number | string = 'not recorded';
+  if (has('files')) {
+    const n = (end.files! - use[0]!.files!) / landedSince;
+    if (n > limits.filesPerTask) failures.push(`file growth: ${end.files! - use[0]!.files!} files under the soak's folder after the warm-up, ${Math.round(n)} per landed task (limit ${limits.filesPerTask})`);
+    filesPerTask = Math.round(n * 10) / 10;
   }
 
   // Work in flight at a sample: none, ever (#1181 review R1181f SL1-SL3). The driver samples after the coordinator's
@@ -391,6 +428,6 @@ export function soakVerdict(samples: readonly SoakSample[], limits: SoakLimits =
   if (filedSince > 0 && sinceMin > stallLimit) failures.push(`stalled: no task landed in the last ${Math.round(sinceMin)} min (${filedSince} filed since; limit ${Math.round(stallLimit)} min; ${end.tasksDone} landed in all)`);
   return {
     failures,
-    measured: { hours: +(end.at / 3_600_000).toFixed(2), samples: samples.length, tasks_done: end.tasksDone, tasks_filed: end.filed, heap_growth: MB(heap.growth), heap_peak: MB(heap.peak), rss_growth: MB(rss.growth), fd_growth: fds ?? 'not counted', log_per_task: `${Math.round(perTask / 1024)} KB`, wal_max: MB(wal), tick_ms_first: Math.round(t0), tick_ms_last: Math.round(t1), tick_ms_slowest_first: Math.round(m0), tick_ms_slowest_last: Math.round(m1), tick_ms_per_100k_events: perEvents, oldest_unlanded_min: Math.round(Math.max(...use.map((s) => s.oldestUnlandedMs)) / 60_000), max_gap_min: +(Math.max(...samples.slice(1).map((s, i) => s.at - samples[i]!.at)) / 60_000).toFixed(1), open_runs_end: end.openRuns, slots_held_end: end.slotsHeld, errors_after_warmup: errors, worktree_growth: worktrees, child_growth: children, disk_per_task: diskPerTask, not_judged: notJudged.join(', ') || 'none' },
+    measured: { hours: +(end.at / 3_600_000).toFixed(2), samples: samples.length, tasks_done: end.tasksDone, tasks_filed: end.filed, heap_growth: MB(heap.growth), heap_peak: MB(heap.peak), rss_growth: MB(rss.growth), fd_growth: fds ?? 'not counted', log_per_task: `${Math.round(perTask / 1024)} KB`, wal_max: MB(wal), tick_ms_first: Math.round(t0), tick_ms_last: Math.round(t1), tick_ms_slowest_first: Math.round(m0), tick_ms_slowest_last: Math.round(m1), tick_ms_per_100k_events: perEvents, oldest_unlanded_min: Math.round(Math.max(...use.map((s) => s.oldestUnlandedMs)) / 60_000), max_gap_min: +(Math.max(...samples.slice(1).map((s, i) => s.at - samples[i]!.at)) / 60_000).toFixed(1), open_runs_end: end.openRuns, slots_held_end: end.slotsHeld, errors_after_warmup: errors, worktree_growth: worktrees, child_growth: children, disk_per_task: diskPerTask, files_per_task: filesPerTask, not_judged: notJudged.join(', ') || 'none' },
   };
 }
