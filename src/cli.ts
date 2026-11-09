@@ -23,7 +23,7 @@ import { evaluate } from './guardrails/engine.js';
 import { globRegExp } from './guardrails/glob.js';
 import { findProjectRoot, hookProcess, readStdin } from './hook.js';
 import { agentSettingsPath, guardrailSettings } from './agent-settings.js';
-import { install, installCheckoutPrePush, installGitHook, invokedEngine, migrateLegacyHooks } from './install.js';
+import { install, installCheckoutPrePush, installGitHook, invokedEngine, migrateLegacyHooks, pinCheckoutHooks } from './install.js';
 import { recordPushBlocked } from './push-guard.js';
 import { currentUid, currentUser, fileAccess, homeDir, isRoot } from './os/index.js';
 import { toolPath, toolPrefix } from './tool-path.js';
@@ -360,7 +360,7 @@ async function main(argv: string[]): Promise<number> {
     case 'install': {
       // Only the pre-commit secret scan, e.g. in a checkout whose settings are already committed.
       if (flag(args, '--git-hooks-only')) {
-        console.log(`pre-commit secret scan: ${installGitHook(root)}`);
+        console.log(`pre-commit secret scan: ${installGitHook(root, invokedEngine())}`);
         // An instance's checkout (checkout.sh): never a push of the default branch from it, by anyone. The config's
         // branch when the repo has its config yet; origin/HEAD's at push time either way.
         let branches: string[] = [];
@@ -370,6 +370,8 @@ async function main(argv: string[]): Promise<number> {
           // no config yet: the hook goes by origin/HEAD
         }
         console.log(`pre-push default-branch guard: ${installCheckoutPrePush(root, branches, invokedEngine())}`);
+        // #983: the checkout's own config names that hooks dir, so no global config an agent's git reads moves it.
+        console.log(`hooks dir pinned in the checkout's git config: ${pinCheckoutHooks(root)}`);
         return 0;
       }
       const gitHooks = flag(args, '--git-hooks');

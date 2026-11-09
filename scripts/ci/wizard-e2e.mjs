@@ -388,7 +388,10 @@ async function localRest(root) {
     assert.ok(existsSync(join(root, '.claude', 'settings.json')));
     const hook = join(root, '.git', 'hooks', 'pre-commit');
     assert.match(stat(hook), / 7[0-7][0-7]$/, 'the pre-commit hook is executable');
-    assert.match(readFileSync(hook, 'utf8'), /gitleaks/);
+    // #983: the engine's own index scan (its guard entry, `pre-commit`), not gitleaks' own git mode.
+    const text = readFileSync(hook, 'utf8');
+    assert.match(text, /^# managed by \S+: secret scan on every commit, of the index it records\./m);
+    assert.match(text, /^exec .+ "\$E" pre-commit <\/dev\/null$/m);
     return { hook: stat(hook) };
   });
 
