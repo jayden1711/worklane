@@ -6,6 +6,9 @@
 // a check that can't fail, a check of another file, the first --retry read instead of the last, flags in a comment, a
 // URL in a variable or an env: value, wget). So the retry and the check now live once, in the helper, its behavior is
 // tested below with a stub curl, and the lint only has to hold that no pinned URL appears anywhere but on a helper line.
+// Scope (owner decision (c), 2026-11-09): the guarantee is the helper's own digest check, for the downloads it handles.
+// This lint is a hint that finds the usual ways around the helper, not a proof that none is left; the evasions it
+// can't see are listed as limits in the PR (#1228) and at the end of this file.
 // One exception, derived from the workflow, not a list: a job whose container can run a pull request's code runs its
 // steps as root on the self-hosted runner until it switches to the runner user, and a root step there runs nothing
 // from the checkout (desktop-removed.test.ts's RUNS_CHECKOUT). Its downloads stay inline, in one exact curl-and-check
@@ -41,8 +44,10 @@ const PATH = String.raw`(?:[^"\s$\x60\\]|${VAR})+`;
  */
 // The checkout's helper only (R1228i D1: a relative path, a working directory or a reassigned variable ran another
 // file): by $GITHUB_WORKSPACE, which no run sets, or by $ws where a run sets it only from the workspace (WS_FROM_WORKSPACE).
+// With `bash -p` (owner decision (c)): bash then reads no BASH_ENV or ENV file and takes no function from the
+// environment, so neither can stand in for the helper's tools, even by their absolute paths.
 const HELPER_LINE = new RegExp(
-  String.raw`^\s*bash "(?:\$GITHUB_WORKSPACE|\$ws)/scripts/ci/fetch-pinned\.sh" ` +
+  String.raw`^\s*bash -p "(?:\$GITHUB_WORKSPACE|\$ws)/scripts/ci/fetch-pinned\.sh" ` +
     String.raw`"https://${PATH}" ` +
     String.raw`(?:"${VAR}"|[0-9a-f]{64}) ` +
     String.raw`(?:"(?:[^"$\x60\\]|${VAR})+"|[A-Za-z0-9_./-]+)\s*$`,
@@ -62,6 +67,14 @@ const INLINE_CURL = new RegExp(
  */
 const INLINE_CHECK = new RegExp(String.raw`^\s*echo "(?:${VAR}|[0-9a-f]{64})  (${PATH})\.part" \| sha256sum -c - --strict && mv -f -- "(${PATH})\.part" "(${PATH})"\s*$`);
 
+/** BASH_ENV or ENV given a value (an empty one clears it), however it is set: assigned, exported, declared, by env. */
+const HELPER_ENV_SET = /(?:^|[\s;&|(`])(?:(?:export|declare|typeset|local|readonly)(?:\s+-[A-Za-z]+)*\s+)?(?:BASH_ENV|ENV)=(?!(?:''|""|\s|$|;|&|\|))/;
+/** A function put in the environment: `export -f`, `declare -fx`, `typeset -xf`, or a BASH_FUNC_ variable. */
+const FUNCTION_EXPORT = /\bexport\s+(?:-[A-Za-z]*\s+)*-[A-Za-z]*f|\b(?:declare|typeset)\s+(?:-[A-Za-z]+\s+)*-(?:[A-Za-z]*f[A-Za-z]*x|[A-Za-z]*x[A-Za-z]*f)|\bBASH_FUNC_/;
+/** ci-slow's $WS root (see runProblems). */
+const WS_ENV_ROOT = /^\$\{?WS\}?\/(?:scripts|\.github)\//;
+/** A shell file from the checkout's root: scripts/ or .github/, plainly or from $GITHUB_WORKSPACE or $ws. */
+const SHELL_FILE_ROOT = /^(?:\.\/|\$\{?(?:GITHUB_WORKSPACE|ws)\}?\/)?(?:scripts|\.github)\//;
 /** Downloaders other than curl: none may run in a workflow or a script (a probe to /dev/null aside, below). */
 const OTHER_FETCH = /\bwget\b|\bgh\s+release\s+download\b|\bInvoke-WebRequest\b|\biwr\b|\bInvoke-RestMethod\b|\birm\b|\bWebClient\b|\bDownloadFile\b|\bHttpClient\b|\bStart-BitsTransfer\b|\baria2c\b|\bcurl\.exe\b|=\s*["']?curl\b|\bgh\s+api\b[^\n]*(?:releases\/|octet-stream)|\b(?:command\s+-v|which|type\s+-[pP])\s+curl\b/i;
 
@@ -212,6 +225,18 @@ export function runProblems(run: string, rootStep = false): string[] {
     const rest = run.split(WS_FROM_WORKSPACE).join('').replace(/\$\{?ws\b/g, '');
     if (!run.includes(WS_FROM_WORKSPACE) || /\bws\b/.test(rest)) out.push(`$ws set other than from the workspace (${WS_FROM_WORKSPACE}) in a run with ${HELPER}`);
   }
+  // ci-slow's WSL steps name the checkout $WS, from /etc/wl-ci.env (written from the workspace's path): a root there only
+  // in a run that sources that file and never sets WS itself.
+  const wsFromEnvFile = /^\s*\. \/etc\/wl-ci\.env\s*$/m.test(run) && !/(?:^|[\s;&|(])(?:export\s+)?WS=/.test(run);
+  // Owner decision (c): a run with the helper sets no BASH_ENV or ENV and exports no function (bash -p ignores both;
+  // this keeps the run from relying on that alone).
+  if (lines.some((l) => HELPER_LINE.test(l))) {
+    for (const l of lines) {
+      if (/^\s*#/.test(l)) continue;
+      if (HELPER_ENV_SET.test(l)) out.push(`BASH_ENV or ENV set in a run with ${HELPER}: ${l.trim()}`);
+      if (FUNCTION_EXPORT.test(l)) out.push(`a function exported in a run with ${HELPER}: ${l.trim()}`);
+    }
+  }
   for (const [i, l] of lines.entries()) {
     if (HELPER_LINE.test(l) && rootStep) out.push(`${HELPER} from the checkout in a step that runs as root in the self-hosted container: ${l.trim()}`);
     const m = INLINE_CURL.exec(l);
@@ -239,8 +264,11 @@ export function runProblems(run: string, rootStep = false): string[] {
     }
     // R1228f D4: a run that executes a shell file runs only one the lint reads (under scripts/ or .github/).
     for (const c of commands(l)) {
-      const m = /^(?:bash|sh|source|\.)\s+("?)([^\s"]+\.(?:sh|bash))\1(?:\s|$)/.exec(c) ?? /^("?)(\.\/[^\s"]+\.(?:sh|bash))\1(?:\s|$)/.exec(c);
-      if (m && !/(^|\/)(scripts|\.github)\//.test(m[2]!)) out.push(`a shell file the download lint doesn't read (put it under scripts/ or .github/): ${c}`);
+      // Owner decision (c): anchored, from the checkout's root (`/tmp/x/scripts/y.sh` named scripts/ and passed), with no
+      // `..` (scripts/../../tmp/y.sh), and with bash's options before the file read past (`bash -x y.sh`).
+      const m = /^(?:bash|sh|source|\.)(?:\s+-[A-Za-z]+)*\s+("?)([^\s"]+\.(?:sh|bash))\1(?:\s|$)/.exec(c) ?? /^("?)(\.\/[^\s"]+\.(?:sh|bash))\1(?:\s|$)/.exec(c);
+      const fromWs = WS_ENV_ROOT.test(m?.[2] ?? '') && wsFromEnvFile;
+      if (m && ((!SHELL_FILE_ROOT.test(m[2]!) && !fromWs) || /(^|\/)\.\.(\/|$)/.test(m[2]!))) out.push(`a shell file the download lint doesn't read (put it under scripts/ or .github/): ${c}`);
     }
   }
   return out;
@@ -371,11 +399,18 @@ function workflowFiles(files: readonly { name: string; text: string }[], report:
     }
     const actionRoot = rootActions.has(name.replace(/\/action\.ya?ml$/, ''));
     const steps = [
-      ...Object.values(doc?.jobs ?? {}).flatMap((j) => (j?.steps ?? []).map((s) => ({ s, root: rootContainer(j ?? {}) }))),
-      ...(doc?.runs?.steps ?? []).map((s) => ({ s, root: actionRoot })),
+      ...Object.values(doc?.jobs ?? {}).flatMap((j) => (j?.steps ?? []).map((s) => ({ s, root: rootContainer(j ?? {}), envs: [(doc as { env?: unknown })?.env, (j as { env?: unknown })?.env] }))),
+      ...(doc?.runs?.steps ?? []).map((s) => ({ s, root: actionRoot, envs: [] as unknown[] })),
     ];
-    for (const { s, root } of steps) {
+    for (const { s, root, envs } of steps) {
       if (typeof s?.run !== 'string') continue;
+      // Owner decision (c): a step that runs the helper gets no BASH_ENV or ENV with a value, from any level.
+      if (logicalLines(s.run).some((l) => HELPER_LINE.test(l))) {
+        for (const e of [...envs, (s as { env?: unknown }).env]) {
+          if (!e || typeof e !== 'object') continue;
+          for (const [k, v] of Object.entries(e)) if ((k === 'BASH_ENV' || k === 'ENV') && String(v ?? '') !== '') report(name, `${k} given a value in the env of a step that runs ${HELPER}: ${String(v)}`);
+        }
+      }
       inline += logicalLines(s.run).filter((l) => INLINE_CURL.test(l)).length;
       for (const p of runProblems(s.run, root && !switchesToRunner(s.run))) report(name, p);
     }
@@ -469,8 +504,8 @@ test('the workflow lint refuses every form R1228a and R1228b found, and keeps th
   };
   for (const [why, s] of Object.entries(bad)) assert.ok(refused(s), `refused: ${why}`);
   const good = {
-    'the helper from the workspace, a literal pin': `bash "$GITHUB_WORKSPACE/${HELPER}" "${REL}" ${PIN} "$f"`,
-    'the helper inside WSL': `${WS_FROM_WORKSPACE}\nbash "$ws/${HELPER}" "https://nodejs.org/dist/$v/node-$v-linux-x64.tar.xz" "$sum" /tmp/node.tar.xz`,
+    'the helper from the workspace, a literal pin': `bash -p "$GITHUB_WORKSPACE/${HELPER}" "${REL}" ${PIN} "$f"`,
+    'the helper inside WSL': `${WS_FROM_WORKSPACE}\nbash -p "$ws/${HELPER}" "https://nodejs.org/dist/$v/node-$v-linux-x64.tar.xz" "$sum" /tmp/node.tar.xz`,
     'a probe to /dev/null': `[ "$(curl -s -o /dev/null -w '%{http_code}' https://hub.example.test/first-run)" = 200 ]`,
     'a local probe': 'curl -sf "$GH_FAKE/repos/example/alpha"',
     'a loopback page kept': `curl -sS -o "$F/seam.json" -w '%{http_code}' "http://127.0.0.1:$port/api/x"`,
@@ -485,7 +520,7 @@ test('a root container step: the helper is refused, the inline pair must be exac
   assert.deepEqual(runProblems(pair('/tmp/$f'), true), [], 'the exact pair in a root step');
   assert.deepEqual(runProblems(`${F} -o "$f.part" "${REL}"\n# a comment\n\necho "${PIN}  $f.part" | sha256sum -c - --strict && mv -f -- "$f.part" "$f"`, true), [], 'comments and blank lines between are skipped');
   assert.match(runProblems(pair('/tmp/$f'), false).join(), /outside a root container step/, 'elsewhere the helper is the one way');
-  assert.match(runProblems(`bash "$GITHUB_WORKSPACE/${HELPER}" "${REL}" ${PIN} "$f"`, true).join(), /from the checkout in a step that runs as root/);
+  assert.match(runProblems(`bash -p "$GITHUB_WORKSPACE/${HELPER}" "${REL}" ${PIN} "$f"`, true).join(), /from the checkout in a step that runs as root/);
   const bad = {
     'the old pair (no .part, no move)': `${F.replace(' --connect-timeout 20 --speed-limit 1024 --speed-time 60', '')} -o "$f" "${REL}"\necho "${PIN}  $f" | sha256sum -c -`,
     'a check that cannot fail': `${F} -o "$f.part" "${REL}"\necho "${PIN}  $f.part" | sha256sum -c - --strict || true`,
@@ -504,7 +539,7 @@ test('a root container step: the helper is refused, the inline pair must be exac
   assert.ok(!rootContainer({}) && !rootContainer({ container: { image: 'x', options: '--user 1001' } }));
   const prelude = AS_RUNNER;
   assert.ok(switchesToRunner(`${prelude}echo ok\n`));
-  assert.ok(!switchesToRunner(prelude.replace('chown -R runner:runner "$GITHUB_WORKSPACE" "$RUNNER_TEMP"', `bash "$GITHUB_WORKSPACE/${HELPER}" "${REL}" ${PIN} f`)), 'X2: a prelude that runs something else');
+  assert.ok(!switchesToRunner(prelude.replace('chown -R runner:runner "$GITHUB_WORKSPACE" "$RUNNER_TEMP"', `bash -p "$GITHUB_WORKSPACE/${HELPER}" "${REL}" ${PIN} f`)), 'X2: a prelude that runs something else');
   assert.ok(!switchesToRunner(prelude.replace('-u runner', '-u root')), 'X2: a switch to root');
 });
 
@@ -539,7 +574,7 @@ test('a composite action used by a root job is judged as root (R1228d D5 X3)', (
   const problems: string[] = [];
   const files = [
     { name: '.github/workflows/zz.yml', text: `jobs:\n  t:\n    container: { image: x }\n    steps:\n      - uses: ./.github/actions/zz\n` },
-    { name: '.github/actions/zz/action.yml', text: `runs:\n  using: composite\n  steps:\n    - shell: bash\n      run: bash "$GITHUB_WORKSPACE/${HELPER}" "${REL}" ${PIN} "$f"\n` },
+    { name: '.github/actions/zz/action.yml', text: `runs:\n  using: composite\n  steps:\n    - shell: bash\n      run: bash -p "$GITHUB_WORKSPACE/${HELPER}" "${REL}" ${PIN} "$f"\n` },
   ];
   workflowFiles(files, (n, p) => problems.push(`${n}: ${p}`));
   assert.match(problems.join(), /\.github\/actions\/zz\/action\.yml: .*from the checkout in a step that runs as root/);
@@ -667,7 +702,7 @@ test('R1228f: any spelling of curl, bash-joined continuations, YAML escapes, gh 
   // R1228g D1: a local action outside .github, or one reached through `..`, is refused.
   for (const u of ['./tools/zzdl', './.github/../tools/zzdl', './.github/actions/../../tools/zzdl', './.github/actions/a/b', './scripts/ci', './.github/actions/setup', './.github/workflows/../x.yml']) assert.equal(USES_ALLOWED.test(u), false, u);
   // Kept: probes and loopback, and a shell file under scripts/ or .github/.
-  for (const s of ['curl -sf "$GH_FAKE/repos/example/alpha" >/dev/null', `curl -fsS -o /dev/null ${U}`, 'curl -sS -o f "http://127.0.0.1:8080/x"', 'bash scripts/ci/x.sh', 'bash "$GITHUB_WORKSPACE/scripts/ci/fetch-pinned.sh" "https://x/y" ' + PIN + ' f'.replace('https://x/y', 'https://example.com/y')]) {
+  for (const s of ['curl -sf "$GH_FAKE/repos/example/alpha" >/dev/null', `curl -fsS -o /dev/null ${U}`, 'curl -sS -o f "http://127.0.0.1:8080/x"', 'bash scripts/ci/x.sh', 'bash -p "$GITHUB_WORKSPACE/scripts/ci/fetch-pinned.sh" "https://x/y" ' + PIN + ' f'.replace('https://x/y', 'https://example.com/y')]) {
     assert.deepEqual(runProblems(s), [], `kept: ${s}`);
   }
   // The scripts rule: xargs curl, /usr/bin/curl with no retry.
@@ -677,7 +712,7 @@ test('R1228f: any spelling of curl, bash-joined continuations, YAML escapes, gh 
 });
 
 /** Runs the helper with a stub curl first on PATH: it logs its argv and writes `body` to its -o target, or exits `rc`. */
-function runHelper(args: (d: string) => string[], opts: { body?: string; rc?: number; stale?: boolean } = {}) {
+function runHelper(args: (d: string) => string[], opts: { body?: string; rc?: number; stale?: boolean; bashArgs?: string[]; env?: (d: string) => Record<string, string> } = {}) {
   const d = mkdtempSync(join(tmpdir(), 'fetch-pinned-'));
   try {
     // The helper calls its tools by absolute path (#1181 R1181l 2): it runs as a copy whose /usr/bin paths point at the
@@ -692,10 +727,10 @@ function runHelper(args: (d: string) => string[], opts: { body?: string; rc?: nu
       { mode: 0o755 },
     );
     if (opts.stale) writeFileSync(join(d, 'out.bin'), 'stale');
-    const r = spawnSync('bash', [join(d, 'helper.sh'), ...args(d)], {
+    const r = spawnSync('bash', [...(opts.bashArgs ?? []), join(d, 'helper.sh'), ...args(d)], {
       cwd: d,
       encoding: 'utf8',
-      env: { ...process.env, STUB_LOG: join(d, 'log'), STUB_BODY: opts.body ?? '', STUB_RC: String(opts.rc ?? 0) },
+      env: { ...process.env, STUB_LOG: join(d, 'log'), STUB_BODY: opts.body ?? '', STUB_RC: String(opts.rc ?? 0), ...(opts.env?.(d) ?? {}) },
     });
     return {
       status: r.status,
@@ -778,7 +813,7 @@ test('R1228h D1, R1228i D1-D3: a local Docker action, the helper by another path
     workflowFiles(files, (n, p) => problems.push(`${n}: ${p}`));
     return problems;
   };
-  const helper = `bash "$GITHUB_WORKSPACE/${HELPER}" "${GL}" ${PIN} gl.tgz`;
+  const helper = `bash -p "$GITHUB_WORKSPACE/${HELPER}" "${GL}" ${PIN} gl.tgz`;
   // The control: the helper line as CI writes it passes.
   assert.deepEqual(scan([{ name: '.github/workflows/k1.yml', text: wf(`      - shell: bash\n        run: |\n          ${helper}\n`) }]), []);
   const refused: Record<string, { name: string; text: string }[]> = {
@@ -790,8 +825,8 @@ test('R1228h D1, R1228i D1-D3: a local Docker action, the helper by another path
     // R1228i D1 (L1-L4): the helper by a relative path, a working directory, or a reassigned ws or GITHUB_WORKSPACE.
     'L1 cd, then a relative path': [{ name: '.github/workflows/l1.yml', text: wf(`      - run: |\n          cd tools\n          bash scripts/ci/fetch-pinned.sh "${GL}" ${PIN} gl.tgz\n`) }],
     'L2 a working directory': [{ name: '.github/workflows/l2.yml', text: wf(`      - working-directory: tools\n        run: |\n          ${helper}\n`) }],
-    'L3 ws reassigned': [{ name: '.github/workflows/l3.yml', text: wf(`      - run: |\n          ws=tools\n          bash "$ws/${HELPER}" "${GL}" ${PIN} gl.tgz\n`) }],
-    'L3b ws from the workspace, then reassigned': [{ name: '.github/workflows/l3b.yml', text: wf(`      - run: |\n          ws="$(wslpath -u '\${{ github.workspace }}')"\n          ws=tools\n          bash "$ws/${HELPER}" "${GL}" ${PIN} gl.tgz\n`) }],
+    'L3 ws reassigned': [{ name: '.github/workflows/l3.yml', text: wf(`      - run: |\n          ws=tools\n          bash -p "$ws/${HELPER}" "${GL}" ${PIN} gl.tgz\n`) }],
+    'L3b ws from the workspace, then reassigned': [{ name: '.github/workflows/l3b.yml', text: wf(`      - run: |\n          ws="$(wslpath -u '\${{ github.workspace }}')"\n          ws=tools\n          bash -p "$ws/${HELPER}" "${GL}" ${PIN} gl.tgz\n`) }],
     'L4 GITHUB_WORKSPACE reassigned': [{ name: '.github/workflows/l4.yml', text: wf(`      - run: |\n          GITHUB_WORKSPACE="$PWD/tools"\n          ${helper}\n`) }],
     'L4b GITHUB_WORKSPACE set by an env': [{ name: '.github/workflows/l4b.yml', text: wf(`      - env:\n          GITHUB_WORKSPACE: /tmp/tools\n        run: |\n          ${helper}\n`) }],
     // R1228i D2 (L14): a pinned URL spelled with a doubled slash, handed to a script.
@@ -804,7 +839,7 @@ test('R1228h D1, R1228i D1-D3: a local Docker action, the helper by another path
   };
   for (const [what, files] of Object.entries(refused)) assert.notDeepEqual(scan(files), [], what);
   // ci-slow's own WSL form passes.
-  assert.deepEqual(scan([{ name: '.github/workflows/ws.yml', text: wf(`      - shell: wsl-bash {0}\n        run: |\n          ws="$(wslpath -u '\${{ github.workspace }}')" home=/h\n          v="$(sed -n 's/^V=//p' "$ws/scripts/bootstrap.sh")"\n          bash "$ws/${HELPER}" "https://nodejs.org/dist/$v/node-$v-linux-x64.tar.xz" "$sum" /tmp/node.tar.xz\n`) }]), []);
+  assert.deepEqual(scan([{ name: '.github/workflows/ws.yml', text: wf(`      - shell: wsl-bash {0}\n        run: |\n          ws="$(wslpath -u '\${{ github.workspace }}')" home=/h\n          v="$(sed -n 's/^V=//p' "$ws/scripts/bootstrap.sh")"\n          bash -p "$ws/${HELPER}" "https://nodejs.org/dist/$v/node-$v-linux-x64.tar.xz" "$sum" /tmp/node.tar.xz\n`) }]), []);
 });
 
 test('R1228i D1, D2: a look-alike helper anywhere else is refused, and the pinned-URL rule reads the spellings the servers accept', () => {
@@ -815,3 +850,66 @@ test('R1228i D1, D2: a look-alike helper anywhere else is refused, and the pinne
   // over each line (above); and a workflow scalar by decodedProblems.
   assert.ok(decodedProblems('curl -fsSL --retry 3 -o gl.tgz "https://github.com/o/r/releases//download/v1/x.tgz"').length > 0, 'L6 in a workflow');
 });
+
+// --- Owner decision (c), 2026-11-09: the cheap structural hardenings; the helper's digest check is the guarantee ---
+test('owner decision (c): the helper is run with bash -p, so a BASH_ENV function named by a tool\'s absolute path never checks the download; plain bash runs it (the control)', { skip: process.platform === 'win32' }, () => {
+  const tool = spawnSync('sh', ['-c', 'command -v sha256sum'], { encoding: 'utf8' }).stdout.trim();
+  if (!tool) return;
+  const env = (d: string) => {
+    writeFileSync(join(d, 'env.sh'), `${tool}() { cat >/dev/null; return 0; }\n`);
+    return { BASH_ENV: join(d, 'env.sh') };
+  };
+  const plain = runHelper((d) => [REL, sha('expected'), join(d, 'out.bin')], { body: 'tampered', env });
+  assert.equal(plain.status, 0, 'control, plain bash: the function stands in for the tool and the tampered file lands');
+  const p = runHelper((d) => [REL, sha('expected'), join(d, 'out.bin')], { body: 'tampered', env, bashArgs: ['-p'] });
+  assert.notEqual(p.status, 0, 'bash -p reads no BASH_ENV: the real tool checks it, and it is refused');
+  assert.equal(p.out, null);
+  // A function exported into the environment (BASH_FUNC_…): bash -p takes none either.
+  const f = runHelper((d) => [REL, sha('expected'), join(d, 'out.bin')], { body: 'tampered', bashArgs: ['-p'], env: () => ({ [`BASH_FUNC_${tool}%%`]: '() { cat >/dev/null; return 0; }' }) });
+  assert.notEqual(f.status, 0);
+});
+
+test('owner decision (c): a helper line without -p, a run with the helper that sets BASH_ENV or ENV or exports a function, and a step env giving them a value are refused; clearing them is kept', () => {
+  const H = `bash -p "$GITHUB_WORKSPACE/${HELPER}" "${REL}" ${PIN} "$f"`;
+  assert.deepEqual(runProblems(H), [], 'the helper line');
+  const noP = H.replace('bash -p ', 'bash ');
+  assert.ok(decodedProblems(noP).length + runProblems(noP).length > 0, 'without -p: its pinned URL is on no helper line');
+  for (const pre of ['BASH_ENV=/tmp/e', 'export BASH_ENV=/tmp/e', 'ENV=/tmp/e', 'declare -x BASH_ENV="$x"', 'export -f sha256sum', 'declare -fx sha256sum', 'typeset -xf mv', 'export BASH_FUNC_x%%="() { :; }"']) {
+    assert.ok(runProblems(`${pre}\n${H}`).length > 0, `refused: ${pre}`);
+  }
+  for (const pre of ["BASH_ENV=''", 'BASH_ENV=', 'unset BASH_ENV ENV', '# export -f x in a comment']) assert.deepEqual(runProblems(`${pre}\n${H}`), [], `kept: ${pre}`);
+  const wf = (env: string) => ({ name: '.github/workflows/x.yml', text: `on: push\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: bash\n${env}        run: |\n          ${H}\n` });
+  const problems = (text: { name: string; text: string }) => {
+    const out: string[] = [];
+    workflowFiles([text], (_n, p) => out.push(p));
+    return out;
+  };
+  assert.deepEqual(problems(wf('')), []);
+  assert.deepEqual(problems(wf("        env:\n          BASH_ENV: ''\n")), [], 'cleared: kept');
+  assert.match(problems(wf('        env:\n          BASH_ENV: /tmp/e\n')).join(), /BASH_ENV given a value in the env of a step that runs/);
+  assert.match(problems(wf('        env:\n          ENV: /tmp/e\n')).join(), /ENV given a value/);
+  const jobLevel = { name: '.github/workflows/y.yml', text: `on: push\nenv:\n  BASH_ENV: /tmp/e\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: bash\n        run: |\n          ${H}\n` };
+  assert.match(problems(jobLevel).join(), /BASH_ENV given a value/, 'from the workflow level too');
+});
+
+test('owner decision (c): a shell file is read only from the checkout\'s root: anchored, no `..`, bash\'s options read past', () => {
+  for (const c of ['bash /tmp/x/scripts/y.sh', 'bash "/tmp/x/.github/y.sh"', 'bash scripts/../../tmp/y.sh', 'bash -x /tmp/x/scripts/y.sh', 'source ~/scripts/y.sh', 'bash $HOME/scripts/y.sh', 'bash -p test/zz.sh']) {
+    assert.match(runProblems(c).join(), /a shell file the download lint doesn't read/, c);
+  }
+  for (const c of ['bash scripts/ci/x.sh', 'bash ./scripts/ci/x.sh', 'bash .github/x.sh', 'bash "$GITHUB_WORKSPACE/scripts/ci/x.sh"', 'bash -x scripts/ci/x.sh', 'bash "$ws/scripts/x.sh"']) {
+    assert.deepEqual(runProblems(c).filter((p) => /shell file/.test(p)), [], c);
+  }
+  // $WS: only in a run that sources /etc/wl-ci.env and never sets WS.
+  assert.deepEqual(runProblems('. /etc/wl-ci.env\nbash "$WS/scripts/bootstrap.sh" --yes').filter((p) => /shell file/.test(p)), [], 'sourced');
+  assert.match(runProblems('bash "$WS/scripts/bootstrap.sh"').join(), /shell file/, 'not sourced');
+  assert.match(runProblems('. /etc/wl-ci.env\nWS=/tmp/x\nbash "$WS/scripts/bootstrap.sh"').join(), /shell file/, 'WS set in the run');
+});
+
+// Limits (owner decision (c): stated, not closed; the helper's digest check holds for each download it handles):
+// - A download that never names a URL the lint knows (DOWNLOAD), through a tool it doesn't know (python, node, perl, a
+//   compiled binary, an action not in USES_ALLOWED once allowed), or built from pieces at run time, isn't seen.
+// - A shell file the lint reads can still be changed by an earlier step before it runs (the lint reads the checkout).
+// - GITHUB_ENV / GITHUB_PATH written by an earlier step can change the tools a later step finds by name; the helper
+//   calls its own by absolute path, and bash -p drops BASH_ENV, ENV and imported functions, but not PATH for a curl
+//   the lint can't see.
+// - A self-hosted runner's own environment, a runner image or a pinned action that is itself compromised.
