@@ -8,7 +8,8 @@
 // sample at the very end fails: the envelope reads the last ~30 samples, a stated limit).
 // Out of this file's reach (R1231c): the driver's own fixes (it records oldestUnlandedMs, and passes sampleMs and
 // issueEveryMs) and what the committed scripts/ci/fetch-pinned.sh does; the PR's own tests cover those.
-// Revised per the spec review R1231c: its N1-N15 split the shapes earlier cases merged, so each fix has a case.
+// Revised per the spec reviews R1231c (its N1-N15 split the shapes earlier cases merged, so each fix has a case) and
+// R1231e (its last cases). Frozen after R1231e by the owner's decision (c), 2026-11-08.
 // Each must-fail case names the failure it expects (R1231a's lesson: "any failure" lets a fix that refuses everything
 // pass); the healthy twins catch such a fix. Frozen once its spec review passes: a change then needs its own review.
 import { test } from 'node:test';
@@ -236,6 +237,25 @@ const BEFORE_SOAK: unknown[] = [
     "run": "npm run build"
   }
 ];
+
+// --- R1231e: the last cases (attacks-1231e/missing2.test.mjs, ported 1:1) ---
+mustFail('R1231e P1 (R1181c): a linear heap +132 MB after the warm-up', series(N, (m) => ({ heapUsed: 80 * MB + (Math.max(0, m - 10) * 132 * MB) / 320 })), LEAK_HEAP);
+mustFail('R1231e P1b: the same, RSS +262 MB', series(N, (m) => ({ rss: 200 * MB + (Math.max(0, m - 10) * 262 * MB) / 320 })), LEAK_RSS);
+{
+  const s = [sample(0)];
+  let at = 0;
+  let i = 0;
+  while (at <= 5.5 * 3600_000 - 15 * 60_000) {
+    at += (i === 8 ? 40 : 15) * 60_000;
+    s.push(sample(at, { tasksDone: Math.floor(at / 60_000), filed: Math.floor(at / 60_000) + 1, maxTickMs: i === 8 ? 40 * 60_000 : 80, events: Math.floor(at / 1000) }));
+    i++;
+  }
+  mustFail('R1231e P2 (R1181f T1): a sample every 15 min, one 40-min tick (its gap under the gap limit)', s, /^hang: a tick took 40 min/, { expectedMs: 5.5 * 3600_000 - 15 * 60_000, sampleMs: 15 * 60_000, issueEveryMs: 30_000 } as unknown as Opts);
+}
+mustPass('R1231e P3: filing and landing pause 30 min from minute 150, idle ticks still log', series(N, (m) => { const d = m < 150 ? m : m < 180 ? 150 : m - 30; return { tasksDone: d, filed: d + 1 }; }));
+mustFail('R1231e P4 (R1181c): the tick 50 -> 1000 ms in the last 35 min, the slowest tick 1200 ms throughout', series(N, (m) => ({ tickMs: m >= 295 ? 1000 : 50, maxTickMs: 1200 })), /^drift: the median tick of the last 30 min/);
+mustFail('R1231e P5 (R1181h V3): no oldestUnlandedMs recorded fails closed', series(N, (m) => ({ filed: m + 10, tasksDone: m })).map((x) => { const c = { ...(x as unknown as Record<string, unknown>) }; delete c.oldestUnlandedMs; return c as unknown as SoakSample; }), /^samples missing oldestUnlandedMs/);
+mustFail('R1231e P6: the median tick 50 -> 200 ms for minutes 240-299, 50 for the last 30, the slowest tick 300 ms throughout', series(N, (m) => ({ tickMs: m >= 240 && m < 300 ? 200 : 50, maxTickMs: 300 })), /^drift: the median tick went from/);
 
 // --- The workflow: the bypasses of R1181c 2, R1181f 7 and R1181h 4 ---
 test('must hold: the soak workflow can be green only on a soak run as asked (R1181c 2, R1181f 7, R1181h 4)', () => {
