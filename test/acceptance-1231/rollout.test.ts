@@ -2,7 +2,7 @@
 // healthy twins a fix must still pass. Each case asserts the SAFE outcome exactly, so a failing case is an attack that
 // works, or a fix that refuses too much. Sources (the attack files the reviews kept): R1174b and R1174c (their cases,
 // from the review comments), R1174d (r1174d-attacks.test.ts), R1174e's A9b, R1174f (r1174f-attacks.test.ts), R1174g
-// (r1174g-attacks.test.ts), R1174h (attacks-1174h/r1174h-attacks.test.ts). Revised per the spec reviews R1231a, R1231b, R1231d, R1231f. Frozen
+// (r1174g-attacks.test.ts), R1174h (attacks-1174h/r1174h-attacks.test.ts). Revised per the spec reviews R1231a, R1231b, R1231d, R1231f, R1231g. Frozen
 // once its spec review passes: a change to it then needs its own acceptance review (#1231).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -539,6 +539,65 @@ test("R1231f B2: the soak counts from the ring's LATEST instance to turn it on",
 test('R1231f B3: main timed out, a machine fault, an unclean stop: each rolls back', () => {
   for (const e of [ev('merge.main_result', { outcome: 'timed_out' }, hoursAgo(40)), ev('testrun.fault', { fault: 'disk' }, hoursAgo(40)), ev('coordinator.stopped', { instance: 'i', clean: false, ms: 1, pending: [] }, hoursAgo(40))])
     assert.equal(status({ e1: [on(60), e, ...merges(3, 30), tick()], p1: [] }, R2).rings[0]!.state, 'roll back', e.type);
+});
+
+// --- R1231g: the cases its review found missing (attacks-1231g/r1231g-cases.test.mjs, ported 1:1) ---
+test('R1231g L1 / R1174d 3: a coordinator whose last tick is older than live_minutes (it died after ticking) is not promoted', () => {
+  const s = status({ e1: [on(100), ...merges(3, 50), tick(10)], p1: [] }, R2);
+  assert.equal(s.rings[0]!.state, 'soaking', s.rings[0]!.why);
+  assert.match(s.next, /^wait: ring engine is soaking/);
+});
+
+test('R1231g L2 / R1174d 1: a ring is out of order when ANY instance (not the first listed) went on before the ring before was promoted', () => {
+  const s = status({ e1: healthy(300, 250), p1: healthy(200, 150), p2: [on(100), ...merges(3, 90), tick()], p3: [on(160), ...merges(3, 90), tick()] });
+  assert.equal(s.rings[2]!.state, 'out of order');
+  assert.match(s.next, /^roll back ring second/);
+});
+
+// Recommended by R1231g (base checks; each removal gives a wrong or empty step).
+test("R1231g B2b: the soak counts from the LATEST instance's on, whichever instance is listed first", () => {
+  const s = status({ e1: healthy(300, 250), p1: healthy(200, 150), p2: [on(10), ...merges(3, 5), tick()], p3: [on(100), ...merges(3, 50), tick()] });
+  assert.equal(s.rings[2]!.state, 'soaking');
+});
+
+test('R1231g B4: a rollback step sets the flag off in the ring it rolls back and in each later ring that is on', () => {
+  const s = status({ e1: [on(10), ev('merge.stopped', { by: 'red_main' }, hoursAgo(5)), tick()], p1: [on(8), tick()] }, R2);
+  assert.match(s.next, /^roll back ring engine .*: set `flags\.f: false` in the config\.yaml of e1 .*; then set `flags\.f: false` in the config\.yaml of p1/);
+});
+
+test('R1231g B5: another flag going on is not this flag going on', () => {
+  const s = status({ e1: [ev('flag.flipped', { flag: 'g', from: false, to: true, sha: SHA }, hoursAgo(100)), ...merges(3, 50), tick()], p1: [] }, R2);
+  assert.equal(s.rings[0]!.state, 'off');
+  assert.match(s.next, /^turn it on for ring engine/);
+});
+
+test("R1231g B6 (CLI): a listed instance whose events.db can't be read (ring 1, or outside) holds: exit 1, wait", () => {
+  for (const missing of ['p1', 'x']) {
+    const dir = mkdtempSync(join(tmpdir(), 'acc-rollout-'));
+    try {
+      const own = join(dir, 'own');
+      const mk = (n: string, repo: string, events: [string, Record<string, unknown>][] | null) => {
+        mkdirSync(join(own, n, 'state'), { recursive: true });
+        writeFileSync(join(own, n, 'instance.yaml'), `version: 1\nname: ${n}\nrepos:\n  - path: /x\n    repo: ${repo}\n`);
+        if (events) {
+          const log = new EventLog(join(own, n, 'state', 'events.db'));
+          for (const [t, p] of events) log.append(t as 'flag.flipped', p as never, n);
+          log.close();
+        }
+      };
+      mk('e1', 'example/engine', [onFlip, ['coordinator.tick', { instance: 'e1', dispatched: 0, reconciled: 0 }]]);
+      mk('p1', 'o/p1', missing === 'p1' ? null : []);
+      if (missing === 'x') mk('x', 'o/x', null);
+      const file = join(dir, 'rollout.json');
+      writeFileSync(file, JSON.stringify({ rings: [{ name: 'engine', instances: ['e1'] }, { name: 'first', instances: ['p1'] }], promote: { soak_hours: 1, min_merges: 0, live_minutes: 180 } }));
+      const out: string[] = [];
+      const code = rolloutCommand('status', ['--flag', 'f', '--file', file], { out: (l) => out.push(l), err: () => {}, now: new Date(Date.now() + 2 * 3_600_000), deps: { ownDir: () => own, srvRoot: () => join(dir, 'no-srv'), homeOf: () => null, engine } });
+      assert.equal(code, 1, `${missing}: ${out.join('\n')}`);
+      assert.match(out.at(-1)!, new RegExp(`^next: wait: can't read the event log of ${missing}`), missing);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
 });
 
 // --- Healthy twins: a fix that refuses everything, or freezes a ring, fails these ---
