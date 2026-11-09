@@ -37,11 +37,20 @@ new behaviour can be tried on one repo before it reaches the rest. Code: `src/co
     the log's last row, by its id and its stamp, so an entry from another log is told apart: a log restored from a
     backup (the updater's rollback restores migration backups), replaced, or a position past every row. Such an
     entry, at a process's start, is written once to this log if it still reads the flag on, else dropped. An entry
-    whose position couldn't be read at the turn-off takes it just before its off is written. Every import removes the
-    file with the log it replaces. If the log can't be read when the file is judged, or the file can't be saved after
-    it is, its flags stay off, with no record, until a later tick can. A save that fails (a full disk) is tried again
-    at every tick. A limit: a restored log whose row at an entry's position was written again with the very same
-    millisecond stamp reads as the entry's own log.
+    whose position couldn't be read at the turn-off takes it just before its off is written, and the off is written
+    only once that position is read and saved: if either fails, the flag stays off and its off waits for the next
+    tick. An import that carries a log removes the file with the log it replaces; one that carries none keeps the
+    target's file, and a bundle's file is never taken without its log. If the log can't be read when the file is
+    judged, or the file can't be saved after it is, the entries stay as they were before and their flags stay off,
+    with no record, until a later tick can. A save that fails (a full disk) is tried again at every tick.
+    Limits:
+    - A restored or replaced log whose row at an entry's position was written again with the very same millisecond
+      stamp reads as the entry's own log: if main turns the flag on, the next start writes that off and the on once
+      more.
+    - An import of this instance's own earlier bundle (a restore by import) loses the offs not yet recorded: the file
+      goes with the log it replaces, and the two logs can't be told apart. The updater's rollback keeps them.
+    - An import doesn't check that the coordinator is stopped. One still running rewrites its own entries beside the
+      imported log, and the next start writes their pairs into it. Stop it first, as export says.
     The coordinator adopts flags even when refreshing its config failed.
   - It reads `flags:` in plain code, not through the zod schema.
   - A coordinator started on the checkout's config (main's invalid or missing) adopts nothing until main's config is
