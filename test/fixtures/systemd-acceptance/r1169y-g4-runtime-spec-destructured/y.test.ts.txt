@@ -1,0 +1,4 @@
+import { lingerEnabled } from '../src/os/probe.js';
+const spec = ['node', 'test'].join(':');
+const { test: check } = await import(spec);
+check('acceptance: linger', { skip: lingerEnabled() === null }, () => {});

@@ -1,0 +1,7 @@
+import { test } from 'node:test';
+import { existsSync } from 'node:fs';
+let booted = false;
+test('probe', () => { booted = existsSync('/run/systemd/system') && !!process.env.NEVER; });
+const host = { need(t) { if (!booted) { t.skip('not a booted host'); return true; } return false; } };
+const helpers = { host };
+test('acceptance: the engine unit starts', (t) => { if (helpers.host.need(t)) return; });

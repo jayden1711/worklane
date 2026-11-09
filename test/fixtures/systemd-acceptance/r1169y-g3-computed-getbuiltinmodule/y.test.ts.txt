@@ -1,0 +1,3 @@
+import { lingerEnabled } from '../src/os/probe.js';
+const { test: check } = process['getBuiltinModule']('node:test');
+check('acceptance: linger', { skip: lingerEnabled() === null }, () => {});

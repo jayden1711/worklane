@@ -1,0 +1,7 @@
+import { test } from 'node:test';
+import { lingerEnabled } from '../src/os/probe.js';
+let reg = () => {
+  test('acceptance: linger', () => {});
+};
+const go = reg;
+if (lingerEnabled() !== null) go();

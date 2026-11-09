@@ -24,7 +24,7 @@ type Script = {
   gateLikeCount: (text: string) => number;
   signUses: (ts: unknown, path: string, text: string) => string[];
   skipReads: (ts: unknown, path: string, text: string, source: { paths: Set<string>; carries: (m: string, b: string) => boolean; direct?: (m: string, b: string) => boolean }) => string[] & { refused: string[] };
-  signTests: (ts: unknown, path: string, text: string, source: unknown, all?: boolean) => { name: string | null; line: number; column: number; label: string; subtests: boolean }[];
+  signTests: (ts: unknown, path: string, text: string, source: unknown, all?: boolean, o?: { stops?: boolean }) => { name: string | null; line: number; column: number; label: string; subtests: boolean; stops?: { text: string; statement: string; decl: { text: string; top: boolean } | null }[]; skipDecl?: { text: string; top: boolean } | null }[];
   signSource: (ts: unknown, texts: Map<string, string>, allow: Allow) => { select: unknown };
   signUseList: (ts: unknown, path: string, text: string) => { at: string; pin: string }[];
   signProblems: (ts: unknown, texts: Map<string, string>, allow?: Allow) => string[];
@@ -642,12 +642,22 @@ test("R1169w: a sign test the allowlist lets skip on the VM still runs for real 
     return { options: args.length === 3 ? args[1]! : null, body: fn.getText() };
   };
   // Where each kind runs for real, checked against the workflow that runs it; and that the test's skip is that one.
-  const holds: Record<string, (file: string, text: string, t: { options: Node | null; body: string }) => void> = {
+  type Stops = { stops: { text: string; statement: string; decl: { text: string; top: boolean } | null }[]; skipDecl: { text: string; top: boolean } | null };
+  // What the test runs, as picking reads it (R1169y D3): every skip or todo, as a word, in its function, the same-file
+  // functions it names and the hooks around it, and its options' `skip` with its declaration.
+  const stopsOf = (file: string, text: string, key: string): Stops => {
+    const items = sa.signTests(ts, file, text, { paths: new Set<string>(), carries: () => false }, true, { stops: true });
+    const item = items.find((x) => `${file}: ${x.name ?? x.label}` === key);
+    assert.ok(item, `${key}: the script finds the test`);
+    return { stops: (item!.stops ?? []).filter((m) => /\b(?:skip|todo)\b/i.test(m.text)), skipDecl: item!.skipDecl ?? null };
+  };
+  const WEB_SKIP = { text: 'const skip = webUiSkip(chrome);', top: true };
+  const holds: Record<string, (file: string, text: string, t: { options: Node | null; body: string }, s: Stops) => void> = {
     // A web-UI test whose only skip is webUiSkip's own: every shard builds the UI before its tests and sets
     // CI_REQUIRE_WEB=1, under which webUiSkip throws instead of skipping (test/browser-helpers.ts), so in the shards
     // it runs or fails. Exactly that skip (R1169w D5): the const is webUiSkip(chrome) alone, the options' only skip or
     // todo is it, and the test's own function mentions neither.
-    web: (file, text, t) => {
+    web: (file, text, t, st) => {
       assert.match(text, /^const chrome = findChrome\(process\.env\.CHROME\);$/m, `${file}: chrome is findChrome's`);
       assert.ok(t.options && T.isObjectLiteralExpression(t.options), `${file}: its options are an object literal`);
       const stops = t.options!.properties!.filter((x) => /skip|todo/i.test(x.name?.getText() ?? x.getText()));
@@ -655,6 +665,10 @@ test("R1169w: a sign test the allowlist lets skip on the VM still runs for real 
       const only = stops.length === 1 && (stops[0]!.getText() === 'skip: webUiSkip(chrome)' || (T.isShorthandPropertyAssignment(stops[0]!) && stops[0]!.getText() === 'skip' && /^const skip = webUiSkip\(chrome\);$/m.test(text)));
       assert.ok(only, `${file}: its options' only skip or todo is webUiSkip(chrome), and nothing more`);
       assert.doesNotMatch(t.body, /skip|todo/i, `${file}: its own function holds no other skip or todo`);
+      // Its `skip` is the file's own top-level const (not a shadowing one), and nothing it runs (a helper, a hook) skips
+      // otherwise: every skip it reaches is that same name (R1169y D3).
+      if (T.isShorthandPropertyAssignment(stops[0]!)) assert.deepEqual(st.skipDecl, WEB_SKIP, `${file}: its options' skip is the top-level const skip = webUiSkip(chrome)`);
+      for (const m of st.stops) assert.ok(m.text === 'skip' && JSON.stringify(m.decl) === JSON.stringify(WEB_SKIP), `${file}: the code it runs holds no other skip or todo (\`${m.statement.slice(0, 100)}\`)`);
       assert.match(readFileSync(join(repoRoot, 'test', 'browser-helpers.ts'), 'utf8'), /if \(!chrome\) required\(/, 'webUiSkip throws under CI_REQUIRE_WEB');
       for (const [k, j] of shards) {
         const steps = j.steps ?? [];
@@ -666,11 +680,12 @@ test("R1169w: a sign test the allowlist lets skip on the VM still runs for real 
     },
     // A check on the whole history: the security-fixed workflow runs the same check on a full checkout. The test's only
     // stop is the shallow-checkout one (R1169w D5): no options, and nothing else in its function skips.
-    'security-fixed': (file, _text, t) => {
+    'security-fixed': (file, _text, t, st) => {
       const guard = "if (git('rev-parse', '--is-shallow-repository') === 'true') return t.skip('a shallow checkout (the CI shards): the security-fixed job checks this');";
       assert.equal(t.options, null, `${file}: no options`);
       assert.equal(t.body.split(guard).length, 2, `${file}: its function's shallow-checkout guard, once`);
       assert.doesNotMatch(t.body.replace(guard, ''), /skip|todo/i, `${file}: and no other skip or todo`);
+      for (const m of st.stops) assert.equal(m.statement, guard, `${file}: the code it runs (a helper, a hook) holds no other skip or todo`);
       const sf = parse(readFileSync(join(repoRoot, '.github', 'workflows', 'security-fixed.yml'), 'utf8')) as { jobs: Record<string, { steps: { with?: { 'fetch-depth'?: number }; run?: string }[] }> };
       const steps = Object.values(sf.jobs).flatMap((j) => j.steps);
       assert.ok(steps.some((st) => st.with?.['fetch-depth'] === 0), 'the whole history');
@@ -682,7 +697,7 @@ test("R1169w: a sign test the allowlist lets skip on the VM still runs for real 
     assert.ok(entry.why && typeof entry.runsIn === 'string' && Object.hasOwn(holds, entry.runsIn), `${key}: names why, and where it runs for real (runsIn: ${Object.keys(holds).join(' or ')})`);
     const file = key.slice(0, key.indexOf(': '));
     const text = readFileSync(join(repoRoot, file), 'utf8');
-    holds[entry.runsIn]!(file, text, testOf(file, text, key.slice(file.length + 2)));
+    holds[entry.runsIn]!(file, text, testOf(file, text, key.slice(file.length + 2)), stopsOf(file, text, key));
   }
 });
 
@@ -720,4 +735,23 @@ test('R1169w D1-D4: a test function passed by name is the test\'s own; node:test
   const sub = (text: string) => sa.signTests(ts, 'test/x.test.ts', text, source).map((t) => [t.name, t.subtests]);
   assert.deepEqual(sub(`${nl}test('y', async (t) => {\n  for (const _ of lingerEnabled() === null ? [] : [1]) await t.test('s', () => {});\n});`), [['y', true]]);
   assert.deepEqual(sub(`${nl}test('z', async (t) => { await t.test('s', () => {}); });`), [], 'subtests, nothing carrying');
+});
+
+test('R1169y: a reassigned function is no known one; node:test passed to any other call is refused; a run-time module\'s destructured test is read', () => {
+  const paths = new Set(['test/x.test.ts', 'src/os.ts']);
+  const source = { paths, carries: (m: string) => m === 'src/os.ts', direct: (m: string) => m.startsWith('src/') };
+  const run = (text: string) => sa.skipReads(ts, 'test/x.test.ts', text, source);
+  const refused = (text: string) => run(text).refused.join('\n');
+  const none = { paths: new Set<string>(), carries: () => false };
+  const picked = (body: string) => sa.signTests(ts, 'test/x.test.ts', `import { test } from 'node:test';\nlet booted = false;\ntest('probe', () => { booted = existsSync('/run/${sd}/system'); });\n${body}`, none).map((t) => t.name);
+  // D1: a let test function written again can't be read: refused; a let helper written again: each of its functions read.
+  assert.match(refused(`import { test } from 'node:test';\nlet body = (t) => {};\nbody = (t) => { t.skip('x'); };\ntest('n', body);`), /registers a test whose function isn't one this file defines/);
+  assert.equal(refused(`import { test } from 'node:test';\nconst body = (t) => {};\ntest('n', body);`), '', 'a const');
+  assert.deepEqual(picked(`let need = (t) => {};\nneed = (t) => { if (!booted) t.skip('x'); };\ntest('a', (t) => { need(t); });`), ['probe', 'a']);
+  assert.deepEqual(picked(`const steps = [(t) => { if (!booted) t.skip('x'); }];\ntest('b', (t) => { steps[0](t); });`), ['probe', 'b'], 'a function in an array');
+  // D2: 'node:test' handed to any call but a load bound directly, or a lookup, is refused.
+  for (const code of [`const load = process.getBuiltinModule;\nconst { test: c } = load('node:test');`, `const { test: c } = process['getBuiltinModule']('node:test');`, `const r = createRequire(import.meta.url);\nconst { test: c } = r.call(null, 'node:test');`]) assert.match(refused(code), /passes 'node:test' to a call this can't read as a load/);
+  assert.equal(refused(`const mods = ['node:test'];\nmods.includes('node:test');\n'x'.startsWith('node:test');`), '');
+  // Minor 2: test destructured from a module named at run time is node:test's.
+  assert.deepEqual([...run(`import { lingerEnabled } from '../src/os.js';\nconst { test: check } = await import(process.env.M);\ncheck('n', { skip: lingerEnabled() === null }, () => {});`)], ['src/os.ts: lingerEnabled']);
 });

@@ -1,0 +1,5 @@
+import { createRequire } from 'node:module';
+import { lingerEnabled } from '../src/os/probe.js';
+const require = createRequire(import.meta.url);
+const { test: check } = require.call(null, 'node:test');
+check('acceptance: linger', { skip: lingerEnabled() === null }, () => {});

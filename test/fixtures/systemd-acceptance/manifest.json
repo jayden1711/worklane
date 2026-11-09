@@ -828,5 +828,85 @@
   "r1169w-z2-catch-registration": [
     2,
     "a skip reads src/os/probe\\.ts: lingerEnabled, which carries systemd's sign"
+  ],
+  "r1169y-g0-control-getbuiltinmodule": [
+    2,
+    "a skip reads src/os/probe\\.ts: lingerEnabled, which carries systemd's sign"
+  ],
+  "r1169y-g1-aliased-getbuiltinmodule": [
+    2,
+    "passes 'node:test' to a call this can't read as a load"
+  ],
+  "r1169y-g2-destructured-getbuiltinmodule": [
+    2,
+    "passes 'node:test' to a call this can't read as a load"
+  ],
+  "r1169y-g3-computed-getbuiltinmodule": [
+    2,
+    "passes 'node:test' to a call this can't read as a load"
+  ],
+  "r1169y-g4-runtime-spec-destructured": [
+    2,
+    "a skip reads src/os/probe\\.ts: lingerEnabled, which carries systemd's sign"
+  ],
+  "r1169y-g5-require-call": [
+    2,
+    "passes 'node:test' to a call this can't read as a load"
+  ],
+  "r1169y-g6-string-const-spec": [
+    2,
+    "a skip reads src/os/probe\\.ts: lingerEnabled, which carries systemd's sign"
+  ],
+  "r1169y-g7-aliased-createrequire-control": [
+    2,
+    "a skip reads src/os/probe\\.ts: lingerEnabled, which carries systemd's sign"
+  ],
+  "r1169y-p1-destructured-exit": [
+    0,
+    "^$"
+  ],
+  "r1169y-p2-globalthis-process-exit": [
+    0,
+    "^$"
+  ],
+  "r1169y-p3-exit-in-iife-arrow": [
+    2,
+    "a skip reads src/os/probe\\.ts: lingerEnabled, which carries systemd's sign"
+  ],
+  "r1169y-r13e-getter": [
+    2,
+    "registers a test inside a method, a constructor or a function kept as a property"
+  ],
+  "r1169y-r13f-let-assigned-function": [
+    2,
+    "registers a test inside a method, a constructor or a function kept as a property"
+  ],
+  "r1169y-r13g-let-first-registers": [
+    2,
+    "uses reg, a function that registers tests, as a value"
+  ],
+  "r1169y-x10-holder-via-this": [
+    1,
+    "acceptance: the engine unit starts: SKIP not a booted host",
+    "test/y\\.test\\.ts:\\d+: acceptance: the engine unit starts"
+  ],
+  "r1169y-x11-function-in-array": [
+    1,
+    "acceptance: the engine unit starts: SKIP not a booted host",
+    "test/y\\.test\\.ts:\\d+: acceptance: the engine unit starts"
+  ],
+  "r1169y-x9-let-reassigned-body": [
+    2,
+    "registers a test whose function isn't one this file defines"
+  ],
+  "r1169y-x9b-let-reassigned-helper": [
+    1,
+    "acceptance: the engine unit starts: SKIP not a booted host",
+    "test/y\\.test\\.ts:\\d+: acceptance: the engine unit starts"
+  ],
+  "r1169y-x9c-control-const-body": [
+    1,
+    "acceptance: the engine unit starts: SKIP not a booted host",
+    "test/y\\.test\\.ts:\\d+: acceptance: the engine unit starts"
   ]
 }

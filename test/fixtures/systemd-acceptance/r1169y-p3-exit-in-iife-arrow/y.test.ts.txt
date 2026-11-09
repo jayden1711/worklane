@@ -1,0 +1,5 @@
+import { test } from 'node:test';
+import { lingerEnabled } from '../src/os/probe.js';
+const quit = () => process.exit(0);
+if (lingerEnabled() === null) quit();
+test('acceptance: linger', () => {});
