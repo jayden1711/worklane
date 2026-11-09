@@ -34,12 +34,14 @@
 // scopes), from one of those, from the sign or from a file read; unless the allowlist's skipImports names it, with
 // why, and a local by the text of what makes it carry the sign.
 //
-// What neither can see (named limits): a skip on a proxy with no sign anywhere in its file (`process.getuid() === 0`, a
+// What neither can see (named limits, by the owner's choice, 2026-11-08, option (a): tests whose body holds the sign,
+// guarded stops and the name rule): a skip on a proxy with no sign anywhere in its file (`process.getuid() === 0`, a
 // cgroup path: R1169n N04); a sign split inside a word (`'sys' + 'temd'`, deliberate); a value carried through a file
-// that holds no sign itself, or through more than one module (a src/ helper wrapping a holder's detector); and, pending
-// the owner's scope decision, R1169r's indirect reach (a property of a shared object, a global, an env variable set
-// from the sign, an aliased createRequire, a re-export) and a stop inside a catch or a switch (R1169q). A test that
-// passes without checking (an early return on the VM's answer) does run on the VM, where it checks for real.
+// that holds no sign itself, or through more than one module (a src/ helper wrapping a holder's detector); R1169r's
+// indirect reach (a property of a shared object, a global, an env variable set from the sign: D2; an aliased
+// createRequire: D3; a re-export: D4); and a stop inside a catch or a switch (R1169q). #1250 tracks measuring the
+// alternative, the whole suite on the VM. A test that passes without checking (an early return on the VM's answer)
+// does run on the VM, where it checks for real.
 //
 // Results come from node's own test events (systemd-acceptance-reporter.mjs, R1169f), never from TAP text a test
 // could print: each gate is matched by its built file, the line and column its test() call is on, and its name, and
