@@ -472,9 +472,9 @@ export const NO_PROJECT_SOURCE_ROLES: readonly string[] = ['planner', 'plan-revi
 
 export function cliArgs(req: RunRequest, settings?: object, systemPromptFile?: string, pluginDirs: readonly string[] = [], mcpConfigFile?: string, o: { guarded?: boolean } = {}): string[] {
   // A guarded run (the instance's agent settings, #958; the owner's decision, 2026-11-08) and a planner (#973) load no
-  // setting source at all: no project settings, hooks or CLAUDE.md from the checkout (measured with Claude Code
-  // 2.1.319: with '', neither a SessionStart hook in .claude/settings.json nor any CLAUDE.md, a parent folder's
-  // included, reaches the run). Its settings are the instance's own, through --settings.
+  // setting source at all: no project settings, hooks or CLAUDE.md from the checkout. CI proves it on the pinned
+  // Claude Code (scripts/bootstrap.sh's CLAUDE_VERSION) through this runner: scripts/ci/setting-sources-probe.mjs.
+  // Its settings are the instance's own, through --settings.
   const sources = o.guarded || NO_PROJECT_SOURCE_ROLES.includes(req.role) ? '' : 'project';
   const args = [...(settings ? ['--settings', JSON.stringify(settings)] : []), '-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--model', req.model, '--setting-sources', sources, '--strict-mcp-config', '--permission-mode', 'dontAsk', '--max-turns', String(req.maxTurns), '--max-budget-usd', String(req.maxBudgetUsd)];
   // WHY: not on a provider run: whether an open model's endpoint takes the effort parameter is unknown (#579).

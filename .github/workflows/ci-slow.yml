@@ -815,6 +815,13 @@ jobs:
           npm install -g --prefix "$cc" --no-audit --no-fund "@anthropic-ai/claude-code@$v" > /dev/null
           "$cc/bin/claude" --version
           node scripts/ci/setting-sources-probe.mjs "$cc/bin/claude"
+          # Must fail (R1185n): wrappers around this claude that leak a settings env under '', or every source on
+          # --resume. The probe must exit 1 on each, naming that leak.
+          for w in env:"guarded run's request carries localEnv" resume:"guarded resumed run's request carries projectClaudeMd"; do
+            f="test/fixtures/setting-sources/wrap-${w%%:*}-leak.cjs"
+            if SETTING_SOURCES_REAL_CLAUDE="$cc/bin/claude" node scripts/ci/setting-sources-probe.mjs "$f" > "$RUNNER_TEMP/must-fail.log" 2>&1; then cat "$RUNNER_TEMP/must-fail.log"; echo "the probe passed $f, which leaks" >&2; exit 1; fi
+            grep -F "${w#*:}" "$RUNNER_TEMP/must-fail.log" || { cat "$RUNNER_TEMP/must-fail.log"; echo "the probe failed $f, but not for its leak" >&2; exit 1; }
+          done
           rm -rf "$cc"
       - name: the machine (machine.sh) and this commit's engine, root-owned, as engine.sh installs it
         run: |

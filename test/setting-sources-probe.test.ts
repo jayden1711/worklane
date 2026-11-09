@@ -41,11 +41,20 @@ test("#958: ci-slow.yml's add-project job runs the setting-sources probe on the 
   assert.match(step.run ?? '', /sed -n 's\/\^CLAUDE_VERSION=\/\/p' scripts\/bootstrap\.sh/, "the version the machine installs (bootstrap.sh's pin)");
   assert.match(step.run ?? '', /npm install -g --prefix "\$cc" .*"@anthropic-ai\/claude-code@\$v"/);
   assert.match(step.run ?? '', /node scripts\/ci\/setting-sources-probe\.mjs "\$cc\/bin\/claude"/);
+  // The must-fail wrappers around the real claude (R1185n): the probe must exit 1 on each, naming its leak.
+  for (const w of ['env', 'resume']) assert.match(step.run ?? '', new RegExp(`${w}:"guarded`), `wrap-${w}-leak.cjs runs, and must fail`);
+  assert.match(step.run ?? '', /SETTING_SOURCES_REAL_CLAUDE="\$cc\/bin\/claude" node scripts\/ci\/setting-sources-probe\.mjs "\$f"/);
+  assert.match(step.run ?? '', /then cat [^;]+; echo "the probe passed \$f, which leaks" >&2; exit 1; fi/);
   assert.doesNotMatch(JSON.stringify(step), /secrets\.|ANTHROPIC_API_KEY/, 'no secret: the probe gives claude a dummy key against its own stand-in');
   assert.ok(steps.indexOf(step) <= steps.findIndex((s) => /machine\.sh/.test(s.name ?? '')), 'before the machine steps, right after the build');
   // A pull request that changes the runner or the probe runs that job (scripts/ci/slow-jobs.sh).
   const scope = readFileSync(join(repoRoot, 'scripts', 'ci', 'slow-jobs.sh'), 'utf8');
-  assert.match(scope, /\^\(scripts\/\(setup\|machine\|ci\)\/\|[^\n]*src\/runner\\\.ts\|src\/service\\\.ts\|src\/instance\\\.ts\)' <<< "\$files"; then run="\$run \$MACHINE"/, 'the runner, the service and the instance: what builds a guarded run (R1185k)');
+  // Everything the probe exercises (R1185k, R1185n C2): what builds a guarded run, the plant and the probe's own test.
+  const machineLine = scope.split('\n').find((l) => l.includes('then run="$run $MACHINE"')) ?? '';
+  for (const path of ['scripts/ci/x', 'scripts/lib/git.cjs', 'scripts/bootstrap.sh', 'src/runner.ts', 'src/service.ts', 'src/instance.ts', 'src/agent-settings.ts', 'src/install.ts', 'src/network.ts', 'examples/basic/x', 'test/setting-sources-probe.test.ts', 'test/fixtures/setting-sources/x']) {
+    const pattern = /grep -qE '([^']+)'/.exec(machineLine)?.[1] ?? '$^';
+    assert.match(path, new RegExp(pattern), `${path} runs the add-project job`);
+  }
   assert.match(scope, /MACHINE="[^"]*add-project-real-systemd/);
 });
 

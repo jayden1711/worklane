@@ -1,7 +1,8 @@
 #!/usr/bin/env node
-// B1: a stand-in claude that honours --setting-sources '' for everything read at session start, but (as a regression
-// might) still runs the checkout's PreToolUse/PostToolUse/Stop hooks and loads nested CLAUDE.md once a model call
-// SUCCEEDS. The probe's stand-in API answers every call with a 400, so none of that is ever reached: the probe passes.
+// R1185l B1, a must-fail case for scripts/ci/setting-sources-probe.mjs: a stand-in claude that honours
+// --setting-sources '' for everything read at session start, but (as a regression might) still runs the checkout's
+// PreToolUse and Stop hooks once a model call succeeds. The probe's stand-in answers its first call with a tool turn,
+// so the probe reaches that and must fail (test/setting-sources-probe.test.ts).
 const fs = require('node:fs');
 const args = process.argv.slice(2);
 const sources = args[args.indexOf('--setting-sources') + 1];
