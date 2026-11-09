@@ -93,6 +93,7 @@ function judgeOffFile(log: EventLog): void {
   try {
     if (offFile.held.size) {
       const recorded = recordedFlags(log);
+      const before = new Map(offFile.held);
       let changed = false;
       for (const [flag, e] of offFile.held) {
         if (anchored(log, e)) continue;
@@ -100,7 +101,15 @@ function judgeOffFile(log: EventLog): void {
         else offFile.held.delete(flag);
         changed = true;
       }
-      if (changed) saveOffFile();
+      if (changed) {
+        saveOffFile();
+        // R1173z Z2: a re-anchor that can't be saved would be redone at the next start, and its off written again:
+        // the entries go back as they were and stay unjudged (their flags off) until the file can be saved.
+        if (!offFile.saved) {
+          offFile.held = before;
+          throw new Error(`${OFF_FILE} couldn't be saved`);
+        }
+      }
       pruneOffFile(log);
     }
     offFile.judged = true;
@@ -295,6 +304,17 @@ export function adoptFlags(o: { log: EventLog; repo: string; actor: string; bran
   const was = recordedFlags(o.log);
   const out: EventPayload<'flag.flipped'>[] = [];
   const write = (p: EventPayload<'flag.flipped'>) => {
+    // R1173y Y-1, R1173z Z1: an entry with no anchor (its read failed at the turn-off) is anchored here, just before its
+    // off is appended, so that off prunes it; else a restart judged it from another log and wrote the pair again.
+    const e = offFile?.held.get(p.flag);
+    if (!p.to && e && e.at === null) {
+      try {
+        offFile!.held.set(p.flag, { sha: e.sha, ...anchorOf(o.log) });
+        saveOffFile();
+      } catch {
+        // still unanchored: judged as from another log at the next start (stated in docs/feature-flags.md)
+      }
+    }
     if (o.log.append('flag.flipped', p, o.actor).id === 0) durable = false;
     // Its off appended (written or held): never written again (R1173q 1: every held tick wrote the pair again).
     else if (!p.to) offUnrecorded.delete(p.flag);
