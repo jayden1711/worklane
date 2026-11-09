@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parse } from 'yaml';
@@ -42,19 +42,16 @@ test("#958: ci-slow.yml's add-project job runs the setting-sources probe on the 
   assert.match(step.run ?? '', /npm install -g --prefix "\$cc" .*"@anthropic-ai\/claude-code@\$v"/);
   assert.match(step.run ?? '', /node scripts\/ci\/setting-sources-probe\.mjs "\$cc\/bin\/claude"/);
   // The must-fail wrappers around the real claude (R1185n): the probe must exit 1 on each, naming its leak.
-  for (const w of ['env', 'resume']) assert.match(step.run ?? '', new RegExp(`${w}:"guarded`), `wrap-${w}-leak.cjs runs, and must fail`);
+  for (const [w, says] of [['env', 'guarded run'], ['resume', 'guarded resumed run'], ['perm', 'a guarded run ran Bash'], ['tool-env', 'guarded worker run'], ['role-prompt', 'guarded worker run']]) {
+    assert.match(step.run ?? '', new RegExp(`(^|\\s)${w}:"[^"]*${says}`), `wrap-${w}-leak.cjs runs, and must fail naming its leak`);
+    assert.ok(existsSync(join(repoRoot, 'test', 'fixtures', 'setting-sources', `wrap-${w}-leak.cjs`)), `wrap-${w}-leak.cjs is there`);
+  }
   assert.match(step.run ?? '', /SETTING_SOURCES_REAL_CLAUDE="\$cc\/bin\/claude" node scripts\/ci\/setting-sources-probe\.mjs "\$f"/);
   assert.match(step.run ?? '', /then cat [^;]+; echo "the probe passed \$f, which leaks" >&2; exit 1; fi/);
   assert.doesNotMatch(JSON.stringify(step), /secrets\.|ANTHROPIC_API_KEY/, 'no secret: the probe gives claude a dummy key against its own stand-in');
   assert.ok(steps.indexOf(step) <= steps.findIndex((s) => /machine\.sh/.test(s.name ?? '')), 'before the machine steps, right after the build');
   // A pull request that changes the runner or the probe runs that job (scripts/ci/slow-jobs.sh).
   const scope = readFileSync(join(repoRoot, 'scripts', 'ci', 'slow-jobs.sh'), 'utf8');
-  // Everything the probe exercises (R1185k, R1185n C2): what builds a guarded run, the plant and the probe's own test.
-  const machineLine = scope.split('\n').find((l) => l.includes('then run="$run $MACHINE"')) ?? '';
-  for (const path of ['scripts/ci/x', 'scripts/lib/git.cjs', 'scripts/bootstrap.sh', 'src/runner.ts', 'src/service.ts', 'src/instance.ts', 'src/agent-settings.ts', 'src/install.ts', 'src/network.ts', 'examples/basic/x', 'test/setting-sources-probe.test.ts', 'test/fixtures/setting-sources/x']) {
-    const pattern = /grep -qE '([^']+)'/.exec(machineLine)?.[1] ?? '$^';
-    assert.match(path, new RegExp(pattern), `${path} runs the add-project job`);
-  }
   assert.match(scope, /MACHINE="[^"]*add-project-real-systemd/);
 });
 
@@ -64,7 +61,7 @@ test("#958: the probe fails on a claude that loads the checkout's files under --
 require('node:child_process').execSync(s.hooks.SessionStart[0].hooks[0].command);
 post(fs.readFileSync('CLAUDE.md', 'utf8') + fs.readFileSync('.claude/CLAUDE.md', 'utf8')).then(() => process.exit(0));`));
   assert.equal(leaky.status, 1, `${leaky.stdout}\n${leaky.stderr}`);
-  assert.match(leaky.stderr, /a guarded run's request carries projectClaudeMd \(PLANTED-PROJECT-CLAUDE-MD\): that file was loaded/);
+  assert.match(leaky.stderr, /a guarded run's request carries projectClaudeMd \(PLANTED-PROJECT-CLAUDE-MD\): that was loaded/);
   assert.match(leaky.stderr, /a guarded run ran the project settings' SessionStart hook/);
   // R1185l's: honours '' for everything read at the start, but runs the checkout's PreToolUse and Stop hooks once a
   // model call succeeds. The stand-in's tool turn reaches that, so the probe catches it.
@@ -77,4 +74,37 @@ post(fs.readFileSync('CLAUDE.md', 'utf8') + fs.readFileSync('.claude/CLAUDE.md',
   assert.equal(silent.status, 1, `${silent.stdout}\n${silent.stderr}`);
   assert.match(silent.stderr, /the project control: no model call reached the stand-in, so nothing is measured/);
   assert.match(silent.stderr, /the guarded run: no model call reached the stand-in/);
+});
+
+test("#958 (R1185p D3): a pull request touching anything the probe loads runs add-project's job: the probe's import closure is scripts/ci/setting-sources-probe.files, and slow-jobs.sh reads it", { skip: isWindows && 'bash', timeout: 120_000 }, () => {
+  const listed = readFileSync(join(repoRoot, 'scripts', 'ci', 'setting-sources-probe.files'), 'utf8');
+  const now = spawnSync(process.execPath, [probe, '--files'], { encoding: 'utf8' });
+  assert.equal(listed, now.stdout, 'the list is the closure as it is now: run `node scripts/ci/setting-sources-probe.mjs --files > scripts/ci/setting-sources-probe.files`');
+  for (const f of ['src/runner.ts', 'src/sandbox.ts', 'src/plugins/run.ts', 'src/brand.ts', 'src/guardrails/push-hook.ts', 'src/agent-settings.ts', 'src/install.ts', 'src/network.ts', 'scripts/lib/git.cjs']) assert.ok(listed.split('\n').includes(f), `${f} is in the closure`);
+  // slow-jobs.sh, on a pull request in a scratch repo, for a change to one file of the list each.
+  const d = mkdtempSync(join(tmpdir(), 'slow-jobs-'));
+  const git = (...a: string[]) => spawnSync('git', a, { cwd: d, encoding: 'utf8' });
+  git('init', '-q', '-b', 'main');
+  git('config', 'user.email', 'a@example.com');
+  git('config', 'user.name', 'A');
+  git('config', 'commit.gpgsign', 'false');
+  mkdirSync(join(d, 'scripts', 'ci'), { recursive: true });
+  writeFileSync(join(d, 'scripts', 'ci', 'setting-sources-probe.files'), listed);
+  writeFileSync(join(d, 'README'), 'x');
+  git('add', '-A');
+  git('commit', '-q', '-m', 'base');
+  const base = git('rev-parse', 'HEAD').stdout.trim();
+  const jobs = (path: string) => {
+    git('checkout', '-q', base);
+    mkdirSync(join(d, path, '..'), { recursive: true });
+    writeFileSync(join(d, path), 'changed');
+    git('add', '-A');
+    git('commit', '-q', '-m', path);
+    const head = git('rev-parse', 'HEAD').stdout.trim();
+    const r = spawnSync('bash', [join(repoRoot, 'scripts', 'ci', 'slow-jobs.sh')], { cwd: d, encoding: 'utf8', env: { PATH: process.env.PATH ?? '', EVENT: 'pull_request', PR_BASE: base, PR_HEAD: head } });
+    return /^run=(.*)$/m.exec(r.stdout)?.[1] ?? `(failed: ${r.stderr})`;
+  };
+  for (const f of ['src/sandbox.ts', 'src/guardrails/push-hook.ts', 'src/brand.ts']) assert.match(jobs(f), / add-project-real-systemd /, `${f} runs add-project's job`);
+  assert.doesNotMatch(jobs('src/sandbox.ts'), /wizard/, "and not the wizard's walk for that alone");
+  assert.doesNotMatch(jobs('docs/x.md'), /add-project-real-systemd/, 'a file outside it does not');
 });

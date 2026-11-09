@@ -6,6 +6,7 @@
   - an MCP server;
   - `CLAUDE.md` in the checkout, `.claude/`, `CLAUDE.local.md`, a parent folder, the agent's home and a nested folder a tool reads;
   - rules (one scoped to a path), skills (one nested), an agent, a command;
-  - an auto-memory file.
+  - an auto-memory file;
+  - an env in the local and home settings (a request header, and a variable a tool would see) and an allow rule for Bash and Write.
 
-  None of it reaches a request or runs. Its controls show each plant loads where it should: under `project`, the checkout's files and hooks; under every source, all of them; and the auto memory without the runner's `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, which (not `''`) is what keeps it out. #958's earlier second-line checks, which refused a run over an uncommitted `.claude/` file or `CLAUDE.md`, are dropped with the owner's approval (2026-11-08).
+  None of it reaches a request or runs: not in a Read-only run (where Bash and Write stay denied), not in one shaped as a coordinator worker's (its role prompt, schema, tools and apiKeyHelper), and not in a resumed session. Its controls show each plant loads where it should: under `project`, the checkout's files and hooks; under `user`, the home's files and env; under every source, all of them, on a fresh session and a resumed one; and the auto memory without the runner's `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, which (not `''`) is what keeps it out. CI also runs it against five wrappers around the real claude that each leak one of these, and fails unless the probe catches each. A pull request touching any module the probe loads runs it. #958's earlier second-line checks, which refused a run over an uncommitted `.claude/` file or `CLAUDE.md`, are dropped with the owner's approval (2026-11-08).
