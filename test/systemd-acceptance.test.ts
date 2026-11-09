@@ -609,3 +609,44 @@ test('R1169u/v: node:test read by binding, failing closed: every use a call as a
   assert.deepEqual(picked(`test('e', (t) => { if (!booted) (() => t.skip('x'))(); });`), ['probe', 'e']);
   assert.deepEqual(picked(`test('f', () => { assert.equal(booted, booted); });`), ['probe'], 'reads it, never a stop');
 });
+
+test("R1169w: a sign test the allowlist lets skip on the VM still runs for real somewhere: each runtime entry names where, and that place runs it", () => {
+  const allow = JSON.parse(readFileSync(join(repoRoot, 'scripts', 'ci', 'systemd-acceptance-allow.json'), 'utf8')) as { runtime: Record<string, { why: string; runsIn: string }> };
+  const wf = parse(readFileSync(join(repoRoot, '.github', 'workflows', 'ci.yml'), 'utf8')) as { jobs: Record<string, { steps?: { name?: string; run?: string; env?: Record<string, string> }[] }> };
+  const shards = Object.entries(wf.jobs).filter(([k]) => /^test-shard-/.test(k));
+  assert.ok(shards.length >= 2, 'the test shards');
+  // Where each kind runs for real, checked against the workflow that runs it.
+  const holds: Record<string, (file: string, text: string, call: string) => void> = {
+    // A web-UI test whose only skip is webUiSkip: every shard builds the UI before its tests and sets CI_REQUIRE_WEB=1,
+    // under which webUiSkip throws instead of skipping (test/browser-helpers.ts), so in the shards it runs or fails.
+    web: (file, text, call) => {
+      assert.match(text, /^const skip = webUiSkip\(/m, `${file}: its skip is webUiSkip's`);
+      assert.match(call, /\{ skip[,} ]/, `${file}: the test's skip is that one`);
+      assert.match(readFileSync(join(repoRoot, 'test', 'browser-helpers.ts'), 'utf8'), /if \(!chrome\) required\(/, 'webUiSkip throws under CI_REQUIRE_WEB');
+      for (const [k, j] of shards) {
+        const steps = j.steps ?? [];
+        const build = steps.findIndex((st) => /npm run build:web/.test(st.run ?? ''));
+        const tests = steps.findIndex((st) => st.name === "this shard's tests");
+        assert.ok(build >= 0 && tests > build, `${k}: builds the UI before its tests`);
+        assert.equal(steps[tests]!.env?.CI_REQUIRE_WEB, '1', `${k}: a missing UI or Chrome fails the web tests`);
+      }
+    },
+    // A check on the whole history: the security-fixed workflow runs the same check on a full checkout.
+    'security-fixed': (file, text) => {
+      assert.match(text, /the security-fixed job checks this/, `${file}: its skip names the job that checks it`);
+      const sf = parse(readFileSync(join(repoRoot, '.github', 'workflows', 'security-fixed.yml'), 'utf8')) as { jobs: Record<string, { steps: { with?: { 'fetch-depth'?: number }; run?: string }[] }> };
+      const steps = Object.values(sf.jobs).flatMap((j) => j.steps);
+      assert.ok(steps.some((st) => st.with?.['fetch-depth'] === 0), 'the whole history');
+      assert.ok(steps.some((st) => /^node scripts\/ci\/security-fixed\.mjs\b/.test(st.run ?? '')), 'runs the check');
+    },
+  };
+  for (const [key, entry] of Object.entries(allow.runtime)) {
+    assert.ok(entry.why && entry.runsIn in holds, `${key}: names why, and where it runs for real (runsIn: ${Object.keys(holds).join(' or ')})`);
+    const file = key.slice(0, key.indexOf(': '));
+    const name = key.slice(file.length + 2);
+    const text = readFileSync(join(repoRoot, file), 'utf8');
+    const at = text.indexOf(name.startsWith('`') ? name : `'${name}'`) >= 0 ? text.indexOf(name.startsWith('`') ? name : `'${name}'`) : text.indexOf(`"${name}"`);
+    assert.ok(at > 0, `${key}: the test is in ${file}`);
+    holds[entry.runsIn]!(file, text, text.slice(at, at + name.length + 200));
+  }
+});
