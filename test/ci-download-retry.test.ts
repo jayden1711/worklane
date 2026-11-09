@@ -680,6 +680,11 @@ test('R1228f: any spelling of curl, bash-joined continuations, YAML escapes, gh 
 function runHelper(args: (d: string) => string[], opts: { body?: string; rc?: number; stale?: boolean } = {}) {
   const d = mkdtempSync(join(tmpdir(), 'fetch-pinned-'));
   try {
+    // The helper calls its tools by absolute path (#1181 R1181l 2): it runs as a copy whose /usr/bin paths point at the
+    // stub curl and this machine's own tools; nothing else in it changes.
+    let text = readFileSync(join(repoRoot, HELPER), 'utf8');
+    for (const t of ['curl', 'sha256sum', 'mktemp', 'rm', 'mv']) text = text.split(`/usr/bin/${t} `).join(`${t === 'curl' ? join(d, 'curl') : spawnSync('sh', ['-c', `command -v ${t}`], { encoding: 'utf8' }).stdout.trim()} `);
+    writeFileSync(join(d, 'helper.sh'), text);
     writeFileSync(
       join(d, 'curl'),
       '#!/usr/bin/env bash\nprintf \'%s\\n\' "$@" > "$STUB_LOG"\nout=\nwhile [ $# -gt 0 ]; do [ "$1" = -o ] && out="$2"; shift; done\n' +
@@ -687,10 +692,10 @@ function runHelper(args: (d: string) => string[], opts: { body?: string; rc?: nu
       { mode: 0o755 },
     );
     if (opts.stale) writeFileSync(join(d, 'out.bin'), 'stale');
-    const r = spawnSync('bash', [join(repoRoot, HELPER), ...args(d)], {
+    const r = spawnSync('bash', [join(d, 'helper.sh'), ...args(d)], {
       cwd: d,
       encoding: 'utf8',
-      env: { ...process.env, PATH: `${d}:${process.env.PATH}`, STUB_LOG: join(d, 'log'), STUB_BODY: opts.body ?? '', STUB_RC: String(opts.rc ?? 0) },
+      env: { ...process.env, STUB_LOG: join(d, 'log'), STUB_BODY: opts.body ?? '', STUB_RC: String(opts.rc ?? 0) },
     });
     return {
       status: r.status,
