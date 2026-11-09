@@ -27,9 +27,12 @@ new behaviour can be tried on one repo before it reaches the rest. Code: `src/co
     else (an unprotected branch), nothing is adopted and every flag is off.
   - A flag goes on only once its `flag.flipped` is durably written: while any record is held in memory (a full disk),
     or one was dropped, nothing turns on. A flag the default branch turned off goes off at once, before its record
-    is written, so a record that can't be written never keeps one on. Such an off is written at the next tick that
-    can write it, before any later change, so a flag the default branch turns on again has both records. The
-    coordinator adopts flags even when refreshing its config failed.
+    is written, so a record that can't be written never keeps one on. Such an off is kept in
+    `flags-unrecorded.json` beside the event log, written and synced to disk before the off takes effect, and is
+    written to the log at the next tick that can, by this process or the next one (a log locked past its busy
+    timeout ends the tick and the process): before any later change, once, so a flag the default branch turns on
+    again has both records. The file is removed once a tick's records are durable. The coordinator adopts flags even
+    when refreshing its config failed.
   - It reads `flags:` in plain code, not through the zod schema.
   - A coordinator started on the checkout's config (main's invalid or missing) adopts nothing until main's config is
     valid: **every flag is off**. A branch, a hand edit, a written-to config object or a polluted prototype never
@@ -45,8 +48,9 @@ new behaviour can be tried on one repo before it reaches the rest. Code: `src/co
 - **Every flip is audited.** On each tick the coordinator compares each flag's state with the last one recorded in the
   event log. Each difference is one `flag.flipped` event: the flag, from, to, and the commit of the config it read.
   A flip made while the coordinator was down is recorded at its first tick. A limit: the coordinator being down is
-  itself an off with no record, and so is an off whose record a process couldn't write before it stopped (a full
-  disk, then a crash); the log shows the flag on through that time. A flag the engine stopped knowing that
+  itself an off with no record, and so is an off on a disk too full for `flags-unrecorded.json` too, when the
+  process stops before the disk has room (its record is then held in memory, or dropped, and lost); the log shows
+  the flag on through that time. A flag the engine stopped knowing that
   was on is recorded off. The events are covered by the audit chain ([audit-log.md](audit-log.md)), and the config's
   git history shows who made the change.
 

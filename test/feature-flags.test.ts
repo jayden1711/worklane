@@ -680,3 +680,107 @@ test("R1173o 1: the coordinator's tick on a repo whose default branch is trunk a
     }
   }
 });
+
+test('R1173q 1: an off recorded late, then main on during a full disk: one off and one on, never the pair again at each held tick', async () => {
+  const f = fixture();
+  const log = new EventLog(f.log.path, { buffer: {} });
+  try {
+    await withKnownFlags([T], async () => {
+      const s1 = onMain(f, (p) => appendFileSync(cfgFile(p), `flags:\n  ${T}: true\n`), 'on');
+      fetch(f);
+      const a = () => adoptFlags({ log, repo: f.repo, actor: 'i', branch: 'main', check: () => [] });
+      a();
+      const s2 = onMain(f, turnOff, 'off');
+      fetch(f);
+      const lock = lockLog(f.log.path);
+      try {
+        assert.throws(a, /locked/);
+      } finally {
+        lock.release();
+      }
+      const s3 = onMain(f, turnOn, 'on again');
+      fetch(f);
+      fillLog(log);
+      for (let i = 0; i < 3; i++) {
+        a();
+        assert.equal(flagOn(T), false, `held tick ${i}`);
+      }
+      roomLog(log);
+      log.flush();
+      a();
+      assert.equal(flagOn(T), true);
+      assert.deepEqual(flips(f), [[T, false, true, s1], [T, true, false, s2], [T, false, true, s3]]);
+    });
+  } finally {
+    clearFlags();
+    log.close();
+    f.log.close();
+    rmSync(f.base, { recursive: true, force: true });
+  }
+});
+
+test('R1173q note 1: an off whose record is dropped (the buffer full) is still recorded before main turns the flag on again', async () => {
+  const f = fixture();
+  const log = new EventLog(f.log.path, { buffer: { max: 0 } });
+  try {
+    await withKnownFlags([T], async () => {
+      const s1 = onMain(f, (p) => appendFileSync(cfgFile(p), `flags:\n  ${T}: true\n`), 'on');
+      fetch(f);
+      const a = () => adoptFlags({ log, repo: f.repo, actor: 'i', branch: 'main', check: () => [] });
+      a();
+      assert.equal(flagOn(T), true);
+      fillLog(log);
+      const s2 = onMain(f, turnOff, 'off');
+      fetch(f);
+      a();
+      assert.equal(flagOn(T), false, 'off, its record dropped');
+      const s3 = onMain(f, turnOn, 'on again');
+      fetch(f);
+      a();
+      assert.equal(flagOn(T), false, 'nothing goes on while the records are dropped');
+      roomLog(log);
+      a();
+      assert.equal(flagOn(T), true);
+      assert.deepEqual(flips(f), [[T, false, true, s1], [T, true, false, s2], [T, false, true, s3]]);
+    });
+  } finally {
+    clearFlags();
+    log.close();
+    f.log.close();
+    rmSync(f.base, { recursive: true, force: true });
+  }
+});
+
+test("R1173r 1: the coordinator's tick under a log locked past the busy timeout ends, the process restarts, then main turns the flag on: the off and the on are both recorded", { skip }, async () => {
+  const f0 = fixture();
+  f0.log.close();
+  const f = { ...f0, log: new EventLog(f0.log.path, { buffer: {} }) };
+  try {
+    await withKnownFlags([T], async () => {
+      const s1 = onMain(f, (p) => appendFileSync(cfgFile(p), `flags:\n  ${T}: true\n`), 'on');
+      const { c } = startOn(f);
+      await ticks(c);
+      assert.equal(flagOn(T), true);
+      const s2 = onMain(f, turnOff, 'off');
+      const lock = lockLog(f.log.path);
+      try {
+        // config.applied, the flag record and the step's own coordinator.error each wait out the busy timeout.
+        await assert.rejects(ticks(c), /locked/);
+      } finally {
+        lock.release();
+      }
+      assert.equal(flagOn(T), false);
+      // The process ends (the service's loop has no catch; systemd starts a fresh one): nothing in memory survives.
+      clearFlags();
+      const s3 = onMain(f, turnOn, 'on again');
+      const { c: c2 } = startOn(f);
+      await ticks(c2);
+      assert.equal(flagOn(T), true);
+      assert.deepEqual(flips(f), [[T, false, true, s1], [T, true, false, s2], [T, false, true, s3]], 'the off it ran, then the on');
+    });
+  } finally {
+    clearFlags();
+    f.log.close();
+    rmSync(f.base, { recursive: true, force: true });
+  }
+});
