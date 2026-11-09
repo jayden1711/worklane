@@ -12,9 +12,10 @@
   helpers) carry a generated frozen copy of their file that a test holds to it. The tables registered in tests stay
   code, read as before, and are frozen by the test loader right after their declaration; one may not be a Set or a
   Map. A removed or changed line that loads a table waits (its `TABLES.get` line included), an added line that loads
-  the loader any other way waits, and each table has one load site. A table that any change can loosen (the git
-  guard's command-scope pairs, cp's and ln's options) waits on any change. The syntax matcher this PR first added is
-  gone. Still open, and named by the owner: a use moved off a data table while its data and its load line stay the
-  same (a decoy, a shadow, a re-pointed import of its module, a tsconfig line that takes its user out of the build).
-  Also open, named by the owner (#1251): code that runs before a table's load and replaces a built-in the loader calls
-  (`JSON.parse`, `Array.prototype.map`, `Object.freeze`, `readFileSync`) changes what the load returns.
+  the loader any other way waits, and each table has one load site. The redaction replacers the data names by key are
+  held as its entries. A table that any change can loosen (the git guard's command-scope pairs, cp's and ln's options)
+  waits on any change. The syntax matcher this PR first added is gone. Still open, and named by the owner: a use moved
+  off a data table while its data and its load line stay the same (a decoy, a shadow, a re-pointed import of its
+  module, a tsconfig line that takes its user out of the build). Also open, named by the owner (#1251): code that runs
+  before a table's load and replaces a built-in the loader calls (`JSON.parse`, `Array.prototype.map`,
+  `Object.freeze`, `readFileSync`) changes what the load returns.
