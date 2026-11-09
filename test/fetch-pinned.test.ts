@@ -133,5 +133,5 @@ test('stated limit (R1181m D2): a BASH_ENV that defines a function by the absolu
     writeFileSync(join(d, 'env.sh'), `${local.sha256sum}() { cat >/dev/null; return 0; }\n`);
     return [REL, sha('expected'), join(d, 'out.bin')];
   }, { body: 'tampered', env: (d) => ({ BASH_ENV: join(d, 'env.sh') }) });
-  assert.equal(r.status, 0, 'today: the function runs in the absolute path\'s place (soak.yml clears BASH_ENV: pending the owner)');
+  assert.equal(r.status, 0, 'today: the function runs in the absolute path\'s place (soak.yml clears BASH_ENV in install gitleaks, the step that runs the helper)');
 });

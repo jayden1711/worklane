@@ -113,17 +113,15 @@ replaces main's pending scheduled run.
 - **It can't run on a pull request's code with more than read access**, or on a self-hosted runner.
 - **It can't see leaks in what it doesn't run:** real agents' processes, the dashboard, the updater, the hub, or a
   real GitHub's answers. It soaks the coordinator's own loop.
-- **It can't stop code that runs before the soak step from changing what the soak runs, beyond what the step itself
-  holds:**
-  - The step calls its tools by absolute path.
-  - It takes node to be any `node` under `$RUNNER_TOOL_CACHE`, which an earlier step can plant there and put first on
-    `GITHUB_PATH` (R1181l A3). Recording node's exact path right after setup-node waits on the owner (#1181,
-    QUESTIONS row 83).
+- **It can't stop code that runs before the soak step from changing what the soak runs, beyond what the steps pin:**
+  - Only the two pinned actions run before node's exact path is recorded (`record node`). The soak step and the build
+    run that node, not whatever is first on PATH or under `$RUNNER_TOOL_CACHE` (R1181l 1, A3; owner OK 2026-11-09).
+  - `install gitleaks` runs before `npm ci`, with BASH_ENV cleared. Then `npm ci --ignore-scripts`, so no package
+    script runs, and the locked TypeScript runs, by the recorded node (R1181l 1, 2, R1181m D2).
   - The download helper calls its tools by absolute path, so a PATH stand-in, or a function named `sha256sum`, can't
-    stand in for them. A BASH_ENV can still define a function by the absolute path's own name. The soak step already
-    clears BASH_ENV, but the step that runs the helper, **install gitleaks**, doesn't, and must (R1181m D2).
-  - The steps before it (`npm ci`, which runs package scripts, and the build) are pinned as they are by the frozen
-    acceptance file. Tightening them, and the two items above, is the owner's decision (#1181 R1181l 1, 2, R1181m D2).
+    stand in for them. A BASH_ENV can still define a function by the absolute path's own name, so a caller must clear
+    BASH_ENV, as `install gitleaks`, the one step that runs it here, does.
+  - setup-node itself, the runner image and the pinned actions are trusted as pinned.
 - **It can't show a leak slower than its hours.** Nor can it show a rise inside the first quarter of the run that then
   holds (about the first 80 minutes of a 5.5 h run, measured by R1181e) under 4× its limit: the first quarter is the
   baseline. The 4 GiB heap cap bounds that heap. A leak after a high first quarter is read from the run's low point.
@@ -131,8 +129,8 @@ replaces main's pending scheduled run.
   sample 140 MB up at the end fails where the same sample mid-run passes (R1181h H4).
 - **A sawtooth slower than the 10-sample block** is bounded only by the 4× peak rule (R1181g note 3).
 - **The workflow trusts what it pins:** every step through the soak is pinned as written; `npm ci`'s own package
-  scripts, setup-node and the runner image aren't, so the soak step sets its knobs, clears NODE_OPTIONS and BASH_ENV
-  and runs a `node` from under `$RUNNER_TOOL_CACHE` (not necessarily setup-node's: see above).
+  scripts don't run, setup-node and the runner image aren't pinned beyond their versions, so the soak step sets its
+  knobs, clears NODE_OPTIONS and BASH_ENV, and runs the node recorded right after setup-node.
 - **It can't see what it doesn't count off Linux, or below what it reads:** off Linux, an orphan that dropped the mark
   and left every group it was seen in, a file held open after unlinking, and the filesystems' levels aren't read. A
   process of another user, and a process of this user that kept a session alive since before the soak, aren't counted.
