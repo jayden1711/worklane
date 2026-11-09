@@ -34,6 +34,10 @@ verdict). Workflow: `.github/workflows/soak.yml`.
 | RSS grew, the same way | 256 MB |
 | Open file handles grew, the same way | 32 |
 | Any one sample above the first quarter (memory held mid-run, then let go) | 4× the limit above |
+| `coordinator.error` events after the warm-up (a step failing on every tick, its work still landing) | 0 |
+| The coordinator's git worktrees grew, as open file handles are judged | 4 |
+| This process's live child processes grew, the same way (counted in at least half the samples) | 4 |
+| Disk under the soak's folder per landed task after the warm-up | 2 MB |
 | Agent runs open, at any sample | 0 |
 | Agent slots held, at any sample | 0 |
 | A gap between samples | 3× the sample period, and at least 5 min |
@@ -70,7 +74,13 @@ closes the newest open run of its issue and role, so an orphan left before a ret
 - **The WAL is read once a sample** (a minute), so a spike between two samples isn't seen. The log is judged per
   landed task, with no absolute cap.
 
-The verdict and every sample are written to `SOAK_REPORT_DIR` (`soak-verdict.json`, `soak-samples.json`).
+The verdict and every sample are written to `SOAK_REPORT_DIR` (`soak-verdict.json`, `soak-samples.json`), and each sample
+as it is taken (`soak-samples.jsonl`), so a run that crashes or runs out of memory still leaves its samples. The
+workflow empties that folder before the soak, and runs node without `NODE_TEST_CONTEXT` (with it, `node --test` runs
+nothing and exits 0), so a verdict an earlier step left there is never the one read. A check a run is too short for
+(the last 30 minutes' drift needs 2 h after the warm-up, the tick against the log 10k new events) is named in the
+verdict's `not_judged`, not passed in silence. Runs are grouped per branch, so a dispatch from another branch never
+replaces main's pending scheduled run.
 
 ## When it runs
 

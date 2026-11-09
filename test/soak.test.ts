@@ -5,12 +5,13 @@
 // judges the samples.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { FakeRunner, type RunRequest } from '../src/runner.js';
 import { slotStatus } from '../src/slots.js';
 import { SOAK_LIMITS, openRunsOf, soakVerdict, theilSen, type SoakSample } from '../src/soak.js';
-import { commitAll, coordinator, easyIssue, fixture, readAll, skip } from './repro-state-graph/harness.js';
+import { commitAll, coordinator, easyIssue, fixture, git, readAll, skip } from './repro-state-graph/harness.js';
 import { repoRoot } from './helpers.js';
 
 const MB = 2 ** 20;
@@ -154,7 +155,7 @@ const SOAK_STEPS: unknown[] = [
       "NODE_OPTIONS": "",
       "BASH_ENV": ""
     },
-    "run": "if ! [[ \"$HOURS\" =~ ^[0-9]+(\\.[0-9]+)?$ ]] || ! awk -v h=\"$HOURS\" 'BEGIN { exit !(h >= 1 && h <= 5.5) }'; then\n  echo \"hours must be a number from 1 to 5.5 (got: $HOURS): a shorter run is no soak\"; exit 2\nfi\nnode_bin=\"$(command -v node)\"\ncase \"$node_bin\" in \"$RUNNER_TOOL_CACHE\"/*) ;; *) echo \"node is $node_bin, not setup-node's (under $RUNNER_TOOL_CACHE)\"; exit 3 ;; esac\nSOAK_HOURS=\"$HOURS\" timeout --signal=INT \"$(awk -v h=\"$HOURS\" 'BEGIN { printf \"%d\", h * 3600 + 900 }')\" \\\n  \"$node_bin\" --max-old-space-size=4096 --expose-gc --import ./dist/test/isolate.js --test --test-name-pattern='^soak: the real coordinator' dist/test/soak.test.js\n\"$node_bin\" -e 'const v = JSON.parse(require(\"fs\").readFileSync(process.argv[1], \"utf8\")); if (!Array.isArray(v.failures) || v.failures.length || v.asked !== Number(process.argv[2])) { console.error(`soak failed: ${JSON.stringify(v.failures)} (asked ${v.asked} h of ${process.argv[2]})`); process.exit(1); }' \"$SOAK_REPORT_DIR/soak-verdict.json\" \"$HOURS\"\n"
+    "run": "rm -rf -- \"$SOAK_REPORT_DIR\"\nif ! [[ \"$HOURS\" =~ ^[0-9]+(\\.[0-9]+)?$ ]] || ! awk -v h=\"$HOURS\" 'BEGIN { exit !(h >= 1 && h <= 5.5) }'; then\n  echo \"hours must be a number from 1 to 5.5 (got: $HOURS): a shorter run is no soak\"; exit 2\nfi\nnode_bin=\"$(command -v node)\"\ncase \"$node_bin\" in \"$RUNNER_TOOL_CACHE\"/*) ;; *) echo \"node is $node_bin, not setup-node's (under $RUNNER_TOOL_CACHE)\"; exit 3 ;; esac\nSOAK_HOURS=\"$HOURS\" timeout --signal=INT \"$(awk -v h=\"$HOURS\" 'BEGIN { printf \"%d\", h * 3600 + 900 }')\" \\\n  env -u NODE_TEST_CONTEXT \"$node_bin\" --max-old-space-size=4096 --expose-gc --import ./dist/test/isolate.js --test --test-name-pattern='^soak: the real coordinator' dist/test/soak.test.js\n\"$node_bin\" -e 'const v = JSON.parse(require(\"fs\").readFileSync(process.argv[1], \"utf8\")); if (!Array.isArray(v.failures) || v.failures.length || v.asked !== Number(process.argv[2])) { console.error(`soak failed: ${JSON.stringify(v.failures)} (asked ${v.asked} h of ${process.argv[2]})`); process.exit(1); }' \"$SOAK_REPORT_DIR/soak-verdict.json\" \"$HOURS\"\n"
   }
 ];
 
@@ -186,6 +187,10 @@ test('the soak workflow: schedule and dispatch only, read-only, on GitHub-hosted
   // The soak step sets its own knobs and clears NODE_OPTIONS and BASH_ENV, and runs setup-node's node only.
   assert.deepEqual(Object.keys(step.env as object).sort(), ['BASH_ENV', 'HOURS', 'NODE_OPTIONS', 'SOAK_ISSUE_EVERY_S', 'SOAK_REPORT_DIR', 'SOAK_SAMPLE_S', 'SOAK_TICK_MS']);
   assert.match(step.run!, /case "\$node_bin" in "\$RUNNER_TOOL_CACHE"\/\*\) ;; \*\)[^\n]*exit 3 ;; esac/);
+  // R1181j 4: the report folder emptied first (a verdict an earlier step left is never the one read), and the soak's
+  // node run without NODE_TEST_CONTEXT (with it, node --test runs nothing and exits 0).
+  assert.match(step.run!, /^rm -rf -- "\$SOAK_REPORT_DIR"\n/);
+  assert.match(step.run!, /\n {2}env -u NODE_TEST_CONTEXT "\$node_bin" --max-old-space-size/);
   // The gitleaks download goes through the pinned-download helper (#1201): retried, and checked against its sha256.
   const gitleaks = job.steps.find((s) => s.name === 'install gitleaks')!.run!;
   assert.match(gitleaks, /^ {0}bash "\$GITHUB_WORKSPACE\/scripts\/ci\/fetch-pinned\.sh" "https:\/\/github\.com\/gitleaks\/gitleaks\/releases\/download\/v\$\{GITLEAKS_VERSION\}\/\$\{f\}" [0-9a-f]{64} "\$f"$/m);
@@ -361,6 +366,27 @@ test('soak verdict: healthy runs pass: a rise that levels off within the limit, 
 });
 
 /** Open file handles of this process, where the platform shows them. */
+/** Bytes under `dir`, links not followed (R1181j 2: a leaked worktree or file grows it). */
+function dirBytes(dir: string): number {
+  let n = 0;
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
+    const p = join(dir, e.name);
+    if (e.isDirectory()) n += dirBytes(p);
+    else if (e.isFile()) n += statSync(p).size;
+  }
+  return n;
+}
+
+/** This process's live children (R1181j 2), less the ps that counts them; null where ps can't. */
+function childCount(): number | null {
+  const r = spawnSync('ps', ['-A', '-o', 'ppid='], { encoding: 'utf8' });
+  if (r.status !== 0 || typeof r.stdout !== 'string') return null;
+  return Math.max(0, r.stdout.split('\n').filter((l) => l.trim() === String(process.pid)).length - 1);
+}
+
+/** The repo's git worktrees, the main one included (R1181j 2). */
+const worktreeCount = (repo: string) => git(repo, 'worktree', 'list', '--porcelain').split('\n').filter((l) => l.startsWith('worktree ')).length;
+
 function openFds(): number | null {
   for (const d of ['/proc/self/fd', '/dev/fd']) {
     try {
@@ -404,6 +430,8 @@ test('soak: the real coordinator works for a while with stand-in agents; nothing
   });
   const c = coordinator(f, runner);
   const samples: SoakSample[] = [];
+  const report = process.env.SOAK_REPORT_DIR;
+  if (report) mkdirSync(report, { recursive: true });
   // Elapsed time on the monotonic clock (#582): an NTP step never moves it. A run's age (below) is against the log's own wall-clock times.
   const start = performance.now();
   let lastIssue = -Infinity;
@@ -452,7 +480,13 @@ test('soak: the real coordinator works for a while with stand-in agents; nothing
           openRuns: runs.open,
           oldestOpenRunMs: runs.oldestMs,
           slotsHeld: slotStatus(f.slotsDir).agents.length,
+          errors: f.log.read(0, ['coordinator.error']).length,
+          worktrees: worktreeCount(f.repo),
+          diskBytes: dirBytes(f.base),
+          children: childCount(),
         });
+        // Each sample as it is taken (R1181j N1: a crash or an OOM left no report, in the runs that most need one).
+        if (report) appendFileSync(join(report, 'soak-samples.jsonl'), `${JSON.stringify(samples.at(-1))}\n`);
         ticks = [];
         lastSample = at;
       }
@@ -465,7 +499,8 @@ test('soak: the real coordinator works for a while with stand-in agents; nothing
   // Nor a log rate: 12 ticks never reach a WAL checkpoint, so it reads page writes (R1181e note 4: 243 KB of 256).
   const limits = hours > 0 ? SOAK_LIMITS : { ...SOAK_LIMITS, warmupMs: 0, heapGrowthBytes: 512 * MB, rssGrowthBytes: 1024 * MB, fdGrowth: 256, tickDrift: 20, tickMsPer100kEvents: 0, logBytesPerTask: 4 * MB };
   // A real soak is judged against the hours it was asked for (a run that stopped early fails).
-  const v = soakVerdict(samples, limits, hours > 0 ? { expectedMs: ms - sampleMs, sampleMs, issueEveryMs } : {});
+  // `extended`: errors, worktrees and disk are recorded here, so a sample without them fails (R1181j 1, 2).
+  const v = soakVerdict(samples, limits, hours > 0 ? { expectedMs: ms - sampleMs, sampleMs, issueEveryMs, extended: true } : { extended: true });
   const out = process.env.SOAK_REPORT_DIR;
   if (out) {
     mkdirSync(out, { recursive: true });
@@ -476,4 +511,67 @@ test('soak: the real coordinator works for a while with stand-in agents; nothing
   rmSync(f.base, { recursive: true, force: true });
   assert.deepEqual(v.failures, [], JSON.stringify(v.measured));
   assert.ok(samples.length >= 4, `${samples.length} samples`);
+  // R1181j 1, 2: the driver records errors, worktrees, disk and children in every sample.
+  for (const k of ['errors', 'worktrees', 'diskBytes'] as const) assert.ok(samples.every((s) => typeof s[k] === 'number'), `every sample has ${k}`);
+  assert.ok(samples.every((s) => 'children' in s), 'every sample has children (a count, or null where ps cannot)');
+});
+
+// --- R1181j: what the verdict never saw (errors, worktrees, child processes, disk), and R1181i's gaps ---
+test('soak verdict: coordinator errors after the warm-up fail; none, or only in the warm-up, pass (#1181 review R1181j 1)', () => {
+  const opts = { expectedMs: 5.5 * 3600_000 - 60_000 };
+  const v = (x: SoakSample[]) => soakVerdict(x, SOAK_LIMITS, opts).failures;
+  // A step failing on every tick (R1181j's audit-chain throw), its work still landing.
+  assert.match(v(series(330, (m) => ({ errors: m }))).join(' | '), /^errors: 319 coordinator\.error event\(s\) after the warm-up \(limit 0\)/);
+  assert.match(v(series(330, (m) => ({ errors: m >= 200 ? 1 : 0 }))).join(' | '), /^errors: 1 coordinator\.error/);
+  assert.deepEqual(v(series(330, () => ({ errors: 0 }))), []);
+  assert.deepEqual(v(series(330, (m) => ({ errors: Math.min(m, 3) }))), [], 'three in the warm-up only');
+});
+
+test('soak verdict: worktrees, child processes and disk are judged like open file handles; steady counts pass (#1181 review R1181j 2)', () => {
+  const opts = { expectedMs: 5.5 * 3600_000 - 60_000 };
+  const v = (x: SoakSample[]) => soakVerdict(x, SOAK_LIMITS, opts).failures.join(' | ');
+  // R1181j's removeWorktree no-op: +2 worktrees a task.
+  assert.match(v(series(330, (m) => ({ worktrees: 2 + 2 * m }))), /leak: worktrees grew by \d+/);
+  assert.match(v(series(330, (m) => ({ worktrees: 2 + Math.floor(m / 60) }))), /leak: worktrees grew by 5/, 'one more an hour');
+  assert.equal(v(series(330, (m) => ({ worktrees: m % 3 ? 2 : 4 }))), '', 'a task in flight at some samples');
+  assert.match(v(series(330, (m) => ({ children: 1 + Math.floor(m / 30) }))), /leak: child processes grew by \d+/);
+  assert.equal(v(series(330, () => ({ children: 1 }))), '');
+  assert.match(v(series(330, (m) => ({ children: m % 3 ? null : 1 }))), /^child processes not counted in \d+ of 320 sample\(s\)/);
+  // A file kept per task: 3 MB a landed task.
+  assert.match(v(series(330, (m) => ({ diskBytes: 50 * MB + m * 3 * MB }))), /^disk growth: \d+\.\d MB under the soak's folder after the warm-up, 3072 KB per landed task/);
+  assert.equal(v(series(330, (m) => ({ diskBytes: 50 * MB + m * 100 * 1024 }))), '', '100 KB a task');
+});
+
+test("soak verdict: the driver's run (extended) fails closed on a sample missing errors, worktrees or disk (#1181 review R1181j)", () => {
+  const full = (m: number) => ({ errors: 0, worktrees: 2, diskBytes: 50 * MB, children: 1 + 0 * m });
+  assert.deepEqual(soakVerdict(series(330, full), SOAK_LIMITS, { expectedMs: 5.5 * 3600_000 - 60_000, extended: true }).failures, []);
+  for (const k of ['errors', 'worktrees', 'diskBytes'] as const) {
+    const x = series(330, full).map((s, i) => (i === 200 ? { ...s, [k]: undefined } : s));
+    assert.match(soakVerdict(x, SOAK_LIMITS, { expectedMs: 5.5 * 3600_000 - 60_000, extended: true }).failures.join(), new RegExp(`^samples missing ${k}: nothing was judged`), k);
+  }
+});
+
+test('soak verdict: a run too short for a drift check names it in measured, not passed in silence (#1181 review R1181j N3)', () => {
+  const short = soakVerdict(series(90), SOAK_LIMITS, { expectedMs: 1.5 * 3600_000 - 60_000 });
+  assert.deepEqual(short.failures, []);
+  assert.match(String(short.measured.not_judged), /the last 30 min's drift .*the tick against the log/);
+  assert.equal(soakVerdict(series(330, (m) => ({ events: m * 80 })), SOAK_LIMITS, { expectedMs: 5.5 * 3600_000 - 60_000 }).measured.not_judged, 'none');
+});
+
+test('soak verdict: R1181i G1-G4, a task waiting past the limit or a backlog mid-run, and fds held then let go, fail (#1181 review R1181i)', () => {
+  const N = 330;
+  const opts = { expectedMs: 5.5 * 3600_000 - 60_000, sampleMs: 60_000, issueEveryMs: 60_000 };
+  const v = (x: SoakSample[]) => soakVerdict(x, SOAK_LIMITS, opts).failures.join(' | ');
+  const aged = (from: number, to: number) => series(N, (m) => (m >= from && m < to ? { filed: m + 2, oldestUnlandedMs: (m - from) * 60_000 } : m >= to ? { filed: m + 2, tasksDone: m + 1 } : {}));
+  assert.match(v(aged(100, 190)), /too little work: a task filed \d+ min/, 'G1 one task waits 90 min mid-run');
+  assert.match(v(aged(200, 260)), /too little work: a task filed \d+ min/, 'G2 one task waits 60 min');
+  assert.equal(v(aged(200, 225)), '', 'G2 twin: a 25-min wait passes');
+  assert.match(v(series(N, (m) => ({ fds: m >= 100 && m < 230 ? 240 : 40 }))), /leak: open file handles peaked/, 'G3 fds +200 held 130 min, let go');
+  assert.match(v(series(N, (m) => (m >= 100 && m < 120 ? { filed: m + 1, tasksDone: m - 24, oldestUnlandedMs: 20 * 60_000 } : {}))), /too little work: \d+ of \d+ task\(s\) filed not landed/, 'G4 a backlog of 25 mid-run');
+});
+
+test('the soak driver writes each sample as it is taken, so a crash or an OOM still leaves a report (#1181 review R1181j N1)', () => {
+  // A text pin (the driver runs only as the smoke and the real soak, without a report folder in the unit tests).
+  const src = readFileSync(join(repoRoot, 'test', 'soak.test.ts'), 'utf8');
+  assert.match(src, /\n\s*\/\/ Each sample as it is taken[^\n]*\n\s*if \(report\) appendFileSync\(join\(report, 'soak-samples\.jsonl'\), `\$\{JSON\.stringify\(samples\.at\(-1\)\)\}\\n`\);/);
 });

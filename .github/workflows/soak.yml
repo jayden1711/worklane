@@ -16,7 +16,8 @@ on:
         required: false
         default: '5.5'
 concurrency:
-  group: soak
+  # Per branch (R1181j N2): a dispatch from another branch never replaces main's pending scheduled run.
+  group: soak-${{ github.ref }}
   cancel-in-progress: false
 permissions:
   contents: read
@@ -53,7 +54,9 @@ jobs:
         # runner. Green only on a verdict with no failure, for the hours asked: a skipped or renamed test exits 0 and
         # writes none. test/soak.test.ts pins this step's run, as written, and its keys (no if:, no continue-on-error).
         # The knobs are set here, and NODE_OPTIONS and BASH_ENV cleared, whatever an earlier step wrote to GITHUB_ENV; node
-        # is setup-node's, from the tool cache, whatever an earlier step put on GITHUB_PATH (#1181 review R1181h 4).
+        # is setup-node's, from the tool cache, whatever an earlier step put on GITHUB_PATH (#1181 review R1181h 4). The
+        # report folder is emptied first and node runs without NODE_TEST_CONTEXT (R1181j 4: that variable made node --test
+        # run nothing and exit 0, and a verdict an earlier step left was then the one read).
         env:
           HOURS: ${{ inputs.hours || '5.5' }}
           SOAK_REPORT_DIR: ${{ runner.temp }}/soak
@@ -63,13 +66,14 @@ jobs:
           NODE_OPTIONS: ''
           BASH_ENV: ''
         run: |
+          rm -rf -- "$SOAK_REPORT_DIR"
           if ! [[ "$HOURS" =~ ^[0-9]+(\.[0-9]+)?$ ]] || ! awk -v h="$HOURS" 'BEGIN { exit !(h >= 1 && h <= 5.5) }'; then
             echo "hours must be a number from 1 to 5.5 (got: $HOURS): a shorter run is no soak"; exit 2
           fi
           node_bin="$(command -v node)"
           case "$node_bin" in "$RUNNER_TOOL_CACHE"/*) ;; *) echo "node is $node_bin, not setup-node's (under $RUNNER_TOOL_CACHE)"; exit 3 ;; esac
           SOAK_HOURS="$HOURS" timeout --signal=INT "$(awk -v h="$HOURS" 'BEGIN { printf "%d", h * 3600 + 900 }')" \
-            "$node_bin" --max-old-space-size=4096 --expose-gc --import ./dist/test/isolate.js --test --test-name-pattern='^soak: the real coordinator' dist/test/soak.test.js
+            env -u NODE_TEST_CONTEXT "$node_bin" --max-old-space-size=4096 --expose-gc --import ./dist/test/isolate.js --test --test-name-pattern='^soak: the real coordinator' dist/test/soak.test.js
           "$node_bin" -e 'const v = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); if (!Array.isArray(v.failures) || v.failures.length || v.asked !== Number(process.argv[2])) { console.error(`soak failed: ${JSON.stringify(v.failures)} (asked ${v.asked} h of ${process.argv[2]})`); process.exit(1); }' "$SOAK_REPORT_DIR/soak-verdict.json" "$HOURS"
       - name: report
         if: ${{ !cancelled() }}
