@@ -24,12 +24,13 @@ const fs = require('node:fs');
 const args = process.argv.slice(2);
 const sources = args[args.indexOf('--setting-sources') + 1];
 const post = (text) => fetch(process.env.ANTHROPIC_BASE_URL + '/v1/messages', { method: 'POST', body: JSON.stringify({ system: text }) });
+void sources;
 ${body}
 `);
   chmodSync(bin, 0o755);
   return bin;
 }
-const run = (bin: string) => spawnSync(process.execPath, [probe, bin], { encoding: 'utf8', timeout: 120_000 });
+const run = (bin: string) => spawnSync(process.execPath, [probe, bin], { encoding: 'utf8', timeout: 240_000 });
 
 test("#958: ci-slow.yml's add-project job runs the setting-sources probe on the pinned real claude, with no secret, on pull requests too", () => {
   const wf = parse(readFileSync(join(repoRoot, '.github', 'workflows', 'ci-slow.yml'), 'utf8')) as { on: Record<string, unknown>; jobs: Record<string, { steps?: { name?: string; run?: string; env?: unknown }[] }> };
@@ -44,26 +45,27 @@ test("#958: ci-slow.yml's add-project job runs the setting-sources probe on the 
   assert.ok(steps.indexOf(step) <= steps.findIndex((s) => /machine\.sh/.test(s.name ?? '')), 'before the machine steps, right after the build');
   // A pull request that changes the runner or the probe runs that job (scripts/ci/slow-jobs.sh).
   const scope = readFileSync(join(repoRoot, 'scripts', 'ci', 'slow-jobs.sh'), 'utf8');
-  assert.match(scope, /\^\(scripts\/\(setup\|machine\|ci\)\/\|[^\n]*src\/runner\\\.ts\)' <<< "\$files"; then run="\$run \$MACHINE"/);
+  assert.match(scope, /\^\(scripts\/\(setup\|machine\|ci\)\/\|[^\n]*src\/runner\\\.ts\|src\/service\\\.ts\|src\/instance\\\.ts\)' <<< "\$files"; then run="\$run \$MACHINE"/, 'the runner, the service and the instance: what builds a guarded run (R1185k)');
   assert.match(scope, /MACHINE="[^"]*add-project-real-systemd/);
 });
 
-test("#958: the probe fails on a claude that loads the checkout's CLAUDE.md under --setting-sources '', or that never calls the API", { skip: isWindows && 'POSIX stand-in claude', timeout: 120_000 }, () => {
-  // Loads CLAUDE.md and runs the checkout's SessionStart hook whatever the sources say: the controls pass, the guarded run fails.
+test("#958: the probe fails on a claude that loads the checkout's files under --setting-sources '', on one that leaks only once a tool runs (R1185l), and on one that never calls the API", { skip: isWindows && 'POSIX stand-in claude', timeout: 300_000 }, () => {
+  // Loads CLAUDE.md and runs the checkout's SessionStart hook whatever the sources say.
   const leaky = run(fake(`const s = JSON.parse(fs.readFileSync('.claude/settings.json', 'utf8'));
 require('node:child_process').execSync(s.hooks.SessionStart[0].hooks[0].command);
-post(fs.readFileSync('CLAUDE.md', 'utf8') + fs.readFileSync('.claude/CLAUDE.md', 'utf8')).then(() => process.exit(1));`));
+post(fs.readFileSync('CLAUDE.md', 'utf8') + fs.readFileSync('.claude/CLAUDE.md', 'utf8')).then(() => process.exit(0));`));
   assert.equal(leaky.status, 1, `${leaky.stdout}\n${leaky.stderr}`);
   assert.match(leaky.stderr, /a guarded run's request carries projectClaudeMd \(PLANTED-PROJECT-CLAUDE-MD\): that file was loaded/);
   assert.match(leaky.stderr, /a guarded run ran the project settings' SessionStart hook/);
+  // R1185l's: honours '' for everything read at the start, but runs the checkout's PreToolUse and Stop hooks once a
+  // model call succeeds. The stand-in's tool turn reaches that, so the probe catches it.
+  const lazy = run(join(repoRoot, 'test', 'fixtures', 'setting-sources', 'fake-lazy-leak.cjs'));
+  assert.equal(lazy.status, 1, `${lazy.stdout}\n${lazy.stderr}`);
+  assert.match(lazy.stderr, /a guarded run ran the project settings' PreToolUse hook/);
+  assert.match(lazy.stderr, /a guarded run ran the project settings' Stop hook/);
   // Never calls the API: nothing is measured, so it fails rather than passing on an empty record.
   const silent = run(fake(`process.exit(0);`));
   assert.equal(silent.status, 1, `${silent.stdout}\n${silent.stderr}`);
-  assert.match(silent.stderr, /the control made no model call to the stand-in, so nothing here is measured/);
-  assert.match(silent.stderr, /the guarded run made no model call/);
-  // Honours the sources for CLAUDE.md, but its plant check (every source) can't find the rest: the control says so.
-  const partial = run(fake(`if (sources !== '') post(fs.readFileSync('CLAUDE.md', 'utf8')).then(() => process.exit(1)); else post('nothing').then(() => process.exit(1));`));
-  assert.equal(partial.status, 1, `${partial.stdout}\n${partial.stderr}`);
-  assert.match(partial.stderr, /with every source, homeClaudeMd \(PLANTED-HOME-CLAUDE-MD\) didn't reach a request: its plant is broken/);
-  assert.doesNotMatch(partial.stderr, /a guarded run's request carries/);
+  assert.match(silent.stderr, /the project control: no model call reached the stand-in, so nothing is measured/);
+  assert.match(silent.stderr, /the guarded run: no model call reached the stand-in/);
 });

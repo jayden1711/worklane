@@ -43,7 +43,7 @@ case "${EVENT:-}" in
       run="$ALL"
     else
       if grep -qE '^(scripts/bootstrap\.sh|scripts/ci/wizard-url\.sh|src/dashboard-detach\.ts|web/src/components/DashboardKey\.tsx|Dockerfile|\.dockerignore|package(-lock)?\.json|scripts/ci/stand-ins/)' <<< "$files"; then run="$BOOTSTRAP"; fi
-      if grep -qE '^(scripts/(setup|machine|ci)/|scripts/bootstrap\.sh|src/os/|src/testrun/|src/runner\.ts)' <<< "$files"; then run="$run $MACHINE"; fi
+      if grep -qE '^(scripts/(setup|machine|ci)/|scripts/bootstrap\.sh|src/os/|src/testrun/|src/runner\.ts|src/service\.ts|src/instance\.ts)' <<< "$files"; then run="$run $MACHINE"; fi
       # WHY: the wizard's walk runs the install and the machine scripts too, so either of the above runs it as well.
       if [ -n "$run" ] || grep -qE '^(web/src/(App\.tsx|api\.ts|pages/(FirstRun|Settings|Machine|Setup)\.tsx|components/(SetupScreens|SetupConfig|ClaudeSignin|DiscordSetup|PolicyForm|RepoConfigForm|TailscaleSetup|UpdaterSetup)\.tsx)|src/(setup-[a-z-]+|setup/[a-z-]+|claude-signin|gh-login|policy-edit|config-change|tailscale-setup|updater-setup|hub-setup|auto-config|init|dashboard|dashboard-hub|browser/cdp)\.ts)' <<< "$files"; then run="$run $WIZARD"; fi
       # WHY: add-project's plugins and MCP broker steps fetch and run test/fixtures/plugins (the escape fixture only
