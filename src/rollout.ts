@@ -120,7 +120,7 @@ export interface InstanceRead {
   downMs: number;
 }
 
-export function readInstance(events: readonly StoredEvent[], flag: string, maxErrors: number): InstanceRead {
+export function readInstance(events: readonly StoredEvent[], flag: string, maxErrors: number, liveMs = Infinity): InstanceRead {
   // The log's order is the array's (the event ids'), never the clock's.
   let flipAt = -1;
   let since: string | null = null;
@@ -165,12 +165,19 @@ export function readInstance(events: readonly StoredEvent[], flag: string, maxEr
   const flipTs = on && flipAt >= 0 ? Date.parse(events[flipAt]!.ts) : NaN;
   // A loop, not Math.max(...): a spread over a long-lived log throws (R1174j J5: past ~125k events).
   let latestBefore = -Infinity;
-  if (on) for (let i = 0; i < flipAt; i++) latestBefore = Math.max(latestBefore, Date.parse(events[i]!.ts));
+  // A stamp that doesn't parse is skipped (R1174k D2: one NaN made the whole bound NaN, and the hold never fired).
+  if (on) for (let i = 0; i < flipAt; i++) {
+    const t = Date.parse(events[i]!.ts);
+    if (Number.isFinite(t)) latestBefore = Math.max(latestBefore, t);
+  }
   // And an event logged after the flip but stamped before it (R1174j J2: a clock ahead at the flip hid an early on), or
   // a stamp that doesn't parse (J6), can't time a soak either.
   let skewed = on && latestBefore - flipTs > 60_000;
   let downMs = 0;
   let stoppedAt: number | null = null;
+  // R1174k D1, R1174l A1/A2: a coordinator suspended, paused, frozen or hung, or a clock stepped forward, records no
+  // stop: a gap of more than live_minutes between two ticks of one run is no soak either.
+  let prevTick: number | null = null;
   // A coordinator.started with no clean stop since the one before it: the process died (a crash loop shows as several).
   let running = false;
   for (const [i, e] of events.entries()) {
@@ -193,6 +200,12 @@ export function readInstance(events: readonly StoredEvent[], flag: string, maxEr
     if (!Number.isFinite(ts) || (after && ts < flipTs - 60_000)) skewed = true;
     // R1174j J3: a clean stop, then a start: the time between is no soak (a coordinator stopped 48 of 50 h promoted).
     if (after && e.type === 'coordinator.stopped' && (e.payload as { clean?: boolean }).clean === true) stoppedAt = ts;
+    // A stop or a start ends a run: its gap is the clean stop's (above), not counted twice.
+    if (after && (e.type === 'coordinator.stopped' || e.type === 'coordinator.started')) prevTick = null;
+    if (after && e.type === 'coordinator.tick' && Number.isFinite(ts)) {
+      if (prevTick !== null && ts - prevTick > liveMs) downMs += ts - prevTick;
+      prevTick = prevTick === null ? ts : Math.max(prevTick, ts);
+    }
     if (after && e.type === 'coordinator.started' && stoppedAt !== null) {
       if (Number.isFinite(stoppedAt) && Number.isFinite(ts)) downMs += Math.max(0, ts - stoppedAt);
       stoppedAt = null;
@@ -273,7 +286,7 @@ export function rolloutStatus(o: {
   let prevName = '';
   for (const r of o.rollout.rings) {
     const missing = r.instances.filter((n) => !o.logs.has(n));
-    const reads = r.instances.filter((n) => o.logs.has(n)).map((n) => ({ n, ...readInstance(o.logs.get(n)!, o.flag, max_errors) }));
+    const reads = r.instances.filter((n) => o.logs.has(n)).map((n) => ({ n, ...readInstance(o.logs.get(n)!, o.flag, max_errors, live_minutes * 60_000) }));
     const onReads = reads.filter((s) => s.on);
     const onCount = onReads.length;
     const sinces = onReads.map((s) => s.since!).sort();

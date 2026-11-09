@@ -12,7 +12,7 @@ import { parse } from 'yaml';
 import { BRAND } from './brand.js';
 import type { StoredEvent } from './events/types.js';
 import { readEvents } from './events/read-only.js';
-import { FLAGS } from './flags.js';
+import { FLAGS, FLAG_NAME } from './flags.js';
 import { instancesDir } from './instance.js';
 import { engineRepos } from './managed-apps.js';
 import { userHomeDir } from './os/index.js';
@@ -109,6 +109,11 @@ export function rolloutCommand(sub: string | undefined, args: readonly string[],
     return 2;
   }
   const flag = given.get('--flag')!;
+  // A flag's name, as the config takes it (R1174k: a newline in --flag forged an output line).
+  if (!FLAG_NAME.test(flag)) {
+    err(`not a flag name: ${JSON.stringify(flag)} (a-z, 0-9 and _, starting with a letter)\n${USAGE}`);
+    return 2;
+  }
   let rollout: Rollout;
   const file = given.get('--file');
   try {

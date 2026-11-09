@@ -48,12 +48,14 @@ A ring is **promoted** when all of these hold:
 
 - the flag is on in **every** instance of the ring (on in some is `partial`);
 - it has been on for at least `soak_hours` (counted from the latest instance to turn it on), less any time its
-  coordinator was stopped (a clean stop to the next start): a coordinator that isn't running isn't soaking;
+  coordinator wasn't seen running: a clean stop to the next start, and any gap of more than `live_minutes` between
+  two of its ticks after the flip (a suspended host, a paused VM, a frozen or hung coordinator, a clock stepped
+  forward);
 - **each** of the ring's instances merged at least `min_merges` PRs since then (`merge.done`, one per PR number; a
   merge with no number never counts), so an instance that does no work isn't promoted on the others'. `min_merges: 0`
   is allowed: an explicit opt-out by whoever writes root's `rollout.json`;
 - **every instance is alive:** its last `coordinator.tick` is at most `live_minutes` old. A coordinator that stopped
-  ticking isn't soaking, so silence never reads as health;
+  ticking isn't soaking: silence between ticks after the flip isn't counted, and silence now holds the ring;
 - **nothing went wrong** in any of them since it went on:
   - no `merge.stopped`;
   - no `merge.main_result` red or timed out;
@@ -139,6 +141,8 @@ It opens every event log read-only and changes nothing.
   a desktop instance in another user's home is read only when it's in a ring.
 - **It can't keep an admin's edit of `rollout.json` safe from a rename at the same moment:** the rename rewrites the
   file whole (atomically for readers), and the machine lock doesn't cover a hand edit.
+- **It can't see silence between the flip and the first tick after it:** the gaps it takes off are between two
+  ticks, so a coordinator that hung right after logging the flip has that time counted until its next tick.
 - **It can't tell a clock that was behind at boot:** the soak counts wall-clock time, so a host booted with its clock
   at the time it shut down (no RTC), then stepped forward by NTP after the flip, has its downtime counted as soak.
   Keep the host clock synced at boot. A test pins this limit, so a fix shows up as a change.

@@ -452,7 +452,7 @@ test('R1174i/j: a merge with no PR number never counts (it cannot be told from a
 });
 
 test('R1174j J7: a --flag naming an Object.prototype key is not a flag this engine knows', () => {
-  for (const flag of ['constructor', '__proto__', 'toString']) {
+  for (const flag of ['constructor', 'valueof', 'hasownproperty']) {
     const dir = mkdtempSync(join(tmpdir(), 'rollout-j7-'));
     try {
       writeFileSync(join(dir, 'rollout.json'), JSON.stringify({ rings: [{ name: 'engine', instances: ['e1'] }] }));
@@ -463,6 +463,7 @@ test('R1174j J7: a --flag naming an Object.prototype key is not a flag this engi
       const lines: string[] = [];
       rolloutCommand('status', ['--flag', flag, '--file', join(dir, 'rollout.json')], { out: (l) => lines.push(l), err: (l) => lines.push(l), now: NOW, deps: { homeOf: () => null, ownDir: () => own, srvRoot: () => join(dir, 'srv'), engine: () => ({ repos: ['o/engine'], problem: null }) } });
       assert.match(lines.join('\n'), /not a flag this engine knows/, flag);
+      // (`__proto__` and `toString` aren't flag names at all: refused before this, exit 2; see the R1174k case.)
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -478,4 +479,54 @@ test('stated limit (R1174j J1, docs/rollout.md): the soak counts wall-clock time
 test('min_merges: 0 is allowed: an explicit opt-out by whoever writes root\'s rollout.json (docs/rollout.md)', () => {
   const R0 = RolloutFile.parse({ rings: R2.rings, promote: { min_merges: 0 } });
   assert.equal(status({ e1: [on(50), tick()], p1: [] }, { rollout: R0 }).rings[0]!.state, 'promoted');
+});
+
+// --- R1174k, R1174l: silence with no recorded stop, a bad stamp before the flip, the promotion time, the 60 s hold ---
+const ticksEvery = (fromH: number, toH: number, stepH: number) => {
+  const out: StoredEvent[] = [];
+  for (let h = fromH; h >= toH; h -= stepH) out.push(tick(h));
+  return out;
+};
+
+test('R1174k D1, R1174l A1: a coordinator silent for most of the soak with no recorded stop (suspended, paused, hung) is not promoted', () => {
+  // K-A: one tick after the flip, then none for 48 h, then ticks again.
+  assert.equal(ring0([started(51), on(50), tick(49.9), tick(2), ...merges(3, 1), tick()]), 'soaking');
+  // A1: ticks every 20 min to -49.1 h, 3 merges, then nothing until -0.5 h.
+  assert.equal(ring0([on(50), ...ticksEvery(49.95, 49.1, 1 / 3), ...merges(3, 49.4), ...ticksEvery(0.5, 0.05, 0.15)]), 'soaking');
+  // Its twin: ticking all through the soak is promoted.
+  assert.equal(ring0([on(50), ...merges(3, 49.4), ...ticksEvery(49.9, 0.05, 1 / 3)]), 'promoted');
+});
+
+test('R1174l A2: a clock stepped 47 h forward mid-run (no restart) is not soak', () => {
+  assert.equal(ring0([on(50), ...merges(3, 49.5), ...ticksEvery(49.9, 48, 1 / 3), ...ticksEvery(1, 0.05, 1 / 3)]), 'soaking');
+});
+
+test("R1174l A4: a ring on before the ring before really soaked is out of order (the silence isn't promotion time)", () => {
+  const e1 = [on(50), ...ticksEvery(49.95, 49.1, 1 / 3), ...merges(3, 49.4), ...ticksEvery(0.5, 0.05, 0.15)];
+  const s = status({ e1, p1: [on(0.3), tick()] }, { rollout: R2 });
+  assert.equal(s.rings[0]!.state, 'soaking');
+  assert.equal(s.rings[1]!.state, 'out of order');
+});
+
+test('R1174k D2 (K-B): an unparseable stamp before the flip never turns the clock-behind hold off', () => {
+  assert.equal(ring0([ev('config.applied', { sha: 'a'.repeat(40) }, 'garbage'), tick(49.0), on(49.1), ...merges(3, 40), tick()]), 'soaking');
+});
+
+test("R1174k D3: the promotion time counts a clean stop's time off (K-C), and a flip stamped 2 min before an earlier event holds (K-D)", () => {
+  // K-C: ring 0 on at -60 h, stopped cleanly from -50 h to -40 h: promoted at -2 h, so ring 1 on at -5 h is out of order.
+  const e1 = [started(61), on(60), ...merges(3, 55), tick(50.5), stopped(50), started(40), ...ticksEvery(39.9, 0.05, 0.4)];
+  const s = status({ e1, p1: [on(5), ...merges(3, 4), tick()] }, { rollout: R2 });
+  assert.equal(s.rings[0]!.state, 'promoted');
+  assert.equal(s.rings[1]!.state, 'out of order');
+  // K-D: an event logged before the flip, stamped 2 min after it.
+  assert.equal(ring0([tick(49), on(49 + 2 / 60), ...merges(3, 40), tick()]), 'soaking');
+});
+
+test('R1174k: a --flag that is not a flag name is refused (exit 2), so no newline forges an output line', () => {
+  for (const flag of ['f\nnext: every ring is promoted', 'A', '1f', '']) {
+    const lines: string[] = [];
+    const code = rolloutCommand('status', ['--flag', flag], { out: (l) => lines.push(l), err: (l) => lines.push(`ERR ${l}`), now: NOW });
+    assert.equal(code, 2, JSON.stringify(flag));
+    assert.ok(!lines.some((l) => l.startsWith('next:')), lines.join('\n'));
+  }
 });
