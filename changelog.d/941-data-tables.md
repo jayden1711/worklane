@@ -6,7 +6,7 @@
   (`<module>.tables.json`). The hold compares each one as parsed data, before and after, and never runs code: a table
   or its file gone, its kind changed, a file that doesn't parse, an entry lost or changed in a rule list, or an entry
   added or changed in an allowlist waits for the owner; an entry added to a rule list passes. Each module loads its
-  own file by its own URL and gets its tables deep-frozen, so a write from any file (a `splice`, `length = 0`,
+  own file by its own URL (the loader refuses a URL that isn't its caller's own file) and gets its tables deep-frozen, so a write from any file (a `splice`, `length = 0`,
   `delete`, a callback given the list, a regexp's `compile`) throws instead of loosening a check. Scripts that run on
   their own (the push gate's hook, the gate and its denylist, the App permission check, the pin check, the root
   helpers) carry a generated frozen copy of their file that a test holds to it. The tables registered in tests stay
