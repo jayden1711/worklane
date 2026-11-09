@@ -66,3 +66,19 @@ test("GIT_GUARD_PAIRS may not set a key REFUSED_KEYS names: include.path or incl
   assert.equal(gitTableProblems([...GIT_GUARD_PAIRS, ['includeIf.gitdir:/x/.path', '/tmp/e']]).length, 1);
   assert.equal(gitTableProblems([...GIT_GUARD_PAIRS, ['url.https://evil/.insteadOf', 'https://github.com/']]).length, 1);
 });
+
+test("every replacer the redaction data names is in REPLACERS, in the module and in the updater's copy, where the hold reads it (#941, R1184r D1)", async () => {
+  const { readFileSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const { replacerLines } = await import('../src/merge-policy-weakening.js');
+  const { repoRoot } = await import('./helpers.js');
+  const { BRAND } = await import('../src/brand.js');
+  const data = readFileSync(join(repoRoot, 'src', 'events', 'redact.tables.json'), 'utf8');
+  const names = [...new Set([...data.matchAll(/"replacer": "(\w+)"/g)].map((m) => m[1]!))];
+  assert.deepEqual(names.sort(), ['basic', 'jsonKey', 'orphanEnd', 'stripe']);
+  for (const file of [join('src', 'events', 'redact.ts'), join('scripts', 'machine', `${BRAND.cli}-update.cjs`)]) {
+    const block = replacerLines(readFileSync(join(repoRoot, file), 'utf8')).join('\n');
+    assert.ok(block, `${file}: the hold finds its REPLACERS block`);
+    for (const n of names) assert.ok(new RegExp(`^\\s*${n}\\b`, 'm').test(block), `${file}: REPLACERS holds ${n}`);
+  }
+});

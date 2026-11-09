@@ -150,3 +150,37 @@ for (const [name, early] of BUILTIN_OPEN) {
     assert.deepEqual(reasons({ 'src/x-early.ts': early, 'src/x-user.ts': `import './x-early.js';\n${USER}` }), [], 'held now: make this a held case, and update the body and design.md');
   });
 }
+
+test("R1184q: import.meta.url written as a pattern or for...of target, and a line the old comment strip cut, wait; R1184r D2: a load spelled TABLES?.get or tablesOf ( is a load line (#941)", () => {
+  const LOAD = "removes or changes the line that loads a check's table from its data";
+  const ADDED = "adds a line that loads a check's table some other way than its module's one load";
+  const has = (r: string[], k: string) => r.some((x) => x.includes(k));
+  const split = "import { tablesOf } from './check-tables.js';\nconst TABLES = tablesOf(import.meta.url);\nexport const CHECKS: readonly string[] = TABLES.get('CHECKS');\n";
+  const base = { 'src/x-rules.ts': split };
+  const above = (line: string) => ({ 'src/x-rules.ts': split.replace('const TABLES', `${line}\nconst TABLES`) });
+  // Q1a-c: a destructuring or for...of target.
+  assert.ok(has(reasons(above("[import.meta.url] = [new URL('./x-decoy.ts', import.meta.url).href];"), base), ADDED), 'Q1a array pattern');
+  assert.ok(has(reasons(above("({ url: import.meta.url } = { url: new URL('./x-decoy.ts', import.meta.url).href });"), base), ADDED), 'Q1b object pattern');
+  assert.ok(has(reasons(above("for (import.meta.url of [new URL('./x-decoy.ts', import.meta.url).href]) break;"), base), ADDED), 'Q1c for...of head');
+  // Q2a-c: a `//` inside a template literal, and a line that starts with an empty block comment.
+  assert.ok(has(reasons(above("const sep = `//`; Object.assign(import.meta, { url: `${new URL(`./x-decoy.ts`, import.meta.url).href}` });"), base), ADDED), 'Q2a');
+  assert.ok(has(reasons({ 'src/zz.ts': "const sep = `//`; const L = await import(`./check-tables.js`);\nvoid sep;\nvoid L;\n" }), ADDED), 'Q2b');
+  assert.ok(has(reasons(above("/**/ Object.assign(import.meta, { url: new URL('./x-decoy.ts', import.meta.url).href });"), base), ADDED), 'Q2c');
+  // D2: a load spelled with ?. or a space, then narrowed on its line.
+  const opt = split.replace("TABLES.get('CHECKS')", "TABLES?.get('CHECKS')");
+  assert.ok(has(reasons({ 'src/x-rules.ts': opt.replace("TABLES?.get('CHECKS');", "TABLES?.get<readonly string[]>('CHECKS').slice(1);") }, { 'src/x-rules.ts': opt }), LOAD), 'V1 TABLES?.get');
+  const spaced = "import { tablesOf } from './check-tables.js';\nexport const CHECKS: readonly string[] = tablesOf (import.meta.url).get('CHECKS');\n";
+  assert.ok(has(reasons({ 'src/x-rules.ts': spaced.replace(".get('CHECKS');", ".get<readonly string[]>('CHECKS').slice(1);") }, { 'src/x-rules.ts': spaced }), LOAD), 'V4 tablesOf (');
+});
+
+test("R1184r D1: a changed line of the redactor's REPLACERS (a table's entries in code) waits, in the module and in the updater's copy (#941)", () => {
+  const SHRUNK = "removes or changes an entry in a check's rules or a guard's list";
+  const redact = "const REPLACERS = Object.freeze({\n  stripe: (m: string, pre?: string, k?: string, v?: string) => (/\\d/.test(v!) ? `${pre}${k}_[REDACTED]` : m),\n  basic: (m: string) => m.slice(0, 1),\n});\nexport const R = REPLACERS;\n";
+  const r1e = redact.replace('(/\\d/.test(v!) ?', '(/\\d/.test(v!) && v!.length !== 99 ?');
+  assert.ok(reasons({ 'src/events/redact.ts': r1e }, { 'src/events/redact.ts': redact }).some((x) => x.includes(SHRUNK) && x.includes('REPLACERS')), 'R1e: the Stripe replacer declines a 99-character key');
+  const upd = "const REPLACERS = Object.freeze({\n    basic: (m) => m.slice(0, 1),\n});\n";
+  assert.ok(reasons({ 'scripts/machine/x-update.cjs': upd.replace('m.slice(0, 1)', 'm') }, { 'scripts/machine/x-update.cjs': upd }).some((x) => x.includes(SHRUNK)), "the updater copy's replacer");
+  // Control: a line added to REPLACERS (a new replacer) and a change outside it pass.
+  assert.deepEqual(reasons({ 'src/events/redact.ts': redact.replace('});', '  extra: (m: string) => m,\n});') }, { 'src/events/redact.ts': redact }), []);
+  assert.deepEqual(reasons({ 'src/events/redact.ts': `${redact}// a comment\n` }, { 'src/events/redact.ts': redact }), []);
+});

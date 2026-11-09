@@ -1210,6 +1210,13 @@ function loadSiteProblems(texts: ReadonlyMap<string, string>, tablesFiles: reado
     const at = (n: ts.Node) => `${f}:${src.getLineAndCharacterOfPosition(n.getStart(src)).line + 1}`;
     const isLoader = (spec: ts.Node | undefined) => !!spec && ts.isStringLiteralLike(spec) && /check-tables(?:\.[cm]?js)?$/.test(spec.text);
     const isGetLiteral = (n: ts.Node) => ts.isPropertyAccessExpression(n.parent) && n.parent.expression === n && n.parent.name.text === 'get' && ts.isCallExpression(n.parent.parent) && n.parent.parent.expression === n.parent && n.parent.parent.arguments.length === 1 && ts.isStringLiteral(n.parent.parent.arguments[0]!);
+    // An accepted load is spelled the one way, on a line the hold's TABLE_LOAD matches (R1184r D2: `TABLES?.get(`,
+    // `TABLES/**/.get(`, `tablesOf (`, a trailing comma or a comment in the call, an escaped name: the parse accepts
+    // them, the text rule doesn't, so a later edit of that line would have no reason).
+    const lineOf = (n: ts.Node) => text.split('\n')[src.getLineAndCharacterOfPosition(n.getStart(src)).line] ?? '';
+    const spelled = (n: ts.Node, as: string) => {
+      if (n.getText(src) !== as || !weakening.TABLE_LOAD.test(lineOf(n))) out.push(`${at(n)}: a load spelled other than \`${as}\` on a line the hold reads as one (${n.getText(src).slice(0, 60)})`);
+    };
     // A load's statement (or parameter) on one line, so a removed line always carries the load (R1184o 1).
     const oneLine = (n: ts.Node) => {
       let s: ts.Node = n;
@@ -1222,13 +1229,24 @@ function loadSiteProblems(texts: ReadonlyMap<string, string>, tablesFiles: reado
       if (ts.isMetaProperty(n) && n.keywordToken === ts.SyntaxKind.ImportKeyword) {
         const pa = n.parent;
         const read = ts.isPropertyAccessExpression(pa) && pa.expression === n && ['url', 'dirname', 'filename'].includes(pa.name.text);
-        const written = read && ((ts.isBinaryExpression(pa.parent) && pa.parent.left === pa && pa.parent.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && pa.parent.operatorToken.kind <= ts.SyntaxKind.LastAssignment) || ts.isDeleteExpression(pa.parent) || ts.isPrefixUnaryExpression(pa.parent) || ts.isPostfixUnaryExpression(pa.parent));
+        // A write: the left of an assignment, a delete or ++/--, or a target nested in a pattern or a for...of/in head
+        // (R1184q 1: `[import.meta.url] = …`, `({ url: import.meta.url } = …)`, `for (import.meta.url of …)`).
+        const target = (x: ts.Node): boolean => {
+          let c: ts.Node = x;
+          while (c.parent && (ts.isParenthesizedExpression(c.parent) || ts.isArrayLiteralExpression(c.parent) || ts.isSpreadElement(c.parent) || ts.isObjectLiteralExpression(c.parent) || ts.isShorthandPropertyAssignment(c.parent) || (ts.isPropertyAssignment(c.parent) && c.parent.initializer === c))) c = c.parent;
+          const q = c.parent;
+          return (ts.isBinaryExpression(q) && q.left === c && q.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && q.operatorToken.kind <= ts.SyntaxKind.LastAssignment) || ((ts.isForOfStatement(q) || ts.isForInStatement(q)) && q.initializer === c);
+        };
+        const written = read && (target(pa) || ts.isDeleteExpression(pa.parent) || ts.isPrefixUnaryExpression(pa.parent) || ts.isPostfixUnaryExpression(pa.parent));
         if (!read || written) out.push(`${at(n)}: import.meta used other than to read its url, dirname or filename`);
       }
       // A loader name read by element access (R1184o 3). A specifier computed at run time is not followed: a named limit
       // (scripts/ci imports by computed URLs by design).
       if (ts.isElementAccessExpression(n) && ts.isStringLiteralLike(n.argumentExpression) && ['tablesOf', 'tablesFrom', 'parseTables'].includes(n.argumentExpression.text)) out.push(`${at(n)}: ${n.argumentExpression.text} read by element access`);
-      if (ts.isIdentifier(n) && n.text === 'TABLES' && isGetLiteral(n)) oneLine(n);
+      if (ts.isIdentifier(n) && n.text === 'TABLES' && isGetLiteral(n)) {
+        oneLine(n);
+        spelled(n.parent, 'TABLES.get');
+      }
       if (ts.isImportDeclaration(n) && isLoader(n.moduleSpecifier)) {
         const c = n.importClause;
         if (!c || c.name || (c.namedBindings && !ts.isNamedImports(c.namedBindings))) out.push(`${at(n)}: the loader imported other than by name`);
@@ -1247,6 +1265,7 @@ function loadSiteProblems(texts: ReadonlyMap<string, string>, tablesFiles: reado
         else {
           loads++;
           oneLine(call);
+          spelled(call, 'tablesOf(import.meta.url)');
         }
         if (bound) tablesBound = true;
       }
@@ -1287,6 +1306,22 @@ test("the load-site lock reads code, not spelling: an alias, a namespace, a dyna
   refused('a second load on the load line', { 'src/a.ts': ok.replace(".get('A');", ".get('A'); const B = tablesOf(import.meta.url).get('A');") });
   refused('TABLES read other than by .get(literal)', { 'src/a.ts': "import { tablesOf } from './check-tables.js';\nconst TABLES = tablesOf(import.meta.url);\nconst k = 'A';\nexport const A = TABLES.get(k);\n" });
   refused('tablesFrom', { 'src/b.ts': "import { tablesFrom } from './check-tables.js';\n" });
+  // R1184q 1: import.meta.url as a pattern or for-head target. R1184r D2: the load spellings the text rule can't read.
+  for (const [label, line] of [
+    ['an array pattern', "[import.meta.url] = ['file:///x'];"],
+    ['an object pattern', "({ url: import.meta.url } = { url: 'file:///x' });"],
+    ['a for...of head', "for (import.meta.url of ['file:///x']) break;"],
+  ] as const) refused(label, { 'src/a.ts': `${line}\n${ok}` });
+  const split2 = (get: string) => `import { tablesOf } from './check-tables.js';\nconst TABLES = tablesOf(import.meta.url);\nexport const A = ${get}('A');\n`;
+  for (const [label, text] of [
+    ['V1 TABLES?.get', split2('TABLES?.get')],
+    ['V2 a comment before .get', split2('TABLES/**/.get')],
+    ['V3 an escaped name', split2('TABL\\u0045S.get')],
+    ['V4 tablesOf (', ok.replace('tablesOf(import.meta.url)', 'tablesOf (import.meta.url)')],
+    ['V5 a trailing comma', ok.replace('tablesOf(import.meta.url)', 'tablesOf(import.meta.url,)')],
+    ['V6 a comment in the call', ok.replace('tablesOf(import.meta.url)', 'tablesOf(import.meta.url /* own */)')],
+    ['V7 an escaped tablesOf', ok.replace('tablesOf(import.meta.url).get', 'tabl\\u0065sOf(import.meta.url).get')],
+  ] as const) refused(label, { 'src/a.ts': text });
   // R1184o: a load statement over lines; import.meta redefined without `=`; a computed specifier; a name by element access.
   refused('a load over three lines', { 'src/a.ts': "import { tablesOf } from './check-tables.js';\nconst TABLES = tablesOf(import.meta.url);\nexport const A = Object.freeze(\n  TABLES.get<readonly string[]>('A').map((x) => x),\n);\n" });
   refused('Object.assign(import.meta, ...)', { 'src/a.ts': `Object.assign(import.meta, { url: new URL('./b.ts', import.meta.url).href });\n${ok}` });

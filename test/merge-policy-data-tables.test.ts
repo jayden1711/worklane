@@ -187,3 +187,10 @@ test("a twin is found by the base's tree, not by text: a base tables file spelli
   // N5: U+017F folds to s under NFKC.
   assert.deepEqual(weakens({ [F]: BASE }, { [F]: BASE, 'src/x-ruleſ.tables.json': file({ CHECKS: ['never-shrink', ['a']] }) }, new Set([F])), [GONE]);
 });
+
+test("a twin whose suffix is in another case (.tables.JSON, .Tables.json, .tableſ.json) waits; so does a tables file named in another case (#941, R1184r D3)", () => {
+  for (const twin of ['src/x-rules.tables.JSON', 'src/x-rules.Tables.json', 'src/x-rules.tableſ.json']) {
+    assert.deepEqual(weakens({ [F]: BASE }, { [F]: BASE, [twin]: file({ CHECKS: ['never-shrink', ['a']] }) }, new Set([F])), [GONE], twin);
+  }
+  assert.deepEqual(weakens({}, { 'src/y-rules.Tables.json': BASE }, new Set([F])), [UNREADABLE], 'no twin, but named in another case');
+});

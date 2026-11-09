@@ -419,7 +419,7 @@ export const isTipConflict = (reason: string): boolean => reason.startsWith(`${W
  * A line that loads a table (#941): a module's own load, any `.tables.json` name, or a generated copy's marker line
  * (scripts/lib/table-copies.mjs, scripts/lib/redact-vendor.mjs). A removed or changed one waits.
  */
-export const TABLE_LOAD = /tablesOf\(\s*import\.meta\.url\s*\)|\bTABLES\s*\.\s*get\b|\.tables\.json\b|\/\/ (?:BEGIN|END) tables from |TABLES_DATA = /;
+export const TABLE_LOAD = /\btablesOf\s*\(\s*import\s*\.\s*meta\s*\.\s*url\b|\bTABLES\s*(?:\?\s*)?\.\s*get\b|\.tables\.json\b|\/\/ (?:BEGIN|END) tables from |TABLES_DATA = /;
 
 /**
  * The one way a module may import the loader (#941, R1184n N3): a plain named import of the names a load site uses
@@ -439,7 +439,35 @@ export const LOADER_CODE: ReadonlySet<string> = new Set(['src/check-tables.ts', 
  * `import.meta` other than a plain read of `.url`, `.dirname` or `.filename` (R1184o 2: `Object.assign(import.meta, …)`,
  * `Reflect.set(import.meta, 'url', …)`), or one of those written or deleted: a module's load reads its path from it.
  */
+/**
+ * `import.meta.<x>` where an assignment target stands: inside an array or object pattern (`[import.meta.url] = …`,
+ * `({ url: import.meta.url } = …)`), or as a `for…of`/`for…in` head (R1184q 1). No line of src/ or scripts/ reads one
+ * that way today; a read in a literal written so (`{ url: import.meta.url }`) waits too, fail closed.
+ */
+const META_URL_TARGET = /\bimport\s*\.\s*meta\s*\.\s*\w+\s*[\]},]|\bimport\s*\.\s*meta\s*\.\s*\w+\s+(?:of|in)\b/;
 const META_URL_SET = /\bimport\s*\.\s*meta\b(?!\s*\.\s*(?:url|dirname|filename)\b)|\bimport\s*\.\s*meta\s*\.\s*\w+\s*(?:[-+*/%&|^]|\*\*|<<|>>>?|&&|\|\||\?\?)?=(?!=)|\bdelete\s+import\s*\.\s*meta\b/;
+
+/** The files whose REPLACERS block is a table's code-held entries: the redactor and the root updater's copy of it. */
+export const REPLACER_FILES = /^(?:src\/events\/redact\.ts|scripts\/machine\/[^/]+-update\.cjs)$/;
+
+/**
+ * The lines of `text`'s REPLACERS block: from the line that declares `const REPLACERS` to the first later line that is
+ * `});` at the declaration's indent. None when the text has no block; throws when it has a declaration that never
+ * closes, or two (a decoy), so the change waits.
+ */
+export function replacerLines(text: string | null): string[] {
+  if (text === null) return [];
+  const lines = text.split('\n');
+  const starts = lines.flatMap((l, k) => (/^\s*const REPLACERS\b/.test(l) ? [k] : []));
+  if (!starts.length) return [];
+  if (starts.length > 1) throw new Error(`REPLACERS is declared ${starts.length} times`);
+  const at = lines[starts[0]!]!.length - lines[starts[0]!]!.trimStart().length;
+  for (let k = starts[0]! + 1; k < lines.length; k++) {
+    const l = lines[k]!;
+    if (l.trim() === '});' && l.length - l.trimStart().length === at) return lines.slice(starts[0]!, k + 1);
+  }
+  throw new Error('REPLACERS never closes');
+}
 
 /** A JSON value as text, its keys sorted at every depth: the same data gives the same text. */
 const canonical = (v: unknown): string => {
@@ -1104,33 +1132,53 @@ function findings(i: WeakeningInput): Found {
     if (isAllow(f.path)) for (const l of added) if (l.trim()) hit('allow-file', f.path, l.trim());
   }
 
+  // The redaction replacers (R1184r D1): the data names each by key (`{"replacer": "stripe"}`), so each function body
+  // is an entry of the table in code. A removed or changed line of the REPLACERS block, in the module or the updater's
+  // generated copy, waits as a table's entry did when the function sat in the table (main).
+  for (const f of i.files) {
+    if (!REPLACER_FILES.test(f.path) || !holds(f.path, i.scope)) continue;
+    let block: Set<string>;
+    try {
+      block = new Set(replacerLines(i.before(f.path)).map((l) => l.trim()));
+    } catch (e) {
+      hit('unreadable', f.path, String((e as Error).message ?? e));
+      continue;
+    }
+    for (const l of f.removedLines ?? []) if (l.trim() && block.has(l.trim())) hit('table-shrunk', f.path, `REPLACERS: ${l.trim()}`);
+  }
+
   // The data tables (#941), compared before and after as parsed data.
   for (const f of i.files) if (dataTables(f.path)) jsonTableFindings(f.path, i.before, i.after, hit);
   // A tables file the change adds whose name differs only in case from another's (R1184l #4): on a checkout that folds
   // case, one is written over the other, and the module reads data the compare never saw. Folded as a file system may
   // fold it: NFKC first (U+017F, the long s, is an s), then lower case (R1184n N5).
   const fold = (p: string) => p.normalize('NFKC').toLowerCase();
-  const tablesFiles = [...new Set([...(i.tablesFiles ?? []), ...i.files.map((f) => f.path).filter((p) => dataTables(p) && !i.deleted.has(p))])];
+  // The suffix is folded too (R1184r D3: `x.tables.JSON`, `x.Tables.json`, `x.tableſ.json` beside `x.tables.json`).
+  const foldedTables = (p: string) => TABLES_FILE.test(fold(p)) && holds(p, i.scope);
+  const tablesFiles = [...new Set([...(i.tablesFiles ?? []), ...i.files.map((f) => f.path).filter((p) => foldedTables(p) && !i.deleted.has(p))])];
   for (const f of i.files) {
-    if (!dataTables(f.path) || i.deleted.has(f.path) || i.tablesFiles?.has(f.path)) continue;
+    if (!foldedTables(f.path) || i.deleted.has(f.path) || i.tablesFiles?.has(f.path)) continue;
     const twin = tablesFiles.find((p) => p !== f.path && fold(p) === fold(f.path));
     if (twin) hit('table-gone', f.path, `its name differs only in case from ${twin}`);
+    else if (!TABLES_FILE.test(f.path)) hit('unreadable', f.path, 'a tables file named in another case: the build and the loader read only `.tables.json`');
   }
   // A line that loads a table, removed or changed (#941, the owner's rule of 2026-11-08): the module's load
   // (`tablesOf(import.meta.url)`), any `.tables.json` name (an import, a require, a read), or a generated copy's marker.
   // It waits whatever replaces it: what the code reads after may not be the table the compare reads.
   // A comment that only names a tables file is no load (a generated copy's marker is); a test's lines are held by the
   // test rules.
-  const commentOnly = (l: string) => /^\s*(?:\/\/|\/\*|\*)/.test(l) && !/\/\/ (?:BEGIN|END) tables from /.test(l);
+  // All comment: a `//` line, or a block comment's line with no code after its close (R1184q 2: `/**/ code` is code).
+  const commentOnly = (l: string) => (/^\s*\/\//.test(l) || (/^\s*(?:\/\*|\*)/.test(l) && !/\*\/\s*\S/.test(l))) && !/\/\/ (?:BEGIN|END) tables from /.test(l);
   for (const f of i.files) {
     if (!MARKABLE.test(f.path) || !holds(f.path, i.scope) || isTest(f.path)) continue;
     for (const l of f.removedLines ?? []) if (TABLE_LOAD.test(l) && !commentOnly(l)) hit('table-load-gone', f.path, l.trim());
     if (LOADER_CODE.has(f.path)) continue;
     for (const l of f.addedLines ?? []) {
       if (commentOnly(l)) continue;
-      // A trailing comment is no part of the import (R1184o: it would make a plain one wait).
-      const code = l.replace(/\s*\/\/[^'"]*$/, '');
-      if ((LOADER_NAMED.test(code) && !LOADER_IMPORT.test(code)) || META_URL_SET.test(code)) hit('table-load-added', f.path, l.trim());
+      // A trailing comment is forgiven only for the plain import (R1184o); the other rules read the whole line (R1184q 2: a
+      // `//` inside a template literal would cut the rest of the line off).
+      const plainImport = LOADER_IMPORT.test(l) || LOADER_IMPORT.test(l.replace(/\s*\/\/[^'"`]*$/, ''));
+      if ((LOADER_NAMED.test(l) && !plainImport) || META_URL_SET.test(l) || META_URL_TARGET.test(l)) hit('table-load-added', f.path, l.trim());
     }
   }
 
@@ -1345,7 +1393,7 @@ function measured(cwd: string, from: string, to: string, files: ChangeFile[], sc
   const markable = (set: Set<string>) => new Set([...files.map((f) => f.path), ...(conflicts ?? [])].filter((p) => set.has(p) && MARKABLE.test(p) && !isNonUtf8Path(p)));
   const marked = markable(new Set(filesWithText(cwd, from, [TABLE_MARK.trimEnd(), LINT_MARK])));
   const tipMarked = at ? markable(new Set(filesWithText(cwd, at.tip, [TABLE_MARK.trimEnd(), LINT_MARK]))) : new Set<string>();
-  const paths = [...new Set([...CHECK_TABLES.map((t) => t.path), ...marked, ...tipMarked, ...files.map((f) => f.path).filter((p) => TABLES_FILE.test(p))])].filter((p) => files.some((f) => f.path === p) && !isNonUtf8Path(p));
+  const paths = [...new Set([...CHECK_TABLES.map((t) => t.path), ...marked, ...tipMarked, ...files.map((f) => f.path).filter((p) => TABLES_FILE.test(p) || REPLACER_FILES.test(p))])].filter((p) => files.some((f) => f.path === p) && !isNonUtf8Path(p));
   // A file over the cap isn't read at all: the change waits.
   const side = (rev: string) => {
     const { texts, tooBig } = filesAt(cwd, rev, paths, MAX_TABLE_FILE);
