@@ -351,5 +351,48 @@
   "r1169p-p8c-control-line1": [
     2,
     "test/y\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside"
+  ],
+  "r1169q-q1-regex-test": [
+    0,
+    "^$",
+    "test/y\\.test\\.ts:3: the unit line names systemctl"
+  ],
+  "r1169q-q1g-gate-regex-test": [
+    0,
+    "^$"
+  ],
+  "r1169q-q3-pin-escaped-line2-base": [
+    0,
+    "^$"
+  ],
+  "r1169q-q3b-pin-escaped-line2-edited": [
+    2,
+    "test/y\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside"
+  ],
+  "r1169r-r1-test-name-read": [
+    1,
+    "/run/systemd/system: SKIP no init here",
+    "test/y\\.test\\.ts:4: /run/systemd/system"
+  ],
+  "r1169r-r1b-suite-name-options": [
+    1,
+    "acceptance: units start: SKIP no init here",
+    "test/y\\.test\\.ts:4: acceptance: units start"
+  ],
+  "r1169r-r6-zero-subtests-bracket": [
+    1,
+    "acceptance: every failed unit is reported: ran no subtest"
+  ],
+  "r1169r-r6c-control-dot-test": [
+    1,
+    "acceptance: every failed unit is reported: ran no subtest"
+  ],
+  "r1169r-r7-pin-unpinned-lines": [
+    2,
+    "test/y\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside"
+  ],
+  "r1169r-r7a-baseline-pinned-stub": [
+    0,
+    "^$"
   ]
 }

@@ -1,0 +1,8 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+const STANDIN = `#!/bin/sh
+\x73ystemctl is-active --quiet worklane || exit 77
+exit 0`;
+test('the stand-in records its calls', () => {
+  assert.ok(STANDIN.startsWith('#!'));
+});

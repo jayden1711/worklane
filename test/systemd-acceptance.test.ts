@@ -435,7 +435,7 @@ test('R1169o/p: the sign is allowed in a test function only in a *.test.ts file;
   assert.deepEqual(uses(`const j = process.env.JOURNAL_STREAM;`), ['1: JOURNAL_STREAM']);
   // A use over several lines is pinned by its first line and each line holding the sign (R1169o: a change on its
   // second line was missed); a line without the sign is not, so a long text's unrelated edits aren't changes.
-  assert.deepEqual(sa.signUseList(ts, 'test/x.test.ts', 'const STUB = `#!/bin/sh\nset -e\nsystemctl is-system-running || exit 77\n`;').map((u) => u.pin), ['systemctl: const STUB = `#!/bin/sh\nsystemctl is-system-running || exit 77']);
+  assert.deepEqual(sa.signUseList(ts, 'test/x.test.ts', 'const STUB = `#!/bin/sh\nset -e\nsystemctl is-system-running || exit 77\n`;').map((u) => u.pin), ['systemctl: const STUB = `#!/bin/sh\nsystemctl is-system-running || exit 77\n`;'], 'and, since R1169r, the statement\'s last line');
 });
 
 test('R1169p D2: a test whose skip, todo or early return turns on what carries the sign, one name away, is picked for the VM; one that only uses such a name is not', () => {
@@ -473,4 +473,21 @@ test('R1169o C4: a local the allowlist excuses is pinned by what makes it carry 
   assert.deepEqual(sa.signProblems(ts, texts, allow(pin)), []);
   const edited = new Map([...texts, ['test/x.test.ts', texts.get('test/x.test.ts')!.replace("status === 0;", "status === 0 && lingerEnabled() !== null;")]]);
   assert.match(sa.signProblems(ts, edited, allow(pin)).join('\n'), /test\/x\.test\.ts: a skip reads test\/x\.test\.ts: canSwitch, named in the allowlist's skipImports, but what makes it carry systemd's sign isn't its pin there/);
+});
+
+test('R1169q/r: subtests are reads of `test` on the context; a name holding the sign picks its tests; a pin holds the statement around a use', () => {
+  const none = { paths: new Set<string>(), carries: () => false };
+  const pick = (text: string) => sa.signTests(ts, 'test/x.test.ts', text, none).map((t) => [t.name, t.subtests]);
+  // C1: another object's .test is no subtest (a regex); D5: t['test'](...) and t.test.bind(t) are; a nested subtest's own.
+  assert.deepEqual(pick(`test('a', () => { run('${sd}-run'); assert.ok(/re/.test('re')); });`), [['a', false]]);
+  assert.deepEqual(pick(`test('b', async (t) => { run('${sd}-run'); await t['test']('s', () => {}); });`), [['b', true]]);
+  assert.deepEqual(pick(`test('c', async (t) => { run('${sd}-run'); const sub = t.test.bind(t); await sub('s', () => {}); });`), [['c', true]]);
+  assert.deepEqual(pick(`test('d', async (t) => { run('${sd}-run'); await t.test('s', async (u) => { await u.test('n', () => {}); }); });`), [['d', true]]);
+  // D1: a test whose name holds the sign, and every test under a suite whose name does.
+  assert.deepEqual(pick(`test('/run/${sd}/system', (t) => { if (!existsSync(t.name)) t.skip(); });`), [['/run/systemd/system', false]]);
+  assert.deepEqual(pick(`describe('/run/${sd}/system', (s) => { it('e', { skip: !existsSync(s.name) }, () => {}); });`), [['e', false]]);
+  // D6: the statement's first and last lines are pinned with the use; q2: a later line's escaped sign is pinned.
+  const pins = (text: string) => sa.signUseList(ts, 'test/x.test.ts', text).map((u) => u.pin);
+  assert.deepEqual(pins('const STUB =\n  `#!/bin/sh\nsystemctl is-system-running\n`;'), ['systemctl: const STUB =\n`#!/bin/sh\nsystemctl is-system-running\n`;']);
+  assert.deepEqual(pins('const S = `#!/bin/sh\necho "\\x73ystemctl"\nexit 0`;'), ['systemctl: const S = `#!/bin/sh\necho "\\x73ystemctl"\nexit 0`;']);
 });

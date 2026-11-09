@@ -1,0 +1,5 @@
+import { describe, it } from 'node:test';
+import { existsSync } from 'node:fs';
+describe('/run/systemd/system', (s) => {
+  it('acceptance: units start', { skip: !existsSync(s.name) && 'no init here' }, () => {});
+});

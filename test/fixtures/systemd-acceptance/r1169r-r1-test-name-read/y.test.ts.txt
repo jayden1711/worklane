@@ -1,0 +1,10 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
+test('/run/systemd/system', (t) => {
+  if (!existsSync(t.name)) {
+    t.skip('no init here');
+    return;
+  }
+  assert.ok(true);
+});

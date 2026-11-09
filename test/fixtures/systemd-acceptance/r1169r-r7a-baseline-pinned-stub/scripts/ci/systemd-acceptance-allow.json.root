@@ -1,0 +1,12 @@
+{
+ "uses": {
+  "test/y.test.ts": {
+   "why": "a stand-in systemctl script (data)",
+   "uses": [
+    "systemctl: const STUB =\n`#!/bin/sh\nsystemctl is-system-running --quiet || exit 77\n`;"
+   ]
+  }
+ },
+ "skipImports": {},
+ "runtime": {}
+}

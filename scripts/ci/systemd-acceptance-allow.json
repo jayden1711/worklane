@@ -4,15 +4,15 @@
     "src/cli.ts": {
       "why": "product code: help text",
       "uses": [
-        "systemd: store named by ${HELD_OUT_ENV} or --held-out-from-state (refused with\n(launchd on macOS, systemd --user on Linux); survives sessions"
+        "systemd: const USAGE = `${BRAND.name} ${pkg.version}: ${BRAND.tagline}\nstore named by ${HELD_OUT_ENV} or --held-out-from-state (refused with\n(launchd on macOS, systemd --user on Linux); survives sessions\noptions: --root <dir> (default: nearest folder with ${BRAND.configDir}/, else cwd)`;"
       ]
     },
     "src/dashboard.ts": {
       "why": "product code: reads a unit's journal with journalctl",
       "uses": [
-        "journalctl: const journalctl: JournalReader = (unit, lines) => {",
+        "journalctl: const journalctl: JournalReader = (unit, lines) => {\n};",
         "journalctl: const r = spawnSync('journalctl', ['--unit', unit, '--output', 'json', '--lines', String(lines), '--no-pager', '--quiet'], { encoding: 'utf8', timeout: 10_000, maxBuffer: 16 * 1024 * 1024 });",
-        "journalctl: export function readServiceLog(src: LogSource, lines = 200, read: JournalReader = journalctl): ServiceLog {",
+        "journalctl: export function readServiceLog(src: LogSource, lines = 200, read: JournalReader = journalctl): ServiceLog {\n}",
         "journalctl: problem = `journalctl couldn't read ${src.unit}: ${(r.stderr || `exit ${r.status}`).trim().split('\\n').pop()}`;"
       ]
     },
@@ -27,26 +27,26 @@
       "uses": [
         "systemd: if (up === null) return no('no systemd here to ask about the dashboard hub');",
         "systemd: return no(`${up === null ? 'no systemd here to ask' : `${unit} isn't active`}${why}`);",
-        "loginctl: today: 'Run `sudo loginctl enable-linger $USER` so the coordinator runs without a login session.',",
-        "loginctl: fix: { kind: 'terminal', command: 'sudo loginctl enable-linger \"$USER\"', why: 'it needs sudo, which the dashboard never runs' },"
+        "loginctl: export const SETUP_STEPS: readonly SetupStep[] = [\ntoday: 'Run `sudo loginctl enable-linger $USER` so the coordinator runs without a login session.',\n];",
+        "loginctl: export const SETUP_STEPS: readonly SetupStep[] = [\nfix: { kind: 'terminal', command: 'sudo loginctl enable-linger \"$USER\"', why: 'it needs sudo, which the dashboard never runs' },\n];"
       ]
     },
     "src/guardrails/push-hook.ts": {
       "why": "product code: systemd-run's option table",
       "uses": [
-        "systemd: 'systemd-run': { value: opts('HMEpu', 'unit', 'property', 'setenv', 'description', 'slice', 'uid', 'gid', 'working-directory', 'machine', 'host', 'nice', 'service-type', 'expand-environment', 'path-property', 'socket-property', 'on-active', 'on-boot', 'on-startup', 'on-unit-active', 'on-unit-inactive', 'on-calendar', 'timer-property') },"
+        "systemd: export const RUNNERS: Readonly<Record<string, Runner>> = {\n'systemd-run': { value: opts('HMEpu', 'unit', 'property', 'setenv', 'description', 'slice', 'uid', 'gid', 'working-directory', 'machine', 'host', 'nice', 'service-type', 'expand-environment', 'path-property', 'socket-property', 'on-active', 'on-boot', 'on-startup', 'on-unit-active', 'on-unit-inactive', 'on-calendar', 'timer-property') },\n};"
       ]
     },
     "src/intake/discord-setup.ts": {
       "why": "product code: a restart command shown to the owner",
       "uses": [
-        "systemctl: restart: `sudo systemctl restart ${instanceUnit(o.instance)}`,"
+        "systemctl: return {\nrestart: `sudo systemctl restart ${instanceUnit(o.instance)}`,\n};"
       ]
     },
     "src/intake/source-setup.ts": {
       "why": "product code: a restart command shown to the owner",
       "uses": [
-        "systemctl: restart: `sudo systemctl restart ${instanceUnit(o.instance)}`,"
+        "systemctl: return {\nrestart: `sudo systemctl restart ${instanceUnit(o.instance)}`,\n};"
       ]
     },
     "src/mcp/throwaway.ts": {
@@ -93,13 +93,13 @@
         "SYSTEMD_: const sd = SYSTEMD_MARKERS.find((k) => env[k] !== undefined);",
         "systemd: if (sd) return no(`${TEST_MACHINE_VAR} (${machine}) isn't this run's test machine: ${SYSTEM_ROOT_VAR} is unset, and systemd started this process (${sd} is set)`);",
         "SYSTEMD_: const key = [root, env.get(TEST_TOKEN_VAR), ...SYSTEMD_MARKERS.map((k) => env.get(k))].join('\\0');",
-        "systemd: units: '/etc/systemd/system',"
+        "systemd: export const SYSTEM_ROOTS = {\nunits: '/etc/systemd/system',\n} as const;"
       ]
     },
     "src/testrun/helper.ts": {
       "why": "product code: a restart command in a message",
       "uses": [
-        "systemctl: `sudo bash ${asRoot.opt('current/scripts/setup/test-user.sh')} update-helper, then restart the instance: sudo systemctl restart ${BRAND.cli}-${instance}.service`;"
+        "systemctl: export const helperFix = (instance: string) =>\n`sudo bash ${asRoot.opt('current/scripts/setup/test-user.sh')} update-helper, then restart the instance: sudo systemctl restart ${BRAND.cli}-${instance}.service`;"
       ]
     },
     "src/watchdog/probes.ts": {
@@ -115,7 +115,7 @@
     "test/agent-api-key-r6.test.ts": {
       "why": "stand-in programs a test puts on PATH (systemctl, systemd-run), by name",
       "uses": [
-        "systemctl: for (const tool of ['sudo', 'systemctl', 'getent', 'useradd', 'gh', 'docker', 'shred']) {"
+        "systemctl: for (const tool of ['sudo', 'systemctl', 'getent', 'useradd', 'gh', 'docker', 'shred']) {\n}"
       ]
     },
     "test/agent-api-key-r7.test.ts": {
@@ -142,13 +142,13 @@
     "test/change-files-renames.test.ts": {
       "why": "a file name in a table (scripts/ci/testrun-real-systemd.mjs)",
       "uses": [
-        "systemd: 'scripts/ci/testrun-real-systemd.mjs': { words: { 'name-only': 1, porcelain: 1 }, why: 'shell lines a slow CI job runs in its VM (`ls-tree`, `status --porcelain`: is it clean)' },"
+        "systemd: const OUTSIDE_THE_HELPER: Record<string, { words: Record<string, number>; why: string; must?: RegExp[] }> = {\n'scripts/ci/testrun-real-systemd.mjs': { words: { 'name-only': 1, porcelain: 1 }, why: 'shell lines a slow CI job runs in its VM (`ls-tree`, `status --porcelain`: is it clean)' },\n};"
       ]
     },
     "test/ci-batch.test.ts": {
       "why": "a CI check's name ('add-project (real systemd)')",
       "uses": [
-        "systemd: function world(n: number, culprit: number, failing = 'add-project (real systemd)'): World {"
+        "systemd: function world(n: number, culprit: number, failing = 'add-project (real systemd)'): World {\n}"
       ]
     },
     "test/ci-preview-done.test.ts": {
@@ -163,11 +163,11 @@
     "test/claude-account-script.test.ts": {
       "why": "stand-in programs a test puts on PATH (systemctl, systemd-run), by name",
       "uses": [
-        "systemctl: T=${JSON.stringify(T)}\nunit_active() { systemctl is-active -q \"$1\"; }",
+        "systemctl: writeFileSync(\nT=${JSON.stringify(T)}\nunit_active() { systemctl is-active -q \"$1\"; }\n);",
         "systemd: for (const tool of ['logger', 'systemd-run', 'journalctl']) exe(tool, `#!/usr/bin/env bash\\necho \"${tool} $*\" >> ${JSON.stringify(join(T, 'calls'))}\\nexit 1\\n`);",
         "journalctl: for (const tool of ['logger', 'systemd-run', 'journalctl']) exe(tool, `#!/usr/bin/env bash\\necho \"${tool} $*\" >> ${JSON.stringify(join(T, 'calls'))}\\nexit 1\\n`);",
-        "systemctl: exe('systemctl', `#!/usr/bin/env bash",
-        "systemctl: T=${JSON.stringify(T)}\necho \"systemctl $*\" >> \"$T/calls\""
+        "systemctl: exe('systemctl', `#!/usr/bin/env bash\n`);",
+        "systemctl: exe('systemctl', `#!/usr/bin/env bash\nT=${JSON.stringify(T)}\necho \"systemctl $*\" >> \"$T/calls\"\n`);"
       ]
     },
     "test/dashboards-root.ts": {
@@ -180,15 +180,15 @@
     "test/egress-firewall.test.ts": {
       "why": "stand-in systemctl and a unit file's text; a systemd version number as a parameter; the CI script's file name",
       "uses": [
-        "systemd: function machine(systemd: number, record?: string, subuid?: string) {",
+        "systemd: function machine(systemd: number, record?: string, subuid?: string) {\n}",
         "systemctl: stub('systemctl', `[ \"$1\" = --version ] && { echo \"systemd ${systemd} (${systemd}.4-1ubuntu8)\"; echo \"+PAM +AUDIT\"; exit 0; }; exit 0`);",
         "systemd: stub('systemctl', `[ \"$1\" = --version ] && { echo \"systemd ${systemd} (${systemd}.4-1ubuntu8)\"; echo \"+PAM +AUDIT\"; exit 0; }; exit 0`);",
         "systemd: stub('systemctl', `[ \"$1\" = --version ] && { echo \"systemd ${systemd} (${systemd}.4-1ubuntu8)\"; echo \"+PAM +AUDIT\"; exit 0; }; exit 0`);",
         "systemd: stub('systemctl', `[ \"$1\" = --version ] && { echo \"systemd ${systemd} (${systemd}.4-1ubuntu8)\"; echo \"+PAM +AUDIT\"; exit 0; }; exit 0`);",
-        "systemd: `'cat ${u}') printf '%s\\\\n' '# /etc/systemd/system/${u}' '[Service]' 'Type=simple' ${p.nftset ? `'NFTSet=${p.nftset}'` : ''} 'Restart=on-failure' ;;`,",
-        "systemctl: const prog = `set -euo pipefail\nsystemctl() {",
-        "systemd: function decide(systemd: number, withTestUsers: boolean, record: string | null) {",
-        "systemd: MARK='${mark}' sysd=${systemd} tests='${withTestUsers ? 1 : ''}'",
+        "systemd: const show = Object.entries(units)\n`'cat ${u}') printf '%s\\\\n' '# /etc/systemd/system/${u}' '[Service]' 'Type=simple' ${p.nftset ? `'NFTSet=${p.nftset}'` : ''} 'Restart=on-failure' ;;`,\n.join('\\n      ');",
+        "systemctl: const prog = `set -euo pipefail\nsystemctl() {\n${body}`;",
+        "systemd: function decide(systemd: number, withTestUsers: boolean, record: string | null) {\n}",
+        "systemd: const prog = `set -euo pipefail\nMARK='${mark}' sysd=${systemd} tests='${withTestUsers ? 1 : ''}'\nrecord`;",
         "systemd: const ciScript = join(repoRoot, 'scripts', 'ci', 'egress-real-systemd.sh');",
         "systemd: assert.ok(from >= 0, `${f} is defined in egress-real-systemd.sh`);"
       ]
@@ -206,15 +206,15 @@
     "test/experiments-helper.test.ts": {
       "why": "stand-in programs a test puts on PATH (systemctl, systemd-run), by name",
       "uses": [
-        "systemd: 'systemd-run',",
-        "systemd: `[ \"$1\" = --version ] && { echo \"systemd 255 (test)\"; exit 0; }",
+        "systemd: stub(\n'systemd-run',\n);",
+        "systemd: stub(\n`[ \"$1\" = --version ] && { echo \"systemd 255 (test)\"; exit 0; }\n);",
         "systemctl: for (const t of ['systemctl', 'chown', 'chgrp', 'mount', 'umount', 'mkfs.ext4']) stub(t, 'exit 0');"
       ]
     },
     "test/git-runner.test.ts": {
       "why": "a file name in a table (scripts/ci/testrun-real-systemd.mjs)",
       "uses": [
-        "systemd: 'scripts/ci/testrun-real-systemd.mjs': { n: 1, why: 'its git: the job copies this file alone into the VM (ci-slow.yml)', must: [/const GIT_FIXED_ARGS = \\['--no-replace-objects', '-c', 'core\\.commitGraph=false'\\]/, /GIT_NO_REPLACE_OBJECTS: '1', GIT_GRAFT_FILE: join\\(devNull, 'no-grafts'\\)/, /execFileSync\\('git', \\[\\.\\.\\.GIT_FIXED_ARGS, /] },"
+        "systemd: const OUTSIDE_THE_RUNNER: Record<string, { n: number; why: string; must?: RegExp[] }> = {\n'scripts/ci/testrun-real-systemd.mjs': { n: 1, why: 'its git: the job copies this file alone into the VM (ci-slow.yml)', must: [/const GIT_FIXED_ARGS = \\['--no-replace-objects', '-c', 'core\\.commitGraph=false'\\]/, /GIT_NO_REPLACE_OBJECTS: '1', GIT_GRAFT_FILE: join\\(devNull, 'no-grafts'\\)/, /execFileSync\\('git', \\[\\.\\.\\.GIT_FIXED_ARGS, /] },\n};"
       ]
     },
     "test/helper-protocol.test.ts": {
@@ -236,12 +236,12 @@
       "uses": [
         "systemd: const roots: Record<string, string> = { etcPath: `/etc/${cli}/`, varLibPath: `/var/lib/${cli}/`, runPath: `/run/${cli}/`, unitPath: '/etc/systemd/system/' };",
         "systemd: const where = (kind: string, w: string) => [w, ...(kind === 'unit' ? [`/etc/systemd/system/${w}`] : kind === 'sudoers' ? [`/etc/sudoers.d/${w}`] : [])];",
-        "loginctl: `usermod() { echo \"usermod $*\" >> \"${log}\"; }; loginctl() { echo \"loginctl $*\" >> \"${log}\"; }; sleep() { :; }`,",
-        "systemctl: `systemctl() { echo \"systemctl $*\" >> \"${log}\"; case \"$1 \\${3:-}\" in \"is-active ${o.active ?? '-'}\") return 0 ;; \"is-active \"*) return 1 ;; esac; case \"$1\" in list-units) echo \"worklane-test-alpha_r1_9.service loaded active running x\"; echo \"worklane-test-beta_r1_9.service loaded active running x\" ;; show) case \"$*\" in *alpha_r1*) echo wl-alpha-agent ;; *beta*) echo wl-beta-agent ;; esac ;; esac; }`,",
-        "systemctl: `usermod() { :; }; systemctl() { return 1; }`,",
-        "loginctl: `pkill() { echo \"pkill $*\" >> \"${log}\"; }; loginctl() { echo \"loginctl $*\" >> \"${log}\"; }; sleep() { echo \"sleep $*\" >> \"${log}\"; }`,",
-        "systemd: '4244': [`0::/user.slice/user-${uid}.slice/user@${uid}.service/init.scope`, 'systemd'],",
-        "systemctl: `systemctl() { echo inactive; }`,"
+        "loginctl: const stubs = [\n`usermod() { echo \"usermod $*\" >> \"${log}\"; }; loginctl() { echo \"loginctl $*\" >> \"${log}\"; }; sleep() { :; }`,\n].join('\\n');",
+        "systemctl: const stubs = [\n`systemctl() { echo \"systemctl $*\" >> \"${log}\"; case \"$1 \\${3:-}\" in \"is-active ${o.active ?? '-'}\") return 0 ;; \"is-active \"*) return 1 ;; esac; case \"$1\" in list-units) echo \"worklane-test-alpha_r1_9.service loaded active running x\"; echo \"worklane-test-beta_r1_9.service loaded active running x\" ;; show) case \"$*\" in *alpha_r1*) echo wl-alpha-agent ;; *beta*) echo wl-beta-agent ;; esac ;; esac; }`,\n].join('\\n');",
+        "systemctl: const stubs = [\n`usermod() { :; }; systemctl() { return 1; }`,\n].join('\\n');",
+        "loginctl: const stubs = [\n`pkill() { echo \"pkill $*\" >> \"${log}\"; }; loginctl() { echo \"loginctl $*\" >> \"${log}\"; }; sleep() { echo \"sleep $*\" >> \"${log}\"; }`,\n].join('\\n');",
+        "systemd: const pids: Record<string, [string, string]> = {\n'4244': [`0::/user.slice/user-${uid}.slice/user@${uid}.service/init.scope`, 'systemd'],\n};",
+        "systemctl: const stubs = [\n`systemctl() { echo inactive; }`,\n].join('\\n');"
       ]
     },
     "test/isolate.ts": {
@@ -249,11 +249,11 @@
       "uses": [
         "SYSTEMD_: import { SYSTEMD_MARKERS, SYSTEM_ROOT_VAR, TEST_MACHINE_VAR, TEST_MARK_FILE, TEST_TOKEN_VAR } from '../src/os/system-paths.js';",
         "SYSTEMD_: for (const k of SYSTEMD_MARKERS) delete process.env[k];",
-        "systemctl: 'systemctl', 'launchctl', 'loginctl', 'systemd-run', 'journalctl',",
-        "loginctl: 'systemctl', 'launchctl', 'loginctl', 'systemd-run', 'journalctl',",
-        "systemd: 'systemctl', 'launchctl', 'loginctl', 'systemd-run', 'journalctl',",
-        "journalctl: 'systemctl', 'launchctl', 'loginctl', 'systemd-run', 'journalctl',",
-        "systemctl: 'test/watchdog.test.ts systemctl',"
+        "systemctl: export const HOST_TOOL_NAMES = [\n'systemctl', 'launchctl', 'loginctl', 'systemd-run', 'journalctl',\n] as const;",
+        "loginctl: export const HOST_TOOL_NAMES = [\n'systemctl', 'launchctl', 'loginctl', 'systemd-run', 'journalctl',\n] as const;",
+        "systemd: export const HOST_TOOL_NAMES = [\n'systemctl', 'launchctl', 'loginctl', 'systemd-run', 'journalctl',\n] as const;",
+        "journalctl: export const HOST_TOOL_NAMES = [\n'systemctl', 'launchctl', 'loginctl', 'systemd-run', 'journalctl',\n] as const;",
+        "systemctl: export const MACHINE_TOOLS_ON_PURPOSE: readonly string[] = Object.freeze([\n'test/watchdog.test.ts systemctl',\n]);"
       ]
     },
     "test/machine-sudoers-legacy.test.ts": {
@@ -268,38 +268,38 @@
     "test/machine-sudoers-removal.test.ts": {
       "why": "a stand-in program (loginctl) put on PATH, by name",
       "uses": [
-        "loginctl: writeFileSync(join(dir, 'lib.sh'), `source ${JSON.stringify(join(m.s, 'lib.sh'))}\nloginctl() { :; }"
+        "loginctl: writeFileSync(join(dir, 'lib.sh'), `source ${JSON.stringify(join(m.s, 'lib.sh'))}\nloginctl() { :; }\n`);"
       ]
     },
     "test/owner-terminal-rerun.test.ts": {
       "why": "a script line's reason (/etc/systemd/system)",
       "uses": [
-        "systemd: { file: 'scripts/bootstrap.sh', has: \"dashboards.sh --no-instances --client-id <the App's client id>\", why: 'behind [ ! -f /etc/systemd/system/$HUB_UNIT ] ||: only with no hub unit' },"
+        "systemd: const FIRST_TIME_ONLY: { file: string; has: string; why: string }[] = [\n{ file: 'scripts/bootstrap.sh', has: \"dashboards.sh --no-instances --client-id <the App's client id>\", why: 'behind [ ! -f /etc/systemd/system/$HUB_UNIT ] ||: only with no hub unit' },\n];"
       ]
     },
     "test/project-command-home-devproc.test.ts": {
       "why": "a path the code under test must refuse (/proc/1/comm)",
       "uses": [
-        "/proc/1/: ['/proc/1/comm', /goes through \\/proc or \\/sys/],"
+        "/proc/1/: const REFUSED: [target: string, why: RegExp][] = [\n['/proc/1/comm', /goes through \\/proc or \\/sys/],\n];"
       ]
     },
     "test/project-command-home-refusal-at.test.ts": {
       "why": "a path the code under test must refuse (/proc/1/comm)",
       "uses": [
-        "/proc/1/: for (const [target, at] of [['/proc/1/comm', '/proc'], ['/sys/kernel', '/sys'], ['/dev/stdout', '/dev/stdout'], ['/dev/fd/0', '/dev/fd']] as const) {"
+        "/proc/1/: for (const [target, at] of [['/proc/1/comm', '/proc'], ['/sys/kernel', '/sys'], ['/dev/stdout', '/dev/stdout'], ['/dev/fd/0', '/dev/fd']] as const) {\n}"
       ]
     },
     "test/runner-option-tables.test.ts": {
       "why": "systemd-run's option table, by name",
       "uses": [
-        "systemd: 'systemd-run': fromFile('systemd-run', (l) => new RegExp(`--${l}=`)),",
-        "systemd: 'systemd-run': fromFile('systemd-run', (l) => new RegExp(`--${l}=`)),"
+        "systemd: const CHECKS: Record<string, (bin: string) => void> = {\n'systemd-run': fromFile('systemd-run', (l) => new RegExp(`--${l}=`)),\n};",
+        "systemd: const CHECKS: Record<string, (bin: string) => void> = {\n'systemd-run': fromFile('systemd-run', (l) => new RegExp(`--${l}=`)),\n};"
       ]
     },
     "test/slot-dir-writes.test.ts": {
       "why": "a table entry's reason (a systemd user unit)",
       "uses": [
-        "systemd: 'installService: writeFileSync(path)': [2, 'a launchd plist, or a systemd user unit'],"
+        "systemd: const REVIEWED: Record<string, Review> = {\n'installService: writeFileSync(path)': [2, 'a launchd plist, or a systemd user unit'],\n};"
       ]
     },
     "test/sudoers-machine-fixture.ts": {
@@ -328,18 +328,18 @@
       "uses": [
         "systemd: const sdArgv = join(dir, 'systemd-run.argv');",
         "systemd: const sdEnv = join(dir, 'systemd-run.envfile');",
-        "systemd: stub('systemd-run', `[ \"$1\" = --version ] && { echo 'systemd 255 (test)'; exit 0; }",
-        "systemd: stub('systemd-run', `[ \"$1\" = --version ] && { echo 'systemd 255 (test)'; exit 0; }",
+        "systemd: stub('systemd-run', `[ \"$1\" = --version ] && { echo 'systemd 255 (test)'; exit 0; }\necho ran`);",
+        "systemd: stub('systemd-run', `[ \"$1\" = --version ] && { echo 'systemd 255 (test)'; exit 0; }\necho ran`);",
         "systemctl: for (const t of ['systemctl', 'getent', 'chown']) stub(t, 'exit 0');"
       ]
     },
     "test/testrun-gpu-helper.test.ts": {
       "why": "stand-in systemd-run and systemctl; a systemd version number as a parameter",
       "uses": [
-        "systemd: function gpuHelper(o: { systemd?: number } = {}) {",
+        "systemd: function gpuHelper(o: { systemd?: number } = {}) {\n}",
         "systemd: writeFileSync(join(dir, 'sdver'), String(o.systemd ?? 255));",
-        "systemd: 'systemd-run',",
-        "systemd: `[ \"$1\" = --version ] && { echo \"systemd $(cat '${dir}/sdver') (test)\"; exit 0; }",
+        "systemd: stub(\n'systemd-run',\n);",
+        "systemd: stub(\n`[ \"$1\" = --version ] && { echo \"systemd $(cat '${dir}/sdver') (test)\"; exit 0; }\n);",
         "systemctl: for (const t of ['systemctl', 'chown']) stub(t, 'exit 0');"
       ]
     },
@@ -352,8 +352,8 @@
     "test/testrun-network.test.ts": {
       "why": "stand-in programs a test puts on PATH (systemctl, systemd-run), by name",
       "uses": [
-        "systemd: stub('systemd-run', `[ \"$1\" = --version ] && { echo \"systemd $(cat '${join(dir, 'sysd')}' 2>/dev/null || echo 255) (test)\"; exit 0; }",
-        "systemd: stub('systemd-run', `[ \"$1\" = --version ] && { echo \"systemd $(cat '${join(dir, 'sysd')}' 2>/dev/null || echo 255) (test)\"; exit 0; }",
+        "systemd: stub('systemd-run', `[ \"$1\" = --version ] && { echo \"systemd $(cat '${join(dir, 'sysd')}' 2>/dev/null || echo 255) (test)\"; exit 0; }\necho ran`);",
+        "systemd: stub('systemd-run', `[ \"$1\" = --version ] && { echo \"systemd $(cat '${join(dir, 'sysd')}' 2>/dev/null || echo 255) (test)\"; exit 0; }\necho ran`);",
         "systemctl: stub('systemctl', '[ \"$1 $2 $3\" = \"show -p MainPID\" ] && { echo 4242; exit 0; }; exit 0');"
       ]
     },
@@ -382,14 +382,14 @@
     "test/testrun-userns-unsupported.test.ts": {
       "why": "a stand-in systemctl function in a script",
       "uses": [
-        "systemctl: 'systemctl() { case \"$1\" in show) if [ \"$2\" = worklane.slice ]; then echo 100; else echo 10; fi ;; list-units) : ;; is-active) return 0 ;; esac; }',"
+        "systemctl: const stubs = [\n'systemctl() { case \"$1\" in show) if [ \"$2\" = worklane.slice ]; then echo 100; else echo 10; fi ;; list-units) : ;; is-active) return 0 ;; esac; }',\n].join('\\n');"
       ]
     },
     "test/testrun-wipe-instances.test.ts": {
       "why": "stand-in programs a test puts on PATH (systemctl, systemd-run), by name",
       "uses": [
         "systemctl: const log = join(dir, 'systemctl.log');",
-        "systemctl: 'systemctl',",
+        "systemctl: stub(\n'systemctl',\n);",
         "systemd: for (const t of ['getent', 'chown', 'runuser', 'git', 'install', 'systemd-run']) stub(t, 'exit 0');"
       ]
     },
@@ -399,12 +399,12 @@
         "systemctl: if (file === 'systemctl' && args[0] === 'list-units') return units.map((x) => `${x} loaded active running x`).join('\\n');",
         "systemctl: if (file === 'systemctl' && args[0] === 'show' && args[2] === 'User,Environment,ExecStart') return show(/worklane-([a-z]+)\\./.exec(args[3]!)![1]!);",
         "systemctl: if (file === 'systemctl' && args[0] === 'show') return running.has(args[3]!) ? 'ActiveState=active\\nSubState=running\\nNRestarts=0\\nResult=success\\n' : 'ActiveState=inactive\\nSubState=dead\\nNRestarts=0\\nResult=success\\n';",
-        "systemctl: if (file === 'systemctl' && (args[0] === 'restart' || args[0] === 'stop')) {",
-        "systemd: if (file === 'systemd-run' && args.includes('migrate')) {",
-        "systemd: if (file === 'systemd-run' && args.includes('canary')) {",
+        "systemctl: if (file === 'systemctl' && (args[0] === 'restart' || args[0] === 'stop')) {\n}",
+        "systemd: if (file === 'systemd-run' && args.includes('migrate')) {\n}",
+        "systemd: if (file === 'systemd-run' && args.includes('canary')) {\n}",
         "systemd: const e = new Error('Command failed: systemd-run') as Error & { stdout: string };",
         "systemd: if (verdict === 'error') throw new Error('Command failed: systemd-run (exit 1)');",
-        "systemd: if (file === 'systemd-run' && args.includes('/bin/sh')) {",
+        "systemd: if (file === 'systemd-run' && args.includes('/bin/sh')) {\n}",
         "systemd: if (file === 'systemd-run') return calls.push('build'), '';",
         "journalctl: if (file === 'journalctl') return 'x';"
       ]
@@ -421,7 +421,7 @@
     "test/update-drain.test.ts": {
       "why": "a fake exec's answers for systemctl and systemd-run calls the code under test makes",
       "uses": [
-        "systemd: if (file === 'systemd-run') {",
+        "systemd: if (file === 'systemd-run') {\n}",
         "systemctl: if (file === 'systemctl' && args[0] === 'list-units') return 'worklane-x.service loaded active running x\\n';",
         "systemctl: if (file === 'systemctl' && args[0] === 'show') return current === tip && o.unhealthy ? 'ActiveState=failed\\nSubState=failed\\nNRestarts=0\\nResult=exit-code\\n' : 'ActiveState=active\\nSubState=running\\nNRestarts=0\\nResult=success\\n';"
       ]
@@ -440,10 +440,10 @@
         "systemctl: if (file === 'systemctl' && args[0] === 'list-units') return units.map((x) => `${x} loaded active running x`).join('\\n');",
         "systemctl: if (file === 'systemctl' && args[0] === 'show' && args[2] === 'User,Environment,ExecStart') return /dashboard/.test(args[3]!) ? 'User=wl-alice\\nExecStart={ argv[]=/usr/local/bin/worklane dashboard --instance alice --service ; }\\n' : show(/worklane-([a-z]+)\\./.exec(args[3]!)![1]!);",
         "systemctl: if (file === 'systemctl' && args[0] === 'show') return running.has(args[3]!) && up(args[3]!) ? 'ActiveState=active\\nSubState=running\\nNRestarts=0\\nResult=success\\n' : 'ActiveState=failed\\nSubState=failed\\nNRestarts=0\\nResult=exit-code\\n';",
-        "systemctl: if (file === 'systemctl' && (args[0] === 'restart' || args[0] === 'stop')) {",
-        "systemd: if (file === 'systemd-run' && args.includes('migrate')) {",
+        "systemctl: if (file === 'systemctl' && (args[0] === 'restart' || args[0] === 'stop')) {\n}",
+        "systemd: if (file === 'systemd-run' && args.includes('migrate')) {\n}",
         "systemd: const e = new Error('Command failed: systemd-run') as Error & { stdout: string };",
-        "systemd: if (file === 'systemd-run' && args.includes('/bin/sh')) {",
+        "systemd: if (file === 'systemd-run' && args.includes('/bin/sh')) {\n}",
         "systemd: if (file === 'systemd-run') return ''; // the build",
         "journalctl: if (file === 'journalctl') return 'x';"
       ]
@@ -454,7 +454,7 @@
         "systemctl: if (file === 'systemctl' && args[0] === 'list-units') return 'worklane-alice.service loaded active running x\\n';",
         "systemctl: if (file === 'systemctl' && args[0] === 'show' && args[2] === 'User,Environment,ExecStart') return show;",
         "systemctl: if (file === 'systemctl' && args[0] === 'show') return 'ActiveState=active\\nSubState=running\\nNRestarts=0\\nResult=success\\n';",
-        "systemd: if (file === 'systemd-run' && args.includes('migrate')) {",
+        "systemd: if (file === 'systemd-run' && args.includes('migrate')) {\n}",
         "systemd: throw Object.assign(new Error('Command failed: systemd-run'), { stdout: `${JSON.stringify({ ok: false, error: o.migrate })}\\n` });",
         "systemd: if (file === 'systemd-run' && o.build) throw new Error(o.build); // the build"
       ]
@@ -463,7 +463,7 @@
       "why": "a fake exec's answers for systemctl and systemd-run calls the code under test makes",
       "uses": [
         "systemctl: if (file === 'systemctl' && args[0] === 'list-units') return 'worklane-x.service loaded active running x\\n';",
-        "systemctl: if (file === 'systemctl' && args[0] === 'show') {",
+        "systemctl: if (file === 'systemctl' && args[0] === 'show') {\n}",
         "systemd: const built = () => calls.filter((c) => c.startsWith('systemd-run') || c.startsWith('installTree') || c.startsWith('switchTo'));"
       ]
     },
@@ -473,7 +473,7 @@
         "systemctl: if (file === 'systemctl' && args[0] === 'list-units') return units.map((x) => `${x} loaded active running x`).join('\\n');",
         "systemctl: if (file === 'systemctl' && args[0] === 'show' && args[2] === 'User,Environment,ExecStart') return show(/worklane-([a-z]+)\\./.exec(args[3]!)![1]!);",
         "systemctl: if (file === 'systemctl' && args[0] === 'show') return 'ActiveState=active\\nSubState=running\\nNRestarts=0\\nResult=success\\n';",
-        "systemctl: if (file === 'systemctl' && (args[0] === 'restart' || args[0] === 'stop')) {",
+        "systemctl: if (file === 'systemctl' && (args[0] === 'restart' || args[0] === 'stop')) {\n}",
         "systemd: if (file === 'systemd-run' && args.includes('migrate')) return `${JSON.stringify({ ok: true, applied: [{ kind: 'state', path: 'x', from: 1, to: 2 }], made: [{ kind: 'state', path: '/srv/x/events.db', backup: '/srv/x/events.db.bak' }] })}\\n`;",
         "systemd: if (file === 'systemd-run' && args.includes('/bin/sh')) return (calls.push(`restore ${args[args.indexOf('-p') + 1]!.replace('User=wl-', '')}`), '');"
       ]
@@ -491,16 +491,16 @@
         "systemctl: if (file === 'systemctl' && args[0] === 'list-units') return 'worklane-x.service loaded active running x\\n';",
         "systemctl: if (file === 'systemctl' && args[0] === 'show') return 'ActiveState=active\\nSubState=running\\nNRestarts=0\\nResult=success\\n';",
         "systemd: return { deps, calls, logs, warned, incidents, resolved, built: () => calls.some((c) => /^(systemd-run|installTree|switchTo)/.test(c)) };",
-        "systemctl: exec: (file: string, args: string[]) => (file === 'git' && args.includes('--tags') ? `${'3'.repeat(40)}\\trefs/tags/v1.0.1\\n${NEW}\\trefs/tags/v1.0.1^{}\\n` : file === 'git' ? `${NEW}\\trefs/heads/main\\n` : file === 'systemctl' && args[0] === 'list-units' ? 'worklane-x.service loaded active running x\\n' : file === 'systemctl' && args[0] === 'show' ? 'ActiveState=active\\nSubState=running\\nNRestarts=0\\nResult=success\\n' : ''),",
-        "systemctl: exec: (file: string, args: string[]) => (file === 'git' && args.includes('--tags') ? `${'3'.repeat(40)}\\trefs/tags/v1.0.1\\n${NEW}\\trefs/tags/v1.0.1^{}\\n` : file === 'git' ? `${NEW}\\trefs/heads/main\\n` : file === 'systemctl' && args[0] === 'list-units' ? 'worklane-x.service loaded active running x\\n' : file === 'systemctl' && args[0] === 'show' ? 'ActiveState=active\\nSubState=running\\nNRestarts=0\\nResult=success\\n' : ''),"
+        "systemctl: const r = await u.run({\nexec: (file: string, args: string[]) => (file === 'git' && args.includes('--tags') ? `${'3'.repeat(40)}\\trefs/tags/v1.0.1\\n${NEW}\\trefs/tags/v1.0.1^{}\\n` : file === 'git' ? `${NEW}\\trefs/heads/main\\n` : file === 'systemctl' && args[0] === 'list-units' ? 'worklane-x.service loaded active running x\\n' : file === 'systemctl' && args[0] === 'show' ? 'ActiveState=active\\nSubState=running\\nNRestarts=0\\nResult=success\\n' : ''),\n});",
+        "systemctl: const r = await u.run({\nexec: (file: string, args: string[]) => (file === 'git' && args.includes('--tags') ? `${'3'.repeat(40)}\\trefs/tags/v1.0.1\\n${NEW}\\trefs/tags/v1.0.1^{}\\n` : file === 'git' ? `${NEW}\\trefs/heads/main\\n` : file === 'systemctl' && args[0] === 'list-units' ? 'worklane-x.service loaded active running x\\n' : file === 'systemctl' && args[0] === 'show' ? 'ActiveState=active\\nSubState=running\\nNRestarts=0\\nResult=success\\n' : ''),\n});"
       ]
     },
     "test/value-report.test.ts": {
       "why": "stand-in programs a test puts on PATH (systemctl, systemd-run), by name",
       "uses": [
-        "systemctl: for (const tool of ['systemctl', 'launchctl', 'loginctl', 'journalctl', 'gh', 'git', 'docker', 'sudo', 'tailscale', 'id', 'useradd', 'df', 'lslocks', 'ps']) {",
-        "loginctl: for (const tool of ['systemctl', 'launchctl', 'loginctl', 'journalctl', 'gh', 'git', 'docker', 'sudo', 'tailscale', 'id', 'useradd', 'df', 'lslocks', 'ps']) {",
-        "journalctl: for (const tool of ['systemctl', 'launchctl', 'loginctl', 'journalctl', 'gh', 'git', 'docker', 'sudo', 'tailscale', 'id', 'useradd', 'df', 'lslocks', 'ps']) {"
+        "systemctl: for (const tool of ['systemctl', 'launchctl', 'loginctl', 'journalctl', 'gh', 'git', 'docker', 'sudo', 'tailscale', 'id', 'useradd', 'df', 'lslocks', 'ps']) {\n}",
+        "loginctl: for (const tool of ['systemctl', 'launchctl', 'loginctl', 'journalctl', 'gh', 'git', 'docker', 'sudo', 'tailscale', 'id', 'useradd', 'df', 'lslocks', 'ps']) {\n}",
+        "journalctl: for (const tool of ['systemctl', 'launchctl', 'loginctl', 'journalctl', 'gh', 'git', 'docker', 'sudo', 'tailscale', 'id', 'useradd', 'df', 'lslocks', 'ps']) {\n}"
       ]
     },
     "scripts/bench/container.ts": {

@@ -9,28 +9,37 @@
 //
 // A test that needs systemd under another name is caught two ways (the owner's decision, 2026-11-08: option (b)):
 //
-// At run time, on the VM (R1169n, signTests): every test whose own function holds systemd's sign (below) runs here
-// too, its whole file at once with no name filter, and each must have run and passed with no skip or todo, all of it,
-// matched by built file, line and column as a gate is. So a test that detects systemd in its body and skips, marks
-// itself todo, returns a skip helper's answer, is registered only sometimes or sits in a suite that skips, fails
-// here, where systemd is. One that legitimately skips here is named in the allowlist's `runtime`, with why.
+// At run time, on the VM (R1169n, R1169p, R1169r, signTests): every test in a *.test.ts file that (a) holds
+// systemd's sign (below) in its own function, (b) has a skip, a todo or an early return there whose condition reads
+// what carries the sign, one name away (a local from it, an import whose export reads it in its own module, a module
+// named at run time), or (c) has a name holding the sign, or sits in a suite whose name does, runs here too. Its whole
+// file runs at once with no name filter, and each such test must have run and passed with no skip or todo, all of it,
+// matched by built file, line and column as a gate is; and one whose function reads `test` on its context (a subtest)
+// must have run one (the owner's option (b): no zero subtests). So a test that detects systemd and skips, marks itself
+// todo, returns early, is registered only sometimes or sits in a suite that skips, fails here, where systemd is. One
+// that legitimately skips here is named in the allowlist's `runtime`, with why.
 //
-// Before that, statically (R1169k, R1169m, R1169n, signProblems), on every PR in the normal suite too: in every file
-// the build compiles (tsconfig.json's include), the sign (`systemd` or `systemd1` as a word, a name starting
+// Before that, statically (R1169k, R1169m, R1169n, R1169o, signProblems), on every PR in the normal suite too: in every
+// file the build compiles (tsconfig.json's include), the sign (`systemd` or `systemd1` as a word, a name starting
 // `systemd_`/`SYSTEMD_`, `systemctl`, `journalctl`, `loginctl`, `/proc/1/`, `is-system-running`, `sd_booted`,
-// INVOCATION_ID, NOTIFY_SOCKET), read by typescript's parser in every string (decoded too), template, regex and
-// identifier, may be only in systemCi's declaration, a gate's reason, a test's or suite's name, or a test's own
-// function (which the VM runs). Anywhere else it must be data scripts/ci/systemd-acceptance-allow.json names by file
-// and exact text (`token: <the line, trimmed>`), with why, so a use moved or swapped is a change. And a test's or
-// suite's skip or todo may not read what carries the sign: an import from src/, from a file that holds the sign, or
-// from a module named at run time, or a local whose value comes, through any number of that file's own declarations
-// and assignments (read with scopes), from one of those, from the sign or from a file read; unless the allowlist's
-// skipImports names it, with why.
+// INVOCATION_ID, NOTIFY_SOCKET, JOURNAL_STREAM), read by typescript's parser in every string (decoded too), template,
+// regex and identifier, may be only in systemCi's declaration, a gate's reason, and, in a *.test.ts file, a test's or
+// suite's name or a test's own function (which the VM runs). Anywhere else it must be data
+// scripts/ci/systemd-acceptance-allow.json names by file and text, with why: each use by its token, the first and last
+// lines of the statement around it, and the lines of its text that hold the sign (not every line of a long text, whose
+// unrelated edits aren't changes), so a use moved, swapped or wrapped differently is a change. And a test's or suite's
+// skip or todo may not read what carries the sign: an import from src/, from a file that holds the sign, or from a
+// module named at run time (a non-literal import(), require() or createRequire(...)(...), or a module outside the build
+// roots), or a local whose value comes, through any number of that file's own declarations and assignments (read with
+// scopes), from one of those, from the sign or from a file read; unless the allowlist's skipImports names it, with
+// why, and a local by the text of what makes it carry the sign.
 //
-// What neither can see: a skip on a proxy with no sign anywhere in its file (`process.getuid() === 0`, a cgroup path:
-// R1169n N04); a sign split inside a word (`'sys' + 'temd'`, deliberate); a value carried through another file that
-// holds no sign itself (a src/ helper wrapping a holder's detector, read by a local); a test that passes without
-// checking (an early return on the VM's answer: it does run on the VM, where it checks for real).
+// What neither can see (named limits): a skip on a proxy with no sign anywhere in its file (`process.getuid() === 0`, a
+// cgroup path: R1169n N04); a sign split inside a word (`'sys' + 'temd'`, deliberate); a value carried through a file
+// that holds no sign itself, or through more than one module (a src/ helper wrapping a holder's detector); and, pending
+// the owner's scope decision, R1169r's indirect reach (a property of a shared object, a global, an env variable set
+// from the sign, an aliased createRequire, a re-export) and a stop inside a catch or a switch (R1169q). A test that
+// passes without checking (an early return on the VM's answer) does run on the VM, where it checks for real.
 //
 // Results come from node's own test events (systemd-acceptance-reporter.mjs, R1169f), never from TAP text a test
 // could print: each gate is matched by its built file, the line and column its test() call is on, and its name, and
@@ -259,9 +268,15 @@ export function signUseList(ts, path, text) {
         // A leaf over several lines (a template) is pinned by its first line and every line of it that holds the sign
         // (R1169o: a sign on its second line went unpinned). Not by every line: the CLI's usage text is one template
         // of hundreds of lines, and any edit to it would change the pin.
-        const spans = lines.slice(line, last + 1);
-        const held = spans.filter((l, k) => k === 0 || new RegExp(SIGN.source).test(l));
-        out.push({ at: `${line + 1}: ${token}`, pin: `${token}: ${held.map((l) => l.trim()).join('\n')}` });
+        // And the first and last lines of the statement around it (R1169r D6: the lines around a multi-line stub
+        // changed so that it ran as a live check). A line holds the sign as maySign reads it, escapes too (R1169q).
+        let st = n;
+        while (st.parent && !ts.isSourceFile(st.parent) && !ts.isBlock(st.parent) && !ts.isModuleBlock(st.parent) && !ts.isCaseClause(st.parent) && !ts.isDefaultClause(st.parent)) st = st.parent;
+        const first = sf.getLineAndCharacterOfPosition(st.getStart(sf)).line;
+        const end = sf.getLineAndCharacterOfPosition(st.end).line;
+        const keep = new Set([first, line, end]);
+        for (let k = line; k <= last; k++) if (maySign(lines[k])) keep.add(k);
+        out.push({ at: `${line + 1}: ${token}`, pin: `${token}: ${[...keep].sort((a, b) => a - b).map((k) => lines[k].trim()).join('\n')}` });
       }
     }
     ts.forEachChild(n, visit);
@@ -625,12 +640,27 @@ export function signTests(ts, path, text, source, all = false) {
     walk(node);
     return hit;
   };
+  // Whether a test's function starts subtests: any read of `test` on its own context parameter, or a nested
+  // subtest's (`t.test(`, `t['test'](`, `t.test.bind(t)`), never another object's `.test` (`/re/.test(s)`, R1169q C1;
+  // R1169r D5).
   const startsSubtests = (fn) => {
+    const ctx = new Set();
+    const param = (f) => f && (ts.isArrowFunction(f) || ts.isFunctionExpression(f)) && f.parameters[0] && ts.isIdentifier(f.parameters[0].name) ? f.parameters[0].name.text : null;
+    if (param(fn)) ctx.add(param(fn));
     let hit = false;
+    const readsTest = (x) => {
+      const base = ts.isPropertyAccessExpression(x) ? (x.name.text === 'test' ? x.expression : null) : ts.isElementAccessExpression(x) && ts.isStringLiteralLike(x.argumentExpression) && x.argumentExpression.text === 'test' ? x.expression : null;
+      return base && ts.isIdentifier(base) && ctx.has(base.text);
+    };
     const walk = (x) => {
-      if (hit) return;
-      if (ts.isCallExpression(x) && ts.isPropertyAccessExpression(x.expression) && x.expression.name.text === 'test') hit = true;
-      else ts.forEachChild(x, walk);
+      if (readsTest(x)) {
+        hit = true;
+        // A subtest's own context reads count too.
+        const call = x.parent && ts.isCallExpression(x.parent) && x.parent.expression === x ? x.parent : null;
+        const sub = call ? param(call.arguments[call.arguments.length - 1]) : null;
+        if (sub) ctx.add(sub);
+      }
+      ts.forEachChild(x, walk);
     };
     walk(fn);
     return hit;
@@ -671,17 +701,25 @@ export function signTests(ts, path, text, source, all = false) {
     return hit;
   };
   const out = [];
-  const visit = (n) => {
+  // A test whose name holds the sign, or any test under a suite whose name does: its function can read the name back
+  // (`t.name`, `s.name`, R1169r D1).
+  const visit = (n, signSuite = false) => {
+    if (isSuiteCall(ts, n)) {
+      const name = nameArg(ts, n);
+      const signed = signSuite || !!(name && holdsSign(name));
+      return ts.forEachChild(n, (x) => visit(x, signed));
+    }
     if (isTestCall(ts, n)) {
       const fn = ownFunction(ts, n);
-      if (fn && (all || holdsSign(fn) || guarded(fn))) {
+      const name = nameArg(ts, n);
+      if (fn && (all || holdsSign(fn) || guarded(fn) || signSuite || (name && holdsSign(name)))) {
         const { line, character } = sf.getLineAndCharacterOfPosition(n.expression.getStart(sf));
         const a = nameArg(ts, n);
         out.push({ name: a && ts.isStringLiteralLike(a) ? a.text : null, line: line + 1, column: character + 1, label: (a ?? n.arguments[0])?.getText(sf).slice(0, 120) ?? '', subtests: startsSubtests(fn) });
       }
       return;
     }
-    ts.forEachChild(n, visit);
+    ts.forEachChild(n, (x) => visit(x, signSuite));
   };
   visit(sf);
   return out;

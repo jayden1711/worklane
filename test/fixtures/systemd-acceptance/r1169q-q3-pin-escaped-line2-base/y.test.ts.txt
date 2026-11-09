@@ -1,0 +1,8 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+const STANDIN = `#!/bin/sh
+echo "\x73ystemctl $*" >> calls
+exit 0`;
+test('the stand-in records its calls', () => {
+  assert.ok(STANDIN.startsWith('#!'));
+});
