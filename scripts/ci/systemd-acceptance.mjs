@@ -256,8 +256,12 @@ export function signUseList(ts, path, text) {
       if (!spans.some(([a, b]) => at >= a && n.end <= b)) {
         const line = sf.getLineAndCharacterOfPosition(at).line;
         const last = sf.getLineAndCharacterOfPosition(n.end).line;
-        // Every line the leaf spans (a template over several lines), so a change on any of them is a change (R1169o).
-        out.push({ at: `${line + 1}: ${token}`, pin: `${token}: ${lines.slice(line, last + 1).map((l) => l.trim()).join('\n')}` });
+        // A leaf over several lines (a template) is pinned by its first line and every line of it that holds the sign
+        // (R1169o: a sign on its second line went unpinned). Not by every line: the CLI's usage text is one template
+        // of hundreds of lines, and any edit to it would change the pin.
+        const spans = lines.slice(line, last + 1);
+        const held = spans.filter((l, k) => k === 0 || new RegExp(SIGN.source).test(l));
+        out.push({ at: `${line + 1}: ${token}`, pin: `${token}: ${held.map((l) => l.trim()).join('\n')}` });
       }
     }
     ts.forEachChild(n, visit);

@@ -433,8 +433,9 @@ test('R1169o/p: the sign is allowed in a test function only in a *.test.ts file;
   assert.deepEqual(reads(`import probe from '../scripts/ci/host-probe.mjs';\ntest('n', { skip: !probe() }, () => {});`), ['?: default']);
   // Minor: JOURNAL_STREAM, set by systemd for a unit's output.
   assert.deepEqual(uses(`const j = process.env.JOURNAL_STREAM;`), ['1: JOURNAL_STREAM']);
-  // A use over several lines is pinned by all of them (R1169o: a change on its second line was missed).
-  assert.deepEqual(sa.signUseList(ts, 'test/x.test.ts', 'const STUB = `#!/bin/sh\nsystemctl is-system-running || exit 77\n`;').map((u) => u.pin), ['systemctl: const STUB = `#!/bin/sh\nsystemctl is-system-running || exit 77\n`;']);
+  // A use over several lines is pinned by its first line and each line holding the sign (R1169o: a change on its
+  // second line was missed); a line without the sign is not, so a long text's unrelated edits aren't changes.
+  assert.deepEqual(sa.signUseList(ts, 'test/x.test.ts', 'const STUB = `#!/bin/sh\nset -e\nsystemctl is-system-running || exit 77\n`;').map((u) => u.pin), ['systemctl: const STUB = `#!/bin/sh\nsystemctl is-system-running || exit 77']);
 });
 
 test('R1169p D2: a test whose skip, todo or early return turns on what carries the sign, one name away, is picked for the VM; one that only uses such a name is not', () => {
