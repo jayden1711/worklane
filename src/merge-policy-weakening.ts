@@ -483,6 +483,82 @@ export function blockCommentRun(lines: readonly string[], k: number): boolean {
   return false;
 }
 
+/**
+ * A line cut at its commas outside brackets, with brackets and commas counted in code only (R1184v D1): the text of
+ * `'…'`, `"…"`, a template and a block comment is skipped, and a template's `${…}` is code. Null, so the line waits,
+ * when the line can't be read alone: a quote, a backtick, a `${`, a block comment or a bracket it doesn't close, or a
+ * `/` that isn't a comment (a regexp and a division look alike here). A `//` comment ends the line's code.
+ */
+export function topLevelParts(l: string): string[] | null {
+  const parts = [''];
+  const add = (s: string) => {
+    parts[parts.length - 1] += s;
+  };
+  let depth = 0;
+  const opened: number[] = []; // the depth each open `${` was at
+  let template = false;
+  for (let i = 0; i < l.length; ) {
+    const c = l[i]!;
+    if (template) {
+      if (c === '\\') {
+        add(l.slice(i, i + 2));
+        i += 2;
+      } else if (c === '`') {
+        template = false;
+        add(c);
+        i++;
+      } else if (c === '$' && l[i + 1] === '{') {
+        opened.push(depth++);
+        template = false;
+        add('${');
+        i += 2;
+      } else {
+        add(c);
+        i++;
+      }
+      continue;
+    }
+    if (c === "'" || c === '"') {
+      let j = i + 1;
+      while (j < l.length && l[j] !== c) j += l[j] === '\\' ? 2 : 1;
+      if (j >= l.length) return null;
+      add(l.slice(i, j + 1));
+      i = j + 1;
+      continue;
+    }
+    if (c === '`') {
+      template = true;
+      add(c);
+      i++;
+      continue;
+    }
+    if (c === '/') {
+      if (l[i + 1] === '/') break;
+      if (l[i + 1] !== '*') return null;
+      const end = l.indexOf('*/', i + 2);
+      if (end < 0) return null;
+      add(' ');
+      i = end + 2;
+      continue;
+    }
+    if ('([{'.includes(c)) depth++;
+    else if (')]}'.includes(c)) {
+      depth--;
+      if (c === '}' && opened.length && depth === opened[opened.length - 1]) {
+        opened.pop();
+        template = true;
+        add(c);
+        i++;
+        continue;
+      }
+    }
+    if (c === ',' && depth === 0) parts.push('');
+    else add(c);
+    i++;
+  }
+  return template || opened.length || depth !== 0 ? null : parts;
+}
+
 /** The files whose REPLACERS block is a table's code-held entries: the redactor and the root updater's copy of it. */
 export const REPLACER_FILES = /^(?:src\/events\/redact\.ts|scripts\/machine\/[^/]+-update\.cjs)$/;
 
@@ -1196,16 +1272,11 @@ function findings(i: WeakeningInput): Found {
       // Exactly one property (R1184t D1: `zz: (m) => m, ...({ stripe: … }),` is a new key and then a spread): cut at its
       // commas outside brackets, the line is one part and an empty one after its last `,`, and it closes every bracket
       // it opens (a replacer over several lines waits from its first line). The part is `name: …`, `name(…) {…}` or
-      // `name`: no spread, computed or quoted key, and no get/set. A bracket or a comma in a string, a regexp or type
-      // arguments makes it wait too: fail closed.
-      const parts: string[] = [''];
-      let depth = 0;
-      for (const c of l) {
-        depth += '([{'.includes(c) ? 1 : ')]}'.includes(c) ? -1 : 0;
-        if (c === ',' && depth === 0) parts.push('');
-        else parts[parts.length - 1] += c;
-      }
-      const one = depth === 0 && parts.length === 2 && parts[1]!.trim() === '' && /^\s*[A-Za-z_$][\w$]*\s*(?::|\(|$)/.test(parts[0]!);
+      // `name`: no spread, computed or quoted key, and no get/set. Brackets and commas count in code only (R1184v D1: a
+      // `'('` or a `/* ( */` hid a spread at "depth 1"); a line with a regexp or a division, or a string, template or
+      // comment it doesn't close, waits (topLevelParts). A comma in type arguments makes it wait too: fail closed.
+      const parts = topLevelParts(l);
+      const one = !!parts && parts.length === 2 && parts[1]!.trim() === '' && /^\s*[A-Za-z_$][\w$]*\s*(?::|\(|$)/.test(parts[0]!);
       const k = one ? keyOf(l) : undefined;
       const lone = !!k && !old.has(k) && fresh.filter((x) => x === k).length === 1;
       if (!lone) hit('table-shrunk', f.path, `REPLACERS: ${l.trim()}`);

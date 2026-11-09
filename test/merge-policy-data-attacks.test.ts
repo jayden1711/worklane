@@ -214,10 +214,17 @@ test("R1184r D1, R1184s D2: a changed line, or an added one that isn't a new rep
     ['T2a a new key, then a spread', "  zz: (m: string) => m, ...({ stripe: (m: string, pre?: string, k?: string, v?: string) => (/\\d/.test(v!) && !m.includes('rk_test_') ? `${pre}${k}_[REDACTED]` : m) } as Partial<Record<string, never>>),"],
     ['T2b a new method, then a spread', "  zz(m: string) { return m; }, ...({ stripe: (m: string) => m } as Partial<Record<string, never>>),"],
     ['T2f an accessor', '  get zz() { return (m: string) => m; },'],
+    // R1184v D1: a bracket in a string, a comment, a regexp or a template hid the spread from the bracket count.
+    ['V1a brackets in strings', "  zz: (m: string) => m + '(', ...({ stripe: (m: string) => m } as Partial<Record<string, never>>), yy: (m: string) => m + ')',"],
+    ['V1b brackets in comments', '  zz: (m: string) => m /* ( */, ...({ stripe: (m: string) => m } as Partial<Record<string, never>>), yy: (m: string) => m /* ) */,'],
+    ['V1c brackets in regexps', "  zz: (m: string) => m.replace(/\\(/, ''), ...({ stripe: (m: string) => m } as Partial<Record<string, never>>), yy: (m: string) => m.replace(/\\)/, ''),"],
+    ['V1d brackets in template text', '  zz: (m: string) => `${m}[`, ...({ stripe: (m: string) => m } as Partial<Record<string, never>>), yy: (m: string) => `${m}]`,'],
   ] as const) assert.ok(add(line).some((x) => x.includes(SHRUNK) && x.includes('REPLACERS')), label);
   const updSpread = upd.replace('});', '    ...({ basic: (m) => m }),\n});');
   assert.ok(reasons({ 'scripts/machine/x-update.cjs': updSpread }, { 'scripts/machine/x-update.cjs': upd }).some((x) => x.includes(SHRUNK)), "S2g a spread in the updater's copy");
   // Control: a line added to REPLACERS (a new replacer) and a change outside it pass.
   assert.deepEqual(reasons({ 'src/events/redact.ts': redact.replace('});', '  extra: (m: string) => m,\n});') }, { 'src/events/redact.ts': redact }), []);
   assert.deepEqual(reasons({ 'src/events/redact.ts': `${redact}// a comment\n` }, { 'src/events/redact.ts': redact }), []);
+  // Control (R1184v D1): a new one-line replacer whose string, template text or comment holds a comma or a bracket.
+  assert.deepEqual(add("  zz: (m: string) => m + ',(' + `[${m},]`, /* ), */ // a trailing comment, ("), [], 'brackets and commas outside code');
 });
