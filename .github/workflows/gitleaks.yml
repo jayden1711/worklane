@@ -26,7 +26,7 @@ jobs:
       - name: install gitleaks
         run: |
           tarball="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
-          bash scripts/ci/fetch-pinned.sh "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${tarball}" "${GITLEAKS_SHA256}" "$tarball"
+          bash "$GITHUB_WORKSPACE/scripts/ci/fetch-pinned.sh" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${tarball}" "${GITLEAKS_SHA256}" "$tarball"
           tar -xzf "$tarball" gitleaks
       - name: scan full history
         run: ./gitleaks git --redact --verbose --exit-code 1 .

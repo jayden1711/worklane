@@ -22,9 +22,14 @@ import { BRAND } from '../src/brand.js';
 import { repoRoot } from './helpers.js';
 
 /** A pinned binary's URL: a GitHub release asset (download or API form), a raw file, or a vendor host CI fetches pinned binaries from. */
-const DOWNLOAD = /releases\/download\/|\/releases\/assets\/|(?:objects|release-assets|raw)\.githubusercontent\.com|storage\.googleapis\.com\/chrome-for-testing-public\/|nodejs\.org\/dist\//;
+// Case-insensitive, and any run of `/` (R1228i D2: GitHub serves releases//download/, and NODEJS.ORG is nodejs.org).
+const DOWNLOAD = /releases\/+download\/|\/releases\/+assets\/|(?:objects|release-assets|raw)\.githubusercontent\.com|storage\.googleapis\.com\/+chrome-for-testing-public\/|nodejs\.org\/+dist\//i;
 
 const HELPER = 'scripts/ci/fetch-pinned.sh';
+/** How ci-slow's WSL steps name the workspace: the one assignment a run with a `$ws/` helper line may make to `ws`. */
+const WS_FROM_WORKSPACE = `ws="$(wslpath -u '\${{ github.workspace }}')"`;
+/** The step shells used today (R1228i D3: a custom shell is a command line, so `curl -K {0}` would be the downloader). */
+const SHELLS_ALLOWED = ['bash', 'wsl-bash {0}', 'wsl-sudo {0}'];
 /** A shell variable reference, `$x` or `${x}`: no `$(…)`, no `${x:-…}`. */
 const VAR = String.raw`\$\{?[A-Za-z_][A-Za-z0-9_]*\}?`;
 /** A quoted path: plain characters and variables only. */
@@ -33,8 +38,10 @@ const PATH = String.raw`(?:[^"\s$\x60\\]|${VAR})+`;
  * The one form a workflow line naming a pinned URL may take: the helper, run with bash, with a quoted https URL, a
  * 64-hex pin or a quoted variable holding one, and an out file, and nothing after it (no `|| true`, no `;`, no `#`).
  */
+// The checkout's helper only (R1228i D1: a relative path, a working directory or a reassigned variable ran another
+// file): by $GITHUB_WORKSPACE, which no run sets, or by $ws where a run sets it only from the workspace (WS_FROM_WORKSPACE).
 const HELPER_LINE = new RegExp(
-  String.raw`^\s*bash "?(?:\$GITHUB_WORKSPACE/|\$ws/)?scripts/ci/fetch-pinned\.sh"? ` +
+  String.raw`^\s*bash "(?:\$GITHUB_WORKSPACE|\$ws)/scripts/ci/fetch-pinned\.sh" ` +
     String.raw`"https://${PATH}" ` +
     String.raw`(?:"${VAR}"|[0-9a-f]{64}) ` +
     String.raw`(?:"(?:[^"$\x60\\]|${VAR})+"|[A-Za-z0-9_./-]+)\s*$`,
@@ -198,6 +205,12 @@ const LOCAL = /^http:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?:[:/]|$)/;
 export function runProblems(run: string, rootStep = false): string[] {
   const out: string[] = [];
   const lines = logicalLines(run);
+  // R1228i D1: GITHUB_WORKSPACE is only read in a run, and $ws, in a run with the helper, is only the workspace.
+  if (/\bGITHUB_WORKSPACE\b/.test(run.replace(/\$\{?GITHUB_WORKSPACE\b/g, ''))) out.push('GITHUB_WORKSPACE set in a run (the helper is run by its path)');
+  if (lines.some((l) => HELPER_LINE.test(l) && l.includes('$ws/'))) {
+    const rest = run.split(WS_FROM_WORKSPACE).join('').replace(/\$\{?ws\b/g, '');
+    if (!run.includes(WS_FROM_WORKSPACE) || /\bws\b/.test(rest)) out.push(`$ws set other than from the workspace (${WS_FROM_WORKSPACE}) in a run with ${HELPER}`);
+  }
   for (const [i, l] of lines.entries()) {
     if (HELPER_LINE.test(l) && rootStep) out.push(`${HELPER} from the checkout in a step that runs as root in the self-hosted container: ${l.trim()}`);
     const m = INLINE_CURL.exec(l);
@@ -270,8 +283,9 @@ const WORKFLOW_PROBES: string[] = [
 
 /** The actions a workflow may use (R1228f D4: a release-download action has no URL text), pinned by commit; ./ local. */
 // A local one only under .github (R1228g D1: `./\S+` let any repo path in, e.g. ./tools/zzdl, whose action.yml the
-// walk of .github never reads): a reusable workflow file, or an action folder, each one plain name (no `..`).
-const USES_ALLOWED = /^(?:(?:actions\/(?:checkout|setup-node|upload-artifact|download-artifact)|Vampire\/setup-wsl)@[0-9a-f]{40}|\.\/\.github\/(?:workflows\/[\w-]+\.ya?ml|actions\/[\w-]+\/?))$/;
+// walk of .github never reads): a reusable workflow file, one plain name (no `..`). No local action (R1228h D1: a
+// Docker or node action under .github/actions runs a Dockerfile or index.js no walk reads): none is used today.
+const USES_ALLOWED = /^(?:(?:actions\/(?:checkout|setup-node|upload-artifact|download-artifact)|Vampire\/setup-wsl)@[0-9a-f]{40}|\.\/\.github\/workflows\/[\w-]+\.ya?ml)$/;
 
 /** Setup scripts that download pinned binaries themselves, each with its own checksum (the pinned-URL text rule skips them; the retry rule holds them). */
 const SETUP_DOWNLOADERS = ['scripts/bootstrap.sh', 'scripts/setup/node.sh', 'scripts/setup/ci-runner.sh', 'scripts/setup/tools.sh'];
@@ -347,6 +361,13 @@ function workflowFiles(files: readonly { name: string; text: string }[], report:
     for (const v of scalars(doc)) for (const p of decodedProblems(v)) report(name, p);
     // R1228f D4: only the actions used today, each pinned by commit (a new downloader action needs a lint edit).
     for (const u of usesOf(doc)) if (!USES_ALLOWED.test(u)) report(name, `an action this lint doesn't allow (pinned: ${USES_ALLOWED.source}): ${u}`);
+    for (const [k, v] of entries(doc)) {
+      // R1228i D3: a step's shell, or a default one, only as used today.
+      if (k === 'shell' && !SHELLS_ALLOWED.includes(String(v))) report(name, `a shell this lint doesn't allow (${SHELLS_ALLOWED.join(', ')}): ${String(v)}`);
+      // R1228i D1: no working directory, and GITHUB_WORKSPACE never set by an env: the helper is run by the workspace's path.
+      if (k === 'working-directory') report(name, `a working directory (the helper is run from the workspace): ${String(v)}`);
+      if (k === 'env' && v && typeof v === 'object' && Object.keys(v).some((e) => e === 'GITHUB_WORKSPACE' || e === 'ws')) report(name, 'GITHUB_WORKSPACE or ws set by an env');
+    }
     const actionRoot = rootActions.has(name.replace(/\/action\.ya?ml$/, ''));
     const steps = [
       ...Object.values(doc?.jobs ?? {}).flatMap((j) => (j?.steps ?? []).map((s) => ({ s, root: rootContainer(j ?? {}) }))),
@@ -359,6 +380,13 @@ function workflowFiles(files: readonly { name: string; text: string }[], report:
     }
   }
   return inline;
+}
+
+/** Every key and its value in a parsed YAML document, at any depth. */
+function entries(v: unknown): [string, unknown][] {
+  if (Array.isArray(v)) return v.flatMap(entries);
+  if (v && typeof v === 'object') return Object.entries(v as Record<string, unknown>).flatMap(([k, x]) => [[k, x] as [string, unknown], ...entries(x)]);
+  return [];
 }
 
 /** Every string value in a parsed YAML document. */
@@ -384,6 +412,11 @@ export function decodedProblems(text: string): string[] {
     if (!/^\s*#/.test(l) && OTHER_FETCH.test(l)) out.push(`a download that isn't the helper's curl: ${l.trim()}`);
   }
   return out;
+}
+
+/** A file named as the helper anywhere but its own place (R1228i D1: a look-alike a relative path would run). */
+function lookAlikes(names: readonly string[]): string[] {
+  return names.filter((n) => n !== HELPER && n.split('/').pop() === 'fetch-pinned.sh').map((n) => `${n}: a file named as ${HELPER} elsewhere`);
 }
 
 /** A shell script by name or shebang. */
@@ -430,12 +463,13 @@ test('the workflow lint refuses every form R1228a and R1228b found, and keeps th
     'R1228d W6 irm': 'irm https://example.com/t -OutFile t',
     'R1228d W6 WebClient': '(New-Object Net.WebClient).DownloadFile("https://example.com/t", "t")',
     'R1228d W7 a config file': 'printf "url = https://example.com/t\\noutput = t\\n" > c\ncurl -sSfL -K c',
+    // R1228i D1: the helper by a relative path (the step's directory picks the file).
+    'R1228i the helper, relative': `bash ${HELPER} "https://github.com/gitleaks/gitleaks/releases/download/v\${GITLEAKS_VERSION}/\${tarball}" "\${GITLEAKS_SHA256}" "$tarball"`,
   };
   for (const [why, s] of Object.entries(bad)) assert.ok(refused(s), `refused: ${why}`);
   const good = {
-    'the helper, relative': `bash ${HELPER} "https://github.com/gitleaks/gitleaks/releases/download/v\${GITLEAKS_VERSION}/\${tarball}" "\${GITLEAKS_SHA256}" "$tarball"`,
     'the helper from the workspace, a literal pin': `bash "$GITHUB_WORKSPACE/${HELPER}" "${REL}" ${PIN} "$f"`,
-    'the helper inside WSL': `bash "$ws/${HELPER}" "https://nodejs.org/dist/$v/node-$v-linux-x64.tar.xz" "$sum" /tmp/node.tar.xz`,
+    'the helper inside WSL': `${WS_FROM_WORKSPACE}\nbash "$ws/${HELPER}" "https://nodejs.org/dist/$v/node-$v-linux-x64.tar.xz" "$sum" /tmp/node.tar.xz`,
     'a probe to /dev/null': `[ "$(curl -s -o /dev/null -w '%{http_code}' https://hub.example.test/first-run)" = 200 ]`,
     'a local probe': 'curl -sf "$GH_FAKE/repos/example/alpha"',
     'a loopback page kept': `curl -sS -o "$F/seam.json" -w '%{http_code}' "http://127.0.0.1:$port/api/x"`,
@@ -510,7 +544,7 @@ test('a composite action used by a root job is judged as root (R1228d D5 X3)', (
   assert.match(problems.join(), /\.github\/actions\/zz\/action\.yml: .*from the checkout in a step that runs as root/);
   problems.length = 0;
   workflowFiles([{ ...files[0]!, text: files[0]!.text.replace('    container: { image: x }\n', '') }, files[1]!], (n, p) => problems.push(`${n}: ${p}`));
-  assert.deepEqual(problems, [], 'used by no root job: the helper is the one way');
+  assert.deepEqual(problems.filter((p) => !/an action this lint doesn't allow/.test(p)), [], 'used by no root job: the helper is the one way');
 });
 
 test('the scripts lint: the last --retry counts, comments and continuations are read as the shell reads them', () => {
@@ -585,6 +619,7 @@ test("every download in the setup and CI scripts retries, the helpers in bootstr
     });
   for (const f of shellFiles(repoRoot).sort()) {
     const name = relative(repoRoot, f);
+    for (const p of lookAlikes([name])) problems.push(p);
     if (!SETUP_DOWNLOADERS.includes(name)) for (const p of logicalLines(readFileSync(f, 'utf8')).filter((l) => !/^\s*#/.test(l) && DOWNLOAD.test(l))) problems.push(`${name}: a pinned URL outside ${HELPER} and the setup downloaders: ${p.trim()}`);
     const probes = SCRIPT_PROBES[name] ?? [];
     const cmds = logicalLines(readFileSync(f, 'utf8')).flatMap(commands);
@@ -627,9 +662,9 @@ test('R1228f: any spelling of curl, bash-joined continuations, YAML escapes, gh 
   // A downloader action, and the actions used today.
   assert.equal(USES_ALLOWED.test('robinraju/release-downloader@v1'), false);
   assert.equal(USES_ALLOWED.test('actions/checkout@v7'), false, 'by tag: refused (pinned by commit only)');
-  for (const u of ['actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1', 'Vampire/setup-wsl@d1da7f2c0322a5ee4f24975344f67fc0f5baf364', './.github/workflows/ci-slow.yml', './.github/actions/setup']) assert.ok(USES_ALLOWED.test(u), u);
+  for (const u of ['actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1', 'Vampire/setup-wsl@d1da7f2c0322a5ee4f24975344f67fc0f5baf364', './.github/workflows/ci-slow.yml']) assert.ok(USES_ALLOWED.test(u), u);
   // R1228g D1: a local action outside .github, or one reached through `..`, is refused.
-  for (const u of ['./tools/zzdl', './.github/../tools/zzdl', './.github/actions/../../tools/zzdl', './.github/actions/a/b', './scripts/ci']) assert.equal(USES_ALLOWED.test(u), false, u);
+  for (const u of ['./tools/zzdl', './.github/../tools/zzdl', './.github/actions/../../tools/zzdl', './.github/actions/a/b', './scripts/ci', './.github/actions/setup', './.github/workflows/../x.yml']) assert.equal(USES_ALLOWED.test(u), false, u);
   // Kept: probes and loopback, and a shell file under scripts/ or .github/.
   for (const s of ['curl -sf "$GH_FAKE/repos/example/alpha" >/dev/null', `curl -fsS -o /dev/null ${U}`, 'curl -sS -o f "http://127.0.0.1:8080/x"', 'bash scripts/ci/x.sh', 'bash "$GITHUB_WORKSPACE/scripts/ci/fetch-pinned.sh" "https://x/y" ' + PIN + ' f'.replace('https://x/y', 'https://example.com/y')]) {
     assert.deepEqual(runProblems(s), [], `kept: ${s}`);
@@ -727,4 +762,50 @@ test('the .github scan reads decoded strings and every uses: (R1228f D3, D4), as
   workflowFiles([{ name: '.github/workflows/zz.yml', text: 'jobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - run: "w\\x67et -q -O g https://github.com/a/b/releases\\x2Fdownload/x"\n      - uses: robinraju/release-downloader@v1\n' }], (n, p) => problems.push(`${n}: ${p}`));
   assert.match(problems.join('\n'), /zz\.yml: a pinned URL not on a scripts\/ci\/fetch-pinned\.sh line: wget/, 'the escaped wget of a pinned URL');
   assert.match(problems.join('\n'), /zz\.yml: an action this lint doesn't allow .*robinraju\/release-downloader@v1/);
+});
+
+test('R1228h D1, R1228i D1-D3: a local Docker action, the helper by another path, other URL spellings and a custom shell are refused at the scan', () => {
+  const GL = 'https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz';
+  const wf = (steps: string) => `on: push\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n${steps}`;
+  const scan = (files: { name: string; text: string }[]) => {
+    const problems: string[] = [];
+    workflowFiles(files, (n, p) => problems.push(`${n}: ${p}`));
+    return problems;
+  };
+  const helper = `bash "$GITHUB_WORKSPACE/${HELPER}" "${GL}" ${PIN} gl.tgz`;
+  // The control: the helper line as CI writes it passes.
+  assert.deepEqual(scan([{ name: '.github/workflows/k1.yml', text: wf(`      - shell: bash\n        run: |\n          ${helper}\n`) }]), []);
+  const refused: Record<string, { name: string; text: string }[]> = {
+    // R1228h D1 (probe C): a local Docker action whose Dockerfile curls the pinned release.
+    'a local Docker action': [
+      { name: '.github/workflows/zz-probe.yml', text: wf('      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n      - uses: ./.github/actions/zzdock\n') },
+      { name: '.github/actions/zzdock/action.yml', text: 'runs:\n  using: docker\n  image: Dockerfile\n' },
+    ],
+    // R1228i D1 (L1-L4): the helper by a relative path, a working directory, or a reassigned ws or GITHUB_WORKSPACE.
+    'L1 cd, then a relative path': [{ name: '.github/workflows/l1.yml', text: wf(`      - run: |\n          cd tools\n          bash scripts/ci/fetch-pinned.sh "${GL}" ${PIN} gl.tgz\n`) }],
+    'L2 a working directory': [{ name: '.github/workflows/l2.yml', text: wf(`      - working-directory: tools\n        run: |\n          ${helper}\n`) }],
+    'L3 ws reassigned': [{ name: '.github/workflows/l3.yml', text: wf(`      - run: |\n          ws=tools\n          bash "$ws/${HELPER}" "${GL}" ${PIN} gl.tgz\n`) }],
+    'L3b ws from the workspace, then reassigned': [{ name: '.github/workflows/l3b.yml', text: wf(`      - run: |\n          ws="$(wslpath -u '\${{ github.workspace }}')"\n          ws=tools\n          bash "$ws/${HELPER}" "${GL}" ${PIN} gl.tgz\n`) }],
+    'L4 GITHUB_WORKSPACE reassigned': [{ name: '.github/workflows/l4.yml', text: wf(`      - run: |\n          GITHUB_WORKSPACE="$PWD/tools"\n          ${helper}\n`) }],
+    'L4b GITHUB_WORKSPACE set by an env': [{ name: '.github/workflows/l4b.yml', text: wf(`      - env:\n          GITHUB_WORKSPACE: /tmp/tools\n        run: |\n          ${helper}\n`) }],
+    // R1228i D2 (L14): a pinned URL spelled with a doubled slash, handed to a script.
+    'L14 releases//download': [{ name: '.github/workflows/l14.yml', text: wf(`      - run: bash scripts/ci/zz-get.sh "${GL.replace('releases/download', 'releases//download')}" gl.tgz\n`) }],
+    'NODEJS.ORG': [{ name: '.github/workflows/l16.yml', text: wf('      - run: bash scripts/ci/zz-get.sh "https://NODEJS.ORG/dist/v22.11.0/node-v22.11.0-linux-x64.tar.xz" n.tar.xz\n') }],
+    // R1228i D3 (L15, L17): a custom shell that is curl, its run a curl config.
+    'L15 shell: curl -K {0}, a pinned URL': [{ name: '.github/workflows/l15.yml', text: wf(`      - shell: curl -fsSL -K {0}\n        run: |\n          url = "${GL.replace('releases/download', 'releases//download')}"\n          output = "gl.tgz"\n`) }],
+    'L17 shell: curl -K {0}, any https URL': [{ name: '.github/workflows/l17.yml', text: wf('      - shell: curl -fsSL -K {0}\n        run: |\n          url = "https://example.com/tool.tgz"\n          output = "tool.tgz"\n') }],
+    'a default shell': [{ name: '.github/workflows/ds.yml', text: `on: push\ndefaults:\n  run:\n    shell: curl -fsSL -K {0}\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi\n` }],
+  };
+  for (const [what, files] of Object.entries(refused)) assert.notDeepEqual(scan(files), [], what);
+  // ci-slow's own WSL form passes.
+  assert.deepEqual(scan([{ name: '.github/workflows/ws.yml', text: wf(`      - shell: wsl-bash {0}\n        run: |\n          ws="$(wslpath -u '\${{ github.workspace }}')" home=/h\n          v="$(sed -n 's/^V=//p' "$ws/scripts/bootstrap.sh")"\n          bash "$ws/${HELPER}" "https://nodejs.org/dist/$v/node-$v-linux-x64.tar.xz" "$sum" /tmp/node.tar.xz\n`) }]), []);
+});
+
+test('R1228i D1, D2: a look-alike helper anywhere else is refused, and the pinned-URL rule reads the spellings the servers accept', () => {
+  assert.deepEqual(lookAlikes([HELPER, 'scripts/ci/other.sh']), []);
+  assert.equal(lookAlikes(['tools/scripts/ci/fetch-pinned.sh']).length, 1);
+  for (const u of ['https://github.com/o/r/releases//download/v1/x.tgz', 'https://NODEJS.ORG/dist/v22.11.0/node.tar.xz', 'https://nodejs.org//dist/v22/x', 'https://github.com/o/r/RELEASES/DOWNLOAD/v1/x']) assert.ok(DOWNLOAD.test(u), u);
+  // L6, L16: a script naming such a URL outside the helper is refused by the scan's pinned-URL rule, which is DOWNLOAD
+  // over each line (above); and a workflow scalar by decodedProblems.
+  assert.ok(decodedProblems('curl -fsSL --retry 3 -o gl.tgz "https://github.com/o/r/releases//download/v1/x.tgz"').length > 0, 'L6 in a workflow');
 });
