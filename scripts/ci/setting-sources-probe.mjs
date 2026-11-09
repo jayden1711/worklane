@@ -31,12 +31,12 @@
 //
 // Exit 0: the controls loaded the plants and the guarded run loaded none. Exit 1: a marker or a hook reached the
 // guarded run, the tool didn't run, or a control didn't load its plants. Exit 2: usage, or the binary can't start.
-import { execFileSync } from 'node:child_process';
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { gitExecFileSync } from '../lib/git.cjs';
 
 const bin = process.argv[2];
 if (!bin) {
@@ -91,7 +91,7 @@ function plant() {
   const instances = join(root, 'instances');
   const instanceHome = join(instances, 'probe');
   cpSync(join(repoRoot, 'examples', 'basic'), repo, { recursive: true });
-  const git = (...a) => execFileSync('git', a, { cwd: repo, stdio: 'ignore' });
+  const git = (...a) => gitExecFileSync(a, { cwd: repo, stdio: 'ignore' });
   git('init', '-q', '-b', 'main');
   git('config', 'user.email', 'probe@example.com');
   git('config', 'user.name', 'Probe');
