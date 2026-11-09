@@ -1,7 +1,7 @@
 // The registered check tables of the engine's own code (#941): a module's tables live in a data-only file beside it,
 // `<module>.tables.json` (`src/review.ts` reads `src/review.tables.json`). The weakening hold reads that file as
 // parsed data, before and after a change, and never runs code (src/merge-policy-weakening.ts, jsonTableFindings). A
-// module loads its own file here, by its own URL, and gets each table deep-frozen: no write to a table succeeds after
+// module loads its own file here, by its own URL (checked against the call stack: callerFile), and gets each table deep-frozen: no write to a table succeeds after
 // load. What the load returns can still be changed by code that runs before it and replaces a built-in it calls
 // (JSON.parse, Array.prototype.map, Object.freeze, readFileSync): open, named by the owner (R1184p P1; #1251). No path is
 // written at the load site. The load line and each `TABLES.get('NAME')` line can't be removed or
@@ -192,8 +192,34 @@ export function tablesFrom(text: string, file: string): Tables {
 /** Where the module at `moduleUrl` keeps its tables: its path with the extension replaced by `.tables.json`. */
 export const tablesFileOf = (moduleUrl: string): string => fileURLToPath(moduleUrl).replace(/\.[cm]?[jt]s$/, '') + '.tables.json';
 
-/** The tables of the module at `moduleUrl` (its `import.meta.url`), read from its own tables file. Throws when it can't. */
+/**
+ * The file of the code that called `fn`, from the call stack: the module V8 is running, which no write to
+ * `import.meta.url` changes. Undefined when the stack has no frame for it.
+ */
+export function callerFile(fn: (...a: never[]) => unknown): string | undefined {
+  const [keep, limit] = [Error.prepareStackTrace, Error.stackTraceLimit];
+  try {
+    Error.prepareStackTrace = (_e, sites) => sites;
+    Error.stackTraceLimit = 1;
+    const o: { stack?: unknown } = {};
+    Error.captureStackTrace(o, fn);
+    const sites = o.stack as NodeJS.CallSite[] | undefined;
+    return sites?.[0]?.getFileName() ?? undefined;
+  } finally {
+    Error.prepareStackTrace = keep;
+    Error.stackTraceLimit = limit;
+  }
+}
+
+/**
+ * The tables of the module at `moduleUrl` (its `import.meta.url`), read from its own tables file. Throws when it can't,
+ * or when `moduleUrl` isn't the calling module's own file (R1184s D1): a module that writes its `import.meta.url` first
+ * (in any spelling: `import.meta.url! = …`, `(import.meta.url as string) = …`, a pattern, a target split over lines)
+ * can't load another file's tables as its own.
+ */
 export function tablesOf(moduleUrl: string): Tables {
+  const caller = callerFile(tablesOf);
+  if (caller !== moduleUrl) throw new Error(`tablesOf: ${moduleUrl} is not the calling module (${caller ?? 'no stack frame'}); a module loads only its own tables, as tablesOf(import.meta.url)`);
   const file = tablesFileOf(moduleUrl);
   return tablesFrom(readFileSync(file, 'utf8'), file);
 }

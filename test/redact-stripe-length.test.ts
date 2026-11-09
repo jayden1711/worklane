@@ -14,7 +14,7 @@ const updater = createRequire(import.meta.url)(join(repoRoot, 'scripts', 'machin
 
 test('a full-length Stripe secret or restricted key is redacted on every path, and so are shorter ones', () => {
   const body = (n: number) => Array.from({ length: n }, (_, k) => 'aB3xZ9'[k % 6]).join('');
-  for (const prefix of ['sk_live_', 'sk_test_', 'rk_live_']) {
+  for (const prefix of ['sk_live_', 'sk_test_', 'rk_live_', 'rk_test_']) {
     for (const n of [16, 24, 32, 99, 107]) {
       const key = `${prefix}${body(n)}`;
       for (const [path, out] of [['default', redactString(`key ${key} end`)], ['broad', redactString(`key ${key} end`, { broad: true })], ['updater', updater.redact(`key ${key} end`)]] as const) {

@@ -6,7 +6,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { BRAND } from '../src/brand.js';
@@ -130,9 +131,32 @@ test('both loaders, and so the hold, refuse a file that is not a tables file (#9
   assert.deepEqual(tablesFrom(one([{ '//': 'why', a: 1 }]), 'c.tables.json').get('T'), [{ a: 1 }]);
 });
 
-test("a module reads only its own tables file, by its own URL: no path is written at the load site (#941)", () => {
-  assert.equal(tablesOf(pathToFileURL(join(repoRoot, 'dist', 'src', 'review.js')).href).get<readonly string[]>('ALWAYS_L3').length, 2);
-  assert.throws(() => tablesOf(pathToFileURL(join(repoRoot, 'dist', 'src', 'no-such-module.js')).href), /ENOENT/);
+test("a module reads only its own tables file, by its own URL: no path is written at the load site (#941)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tables-own-'));
+  try {
+    const loaders = [pathToFileURL(join(repoRoot, 'dist', 'src', 'check-tables.js')).href, pathToFileURL(join(repoRoot, 'scripts', 'lib', 'check-tables.mjs')).href];
+    writeFileSync(join(dir, 'decoy.tables.json'), one(['weak']));
+    for (const [k, loader] of loaders.entries()) {
+      const mod = async (name: string, body: string, tables?: string) => {
+        if (tables) writeFileSync(join(dir, `${name}${k}.tables.json`), tables);
+        writeFileSync(join(dir, `${name}${k}.mjs`), `import { tablesOf } from '${loader}';\n${body}\nexport const T = tablesOf(import.meta.url).get('T');\n`);
+        return ((await import(pathToFileURL(join(dir, `${name}${k}.mjs`)).href)) as { T: unknown }).T;
+      };
+      assert.deepEqual(await mod('own', '', one(['a', 'b'])), ['a', 'b'], `${k}: its own file`);
+      await assert.rejects(mod('none', ''), /ENOENT/, `${k}: no tables file`);
+      // R1184s D1: import.meta.url written before the load, in each shape tsc emits for `import.meta.url! = …`,
+      // `(import.meta.url as string) = …`, `[import.meta.url!] = […]`, `for ((import.meta.url as string) of …)`, and a
+      // target split over lines. The load is refused, never the decoy's data.
+      const decoy = "new URL('./decoy.mjs', import.meta.url).href";
+      for (const [name, write] of [['assign', `import.meta.url = ${decoy};`], ['paren', `(import.meta.url) = ${decoy};`], ['array', `[import.meta.url] = [${decoy}];`], ['object', `({ url: import.meta.url } = { url: ${decoy} });`], ['forof', `for (import.meta.url of [${decoy}]) break;`], ['split', `[import.meta.url\n] = [${decoy}];`], ['assignObject', `Object.assign(import.meta, { url: ${decoy} });`]] as const) {
+        await assert.rejects(mod(name, write, one(['a', 'b'])), /is not the calling module/, `${k}: ${name}`);
+      }
+    }
+    // A call with another module's URL, from here, is refused too.
+    assert.throws(() => tablesOf(pathToFileURL(join(repoRoot, 'dist', 'src', 'review.js')).href), /is not the calling module/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
   assert.throws(() => tablesFrom(one([]), 'x.tables.json').get('MISSING'), /has no table MISSING/);
 });
 

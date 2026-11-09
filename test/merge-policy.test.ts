@@ -1230,14 +1230,17 @@ function loadSiteProblems(texts: ReadonlyMap<string, string>, tablesFiles: reado
         const pa = n.parent;
         const read = ts.isPropertyAccessExpression(pa) && pa.expression === n && ['url', 'dirname', 'filename'].includes(pa.name.text);
         // A write: the left of an assignment, a delete or ++/--, or a target nested in a pattern or a for...of/in head
-        // (R1184q 1: `[import.meta.url] = …`, `({ url: import.meta.url } = …)`, `for (import.meta.url of …)`).
+        // (R1184q 1: `[import.meta.url] = …`, `({ url: import.meta.url } = …)`, `for (import.meta.url of …)`),
+        // through a TypeScript wrapper tsc erases (R1184s D1: `!`, `as`, `satisfies`, `<T>`).
         const target = (x: ts.Node): boolean => {
           let c: ts.Node = x;
-          while (c.parent && (ts.isParenthesizedExpression(c.parent) || ts.isArrayLiteralExpression(c.parent) || ts.isSpreadElement(c.parent) || ts.isObjectLiteralExpression(c.parent) || ts.isShorthandPropertyAssignment(c.parent) || (ts.isPropertyAssignment(c.parent) && c.parent.initializer === c))) c = c.parent;
+          while (c.parent && (ts.isParenthesizedExpression(c.parent) || ts.isNonNullExpression(c.parent) || ts.isAsExpression(c.parent) || ts.isSatisfiesExpression(c.parent) || ts.isTypeAssertionExpression(c.parent) || ts.isArrayLiteralExpression(c.parent) || ts.isSpreadElement(c.parent) || ts.isObjectLiteralExpression(c.parent) || ts.isShorthandPropertyAssignment(c.parent) || (ts.isPropertyAssignment(c.parent) && c.parent.initializer === c))) c = c.parent;
           const q = c.parent;
           return (ts.isBinaryExpression(q) && q.left === c && q.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && q.operatorToken.kind <= ts.SyntaxKind.LastAssignment) || ((ts.isForOfStatement(q) || ts.isForInStatement(q)) && q.initializer === c);
         };
-        const written = read && (target(pa) || ts.isDeleteExpression(pa.parent) || ts.isPrefixUnaryExpression(pa.parent) || ts.isPostfixUnaryExpression(pa.parent));
+        let w: ts.Node = pa;
+        while (w.parent && (ts.isParenthesizedExpression(w.parent) || ts.isNonNullExpression(w.parent) || ts.isAsExpression(w.parent) || ts.isSatisfiesExpression(w.parent) || ts.isTypeAssertionExpression(w.parent))) w = w.parent;
+        const written = read && (target(pa) || ts.isDeleteExpression(w.parent) || ts.isPrefixUnaryExpression(w.parent) || ts.isPostfixUnaryExpression(w.parent));
         if (!read || written) out.push(`${at(n)}: import.meta used other than to read its url, dirname or filename`);
       }
       // A loader name read by element access (R1184o 3). A specifier computed at run time is not followed: a named limit
@@ -1311,6 +1314,16 @@ test("the load-site lock reads code, not spelling: an alias, a namespace, a dyna
     ['an array pattern', "[import.meta.url] = ['file:///x'];"],
     ['an object pattern', "({ url: import.meta.url } = { url: 'file:///x' });"],
     ['a for...of head', "for (import.meta.url of ['file:///x']) break;"],
+    // R1184s D1: a TypeScript wrapper tsc erases to a plain write.
+    ['a non-null target', "import.meta.url! = 'file:///x';"],
+    ['an as target', "(import.meta.url as string) = 'file:///x';"],
+    ['a satisfies target', "(import.meta.url satisfies string) = 'file:///x';"],
+    ['a type-assertion target', "(<string>import.meta.url) = 'file:///x';"],
+    ['a non-null in a pattern', "[import.meta.url!] = ['file:///x'];"],
+    ['an as in a for...of head', "for ((import.meta.url as string) of ['file:///x']) break;"],
+    ['a parenthesized target', "(import.meta.url) = 'file:///x';"],
+    ['a delete of a wrapped url', "delete (import.meta.url as never);"],
+    ['an increment through !', "(import.meta.url as unknown as number)!++;"],
   ] as const) refused(label, { 'src/a.ts': `${line}\n${ok}` });
   const split2 = (get: string) => `import { tablesOf } from './check-tables.js';\nconst TABLES = tablesOf(import.meta.url);\nexport const A = ${get}('A');\n`;
   for (const [label, text] of [

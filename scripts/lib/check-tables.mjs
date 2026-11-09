@@ -125,8 +125,28 @@ export function tablesFrom(text, file, fill = (s) => s) {
 /** Where the script at `moduleUrl` keeps its tables: its path with the extension replaced by `.tables.json`. */
 export const tablesFileOf = (moduleUrl) => fileURLToPath(moduleUrl).replace(/\.[cm]?[jt]s$/, '') + '.tables.json';
 
-/** The tables of the script at `moduleUrl` (its `import.meta.url`), from its own tables file. Throws when it can't. */
+/** The file of the code that called `fn`, from the call stack (no write to `import.meta.url` changes it). */
+export function callerFile(fn) {
+  const [keep, limit] = [Error.prepareStackTrace, Error.stackTraceLimit];
+  try {
+    Error.prepareStackTrace = (_e, sites) => sites;
+    Error.stackTraceLimit = 1;
+    const o = {};
+    Error.captureStackTrace(o, fn);
+    return o.stack?.[0]?.getFileName() ?? undefined;
+  } finally {
+    Error.prepareStackTrace = keep;
+    Error.stackTraceLimit = limit;
+  }
+}
+
+/**
+ * The tables of the script at `moduleUrl` (its `import.meta.url`), from its own tables file. Throws when it can't, or
+ * when `moduleUrl` isn't the calling script's own file (R1184s D1).
+ */
 export function tablesOf(moduleUrl) {
+  const caller = callerFile(tablesOf);
+  if (caller !== moduleUrl) throw new Error(`tablesOf: ${moduleUrl} is not the calling module (${caller ?? 'no stack frame'}); a module loads only its own tables, as tablesOf(import.meta.url)`);
   const file = tablesFileOf(moduleUrl);
   return tablesFrom(readFileSync(file, 'utf8'), file);
 }

@@ -151,7 +151,7 @@ for (const [name, early] of BUILTIN_OPEN) {
   });
 }
 
-test("R1184q: import.meta.url written as a pattern or for...of target, and a line the old comment strip cut, wait; R1184r D2: a load spelled TABLES?.get or tablesOf ( is a load line (#941)", () => {
+test("R1184q, R1184s D1: import.meta.url written as a pattern or for...of target, through a TypeScript wrapper or over lines, and a line the old comment strip cut, wait; R1184r D2: a load spelled TABLES?.get or tablesOf ( is a load line (#941)", () => {
   const LOAD = "removes or changes the line that loads a check's table from its data";
   const ADDED = "adds a line that loads a check's table some other way than its module's one load";
   const has = (r: string[], k: string) => r.some((x) => x.includes(k));
@@ -162,6 +162,26 @@ test("R1184q: import.meta.url written as a pattern or for...of target, and a lin
   assert.ok(has(reasons(above("[import.meta.url] = [new URL('./x-decoy.ts', import.meta.url).href];"), base), ADDED), 'Q1a array pattern');
   assert.ok(has(reasons(above("({ url: import.meta.url } = { url: new URL('./x-decoy.ts', import.meta.url).href });"), base), ADDED), 'Q1b object pattern');
   assert.ok(has(reasons(above("for (import.meta.url of [new URL('./x-decoy.ts', import.meta.url).href]) break;"), base), ADDED), 'Q1c for...of head');
+  // R1184s D1: a write through a TypeScript wrapper tsc erases, a parenthesized target, a target split over lines, and a
+  // code line that starts with `*` (each also refused by the loader at run time: test/check-tables.test.ts).
+  const decoy = "new URL('./x-decoy.ts', import.meta.url).href";
+  for (const [label, line] of [
+    ['S1a non-null', `import.meta.url! = ${decoy};`],
+    ['S1b as', `(import.meta.url as string) = ${decoy};`],
+    ['S1c satisfies', `(import.meta.url satisfies string) = ${decoy};`],
+    ['S1d a type assertion', `(<string>import.meta.url) = ${decoy};`],
+    ['S1e non-null in a pattern', `[import.meta.url!] = [${decoy}];`],
+    ['S1f as in a for...of head', `for ((import.meta.url as string) of [${decoy}]) break;`],
+    ['S1g parenthesized', `(import.meta.url) = ${decoy};`],
+    ['S1h a pattern split over lines', `[import.meta.url\n] = [${decoy}];`],
+    ['S1i an assignment split over lines', `import.meta.url\n  = ${decoy};`],
+    ['S1j a code line that starts with *', `const one = 1\n* ((import.meta.url = ${decoy}), 1);`],
+    ['S1k a delete through a wrapper', 'delete (import.meta.url as never);'],
+    ['S1l a delete in parentheses', 'delete (import.meta.url);'],
+    ['S1m an increment in parentheses', '(import.meta.url)++;'],
+  ] as const) assert.ok(has(reasons(above(line), base), ADDED), label);
+  // Control: a JSDoc comment that names import.meta passes.
+  assert.deepEqual(reasons(above('/**\n * reads import.meta.url as its own\n * import\n */'), base), [], 'a JSDoc comment');
   // Q2a-c: a `//` inside a template literal, and a line that starts with an empty block comment.
   assert.ok(has(reasons(above("const sep = `//`; Object.assign(import.meta, { url: `${new URL(`./x-decoy.ts`, import.meta.url).href}` });"), base), ADDED), 'Q2a');
   assert.ok(has(reasons({ 'src/zz.ts': "const sep = `//`; const L = await import(`./check-tables.js`);\nvoid sep;\nvoid L;\n" }), ADDED), 'Q2b');
@@ -173,13 +193,26 @@ test("R1184q: import.meta.url written as a pattern or for...of target, and a lin
   assert.ok(has(reasons({ 'src/x-rules.ts': spaced.replace(".get('CHECKS');", ".get<readonly string[]>('CHECKS').slice(1);") }, { 'src/x-rules.ts': spaced }), LOAD), 'V4 tablesOf (');
 });
 
-test("R1184r D1: a changed line of the redactor's REPLACERS (a table's entries in code) waits, in the module and in the updater's copy (#941)", () => {
+test("R1184r D1, R1184s D2: a changed line, or an added one that isn't a new replacer, of the redactor's REPLACERS (a table's entries in code) waits, in the module and in the updater's copy (#941)", () => {
   const SHRUNK = "removes or changes an entry in a check's rules or a guard's list";
   const redact = "const REPLACERS = Object.freeze({\n  stripe: (m: string, pre?: string, k?: string, v?: string) => (/\\d/.test(v!) ? `${pre}${k}_[REDACTED]` : m),\n  basic: (m: string) => m.slice(0, 1),\n});\nexport const R = REPLACERS;\n";
   const r1e = redact.replace('(/\\d/.test(v!) ?', '(/\\d/.test(v!) && v!.length !== 99 ?');
   assert.ok(reasons({ 'src/events/redact.ts': r1e }, { 'src/events/redact.ts': redact }).some((x) => x.includes(SHRUNK) && x.includes('REPLACERS')), 'R1e: the Stripe replacer declines a 99-character key');
   const upd = "const REPLACERS = Object.freeze({\n    basic: (m) => m.slice(0, 1),\n});\n";
   assert.ok(reasons({ 'scripts/machine/x-update.cjs': upd.replace('m.slice(0, 1)', 'm') }, { 'scripts/machine/x-update.cjs': upd }).some((x) => x.includes(SHRUNK)), "the updater copy's replacer");
+  // R1184s D2: an added line that overrides a replacer, removing none: a spread, a name used before, a computed or
+  // quoted key, a replacer over several lines.
+  const add = (line: string) => reasons({ 'src/events/redact.ts': redact.replace('});', `${line}\n});`) }, { 'src/events/redact.ts': redact });
+  for (const [label, line] of [
+    ['S2a a spread', "  ...({ stripe: (m: string, pre?: string, k?: string, v?: string) => (/\\d/.test(v!) && !pre!.startsWith('rk') ? `${pre}${k}_[REDACTED]` : m) } as Partial<Record<string, never>>),"],
+    ['S2b a name used before', '  stripe: (m: string) => m,'],
+    ['S2c a computed key', "  ['basic']: (m: string) => m,"],
+    ['S2d a quoted key', "  'basic': (m: string) => m,"],
+    ['S2e a new replacer over two lines', '  extra: (m: string) =>\n    m,'],
+    ['S2f a new name twice', '  extra: (m: string) => m,\n  extra: (m: string) => m.slice(1),'],
+  ] as const) assert.ok(add(line).some((x) => x.includes(SHRUNK) && x.includes('REPLACERS')), label);
+  const updSpread = upd.replace('});', '    ...({ basic: (m) => m }),\n});');
+  assert.ok(reasons({ 'scripts/machine/x-update.cjs': updSpread }, { 'scripts/machine/x-update.cjs': upd }).some((x) => x.includes(SHRUNK)), "S2g a spread in the updater's copy");
   // Control: a line added to REPLACERS (a new replacer) and a change outside it pass.
   assert.deepEqual(reasons({ 'src/events/redact.ts': redact.replace('});', '  extra: (m: string) => m,\n});') }, { 'src/events/redact.ts': redact }), []);
   assert.deepEqual(reasons({ 'src/events/redact.ts': `${redact}// a comment\n` }, { 'src/events/redact.ts': redact }), []);

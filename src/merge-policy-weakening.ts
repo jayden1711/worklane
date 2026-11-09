@@ -444,8 +444,44 @@ export const LOADER_CODE: ReadonlySet<string> = new Set(['src/check-tables.ts', 
  * `({ url: import.meta.url } = …)`), or as a `for…of`/`for…in` head (R1184q 1). No line of src/ or scripts/ reads one
  * that way today; a read in a literal written so (`{ url: import.meta.url }`) waits too, fail closed.
  */
-const META_URL_TARGET = /\bimport\s*\.\s*meta\s*\.\s*\w+\s*[\]},]|\bimport\s*\.\s*meta\s*\.\s*\w+\s+(?:of|in)\b/;
+// R1184s D1, each fail closed: a TypeScript wrapper tsc erases to a plain write (`import.meta.url!`, `… as string`,
+// `… satisfies string`, `<string>import.meta.url`), a parenthesized target (`(import.meta.url) = …`), and a line that
+// ends at `import.meta.<x>` or `import`, or starts at `.meta` (a target split over lines). No line of src/ or scripts/
+// reads one so today. The loader is the real stop: tablesOf refuses a URL that isn't its caller's own file
+// (src/check-tables.ts callerFile), so a write in any spelling gets no other file's tables.
+const META_URL_TARGET = new RegExp(
+  [
+    /\bimport\s*\.\s*meta\s*\.\s*\w+\s*[\]},]/,
+    /\bimport\s*\.\s*meta\s*\.\s*\w+\s+(?:of|in)\b/,
+    /\bimport\s*\.\s*meta\s*\.\s*\w+\s*!(?!=)/,
+    /\bimport\s*\.\s*meta\s*\.\s*\w+\s+(?:as|satisfies)\b/,
+    />\s*import\s*\.\s*meta\b/,
+    /\bimport\s*\.\s*meta\s*\.\s*\w+\s*\)+\s*(?:[-+*/%&|^]|\*\*|<<|>>>?|&&|\|\||\?\?)?=(?!=)/,
+    /\bimport\s*\.\s*meta(?:\s*\.\s*\w+)?\s*$/,
+    /\bimport\s*$/,
+    /^\s*\.\s*meta\b/,
+    /\bdelete\b[\s(]*(?:<[^>]*>\s*)?import\s*\.\s*meta\b/,
+    /(?:\+\+|--)[\s(]*(?:<[^>]*>\s*)?import\s*\.\s*meta\b/,
+    /\bimport\s*\.\s*meta\s*\.\s*\w+[\s)!]*(?:\+\+|--)/,
+  ]
+    .map((r) => r.source)
+    .join('|'),
+);
 const META_URL_SET = /\bimport\s*\.\s*meta\b(?!\s*\.\s*(?:url|dirname|filename)\b)|\bimport\s*\.\s*meta\s*\.\s*\w+\s*(?:[-+*/%&|^]|\*\*|<<|>>>?|&&|\|\||\?\?)?=(?!=)|\bdelete\s+import\s*\.\s*meta\b/;
+
+/**
+ * Whether line `k` of `lines` (a `*` line) sits in a block comment: the lines above it up to a line that opens one
+ * (`/*`, never closed on it) all start with `*`, and none of them closes it or holds a `${`.
+ */
+export function blockCommentRun(lines: readonly string[], k: number): boolean {
+  for (let j = k; j >= 0; j--) {
+    const x = lines[j]!;
+    if (/\*\//.test(x) || x.includes('${')) return false;
+    if (/^\s*\/\*/.test(x)) return true;
+    if (!/^\s*\*/.test(x)) return false;
+  }
+  return false;
+}
 
 /** The files whose REPLACERS block is a table's code-held entries: the redactor and the root updater's copy of it. */
 export const REPLACER_FILES = /^(?:src\/events\/redact\.ts|scripts\/machine\/[^/]+-update\.cjs)$/;
@@ -1137,14 +1173,34 @@ function findings(i: WeakeningInput): Found {
   // generated copy, waits as a table's entry did when the function sat in the table (main).
   for (const f of i.files) {
     if (!REPLACER_FILES.test(f.path) || !holds(f.path, i.scope)) continue;
-    let block: Set<string>;
+    let was: string[];
+    let now: string[];
     try {
-      block = new Set(replacerLines(i.before(f.path)).map((l) => l.trim()));
+      [was, now] = [replacerLines(i.before(f.path)), replacerLines(i.after(f.path))];
     } catch (e) {
       hit('unreadable', f.path, String((e as Error).message ?? e));
       continue;
     }
+    const block = new Set(was.map((l) => l.trim()));
     for (const l of f.removedLines ?? []) if (l.trim() && block.has(l.trim())) hit('table-shrunk', f.path, `REPLACERS: ${l.trim()}`);
+    // An added line in the block (R1184s D2: `...({ stripe: … } as Partial<…>),` overrides a replacer and removes no
+    // line): it passes only as a comment, or as a new replacer's one line, `name: …` or `name,`, its name in neither the
+    // old block nor anywhere else in the new one. Anything else (a spread, a computed or quoted key, a name used before,
+    // a replacer over several lines) waits.
+    const keyOf = (l: string) => /^\s*([A-Za-z_$][\w$]*)\s*(?::|,\s*$|\()/.exec(l)?.[1];
+    const keys = (ls: string[]) => ls.slice(1, -1).flatMap((l) => (/^\s*(?:\/\/|\/\*|\*)/.test(l) ? [] : [keyOf(l) ?? '']));
+    const [old, fresh] = [new Set(keys(was)), keys(now)];
+    const inBlock = new Set(now.slice(1, -1));
+    for (const l of f.addedLines ?? []) {
+      if (!inBlock.has(l) || !l.trim() || /^\s*\/\//.test(l)) continue;
+      const k = keyOf(l);
+      // One whole line: it ends its property with `,` and closes every bracket it opens (a replacer over several lines
+      // waits from its first line; a bracket in a string or a regexp makes it wait too, fail closed).
+      const depth = [...l].reduce((d, c) => d + ('([{'.includes(c) ? 1 : ')]}'.includes(c) ? -1 : 0), 0);
+      const whole = /,\s*$/.test(l) && depth === 0;
+      const lone = !!k && whole && !old.has(k) && fresh.filter((x) => x === k).length === 1;
+      if (!lone) hit('table-shrunk', f.path, `REPLACERS: ${l.trim()}`);
+    }
   }
 
   // The data tables (#941), compared before and after as parsed data.
@@ -1167,14 +1223,31 @@ function findings(i: WeakeningInput): Found {
   // It waits whatever replaces it: what the code reads after may not be the table the compare reads.
   // A comment that only names a tables file is no load (a generated copy's marker is); a test's lines are held by the
   // test rules.
-  // All comment: a `//` line, or a block comment's line with no code after its close (R1184q 2: `/**/ code` is code).
-  const commentOnly = (l: string) => (/^\s*\/\//.test(l) || (/^\s*(?:\/\*|\*)/.test(l) && !/\*\/\s*\S/.test(l))) && !/\/\/ (?:BEGIN|END) tables from /.test(l);
+  // All comment: a `//` line, or a block comment's line with no code after its close (R1184q 2: `/**/ code` is code). A
+  // line that starts with `*` is a comment's only inside one (R1184s D1: `a\n* (import.meta.url = …)` is code): every
+  // place it stands in the file's text is in a run of `*` lines under a `/*` line, none of them closing it and none
+  // holding a `${`.
+  const commentOnly = (l: string, text: () => string | null) => {
+    if (/\/\/ (?:BEGIN|END) tables from /.test(l)) return false;
+    if (/^\s*\/\//.test(l)) return true;
+    if (/\*\/\s*\S/.test(l) || l.includes('${')) return false;
+    if (/^\s*\/\*/.test(l)) return true;
+    if (!/^\s*\*/.test(l)) return false;
+    let lines: string[];
+    try {
+      lines = (text() ?? '').split('\n');
+    } catch {
+      return false;
+    }
+    const at = lines.flatMap((x, k) => (x === l ? [k] : []));
+    return at.length > 0 && at.every((k) => blockCommentRun(lines, k));
+  };
   for (const f of i.files) {
     if (!MARKABLE.test(f.path) || !holds(f.path, i.scope) || isTest(f.path)) continue;
-    for (const l of f.removedLines ?? []) if (TABLE_LOAD.test(l) && !commentOnly(l)) hit('table-load-gone', f.path, l.trim());
+    for (const l of f.removedLines ?? []) if (TABLE_LOAD.test(l) && !commentOnly(l, () => i.before(f.path))) hit('table-load-gone', f.path, l.trim());
     if (LOADER_CODE.has(f.path)) continue;
     for (const l of f.addedLines ?? []) {
-      if (commentOnly(l)) continue;
+      if (commentOnly(l, () => i.after(f.path))) continue;
       // A trailing comment is forgiven only for the plain import (R1184o); the other rules read the whole line (R1184q 2: a
       // `//` inside a template literal would cut the rest of the line off).
       const plainImport = LOADER_IMPORT.test(l) || LOADER_IMPORT.test(l.replace(/\s*\/\/[^'"`]*$/, ''));
@@ -1385,6 +1458,9 @@ export function weakeningOf(cwd: string, base: string, head: string, files: Chan
  * With `at`, the default branch's tip and where `to` meets it: their marks are read as well as `from`'s (#869). With
  * `conflicts`, the paths a merge `to` is the tree of conflicts on (their marks at `from` are read too).
  */
+/** A file with a changed line that starts with `*`: the load rules read its text to tell a comment's line from code (R1184s D1). */
+const starLine = (f: ChangeFile) => MARKABLE.test(f.path) && [...(f.addedLines ?? []), ...(f.removedLines ?? [])].some((l) => /^\s*\*/.test(l));
+
 function measured(cwd: string, from: string, to: string, files: ChangeFile[], scope: LockScope | undefined, at?: { tip: string; meet: string }, conflicts?: string[]): WeakeningInput {
   const deleted = new Set(changedNames(cwd, ['--diff-filter=D', `${from}..${to}`]));
   const moved = exactMoves(cwd, from, to);
@@ -1393,7 +1469,7 @@ function measured(cwd: string, from: string, to: string, files: ChangeFile[], sc
   const markable = (set: Set<string>) => new Set([...files.map((f) => f.path), ...(conflicts ?? [])].filter((p) => set.has(p) && MARKABLE.test(p) && !isNonUtf8Path(p)));
   const marked = markable(new Set(filesWithText(cwd, from, [TABLE_MARK.trimEnd(), LINT_MARK])));
   const tipMarked = at ? markable(new Set(filesWithText(cwd, at.tip, [TABLE_MARK.trimEnd(), LINT_MARK]))) : new Set<string>();
-  const paths = [...new Set([...CHECK_TABLES.map((t) => t.path), ...marked, ...tipMarked, ...files.map((f) => f.path).filter((p) => TABLES_FILE.test(p) || REPLACER_FILES.test(p))])].filter((p) => files.some((f) => f.path === p) && !isNonUtf8Path(p));
+  const paths = [...new Set([...CHECK_TABLES.map((t) => t.path), ...marked, ...tipMarked, ...files.filter((f) => TABLES_FILE.test(f.path) || REPLACER_FILES.test(f.path) || starLine(f)).map((f) => f.path)])].filter((p) => files.some((f) => f.path === p) && !isNonUtf8Path(p));
   // A file over the cap isn't read at all: the change waits.
   const side = (rev: string) => {
     const { texts, tooBig } = filesAt(cwd, rev, paths, MAX_TABLE_FILE);
