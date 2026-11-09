@@ -235,3 +235,84 @@ test('R3b (not the review\'s): main moves through an unrelated file after the ap
   const h2 = commit('pre-land pass 2');
   assert.equal(landFloor(f, tip2, h2, [qa]).ask.length, 0, 'main moved, the bound file is the same on both sides: covered');
 });
+
+// R1182q (final) on #1182. Q1, Q1b: a file literally named `*` in the output never stops the whole app change binding
+// the app files (the category decides, not a path's text). Q2, Q3: liveness under the whole app change. Ported from the
+// review's JavaScript (attacks-1182q), assertions unchanged except Q3's recorded count (below).
+
+test('Q1: P1b with a judged file literally named "*" in the output: the large file swapped after approval must be asked again', () => {
+  const f = fixture(['app-non-money-large'], { max_lines: 50 });
+  const { tip, qa, output } = withApproved(f);
+  const h1 = output(() => (put(f.repo, '.gitlab-ci.yml', CI), put(f.repo, '*', 'x\n'), put(f.repo, 'src/gen.js', lines(200, 'what the owner saw'))), 'pass 1');
+  const fl1 = landFloor(f, tip, h1, [qa]);
+  assert.ok(fl1.held.some((h) => /app-non-money-large/.test(h)) && fl1.held.some((h) => /ci-config/.test(h)), `control: ${JSON.stringify(fl1.held)}`);
+  approveAtLanding(f, qa, fl1);
+  assert.equal(landFloor(f, tip, h1, [qa]).ask.length, 0, 'control: the approved form is covered');
+  const h2 = output(() => (put(f.repo, '.gitlab-ci.yml', CI), put(f.repo, '*', 'x\n'), put(f.repo, 'src/gen.js', lines(200, 'something else entirely'))), 'pass 2');
+  const fl2 = landFloor(f, tip, h2, [qa]);
+  assert.ok(fl2.ask.length > 0, `LANDS UNASKED: a file named "*" stops app-non-money-large binding every judged file: ${JSON.stringify(fl2)}`);
+});
+
+test('Q1b: P1c with a file named "*" (app-non-money-large the only category): the large file swapped is asked again', () => {
+  const f = fixture(['app-non-money-large'], { max_lines: 50 });
+  const { tip, qa, output } = withApproved(f);
+  const h1 = output(() => (put(f.repo, '*', 'x\n'), put(f.repo, 'src/gen.js', lines(200, 'v1'))), 'pass 1');
+  const fl1 = landFloor(f, tip, h1, [qa]);
+  assert.ok(fl1.held.some((h) => /app-non-money-large/.test(h)), `control: ${JSON.stringify(fl1.held)}`);
+  approveAtLanding(f, qa, fl1);
+  const h2 = output(() => (put(f.repo, '*', 'x\n'), put(f.repo, 'src/gen.js', lines(200, 'v2'))), 'pass 2');
+  const fl2 = landFloor(f, tip, h2, [qa]);
+  assert.ok(fl2.ask.length > 0, `LANDS UNASKED: ${JSON.stringify(fl2)}`);
+});
+
+test('Q2 (liveness): an unapproved large own change + ci output + a per-pass stamp is asked at most twice, then covered', () => {
+  const f = fixture(['app-non-money-large'], { max_lines: 50 });
+  const r = f.repo;
+  const tip = git(r, 'rev-parse', 'HEAD');
+  put(r, 'src/big.js', lines(200, 'own'));
+  git(r, 'add', '-A');
+  git(r, 'commit', '-q', '-m', 'A');
+  const a = git(r, 'rev-parse', 'HEAD');
+  const qa = event(f, { issue: 1, head: a, base: tip, files: ['src/big.js'], level: 'L1' });
+  const pass = (k: number) => {
+    git(r, 'checkout', '-q', '-f', a);
+    put(r, '.gitlab-ci.yml', CI);
+    put(r, 'stamp.txt', `built ${k}\n`);
+    git(r, 'add', '-A');
+    git(r, 'commit', '-q', '-m', `pass ${k}`);
+    return git(r, 'rev-parse', 'HEAD');
+  };
+  const fl1 = landFloor(f, tip, pass(1), [qa]);
+  assert.equal(fl1.ask.length, 1, 'control: asked');
+  approveAtLanding(f, qa, fl1);
+  const q = { ...qa, level: 'L3' } as Queued;
+  f.log.append('land.queued', q, 'coordinator');
+  let questions = 1;
+  for (let k = 2; k <= 4; k++) {
+    const fl = landFloor(f, tip, pass(k), [q]);
+    if (!fl.ask.length) break;
+    questions++;
+    approveAtLanding(f, q, fl);
+  }
+  assert.ok(questions <= 2, `asked ${questions} times for one change with a per-pass stamp`);
+});
+
+// Q3 recorded 3 asks at f1376d2b, where the whole app change bound every judged file. Since R1182r it binds only the app
+// files, so a docs stamp (stamp.txt) is asked about once; a stamp written into app code is part of the large change and
+// is asked about on every pass (fails closed). Both are asserted here.
+test('Q3 (documented): a large output plus a per-pass stamp: a docs stamp is asked once, an app-code stamp every pass', () => {
+  for (const [stamp, want] of [['stamp.txt', 1], ['src/stamp.js', 3]] as const) {
+    const f = fixture(['app-non-money-large'], { max_lines: 50 });
+    const { tip, qa, output } = withApproved(f);
+    let asks = 0;
+    for (let k = 1; k <= 3; k++) {
+      const h = output(() => (put(f.repo, 'src/gen.js', lines(200, 'same')), put(f.repo, stamp, `export const built = ${k};\n`)), `pass ${k}`);
+      const fl = landFloor(f, tip, h, [qa]);
+      if (fl.ask.length) {
+        asks++;
+        approveAtLanding(f, qa, fl);
+      }
+    }
+    assert.equal(asks, want, `${stamp}: recorded behaviour: ${asks}`);
+  }
+});

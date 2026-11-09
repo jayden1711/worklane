@@ -34,8 +34,8 @@ const LANDING_FLOOR = ": held for the owner (direct land's merge-policy floor, c
  * An approval at landing covers output only while this matches; the reasons' text (which names at most a few paths) never decides.
  */
 const LANDING_PRINT = 'landing floor, exactly this batch and these files: sha256 ';
-/** The path review.ts records for `app-non-money-large`: the whole app change, not a file. */
-const WHOLE_APP_CHANGE = '*';
+/** The category whose recorded path (review.ts: `*`) is the whole app change, not a file. */
+const WHOLE_APP_CHANGE = 'app-non-money-large';
 
 /** R1182n D2: what a landing-floor question may name in its comment (GitHub refuses one over 65536 characters). */
 export const QUESTION_LINE_MAX = 600;
@@ -479,9 +479,10 @@ export abstract class Landing extends Decisions {
       const held = riskAndDesignReasons({ level, waitCategories: waitCategoriesOf(review), newTopLevel: [] });
       if (!held.length) return null;
       const categories = riskAndDesignCategories({ level, waitCategories: waitCategoriesOf(review) });
-      // The paths real-path categories record (realPaths first in the question), then `*` read as the app files it counts.
-      const realPaths = new Set(Object.values(categories).flat().filter((p) => p !== WHOLE_APP_CHANGE));
-      const app = Object.values(categories).some((ps) => ps.includes(WHOLE_APP_CHANGE)) ? (level.categories['app-non-money'] ?? []) : [];
+      // The paths every other held category records (named first in the question), then the whole app change read as
+      // the app files it counts. Decided by the category, never by a path's text (R1182q: a file can be named `*`).
+      const realPaths = new Set(Object.entries(categories).flatMap(([c, ps]) => (c === WHOLE_APP_CHANGE ? [] : ps)));
+      const app = WHOLE_APP_CHANGE in categories ? (level.categories['app-non-money'] ?? []) : [];
       const paths = [...realPaths, ...app];
       const whole = paths.length === 0 || paths.some((p) => !judgedNames.has(p));
       const raising = new Set(paths);
