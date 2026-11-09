@@ -24,6 +24,7 @@ import { EventLog } from '../src/events/log.js';
 // Read through the namespace, so a module without one of them fails only the test that uses it.
 import * as weakening from '../src/merge-policy-weakening.js';
 import { parseTables, TABLES_FILE } from '../src/check-tables.js';
+import ts from 'typescript';
 import type { ChangeFile, LockScope } from '../src/review.js';
 import { FakeRunner } from '../src/runner.js';
 import { parse } from 'yaml';
@@ -1106,7 +1107,7 @@ function registryProblems(texts: ReadonlyMap<string, string>): { tables: string[
     // An allowlist's name is never-grow (#869). A rule list's name may carry either mark: its floor holds it on
     // shrinking whatever the mark says, and a never-grow mark adds a growth hold (a mark only adds).
     const allow = weakening.ALLOW_NAMED?.test(t.table);
-    if (allow && t.kind !== 'never-grow') tables.push(`${t.path} ${t.table}: its name says it allows or exempts something, so it is never-grow`);
+    if (allow && t.kind !== 'never-grow') tables.push(`${t.path} ${t.table}: its name says it allows or exempts something, so it is never-grow or exact`);
     let read: string[] | null;
     try {
       read = weakening.tableLines(text, t.table);
@@ -1164,7 +1165,7 @@ test('weakening backstop (#941): src/ and scripts/ register no table by a mark (
   const problems: string[] = [];
   for (const f of files) {
     try {
-      for (const [name, d] of parseTables(readFileSync(join(repoRoot, f), 'utf8'), f)) if (weakening.ALLOW_NAMED.test(name) && d.kind !== 'never-grow') problems.push(`${f} ${name}: its name says it allows or exempts something, so it is never-grow`);
+      for (const [name, d] of parseTables(readFileSync(join(repoRoot, f), 'utf8'), f)) if (weakening.ALLOW_NAMED.test(name) && d.kind === 'never-shrink') problems.push(`${f} ${name}: its name says it allows or exempts something, so it is never-grow or exact`);
     } catch (e) {
       problems.push(String((e as Error).message));
     }
@@ -1182,31 +1183,90 @@ test('weakening backstop (#941): src/ and scripts/ register no table by a mark (
   );
 });
 
+/** The names a load site may import from the loader, each under its own name. */
+const LOADER_NAMES = new Set(['tablesOf', 'frozenSet', 'regExpOf', 'regExpsOf', 'FrozenSet', 'Pattern', 'Tables']);
+
 /**
- * The loader, the parser, the copy generators and the hold's own rule: the only code that may name a tables file or call
- * the loader other than a table's one load site.
+ * Where each module loads tables, read with TypeScript's parser (#941; R1184m 3, R1184n N3: a regex missed `tablesOf (`,
+ * an alias, a namespace or a dynamic import). Outside the loader code (weakening.LOADER_CODE), a module may:
+ *   - import the loader only by a plain named import of LOADER_NAMES, none under another name (no default, namespace,
+ *     `import x = require`, dynamic import or require of it);
+ *   - call `tablesOf` only as `tablesOf(import.meta.url)`, and only right before `.get('<literal>')` or as the value of
+ *     `const TABLES`, which it then reads only as `TABLES.get('<literal>')`;
+ *   - name no `.tables.json` file in a string, and use neither `tablesFrom` nor `parseTables`.
+ * Each tables file then has exactly one load site: its module's `tablesOf(import.meta.url)`, or its script's generated
+ * copy (one BEGIN line). The root updater's redactor copy carries src/events/redact.ts's (its one TABLES_DATA line).
  */
-const TABLE_LOADER_CODE = ['src/check-tables.ts', 'src/merge-policy-weakening.ts', 'scripts/lib/check-tables.mjs', 'scripts/lib/table-copies.mjs', 'scripts/gen-table-copies.mjs', 'scripts/lib/redact-vendor.mjs'];
+function loadSiteProblems(texts: ReadonlyMap<string, string>, tablesFiles: readonly string[]): string[] {
+  const out: string[] = [];
+  const sites = new Map<string, string[]>();
+  for (const [f, text] of texts) {
+    if (weakening.LOADER_CODE.has(f)) continue;
+    const kind = /\.tsx?$/.test(f) ? ts.ScriptKind.TS : ts.ScriptKind.JS;
+    const src = ts.createSourceFile(f, text, ts.ScriptTarget.Latest, true, kind);
+    const own = f.replace(/\.[cm]?[jt]s$/, '') + '.tables.json';
+    let loads = 0;
+    let tablesBound = false;
+    const at = (n: ts.Node) => `${f}:${src.getLineAndCharacterOfPosition(n.getStart(src)).line + 1}`;
+    const isLoader = (spec: ts.Node | undefined) => !!spec && ts.isStringLiteralLike(spec) && /check-tables(?:\.[cm]?js)?$/.test(spec.text);
+    const isGetLiteral = (n: ts.Node) => ts.isPropertyAccessExpression(n.parent) && n.parent.expression === n && n.parent.name.text === 'get' && ts.isCallExpression(n.parent.parent) && n.parent.parent.expression === n.parent && n.parent.parent.arguments.length === 1 && ts.isStringLiteral(n.parent.parent.arguments[0]!);
+    const visit = (n: ts.Node): void => {
+      if (ts.isImportDeclaration(n) && isLoader(n.moduleSpecifier)) {
+        const c = n.importClause;
+        if (!c || c.name || (c.namedBindings && !ts.isNamedImports(c.namedBindings))) out.push(`${at(n)}: the loader imported other than by name`);
+        else if (c.namedBindings) for (const el of c.namedBindings.elements) if (el.propertyName || !LOADER_NAMES.has(el.name.text)) out.push(`${at(el)}: the loader's ${el.propertyName?.text ?? el.name.text} imported${el.propertyName ? ` as ${el.name.text}` : ''}`);
+      } else if (ts.isImportEqualsDeclaration(n) && ts.isExternalModuleReference(n.moduleReference) && isLoader(n.moduleReference.expression)) out.push(`${at(n)}: the loader imported with import = require`);
+      else if (ts.isCallExpression(n) && (n.expression.kind === ts.SyntaxKind.ImportKeyword || (ts.isIdentifier(n.expression) && n.expression.text === 'require')) && n.arguments.some((a) => isLoader(a))) out.push(`${at(n)}: the loader loaded by a dynamic import or require`);
+      else if (ts.isExportDeclaration(n) && isLoader(n.moduleSpecifier)) out.push(`${at(n)}: the loader re-exported`);
+      else if (ts.isIdentifier(n) && (n.text === 'tablesFrom' || n.text === 'parseTables')) out.push(`${at(n)}: ${n.text}`);
+      else if (ts.isStringLiteralLike(n) && /\.tables\.json\b/.test(n.text)) out.push(`${at(n)}: names a tables file`);
+      else if (ts.isIdentifier(n) && n.text === 'tablesOf' && !(ts.isImportSpecifier(n.parent))) {
+        const call = n.parent;
+        const meta = ts.isCallExpression(call) && call.expression === n && call.arguments.length === 1 ? call.arguments[0]! : null;
+        const plain = !!meta && ts.isPropertyAccessExpression(meta) && meta.name.text === 'url' && ts.isMetaProperty(meta.expression) && meta.expression.keywordToken === ts.SyntaxKind.ImportKeyword;
+        const bound = ts.isCallExpression(call) && ts.isVariableDeclaration(call.parent) && ts.isIdentifier(call.parent.name) && call.parent.name.text === 'TABLES' && call.parent.initializer === call;
+        if (!plain || !(bound || isGetLiteral(call))) out.push(`${at(n)}: tablesOf other than tablesOf(import.meta.url).get('<name>') or const TABLES = tablesOf(import.meta.url)`);
+        else loads++;
+        if (bound) tablesBound = true;
+      }
+      ts.forEachChild(n, visit);
+    };
+    visit(src);
+    if (tablesBound) {
+      const uses = (n: ts.Node): void => {
+        if (ts.isIdentifier(n) && n.text === 'TABLES' && !(ts.isVariableDeclaration(n.parent) && n.parent.name === n) && !isGetLiteral(n)) out.push(`${at(n)}: TABLES read other than as TABLES.get('<name>')`);
+        ts.forEachChild(n, uses);
+      };
+      uses(src);
+    }
+    // Comment lines: a generated copy's marker (one copy), and the updater's redactor copy.
+    const begins = text.split('\n').filter((l) => l.startsWith('// BEGIN tables from ')).length;
+    if (loads + begins) sites.set(own, [...(sites.get(own) ?? []), ...Array<string>(loads + begins).fill(f)]);
+    if (text.includes('const TABLES_DATA = ') && !/^scripts\/machine\/[^/]+-update\.cjs$/.test(f)) out.push(`${f}: a TABLES_DATA line outside the updater's redactor copy`);
+  }
+  for (const f of tablesFiles) if (sites.get(f)?.length !== 1) out.push(`${f}: ${sites.get(f)?.length ?? 0} load sites ${JSON.stringify(sites.get(f) ?? [])}`);
+  for (const f of sites.keys()) if (!tablesFiles.includes(f)) out.push(`${f}: a load site with no tables file`);
+  return out;
+}
 
 test("weakening backstop (#941, the owner's rule of 2026-11-08): each tables file has exactly one load site, its module's, and nothing else in src/ or scripts/ loads a table", () => {
-  const code = (text: string) => text.split('\n').filter((l) => !/^\s*(?:\/\/|\/\*|\*)/.test(l) || /\/\/ (?:BEGIN|END) tables from /.test(l));
-  const sites = new Map<string, string[]>();
-  const stray: string[] = [];
-  for (const f of engineFiles.filter((x) => /^(?:src|scripts)\//.test(x) && markable(x) && !TABLE_LOADER_CODE.includes(x))) {
-    const lines = code(readFileSync(join(repoRoot, f), 'utf8'));
-    const own = f.replace(/\.[cm]?[jt]s$/, '') + '.tables.json';
-    const loads = lines.filter((l) => /tablesOf\(\s*import\.meta\.url\s*\)/.test(l)).length;
-    const begins = lines.filter((l) => l.startsWith('// BEGIN tables from ')).length;
-    // The root updater carries src/events/redact.ts's generated copy, whose one line holds its tables' data (held to it by test/redact-vendored.test.ts).
-    const vendored = lines.filter((l) => l.includes('const TABLES_DATA = ')).length;
-    if (loads + begins) sites.set(own, [...(sites.get(own) ?? []), ...Array<string>(loads + begins).fill(f)]);
-    if (vendored && !/^scripts\/machine\/[^/]+-update\.cjs$/.test(f)) stray.push(`${f}: a TABLES_DATA line outside the updater's redactor copy`);
-    for (const l of lines) if (/tablesFrom\(|\btablesOf\(|\.tables\.json\b/.test(l) && !/tablesOf\(\s*import\.meta\.url\s*\)/.test(l) && !l.startsWith('// ')) stray.push(`${f}: ${l.trim().slice(0, 120)}`);
-  }
-  const files = engineFiles.filter((f) => TABLES_FILE.test(f));
-  assert.deepEqual(files.filter((f) => sites.get(f)?.length !== 1).map((f) => `${f}: ${sites.get(f)?.length ?? 0} load sites ${JSON.stringify(sites.get(f) ?? [])}`), [], 'one load site each: its module\'s tablesOf(import.meta.url), or its generated copy');
-  assert.deepEqual([...sites.keys()].filter((f) => !files.includes(f)), [], 'a load site with no tables file');
-  assert.deepEqual(stray, [], 'only the loader, the parser and the copy generators name a tables file or load one some other way');
+  const texts = new Map(engineFiles.filter((x) => /^(?:src|scripts)\//.test(x) && markable(x)).map((f) => [f, readFileSync(join(repoRoot, f), 'utf8')] as const));
+  assert.deepEqual(loadSiteProblems(texts, engineFiles.filter((f) => TABLES_FILE.test(f))), []);
+});
+
+test("the load-site lock reads code, not spelling: an alias, a namespace, a dynamic import, `tablesOf (`, a second call, TABLES read another way are each refused (#941, R1184m 3, R1184n N3)", () => {
+  const ok = "import { tablesOf } from './check-tables.js';\nexport const A = tablesOf(import.meta.url).get('A');\n";
+  const files = ['src/a.tables.json'];
+  assert.deepEqual(loadSiteProblems(new Map([['src/a.ts', ok]]), files), [], 'the control');
+  const refused = (label: string, extra: Record<string, string>) => assert.ok(loadSiteProblems(new Map([['src/a.ts', ok], ...Object.entries(extra)]), files).length > 0, label);
+  refused('an alias', { 'scripts/zz.mjs': "import { tablesOf as load } from './lib/check-tables.mjs';\nconst T = load(new URL('./push-gate.mjs', import.meta.url).href);\n" });
+  refused('a namespace', { 'src/b.ts': "import * as L from './check-tables.js';\nexport const T = L.tablesOf(new URL('./a.ts', import.meta.url).href);\n" });
+  refused('a dynamic import', { 'src/b.ts': "const L = await import('./check-tables.js');\n" });
+  refused('tablesOf spaced, another URL', { 'src/b.ts': "import { tablesOf } from './check-tables.js';\nconst AGAIN = tablesOf (new URL('./a.ts', import.meta.url).href);\n" });
+  refused('a second load on the load line', { 'src/a.ts': ok.replace(".get('A');", ".get('A'); const B = tablesOf(import.meta.url).get('A');") });
+  refused('TABLES read other than by .get(literal)', { 'src/a.ts': "import { tablesOf } from './check-tables.js';\nconst TABLES = tablesOf(import.meta.url);\nconst k = 'A';\nexport const A = TABLES.get(k);\n" });
+  refused('tablesFrom', { 'src/b.ts': "import { tablesFrom } from './check-tables.js';\n" });
+  refused('a tables file named', { 'src/b.ts': "import { readFileSync } from 'node:fs';\nexport const T = readFileSync('src/a.tables.json', 'utf8');\n" });
 });
 
 test('weakening backstop: every test that lists src/ or scripts/ files is a registered lint test or says why it is not', () => {
