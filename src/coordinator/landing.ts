@@ -8,7 +8,7 @@ import type { EventLog } from '../events/log.js';
 import type { EventPayload } from '../events/types.js';
 import { computeLevel } from '../review.js';
 import type { ReviewConfig } from '../config/schema.js';
-import { riskAndDesignPaths, riskAndDesignReasons, waitCategoriesOf } from '../merge-policy.js';
+import { riskAndDesignCategories, riskAndDesignReasons, waitCategoriesOf } from '../merge-policy.js';
 import { effectiveClass, prBodyHead, prBodyProblems, riskClassOf } from '../pr-rules.js';
 import { claimLines } from '../claim-labels.js';
 import { checkedPush } from '../push-check.js';
@@ -30,7 +30,7 @@ import { optimizePrLines } from '../optimize.js';
 const LANDING_FLOOR = ": held for the owner (direct land's merge-policy floor, checked again at landing)";
 /**
  * R1182i/j: the line on a landing-floor level that names exactly what the owner was asked about: a hash of the batch
- * (each entry's issue and head) and of every judged file a held reason is about (R1182n D1), with its `git ls-tree` entry.
+ * (each entry's issue and head), the held categories (R1182p) and every judged file a held reason is about (R1182n D1), with its `git ls-tree` entry.
  * An approval at landing covers output only while this matches; the reasons' text (which names at most a few paths) never decides.
  */
 const LANDING_PRINT = 'landing floor, exactly this batch and these files: sha256 ';
@@ -445,40 +445,65 @@ export abstract class Landing extends Decisions {
       const q = text(hex) === null ? undefined : ownerOfPath.get(hex);
       return q && entryAt(head, hex) === entryAt(q.head, hex) ? q : undefined;
     };
-    const judgedHex = changed.filter((h) => {
-      const q = own(h);
-      return q === undefined || !approved.includes(q);
-    });
     const outputHex = changed.filter((h) => own(h) === undefined);
     // The level reads changeFiles' (lossily decoded) names: a non-UTF-8 name's reasons are judged as git decodes it.
     const files = this.changeFiles(path, tip, head);
-    const decoded = (hs: string[]) => new Set(hs.map((h) => Buffer.from(h, 'hex').toString('utf8')));
-    const judgedNames = decoded(judgedHex);
-    const judged = files.filter((f) => judgedNames.has(f.path));
+    const decode = (h: string) => Buffer.from(h, 'hex').toString('utf8');
     const review: ReviewConfig = this.d.cfg.review ?? DEFAULT_REVIEW;
     const labels = [...new Set(applied.flatMap((q) => this.events(q.issue).filter((e) => e.type === 'issue.seen').flatMap((e) => (e.payload as { labels: string[] }).labels)))];
+    const moneyPaths = this.moneyPaths(review.money_path_source);
+    const batch = applied.map((q) => `${q.issue}@${q.head}`).sort();
+    /**
+     * The floor with `ok` taken as approved: the judged files (every changed file but those an entry in `ok` owns),
+     * the held reasons, and the print. R1182n D1: the print binds the files the held reasons are about (their
+     * categories' paths; a decoded name two paths share takes both). A judged file that raises nothing lands unasked on
+     * its own, so binding the approval to it protects nothing, and one that changes every pass (a build stamp) would
+     * make every approval stale. R1182p: the held categories are in the print too, so a reason the owner wasn't shown
+     * never rides on an older approval; and a category whose recorded paths aren't all judged files (`app-non-money-large`
+     * records `*`, the whole app change) or a reason naming no file binds every judged file, which fails closed.
+     */
+    const judge = (ok: EventPayload<'land.queued'>[]) => {
+      const judgedHex = changed.filter((h) => {
+        const q = own(h);
+        return q === undefined || !ok.includes(q);
+      });
+      const judgedNames = new Set(judgedHex.map(decode));
+      const judged = files.filter((f) => judgedNames.has(f.path));
+      if (!judged.length) return null;
+      const level = computeLevel({ files: judged, labels, moneyPaths, scope: lockScopeOf(this.d) }, review);
+      const held = riskAndDesignReasons({ level, waitCategories: waitCategoriesOf(review), newTopLevel: [] });
+      if (!held.length) return null;
+      const categories = riskAndDesignCategories({ level, waitCategories: waitCategoriesOf(review) });
+      const paths = Object.values(categories).flat();
+      const whole = paths.length === 0 || paths.some((p) => !judgedNames.has(p));
+      const raising = new Set(paths);
+      const bound = whole ? judgedHex : judgedHex.filter((h) => raising.has(decode(h)));
+      const print = createHash('sha256')
+        .update(JSON.stringify({ batch, categories: Object.keys(categories).sort(), files: bound.map((h) => [h, entryAt(head, h)]).sort((a, b) => (a[0]! < b[0]! ? -1 : a[0]! > b[0]! ? 1 : 0)) }))
+        .digest('hex');
+      return { judgedHex, bound, held, print };
+    };
     const none = { held: [], ask: [], seen: true, listed: [], print: '' };
-    if (!judged.length) return none;
-    const level = computeLevel({ files: judged, labels, moneyPaths: this.moneyPaths(review.money_path_source), scope: lockScopeOf(this.d) }, review);
-    const held = riskAndDesignReasons({ level, waitCategories: waitCategoriesOf(review), newTopLevel: [] });
-    if (!held.length) return none;
-    // R1182n D1: the print binds the files the held reasons are about (their categories' paths; a decoded name two
-    // paths share takes both). A judged file that raises nothing lands unasked on its own, so binding the approval to
-    // it protects nothing, and one that changes every pass (a build stamp) would make every approval stale. No file
-    // named (a reason that names none): every judged file is bound, which fails closed.
-    const raising = new Set(riskAndDesignPaths({ level, waitCategories: waitCategoriesOf(review) }));
-    const raisingHex = judgedHex.filter((h) => raising.has(Buffer.from(h, 'hex').toString('utf8')));
-    const bound = raisingHex.length ? raisingHex : judgedHex;
+    const floor = judge(approved);
+    if (!floor) return none;
+    const { judgedHex, bound, held, print } = floor;
     const shown = (e: string) => {
       const m = /^(\d+) (\w+) ([0-9a-f]+)$/.exec(e);
       return m ? `${m[1]} ${m[2]} ${m[3]!.slice(0, 12)}` : 'deleted';
     };
     const named = (hex: string) => text(hex) ?? `${Buffer.from(hex, 'hex').toString('utf8')} (not UTF-8; bytes ${hex})`;
-    const listed = judgedHex.map((h) => `judged at landing: ${named(h)} (${shown(entryAt(head, h))})`);
-    const print = createHash('sha256')
-      .update(JSON.stringify({ batch: applied.map((q) => `${q.issue}@${q.head}`).sort(), files: bound.map((h) => [h, entryAt(head, h)]).sort((a, b) => (a[0]! < b[0]! ? -1 : a[0]! > b[0]! ? 1 : 0)) }))
-      .digest('hex');
-    const covered = approved.some((q) => this.landingPrint(q) === print);
+    // The files the print binds first (R1182p): a capped question still shows them before the rest.
+    const listed = [...bound, ...judgedHex.filter((h) => !bound.includes(h))].map((h) => `judged at landing: ${named(h)} (${shown(entryAt(head, h))})`);
+    const prints = approved.map((q) => this.landingPrint(q));
+    let covered = prints.includes(print);
+    // R1182p finding 2: entries approved at landing were unapproved when that question was asked, so their own files
+    // were judged then. The print as it was asked (those entries' own files judged again) is exactly what the owner
+    // approved: the same batch, categories and bound files, so the identical land commit isn't asked about twice.
+    const atLanding = approved.filter((_, i) => prints[i] !== null);
+    if (!covered && !unapproved.length && atLanding.length) {
+      const asked = judge(approved.filter((q) => !atLanding.includes(q)));
+      covered = asked !== null && prints.includes(asked.print);
+    }
     const ask = unapproved.length ? unapproved : covered ? [] : approved;
     return ask.length ? { held, ask, seen: outputHex.length === 0, listed, print } : none;
   }

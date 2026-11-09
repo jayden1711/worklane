@@ -232,11 +232,18 @@ export function riskAndDesignReasons(o: { level: LevelResult; waitCategories: st
 }
 
 /**
- * The paths riskAndDesignReasons' path reasons name: each file in a category it waits on, and each dependency manifest
- * (the same categories, read the same way). Its other reasons (a design flag, a new top-level module) name no file.
+ * The categories riskAndDesignReasons' path reasons come from, each with the paths the level recorded for it: every
+ * category it waits on that the change touches, and `dependency` (the same categories, read the same way). A recorded
+ * path isn't always a file: `app-non-money-large` records `*` (the whole app change). Its other reasons (a design
+ * flag, a new top-level module) have no category here.
  */
-export function riskAndDesignPaths(o: { level: LevelResult; waitCategories: string[] }): string[] {
-  return [...new Set([...[...waitingOn(o.waitCategories)].flatMap((c) => o.level.categories[c] ?? []), ...(o.level.categories.dependency ?? [])])];
+export function riskAndDesignCategories(o: { level: LevelResult; waitCategories: string[] }): Record<string, string[]> {
+  const out: Record<string, string[]> = {};
+  for (const c of [...waitingOn(o.waitCategories), 'dependency']) {
+    const hit = o.level.categories[c];
+    if (hit?.length) out[c] = hit;
+  }
+  return out;
 }
 
 /**
