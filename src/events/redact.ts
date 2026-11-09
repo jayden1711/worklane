@@ -132,9 +132,7 @@ type RuleData = { re: Pattern; rep: string | { replacer: string } };
  * Each pattern with what kind of secret it finds (secretKinds names the kind, never the value), in the data's order:
  * the comments on each are in src/events/redact.tables.json.
  */
-const PATTERNS: readonly (readonly [RegExp, Replacement, string])[] = Object.freeze(
-  TABLES.get<readonly (RuleData & { kind: string })[]>('PATTERNS').map((e) => Object.freeze([regExpOf(e.re), replacementOf(e.rep), e.kind] as const)),
-);
+const PATTERNS: readonly (readonly [RegExp, Replacement, string])[] = Object.freeze(TABLES.get<readonly (RuleData & { kind: string })[]>('PATTERNS').map((e) => Object.freeze([regExpOf(e.re), replacementOf(e.rep), e.kind] as const)));
 // Not covered: a bare 32-character string with no prefix (a dashboard key from before #889 among them): a commit
 // hash, a digest and the engine's own ids have the same shape. New dashboard keys carry DASHBOARD_KEY_PREFIX.
 
@@ -147,9 +145,7 @@ const PATTERNS: readonly (readonly [RegExp, Replacement, string])[] = Object.fre
  * after a hyphen. Each starts only where a run starts, or reads a bounded stretch from each start: linear.
  */
 /** Each broad rule: its RegExp, its replacement with `{mask}` where the mask goes, and its kind. */
-const BROAD: readonly (readonly [RegExp, string, string])[] = Object.freeze(
-  TABLES.get<readonly { re: Pattern; mask: string; kind: string }[]>('BROAD').map((e) => Object.freeze([regExpOf(e.re), e.mask, e.kind] as const)),
-);
+const BROAD: readonly (readonly [RegExp, string, string])[] = Object.freeze(TABLES.get<readonly { re: Pattern; mask: string; kind: string }[]>('BROAD').map((e) => Object.freeze([regExpOf(e.re), e.mask, e.kind] as const)));
 /** A broad rule's replacement with `mask` in it (taken literally). */
 const masked = (template: string, mask: string) => template.split('{mask}').join(mask);
 
@@ -404,9 +400,7 @@ const SHAPE_RULES: readonly (readonly [RegExp, Replacement])[] = PATTERNS.map(([
  * Every rule of the broad mode: the shapes and the broad rules, each shown with the default mask. Its own list in the
  * data (#941), written out: test/check-tables-sync.test.ts holds it equal to PATTERNS' rules then BROAD's.
  */
-const BROAD_RULES: readonly (readonly [RegExp, Replacement])[] = Object.freeze(
-  TABLES.get<readonly RuleData[]>('BROAD_RULES').map((e) => Object.freeze([regExpOf(e.re), replacementOf(e.rep)] as const)),
-);
+const BROAD_RULES: readonly (readonly [RegExp, Replacement])[] = Object.freeze(TABLES.get<readonly RuleData[]>('BROAD_RULES').map((e) => Object.freeze([regExpOf(e.re), replacementOf(e.rep)] as const)));
 
 /**
  * What is wrong with the written-out tables against what this module built them from (#941), each in words; none when

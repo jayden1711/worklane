@@ -419,19 +419,27 @@ export const isTipConflict = (reason: string): boolean => reason.startsWith(`${W
  * A line that loads a table (#941): a module's own load, any `.tables.json` name, or a generated copy's marker line
  * (scripts/lib/table-copies.mjs, scripts/lib/redact-vendor.mjs). A removed or changed one waits.
  */
-export const TABLE_LOAD = /tablesOf\(\s*import\.meta\.url\s*\)|\bTABLES\.get\s*\(|\.tables\.json\b|\/\/ (?:BEGIN|END) tables from |TABLES_DATA = /;
+export const TABLE_LOAD = /tablesOf\(\s*import\.meta\.url\s*\)|\bTABLES\s*\.\s*get\b|\.tables\.json\b|\/\/ (?:BEGIN|END) tables from |TABLES_DATA = /;
 
 /**
- * The one way a module may import the loader (#941, R1184n N3): a plain named import of the names a load site uses,
- * none of them under another name, on one line. Any other added line naming the loader's module (an alias, a namespace,
- * a dynamic import, `tablesFrom` or `parseTables`, an import split over lines) waits; so does a line that assigns
- * `import.meta.url` (the URL a module's load reads its own tables file by).
+ * The one way a module may import the loader (#941, R1184n N3): a plain named import of the names a load site uses
+ * (`import type` too), none of them under another name, on one line. Any other added line naming the loader's module
+ * (an alias, a namespace, a dynamic import, `tablesFrom` or `parseTables`, an import split over lines) waits; so does a
+ * line that uses `import.meta` other than to read it (META_URL_SET). Lines are read as text, and the backstop
+ * (test/merge-policy.test.ts loadSiteProblems) reads them parsed: a specifier written with escapes is caught there.
+ * Neither follows a specifier computed at run time (`import('./check' + '-tables.js')`): a named limit (R1184o 3), since
+ * scripts/ci imports by computed URLs by design; a second load of a real tables file gets the same frozen data, and a
+ * decoy loaded that way is the open class.
  */
-export const LOADER_IMPORT = /^\s*import\s*\{\s*(?:(?:type\s+)?(?:tablesOf|frozenSet|regExpOf|regExpsOf|FrozenSet|Pattern|Tables)\s*,?\s*)+\}\s*from\s*['"](?:\.\.?\/)+(?:[\w-]+\/)*check-tables\.(?:js|mjs)['"];?\s*$/;
+export const LOADER_IMPORT = /^\s*import\s+(?:type\s+)?\{\s*(?:(?:type\s+)?(?:tablesOf|frozenSet|regExpOf|regExpsOf|FrozenSet|Pattern|Tables|TableKind)\s*,?\s*)+\}\s*from\s*['"](?:\.\.?\/)+(?:[\w-]+\/)*check-tables\.(?:js|mjs)['"];?\s*$/;
 const LOADER_NAMED = /check-tables/;
 /** The loader, the parser, the copy generators and this hold: the only code that loads tables some other way. */
 export const LOADER_CODE: ReadonlySet<string> = new Set(['src/check-tables.ts', 'src/merge-policy-weakening.ts', 'scripts/lib/check-tables.mjs', 'scripts/lib/table-copies.mjs', 'scripts/gen-table-copies.mjs', 'scripts/lib/redact-vendor.mjs']);
-const META_URL_SET = /\bimport\.meta\.url\s*(?:[-+*/%&|^]|\*\*|<<|>>>?|&&|\|\||\?\?)?=(?!=)/;
+/**
+ * `import.meta` other than a plain read of `.url`, `.dirname` or `.filename` (R1184o 2: `Object.assign(import.meta, …)`,
+ * `Reflect.set(import.meta, 'url', …)`), or one of those written or deleted: a module's load reads its path from it.
+ */
+const META_URL_SET = /\bimport\s*\.\s*meta\b(?!\s*\.\s*(?:url|dirname|filename)\b)|\bimport\s*\.\s*meta\s*\.\s*\w+\s*(?:[-+*/%&|^]|\*\*|<<|>>>?|&&|\|\||\?\?)?=(?!=)|\bdelete\s+import\s*\.\s*meta\b/;
 
 /** A JSON value as text, its keys sorted at every depth: the same data gives the same text. */
 const canonical = (v: unknown): string => {
@@ -1120,7 +1128,9 @@ function findings(i: WeakeningInput): Found {
     if (LOADER_CODE.has(f.path)) continue;
     for (const l of f.addedLines ?? []) {
       if (commentOnly(l)) continue;
-      if ((LOADER_NAMED.test(l) && !LOADER_IMPORT.test(l)) || META_URL_SET.test(l)) hit('table-load-added', f.path, l.trim());
+      // A trailing comment is no part of the import (R1184o: it would make a plain one wait).
+      const code = l.replace(/\s*\/\/[^'"]*$/, '');
+      if ((LOADER_NAMED.test(code) && !LOADER_IMPORT.test(code)) || META_URL_SET.test(code)) hit('table-load-added', f.path, l.trim());
     }
   }
 

@@ -1,5 +1,5 @@
-// #941: the tables of src/ and scripts/ are data (src/check-tables.ts): loaded deep-frozen, so no code can change one
-// after load. The write shapes R1184g-j found against the line reader (a member write, a callback's array, a replacer, an
+// #941: the tables of src/ and scripts/ are data (src/check-tables.ts): loaded deep-frozen, so no write to one succeeds
+// after load (code that runs before the load and replaces a built-in the loader calls is open: R1184p P1). The write shapes R1184g-j found against the line reader (a member write, a callback's array, a replacer, an
 // entry changed through an index or a for...of, delete, a shadowed built-in, a template's ${}, a namespace member, a
 // RegExp's compile) each throw here against a real loaded table, or have nothing to write to. The two loaders (src/ and
 // scripts/lib/) give the same answers on every tables file in the repo, and refuse the same bad files.

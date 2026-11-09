@@ -128,9 +128,7 @@ const TABLES = tablesOf(import.meta.url);
  * set over here. credential.helper's empty value clears every helper a file named (URL-scoped ones too, measured), so
  * only one the caller adds after it is used. `{noProgram}` in the data is NO_PROGRAM (it is the OS's null device's).
  */
-export const GIT_GUARD_PAIRS: readonly (readonly [string, string])[] = Object.freeze(
-  TABLES.get<readonly (readonly [string, string])[]>('GIT_GUARD_PAIRS').map(([k, v]) => Object.freeze([k, v === '{noProgram}' ? NO_PROGRAM : v] as const)),
-);
+export const GIT_GUARD_PAIRS: readonly (readonly [string, string])[] = Object.freeze(TABLES.get<readonly (readonly [string, string])[]>('GIT_GUARD_PAIRS').map(([k, v]) => Object.freeze([k, v === '{noProgram}' ? NO_PROGRAM : v] as const)));
 
 /**
  * Keys a config file may not set at all for a guarded git, with why: no command-scope value takes them back (an
@@ -138,9 +136,7 @@ export const GIT_GUARD_PAIRS: readonly (readonly [string, string])[] = Object.fr
  * the plain one). Matched on git's own spelling of the key, folded to lower case. The RegExps are this module's own,
  * made from the data, never exported (a RegExp can be rewritten in place).
  */
-const REFUSED_KEYS: readonly (readonly [RegExp, string])[] = Object.freeze(
-  TABLES.get<readonly (readonly [Pattern, string])[]>('REFUSED_KEYS').map(([p, why]) => Object.freeze([regExpOf(p), why] as const)),
-);
+const REFUSED_KEYS: readonly (readonly [RegExp, string])[] = Object.freeze(TABLES.get<readonly (readonly [Pattern, string])[]>('REFUSED_KEYS').map(([p, why]) => Object.freeze([regExpOf(p), why] as const)));
 
 /**
  * What is wrong with the git guard's tables (#941, R1184l): a key GIT_GUARD_PAIRS sets twice (git takes a key's last

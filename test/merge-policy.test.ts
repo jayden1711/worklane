@@ -1184,7 +1184,7 @@ test('weakening backstop (#941): src/ and scripts/ register no table by a mark (
 });
 
 /** The names a load site may import from the loader, each under its own name. */
-const LOADER_NAMES = new Set(['tablesOf', 'frozenSet', 'regExpOf', 'regExpsOf', 'FrozenSet', 'Pattern', 'Tables']);
+const LOADER_NAMES = new Set(['tablesOf', 'frozenSet', 'regExpOf', 'regExpsOf', 'FrozenSet', 'Pattern', 'Tables', 'TableKind']);
 
 /**
  * Where each module loads tables, read with TypeScript's parser (#941; R1184m 3, R1184n N3: a regex missed `tablesOf (`,
@@ -1210,7 +1210,25 @@ function loadSiteProblems(texts: ReadonlyMap<string, string>, tablesFiles: reado
     const at = (n: ts.Node) => `${f}:${src.getLineAndCharacterOfPosition(n.getStart(src)).line + 1}`;
     const isLoader = (spec: ts.Node | undefined) => !!spec && ts.isStringLiteralLike(spec) && /check-tables(?:\.[cm]?js)?$/.test(spec.text);
     const isGetLiteral = (n: ts.Node) => ts.isPropertyAccessExpression(n.parent) && n.parent.expression === n && n.parent.name.text === 'get' && ts.isCallExpression(n.parent.parent) && n.parent.parent.expression === n.parent && n.parent.parent.arguments.length === 1 && ts.isStringLiteral(n.parent.parent.arguments[0]!);
+    // A load's statement (or parameter) on one line, so a removed line always carries the load (R1184o 1).
+    const oneLine = (n: ts.Node) => {
+      let s: ts.Node = n;
+      while (s.parent && !(ts.isVariableStatement(s) || ts.isParameter(s) || ts.isExpressionStatement(s) || ts.isReturnStatement(s) || ts.isPropertyDeclaration(s) || ts.isExportAssignment(s))) s = s.parent;
+      const [a, b] = [src.getLineAndCharacterOfPosition(s.getStart(src)).line, src.getLineAndCharacterOfPosition(s.getEnd()).line];
+      if (a !== b) out.push(`${at(n)}: a load's statement over ${b - a + 1} lines (put it on one)`);
+    };
     const visit = (n: ts.Node): void => {
+      // import.meta only read, as .url, .dirname or .filename, and never written or deleted (R1184o 2).
+      if (ts.isMetaProperty(n) && n.keywordToken === ts.SyntaxKind.ImportKeyword) {
+        const pa = n.parent;
+        const read = ts.isPropertyAccessExpression(pa) && pa.expression === n && ['url', 'dirname', 'filename'].includes(pa.name.text);
+        const written = read && ((ts.isBinaryExpression(pa.parent) && pa.parent.left === pa && pa.parent.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && pa.parent.operatorToken.kind <= ts.SyntaxKind.LastAssignment) || ts.isDeleteExpression(pa.parent) || ts.isPrefixUnaryExpression(pa.parent) || ts.isPostfixUnaryExpression(pa.parent));
+        if (!read || written) out.push(`${at(n)}: import.meta used other than to read its url, dirname or filename`);
+      }
+      // A loader name read by element access (R1184o 3). A specifier computed at run time is not followed: a named limit
+      // (scripts/ci imports by computed URLs by design).
+      if (ts.isElementAccessExpression(n) && ts.isStringLiteralLike(n.argumentExpression) && ['tablesOf', 'tablesFrom', 'parseTables'].includes(n.argumentExpression.text)) out.push(`${at(n)}: ${n.argumentExpression.text} read by element access`);
+      if (ts.isIdentifier(n) && n.text === 'TABLES' && isGetLiteral(n)) oneLine(n);
       if (ts.isImportDeclaration(n) && isLoader(n.moduleSpecifier)) {
         const c = n.importClause;
         if (!c || c.name || (c.namedBindings && !ts.isNamedImports(c.namedBindings))) out.push(`${at(n)}: the loader imported other than by name`);
@@ -1226,7 +1244,10 @@ function loadSiteProblems(texts: ReadonlyMap<string, string>, tablesFiles: reado
         const plain = !!meta && ts.isPropertyAccessExpression(meta) && meta.name.text === 'url' && ts.isMetaProperty(meta.expression) && meta.expression.keywordToken === ts.SyntaxKind.ImportKeyword;
         const bound = ts.isCallExpression(call) && ts.isVariableDeclaration(call.parent) && ts.isIdentifier(call.parent.name) && call.parent.name.text === 'TABLES' && call.parent.initializer === call;
         if (!plain || !(bound || isGetLiteral(call))) out.push(`${at(n)}: tablesOf other than tablesOf(import.meta.url).get('<name>') or const TABLES = tablesOf(import.meta.url)`);
-        else loads++;
+        else {
+          loads++;
+          oneLine(call);
+        }
         if (bound) tablesBound = true;
       }
       ts.forEachChild(n, visit);
@@ -1266,6 +1287,15 @@ test("the load-site lock reads code, not spelling: an alias, a namespace, a dyna
   refused('a second load on the load line', { 'src/a.ts': ok.replace(".get('A');", ".get('A'); const B = tablesOf(import.meta.url).get('A');") });
   refused('TABLES read other than by .get(literal)', { 'src/a.ts': "import { tablesOf } from './check-tables.js';\nconst TABLES = tablesOf(import.meta.url);\nconst k = 'A';\nexport const A = TABLES.get(k);\n" });
   refused('tablesFrom', { 'src/b.ts': "import { tablesFrom } from './check-tables.js';\n" });
+  // R1184o: a load statement over lines; import.meta redefined without `=`; a computed specifier; a name by element access.
+  refused('a load over three lines', { 'src/a.ts': "import { tablesOf } from './check-tables.js';\nconst TABLES = tablesOf(import.meta.url);\nexport const A = Object.freeze(\n  TABLES.get<readonly string[]>('A').map((x) => x),\n);\n" });
+  refused('Object.assign(import.meta, ...)', { 'src/a.ts': `Object.assign(import.meta, { url: new URL('./b.ts', import.meta.url).href });\n${ok}` });
+  refused('Reflect.set(import.meta, ...)', { 'src/a.ts': `Reflect.set(import.meta, 'url', 'file:///x');\n${ok}` });
+  refused('import.meta.url assigned', { 'src/a.ts': `import.meta.url = 'file:///x';\n${ok}` });
+  refused('a loader name by element access', { 'src/b.ts': "const L = await import('./check' + '-tables.js');\nexport const T = L['tablesOf'](new URL('./a.ts', import.meta.url).href);\n" });
+  // The named limit: a specifier computed at run time, read by a computed name, isn't followed (`L.tablesOf` is).
+  assert.deepEqual(loadSiteProblems(new Map([['src/a.ts', ok], ['src/b.ts', "const L = await import('./check' + '-tables.js');\nconst k = 'tables' + 'Of';\nexport const T = L[k];\n"]]), files), [], 'a computed specifier and name: a named limit (R1184o 3)');
+  assert.deepEqual(loadSiteProblems(new Map([['src/a.ts', ok], ['src/c.ts', 'export const here = import.meta.dirname;\nexport const me = import.meta.filename;\n']]), files), [], 'import.meta read is fine');
   refused('a tables file named', { 'src/b.ts': "import { readFileSync } from 'node:fs';\nexport const T = readFileSync('src/a.tables.json', 'utf8');\n" });
 });
 

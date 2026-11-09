@@ -1,11 +1,15 @@
 // The registered check tables of the engine's own code (#941): a module's tables live in a data-only file beside it,
 // `<module>.tables.json` (`src/review.ts` reads `src/review.tables.json`). The weakening hold reads that file as
 // parsed data, before and after a change, and never runs code (src/merge-policy-weakening.ts, jsonTableFindings). A
-// module loads its own file here, by its own URL, and gets each table deep-frozen: nothing can change a table after
-// load. No path is written at the load site. The load line and each `TABLES.get('NAME')` line can't be removed or
-// changed without the owner (the hold's TABLE_LOAD), and an added line that imports the loader any other way, or
-// reassigns `import.meta.url` (which this reads the path from), waits too (LOADER_IMPORT). A use moved off a table
-// while its load stays is the open class the owner named (#941).
+// module loads its own file here, by its own URL, and gets each table deep-frozen: no write to a table succeeds after
+// load. What the load returns can still be changed by code that runs before it and replaces a built-in it calls
+// (JSON.parse, Array.prototype.map, Object.freeze, readFileSync): open (R1184p P1, the owner's call). No path is
+// written at the load site. The load line and each `TABLES.get('NAME')` line can't be removed or
+// changed without the owner (the hold's TABLE_LOAD; each load statement is on one line), and an added line that
+// imports the loader any other way, or uses `import.meta` other than to read it (this reads the path from its `.url`),
+// waits too (LOADER_IMPORT); a specifier computed at run time is a named limit (R1184o 3). The hold reads lines as text; test/merge-policy.test.ts's
+// backstop reads every module parsed. A use moved off a table while its load stays is the open class the owner named
+// (#941).
 //
 // A tables file is one JSON object: each key a table's name (A-Z, 0-9, `_`), each value
 // `{ "kind": "never-shrink" | "never-grow" | "exact", "value": <data> }` (exact: an entry added, lost or changed

@@ -117,6 +117,18 @@ test("R1184m P1d/P1e: a module's TABLES.get('NAME') line changed waits, as its l
   assert.ok(has(reasons({ 'scripts/zz.mjs': "import { tablesOf as load } from './lib/check-tables.mjs';\nconst T = load(new URL('../src/x-rules.ts', import.meta.url).href);\n" }), ADDED), 'an alias');
   assert.ok(has(reasons({ 'src/zz.ts': "import * as L from './check-tables.js';\nvoid L;\n" }), ADDED), 'a namespace');
   assert.ok(has(reasons({ 'src/x-rules.ts': split.replace('const TABLES', "import.meta.url = new URL('./x-decoy.ts', import.meta.url).href;\nconst TABLES") }, base), ADDED), 'import.meta.url reassigned');
+  // R1184o 1: the shape redact.ts has: the removed line carries `TABLES.get<T>(` (a type argument), sliced (P1e) or
+  // filtered (R1184o's PATTERNS case), on the one line its statement now takes.
+  const typed = "import { tablesOf } from './check-tables.js';\nconst TABLES = tablesOf(import.meta.url);\nexport const CHECKS: readonly string[] = Object.freeze(TABLES.get<readonly string[]>('CHECKS').map((c) => c));\n";
+  assert.ok(has(reasons({ 'src/x-rules.ts': typed.replace(".map((c) => c));", ".slice(0, -1).map((c) => c));") }, { 'src/x-rules.ts': typed }), LOAD), 'P1e: TABLES.get<T> sliced');
+  assert.ok(has(reasons({ 'src/x-rules.ts': typed.replace(".map((c) => c));", ".filter((c) => c !== 'a').map((c) => c));") }, { 'src/x-rules.ts': typed }), LOAD), 'PATTERNS: TABLES.get<T> filtered');
+  // R1184o 2: import.meta redefined without an assignment operator; R1184o 3: a computed specifier.
+  assert.ok(has(reasons({ 'src/x-rules.ts': split.replace('const TABLES', "Object.assign(import.meta, { url: new URL('./x-decoy.ts', import.meta.url).href });\nconst TABLES") }, base), ADDED), 'Object.assign(import.meta, …)');
+  assert.ok(has(reasons({ 'src/x-rules.ts': split.replace('const TABLES', "Reflect.set(import.meta, 'url', 'file:///x');\nconst TABLES") }, base), ADDED), 'Reflect.set(import.meta, …)');
+  // A computed specifier is a named limit (R1184o 3): not followed by the hold or the backstop.
+  assert.ok(!has(reasons({ 'src/zz.ts': "const L = await import('./check' + '-tables.js');\nvoid L;\n" }), ADDED), 'a computed dynamic import: a named limit');
+  // Controls (R1184o's smaller notes): a type-only import of the loader and a trailing comment pass; so does reading import.meta.
+  assert.deepEqual(reasons({ 'src/zz.ts': "import type { TableKind } from './check-tables.js'; // the kinds\nexport type K = TableKind;\nexport const here = import.meta.dirname;\n" }), []);
   // Control: a new module's own load, imported the plain way, adds nothing to hold.
   assert.deepEqual(reasons({ 'src/x-new.ts': "import { tablesOf } from './check-tables.js';\nexport const NEW_RULES: readonly string[] = tablesOf(import.meta.url).get('NEW_RULES');\n", 'src/x-new.tables.json': '{ "NEW_RULES": { "kind": "never-shrink", "value": ["a"] } }\n' }), []);
 });
