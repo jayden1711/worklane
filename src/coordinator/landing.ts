@@ -25,6 +25,15 @@ import { redactString } from '../events/redact.js';
 import { slotDeferringSince } from './wait-caps.js';
 import { optimizePrLines } from '../optimize.js';
 
+/** Why an automatic land (below L3) waits queued while the instance policy's auto-merge is off (#808). */
+export const AUTO_OFF_WAIT = "waiting: the instance policy's auto-merge is off, so only what the owner approved (L3) lands; this lands once auto_merge is on";
+
+/**
+ * Whether a queued land is one the owner approved: an L3 is queued only by the owner's approve answer (decisions.ts),
+ * every other level straight from the review (coordinator.ts), so the level says it.
+ */
+const ownerApproved = (q: { level: string }) => q.level === 'L3';
+
 export abstract class Landing extends Decisions {
   // ---------------------------------------------------------------- landing
 
@@ -64,11 +73,30 @@ export abstract class Landing extends Decisions {
   private remoteIsLocal: boolean | undefined;
 
   /**
-   * Why a direct land may not push the default branch now, or null: GitHub must enforce its protection, asked now
-   * (src/direct-land.ts). A refusal is recorded once until the answer changes (coordinator.error: health and the
-   * dashboard show it); the queue waits, and lands once protection is back.
+   * The instance policy's auto-merge switch for direct landing (#808, the owner's (c), 2026-11-07): `auto_merge: off`
+   * stops automatic landing (L0 to L2), never what the owner approved (L3). Read at each use. A policy that can't be
+   * read (the switch throws) is off, fail closed. No instance policy at all (a local site, which passes no switch) has
+   * no `auto_merge` to turn off, so direct landing there is as before.
+   */
+  private directAutoOn(): boolean {
+    if (!this.d.autoMerge) return true;
+    try {
+      return this.d.autoMerge();
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Why a direct land may not push the default branch now, or null. The auto-merge stop first (#808): the same check
+   * PR mode makes, so a stop, whichever mode set it (one left from PR mode across a land_mode switch included), holds
+   * every direct land, approved or not, until the operator clears it. Then GitHub must enforce its protection, asked
+   * now (src/direct-land.ts). A protection refusal is recorded once until the answer changes (coordinator.error: health
+   * and the dashboard show it). Either way the queue waits, and lands once it is lifted.
    */
   private async directLandBlocked(): Promise<string | null> {
+    const stopped = this.autoMergeStopped();
+    if (stopped) return `auto-merge is stopped: ${stopped}`;
     this.remoteIsLocal ??= localRemote(this.d.repo, this.remote);
     const why = await directLandRefusal(this.d.protection, { repo: this.d.cfg.project.project.repo, branch: this.branch, local: this.remoteIsLocal });
     if (why && why !== this.directRefused) this.emit('coordinator.error', { instance: this.d.instance, where: 'direct land', kind: DIRECT_LAND_REFUSED, message: `nothing pushed: ${why}`.slice(0, 1000) });
@@ -84,11 +112,47 @@ export abstract class Landing extends Decisions {
     this.landing = true;
     try {
       if (this.d.cfg.project.land_mode === 'pr') for (const q of queue) await this.proposePr(q);
-      // Direct: not even the gates run while the branch is unprotected (asked again just before the push, too).
-      else if (!(await this.directLandBlocked())) await this.landBatch(this.buildBatch(queue));
+      // Direct: not even the gates run while the branch is unprotected (asked again just before the push, too). With
+      // the policy's auto-merge off, only what the owner approved (L3) lands; the rest waits queued (#808).
+      else if (!(await this.directLandBlocked())) {
+        const auto = this.directAutoOn();
+        const landing = auto ? queue : queue.filter(ownerApproved);
+        // What the switch leaves queued says why it waits (the dashboard's queue shows it), once until that changes.
+        if (!auto) for (const q of queue) if (!ownerApproved(q)) this.waitingOnce(q.issue, AUTO_OFF_WAIT);
+        if (landing.length) await this.landBatch(this.buildBatch(landing));
+      }
     } finally {
       this.landing = false;
     }
+  }
+
+  /**
+   * Record why queued `issue` waits (a `land.result` deferred, which keeps it queued), unless its last result since it
+   * was queued already says so: one event per reason, not one per tick.
+   */
+  private waitingOnce(issue: number, detail: string) {
+    const queuedAt = this.d.log.read(0, ['land.queued']).filter((e) => (e.payload as { issue: number }).issue === issue).at(-1)?.id ?? 0;
+    const last = this.d.log
+      .read(queuedAt, ['land.result'])
+      .map((e) => e.payload as EventPayload<'land.result'>)
+      .filter((r) => r.issue === issue)
+      .at(-1);
+    if (last?.outcome === 'deferred' && last.detail === detail) return;
+    this.emit('land.result', { issue, outcome: 'deferred', landed: null, detail });
+  }
+
+  /**
+   * Why a direct land's batch may not push now, read synchronously: an emergency stop, the auto-merge stop (#808), or
+   * the policy's auto-merge off with anything in the batch the owner didn't approve. Null: push. Synchronous means
+   * nothing in this process changes it before the push; another process can still write a stop file or policy.yaml
+   * in the moment before `git push` runs, which is why checkedPush asks it again last (R1183f).
+   */
+  private heldAtPush(applied: EventPayload<'land.queued'>[]): string | null {
+    if (this.emergencyInForce()) return 'emergency stop in force; lands once it is lifted';
+    const stopped = this.autoMergeStopped();
+    if (stopped) return `not pushed: auto-merge is stopped: ${stopped}`;
+    if (!this.directAutoOn() && applied.some((q) => !ownerApproved(q))) return "not pushed: the instance policy's auto-merge is off, so only what the owner approved (L3) lands";
+    return null;
   }
 
   private gateTiers(batch: EventPayload<'land.queued'>[]): string[] {
@@ -240,19 +304,28 @@ export abstract class Landing extends Decisions {
         return;
       }
       const head = this.git(path, 'rev-parse', 'HEAD');
-      // A stop that came in while the gates ran: left queued, landed once it's lifted.
-      if (this.emergencyInForce()) {
-        for (const q of applied) result(q.issue, 'deferred', null, 'emergency stop in force; lands once it is lifted');
-        return;
-      }
       // The branch's protection, asked again right before the push: none (or no answer) and nothing is pushed.
       const unprotected = await this.directLandBlocked();
       if (unprotected) {
         for (const q of applied) result(q.issue, 'deferred', null, `not pushed: ${unprotected}`);
         return;
       }
+      // INVARIANT (R1183d, R1183f): after the last await, read again what holds the push: a stop or a switch turned
+      // off while the gates ran, or while GitHub answered the protection call, is never missed. And once more inside
+      // checkedPush (its `hold`), after the push limits' own git runs, right before `git push`: those take a moment,
+      // and another process (an operator's stop, policy.yaml) can write in it.
+      const held = this.heldAtPush(applied);
+      if (held) {
+        for (const q of applied) result(q.issue, 'deferred', null, held);
+        return;
+      }
       // A plain (non-force) push only succeeds if the tip hasn't moved: compare-and-swap.
-      const push = checkedPush({ cwd: path, remote: this.remote, base: tip, head, ref: `refs/heads/${this.branch}`, limits: this.d.cfg.guardrails.push, guard: this.pushGuard(this.d.cfg.project.land_mode === 'direct') });
+      // R1183f: asked again inside checkedPush, after its limits' git runs and right before `git push`.
+      const push = checkedPush({ cwd: path, remote: this.remote, base: tip, head, ref: `refs/heads/${this.branch}`, limits: this.d.cfg.guardrails.push, guard: this.pushGuard(this.d.cfg.project.land_mode === 'direct'), hold: () => this.heldAtPush(applied) });
+      if (!push.ok && 'held' in push && push.held) {
+        for (const q of applied) result(q.issue, 'deferred', null, push.error);
+        return;
+      }
       if (!push.ok && 'refused' in push) {
         for (const q of applied) {
           this.emit('push.refused', { issue: q.issue, head, stage: 'push', reasons: push.refused });

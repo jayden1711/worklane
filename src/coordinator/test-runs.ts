@@ -19,6 +19,8 @@ import { gitRemote } from '../git-remote.js';
 export interface OpenPr {
   number: number;
   headSha: string;
+  /** The head branch (`head.ref`): a PR's head is judged with it (#943, R1176e). Absent: its pinned checks never pass. */
+  headRef?: string;
   base: string;
   author: string;
   bot: boolean;
@@ -32,8 +34,8 @@ export async function listOpenPrs(repo: string, token: () => Promise<string>, f:
     headers: { authorization: `Bearer ${await token()}`, accept: 'application/vnd.github+json', 'x-github-api-version': '2022-11-28' },
   });
   if (!res.ok) throw new Error(`GitHub ${res.status} listing open PRs`);
-  const prs = (await res.json()) as { number: number; head: { sha: string }; base: { ref: string }; user?: { login?: string; type?: string } | null }[];
-  return prs.map((p) => ({ number: p.number, headSha: p.head.sha, base: p.base.ref, author: p.user?.login ?? '', bot: p.user?.type === 'Bot' || /\[bot\]$/.test(p.user?.login ?? '') }));
+  const prs = (await res.json()) as { number: number; head: { sha: string; ref?: string }; base: { ref: string }; user?: { login?: string; type?: string } | null }[];
+  return prs.map((p) => ({ number: p.number, headSha: p.head.sha, ...(typeof p.head.ref === 'string' ? { headRef: p.head.ref } : {}), base: p.base.ref, author: p.user?.login ?? '', bot: p.user?.type === 'Bot' || /\[bot\]$/.test(p.user?.login ?? '') }));
 }
 
 /** Whether a PR may have its full tiers run (a batch): a bot's only once the owner approved it. */
