@@ -152,7 +152,8 @@ export function rolloutCommand(sub: string | undefined, args: readonly string[],
   const engine = d.engine();
   const repos = new Map([...inRings, ...others].map((n) => [n, reposOf(dirOf(n))] as const));
   const ringZero = ringZeroProblem({ rollout, repos, engine: engine.problem ? null : engine.repos, outsideNames: others });
-  if (!(flag in FLAGS)) out(`note: ${flag} is not a flag this engine knows (${Object.keys(FLAGS).join(', ') || 'none yet'}); every ring reads it as off`);
+  // Its own key only (R1174j J7: `constructor` and `__proto__` are `in` every object).
+  if (!Object.hasOwn(FLAGS, flag)) out(`note: ${flag} is not a flag this engine knows (${Object.keys(FLAGS).join(', ') || 'none yet'}); every ring reads it as off`);
   const s = rolloutStatus({ rollout, flag, logs, now: o.now ?? new Date(), outside, outsideNames: others, ringZero, listing });
   for (const [i, r] of s.rings.entries()) out(`ring ${i} ${r.ring} (${r.instances.join(', ')}): ${r.state}: ${r.why}`);
   for (const n of s.outsideOn) out(`outside the rollout: ${n} has ${flag} on, in no ring`);

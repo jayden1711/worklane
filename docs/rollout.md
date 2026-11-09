@@ -47,9 +47,11 @@ The rings name instances, so they live on the machine, never in a repository:
 A ring is **promoted** when all of these hold:
 
 - the flag is on in **every** instance of the ring (on in some is `partial`);
-- it has been on for at least `soak_hours` (counted from the latest instance to turn it on);
-- **each** of the ring's instances merged at least `min_merges` PRs since then (`merge.done`, one per PR number), so an
-  instance that does no work isn't promoted on the others';
+- it has been on for at least `soak_hours` (counted from the latest instance to turn it on), less any time its
+  coordinator was stopped (a clean stop to the next start): a coordinator that isn't running isn't soaking;
+- **each** of the ring's instances merged at least `min_merges` PRs since then (`merge.done`, one per PR number; a
+  merge with no number never counts), so an instance that does no work isn't promoted on the others'. `min_merges: 0`
+  is allowed: an explicit opt-out by whoever writes root's `rollout.json`;
 - **every instance is alive:** its last `coordinator.tick` is at most `live_minutes` old. A coordinator that stopped
   ticking isn't soaking, so silence never reads as health;
 - **nothing went wrong** in any of them since it went on:
@@ -58,14 +60,16 @@ A ring is **promoted** when all of these hold:
   - no `config.invalid`;
   - no `testrun.fault`;
   - no unclean stop, and no restart without a clean stop before it (a crash, or a crash loop);
-  - no more than `max_errors` `coordinator.error`;
+  - no more than `max_errors` `coordinator.error`, and no events lost to a full disk (what they said is unknown);
 - every ring before it is promoted;
 - every instance's event log could be read.
 
 "Since it went on" is by the **log's own order**: what was written after the flip that turned the flag on. The clock
 only measures the soak's hours, so a clock stepped back never hides a bad sign. A flip stamped before events logged
-ahead of it (a clock behind) can't time a soak: the ring is held until the flag goes off and on again. A tick stamped in
-the future is no sign of life, and neither is a tick followed by a recorded stop. A merge counts once per PR, and only
+ahead of it (a clock behind), an event logged after the flip but stamped before it, or a stamp that doesn't parse, can't
+time a soak: the ring is held until the flag goes off and on again. Order against the ring before is judged from the
+earliest stamp of any event in the stretch. A tick stamped in the future, or one whose stamp doesn't parse, is no sign
+of life, and neither is a tick followed by a recorded stop. A merge counts once per PR, and only
 when it was merged after the flip (by its own `merged_at` when it has one).
 - **An off with no commit** (`sha: null`) is the engine's own, written when it read no config from the default branch.
   It is a real off: the engine ran with the flag off, so the next on starts a new soak. While an instance is off this
@@ -135,6 +139,9 @@ It opens every event log read-only and changes nothing.
   a desktop instance in another user's home is read only when it's in a ring.
 - **It can't keep an admin's edit of `rollout.json` safe from a rename at the same moment:** the rename rewrites the
   file whole (atomically for readers), and the machine lock doesn't cover a hand edit.
+- **It can't tell a clock that was behind at boot:** the soak counts wall-clock time, so a host booted with its clock
+  at the time it shut down (no RTC), then stepped forward by NTP after the flip, has its downtime counted as soak.
+  Keep the host clock synced at boot. A test pins this limit, so a fix shows up as a change.
 - **It can't see harm the event log doesn't record:** a slower agent, or a worse plan that still merged green. The
   soak time and the merge count are there so a person looks before the next ring.
 - **It can't stage an engine version.** That's the canary's and the updater's job.

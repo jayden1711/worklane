@@ -75,6 +75,9 @@ export function badSign(e: StoredEvent): string | null {
       return `a test run met a machine fault (${(e.payload as { fault?: string }).fault ?? 'unknown'})`;
     case 'coordinator.stopped':
       return (e.payload as { clean?: boolean }).clean === false ? 'the coordinator stopped uncleanly' : null;
+    case 'coordinator.error':
+      // R1174j J4: events lost to a full disk past the in-memory buffer: a bad sign among them is gone with them.
+      return (e.payload as { kind?: string }).kind === 'disk_full' ? 'events were lost to a full disk (what they said is unknown)' : null;
     default:
       return null;
   }
@@ -113,6 +116,8 @@ export interface InstanceRead {
   skewed: boolean;
   /** When the stretch of config-on time began, at the earliest (for judging order against the ring before), or null. */
   stretchSince: string | null;
+  /** Time since the flip the coordinator was stopped cleanly (a stop to the next start): no soak (R1174j J3). */
+  downMs: number;
 }
 
 export function readInstance(events: readonly StoredEvent[], flag: string, maxErrors: number): InstanceRead {
@@ -158,8 +163,14 @@ export function readInstance(events: readonly StoredEvent[], flag: string, maxEr
   let stoppedAfterTick = false;
   // The clock: a flip stamped before an event logged ahead of it (R1174h H3a: a clock behind) can't time a soak.
   const flipTs = on && flipAt >= 0 ? Date.parse(events[flipAt]!.ts) : NaN;
-  const latestBefore = on && flipAt > 0 ? Math.max(...events.slice(0, flipAt).map((e) => Date.parse(e.ts))) : -Infinity;
-  const skewed = on && latestBefore - flipTs > 60_000;
+  // A loop, not Math.max(...): a spread over a long-lived log throws (R1174j J5: past ~125k events).
+  let latestBefore = -Infinity;
+  if (on) for (let i = 0; i < flipAt; i++) latestBefore = Math.max(latestBefore, Date.parse(events[i]!.ts));
+  // And an event logged after the flip but stamped before it (R1174j J2: a clock ahead at the flip hid an early on), or
+  // a stamp that doesn't parse (J6), can't time a soak either.
+  let skewed = on && latestBefore - flipTs > 60_000;
+  let downMs = 0;
+  let stoppedAt: number | null = null;
   // A coordinator.started with no clean stop since the one before it: the process died (a crash loop shows as several).
   let running = false;
   for (const [i, e] of events.entries()) {
@@ -167,7 +178,7 @@ export function readInstance(events: readonly StoredEvent[], flag: string, maxEr
     // stretch's start (an engine off and on again forgives nothing).
     const after = on && i > flipAt;
     const inStretch = on && stretchAt >= 0 && i > stretchAt;
-    if (e.type === 'coordinator.tick') {
+    if (e.type === 'coordinator.tick' && Number.isFinite(Date.parse(e.ts))) {
       lastTick = e.ts;
       stoppedAfterTick = false;
     }
@@ -178,13 +189,22 @@ export function readInstance(events: readonly StoredEvent[], flag: string, maxEr
     }
     if (e.type === 'coordinator.stopped' && (e.payload as { clean?: boolean }).clean === true) running = false;
     if (!inStretch) continue;
+    const ts = Date.parse(e.ts);
+    if (!Number.isFinite(ts) || (after && ts < flipTs - 60_000)) skewed = true;
+    // R1174j J3: a clean stop, then a start: the time between is no soak (a coordinator stopped 48 of 50 h promoted).
+    if (after && e.type === 'coordinator.stopped' && (e.payload as { clean?: boolean }).clean === true) stoppedAt = ts;
+    if (after && e.type === 'coordinator.started' && stoppedAt !== null) {
+      if (Number.isFinite(stoppedAt) && Number.isFinite(ts)) downMs += Math.max(0, ts - stoppedAt);
+      stoppedAt = null;
+    }
     if (after && e.type === 'merge.done') {
       const n = (e.payload as { number?: unknown }).number;
       // Merged after the flip, by its own merged_at when it has one (R1174h H2: a merge made before the flip and
       // recorded after it counted).
       const at = (e.payload as { merged_at?: unknown }).merged_at;
       const before = typeof at === 'string' && Number.isFinite(Date.parse(at)) && Date.parse(at) < flipTs;
-      if (!before && (n === undefined || n === null || !mergedPrs.has(n))) merges.push(e.ts);
+      // By its PR number, once each; a merge with no number can't be told from a repeat, so it never counts (R1174i/j).
+      if (!before && n !== undefined && n !== null && !mergedPrs.has(n)) merges.push(e.ts);
       if (n !== undefined && n !== null) mergedPrs.add(n);
     }
     if (inStretch && e.type === 'coordinator.error' && ++errors > maxErrors) bad ??= `${errors} coordinator errors since it went on (limit ${maxErrors})`;
@@ -192,8 +212,16 @@ export function readInstance(events: readonly StoredEvent[], flag: string, maxEr
   }
   // When the stretch began, for judging order against the ring before (R1174h H3b): the earlier of its flip's stamp
   // and the stamp of the event logged just before it, since a flip logged after a silence may be stamped late.
-  const stretchTs = on && stretchAt >= 0 ? Math.min(Date.parse(events[stretchAt]!.ts), stretchAt > 0 ? Date.parse(events[stretchAt - 1]!.ts) : Infinity) : NaN;
-  return { on, since: on ? since : null, merges, bad, lastTick: stoppedAfterTick ? null : lastTick, badBefore, engineOff: !on && engineOff, skewed, stretchSince: Number.isFinite(stretchTs) ? new Date(stretchTs).toISOString() : null };
+  // And the earliest stamp of any event in the stretch (R1174j J2: a clock ahead at the flip, fixed after it).
+  let stretchTs = NaN;
+  if (on && stretchAt >= 0) {
+    stretchTs = stretchAt > 0 ? Date.parse(events[stretchAt - 1]!.ts) : Infinity;
+    for (let i = stretchAt; i < events.length; i++) {
+      const t = Date.parse(events[i]!.ts);
+      if (Number.isFinite(t)) stretchTs = Math.min(stretchTs, t);
+    }
+  }
+  return { on, since: on ? since : null, merges, bad, lastTick: stoppedAfterTick ? null : lastTick, badBefore, engineOff: !on && engineOff, skewed, stretchSince: Number.isFinite(stretchTs) ? new Date(stretchTs).toISOString() : null, downMs };
 }
 
 /** Each instance's last recorded state of `flag` (flag.flipped), in log order. */
@@ -266,7 +294,9 @@ export function rolloutStatus(o: {
     else if (onCount === 0) st = { ...base, state: 'off', why: 'the flag is off in every instance of this ring' };
     else if (onCount < r.instances.length) st = { ...base, state: 'partial', why: `on in ${onCount} of ${r.instances.length} instances: turn it on in all of them, or off in all` };
     else {
-      const hours = (o.now.getTime() - Date.parse(onSince!)) / 3_600_000;
+      // Each instance's soak is its time since its flip, less the time it was stopped cleanly (R1174j J3); the ring's
+      // is its shortest.
+      const hours = Math.min(...onReads.map((s) => (o.now.getTime() - Date.parse(s.since!) - s.downMs) / 3_600_000));
       // A last tick stamped in the future (a clock ahead) is no sign of life (R1174f A5): alive is a tick in the last
       // live_minutes, by this clock.
       const age = (t: string) => o.now.getTime() - Date.parse(t);
@@ -282,7 +312,7 @@ export function rolloutStatus(o: {
         st = { ...base, state: 'promoted', why: `${Math.floor(hours)} h on, ${mergeTs.length} merges (at least ${min_merges} in each instance), nothing went wrong${earlier}` };
         // Promoted once its hours were done and every instance had its min_merges-th merge.
         const lastNeeded = min_merges ? Math.max(...onReads.map((s) => Date.parse([...s.merges].sort()[min_merges - 1]!))) : Number.NEGATIVE_INFINITY;
-        promotedAt = Math.max(Date.parse(onSince!) + soak_hours * 3_600_000, lastNeeded);
+        promotedAt = Math.max(...onReads.map((s) => Date.parse(s.since!) + s.downMs + soak_hours * 3_600_000), lastNeeded);
       } else st = { ...base, state: 'soaking', why: `${Math.floor(hours)} of ${soak_hours} h${short.length ? `; ${short.join(', ')}` : `, ${mergeTs.length} merges`}${earlier}` };
     }
     rings.push(st);

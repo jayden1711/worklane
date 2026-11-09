@@ -386,3 +386,96 @@ test("the wait step names what holds: a ring unknown because an instance runs wi
   const both = status({ e1: healthy(300), p1: healthy(200), p3: [on(120), ...merges(3, 110), nullOff(105), tick()] });
   assert.match(both.next, /^wait: can't read the event log of p2/);
 });
+
+// --- R1174i (thresholds pinned at their boundaries) and R1174j (clock, stops, lost events, size, stamps, names) ---
+const R2: Rollout = RolloutFile.parse({ rings: [{ name: 'engine', instances: ['e1'] }, { name: 'first', instances: ['p1'] }] });
+const ring0 = (e1: StoredEvent[]) => status({ e1, p1: [] }, { rollout: R2 }).rings[0]!.state;
+const started = (h: number) => ev('coordinator.started', { instance: 'i', pid: 1, version: 'v' }, hoursAgo(h));
+const stopped = (h: number, clean = true) => ev('coordinator.stopped', { instance: 'i', clean, ms: 1, pending: [] }, hoursAgo(h));
+const nullOff = (h: number) => ev('flag.flipped', { flag: 'f', from: true, to: false, sha: null }, hoursAgo(h));
+
+test('R1174i: each threshold at its boundary: 48 h, a 30-min tick, a tick ahead, a flip stamped behind, a merge before the flip', () => {
+  assert.equal(ring0([on(48.1), ...merges(3, 40), tick()]), 'promoted', 'the twin: 48.1 h');
+  assert.equal(ring0([on(47.5), ...merges(3, 40), tick()]), 'soaking', 'B1 soak: 47.5 of 48 h');
+  assert.equal(ring0([on(48.1), ...merges(3, 40), tick(31 / 60)]), 'soaking', 'B2 a last tick 31 min ago');
+  assert.equal(ring0([on(48.1), ...merges(3, 40), tick(-5 / 60)]), 'soaking', 'B3 a tick stamped 5 min ahead');
+  assert.equal(ring0([tick(49.0), on(49.1), ...merges(3, 40), tick()]), 'soaking', 'B4 a flip stamped 6 min before an event logged ahead of it');
+  const before = Array.from({ length: 3 }, () => ev('merge.done', { number: ++pr, reconciled: true, merged_at: hoursAgo(48.1 + 5 / 60) }, hoursAgo(40)));
+  assert.equal(ring0([on(48.1), ...before, tick()]), 'soaking', 'B5 merges merged 5 min before the flip, recorded after it');
+});
+
+test('R1174j J3: a coordinator stopped cleanly for most of the soak is not promoted: the stopped time is no soak', () => {
+  assert.equal(ring0([started(51), on(50), tick(49.9), stopped(49.5), started(1), tick(0.9), ...merges(3, 0.5), tick()]), 'soaking');
+  // A short stop (an engine update) costs only its own time.
+  assert.equal(ring0([started(60), on(50), ...merges(3, 30), stopped(20), started(19.9), tick()]), 'promoted');
+  assert.equal(ring0([started(50), on(48.3), ...merges(3, 30), stopped(20), started(19), tick()]), 'soaking', '48.3 h less a 1 h stop is under 48 h');
+});
+
+test('R1174j J2: a ring whose clock was ahead at its flip, fixed after, is judged by its earliest stamp: out of order', () => {
+  const e1 = [on(60), ...merges(3, 40), tick()];
+  const p1 = [tick(31), stopped(30.5), started(5.01), on(5), tick(29), tick(10), ...merges(3, 2), tick()];
+  const s = status({ e1, p1 }, { rollout: R2 });
+  assert.equal(s.rings[0]!.state, 'promoted');
+  assert.equal(s.rings[1]!.state, 'out of order');
+  // An event after the flip stamped before it holds the soak (a clock that moved back).
+  assert.equal(ring0([on(60), tick(61), ...merges(3, 40), tick()]), 'soaking');
+});
+
+test('R1174j J4: events lost to a full disk after the flip roll the ring back', () => {
+  const lost = ev('coordinator.error', { instance: 'e1', where: 'event log', kind: 'disk_full', message: '3127 events were lost' }, hoursAgo(20));
+  const s = status({ e1: [started(60), on(50), tick(30), lost, tick(19), ...merges(3, 10), tick()], p1: [] }, { rollout: R2 });
+  assert.equal(s.rings[0]!.state, 'roll back');
+  assert.match(s.rings[0]!.why, /events were lost to a full disk/);
+});
+
+test('R1174j J5: a long-lived log (150,000 events before the flip) is read, and a bad sign still rolls back', () => {
+  const t = hoursAgo(200);
+  const old = Array.from({ length: 150_000 }, (_, i) => ({ id: i + 1, ts: t, type: 'coordinator.tick', actor: 'c', source: 'coordinator', payload: { instance: 'i', dispatched: 0, reconciled: 0 } }) as unknown as StoredEvent);
+  let s: ReturnType<typeof status> | undefined;
+  assert.doesNotThrow(() => { s = status({ e1: [...old, on(50), ev('merge.stopped', { reason: 'x' }, hoursAgo(40)), ...merges(3, 30), tick()], p1: [] }, { rollout: R2 }); });
+  assert.equal(s!.rings[0]!.state, 'roll back');
+});
+
+test('R1174j J6: a stamp that does not parse holds: a tick is no sign of life, a merge keeps the ring from promotion', () => {
+  assert.equal(ring0([on(50), ...merges(3, 30), ev('coordinator.tick', { instance: 'i', dispatched: 0, reconciled: 0 }, 'not-a-date')]), 'soaking');
+  // Before the flip too, with no tick after it: still no sign of life.
+  assert.equal(ring0([ev('coordinator.tick', { instance: 'i', dispatched: 0, reconciled: 0 }, 'not-a-date'), on(50), ...merges(3, 30)]), 'soaking', 'a garbage tick before the flip');
+  const s = status({ e1: [on(60), ...merges(2, 40), ev('merge.done', { number: 9999 }, 'garbage'), tick()], p1: [on(59), ...merges(3, 30), tick()] }, { rollout: R2 });
+  assert.notEqual(s.rings[0]!.state, 'promoted');
+  assert.equal(s.rings[1]!.state, 'out of order');
+});
+
+test('R1174i/j: a merge with no PR number never counts (it cannot be told from a repeat)', () => {
+  const numberless = Array.from({ length: 3 }, () => ev('merge.done', {}, hoursAgo(40)));
+  assert.equal(ring0([on(50), ...numberless, tick()]), 'soaking');
+  assert.equal(ring0([on(50), ...numberless, ...merges(3, 30), tick()]), 'promoted');
+});
+
+test('R1174j J7: a --flag naming an Object.prototype key is not a flag this engine knows', () => {
+  for (const flag of ['constructor', '__proto__', 'toString']) {
+    const dir = mkdtempSync(join(tmpdir(), 'rollout-j7-'));
+    try {
+      writeFileSync(join(dir, 'rollout.json'), JSON.stringify({ rings: [{ name: 'engine', instances: ['e1'] }] }));
+      const own = join(dir, 'own');
+      mkdirSync(join(own, 'e1', 'state'), { recursive: true });
+      writeFileSync(join(own, 'e1', 'instance.yaml'), 'repos:\n  - repo: o/engine\n');
+      new EventLog(join(own, 'e1', 'state', 'events.db')).close();
+      const lines: string[] = [];
+      rolloutCommand('status', ['--flag', flag, '--file', join(dir, 'rollout.json')], { out: (l) => lines.push(l), err: (l) => lines.push(l), now: NOW, deps: { homeOf: () => null, ownDir: () => own, srvRoot: () => join(dir, 'srv'), engine: () => ({ repos: ['o/engine'], problem: null }) } });
+      assert.match(lines.join('\n'), /not a flag this engine knows/, flag);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test('stated limit (R1174j J1, docs/rollout.md): the soak counts wall-clock time, so a clock behind at boot buys soak time; a fix shows up here as a change', () => {
+  // Down 48 h, booted with the clock at the shutdown time, the flag on, then NTP steps the clock: about 1 h of real soak.
+  // Today this reads promoted (the known limit: the host clock must be synced at boot). If it changes, update the docs.
+  assert.equal(ring0([tick(49.1), stopped(49), started(48.95), on(48.9), tick(0.9), ...merges(3, 0.5), tick()]), 'promoted');
+});
+
+test('min_merges: 0 is allowed: an explicit opt-out by whoever writes root\'s rollout.json (docs/rollout.md)', () => {
+  const R0 = RolloutFile.parse({ rings: R2.rings, promote: { min_merges: 0 } });
+  assert.equal(status({ e1: [on(50), tick()], p1: [] }, { rollout: R0 }).rings[0]!.state, 'promoted');
+});
