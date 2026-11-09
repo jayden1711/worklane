@@ -591,6 +591,12 @@ export const EventSchemas = {
   /** The PR's size and conversation as GitHub reports them at `head` (lines added and removed, files, comments and review comments), recorded when they change. */
   'pr.stats': z.strictObject({ issue, number: z.number().int().positive(), head: sha, additions: z.number().int().nonnegative(), deletions: z.number().int().nonnegative(), files: z.number().int().nonnegative(), comments: z.number().int().nonnegative() }),
   'pr.ready': z.strictObject({ issue, number: z.number().int().positive(), head: sha }),
+  /**
+   * The required checks on an open PR's head as readiness judged them (#943 (a)): written when the judgement changes.
+   * The main watch reads it for the merged PR, whose runs GitHub no longer links to it (pull_requests is only filled
+   * for open PRs), so the base its runs were for can be told only while it was open.
+   */
+  'checks.judged': z.strictObject({ issue, number: z.number().int().positive(), head: sha, checks: z.array(z.strictObject({ name: z.string(), outcome: z.enum(['pass', 'fail', 'pending', 'missing']), pin: z.union([z.strictObject({ app_id: z.number().int() }), z.strictObject({ workflow: z.string() })]).nullable().optional() })) }),
   'pr.unready': z.strictObject({ issue, number: z.number().int().positive(), head: sha, why: z.string() }),
   'pr.closed': z.strictObject({ issue, number: z.number().int().positive(), merged: z.boolean() }),
   /**

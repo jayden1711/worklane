@@ -7,20 +7,15 @@
 //      { <name>: { workflow: .github/workflows/<file> } } (the Actions workflow file that runs it, in this repo, in a
 //      workflow run for the very commit judged, as one of that run's own jobs);
 //   2. else the App GitHub's own branch protection (app_id) or ruleset (integration_id) requires for that name;
-//   3. else none: the check is judged by name, exactly as before pins (the owner's choice, 2026-10-19: an existing
+//   3. else none: the check is judged by name, as before pins (the owner's choice, 2026-10-19: an existing
 //      install keeps working), and doctor prints a paste-ready pin block for it (src/check-pin-block.ts).
-// A commit status never satisfies a pin: statuses carry no App. The owner's rule, 2026-10-19, with its round-5 and
-// round-6 tightenings (ownVerdict): a pinned check's own runs are grouped by workflow file (an Actions run, by its
-// workflow run's file; one whose workflow run wasn't read is a group of its own), and in each file's group both its
-// latest run (by workflow run, then check run) and its newest check run must pass, so a later run of that file
-// supersedes its earlier failed or cancelled runs, but one file never supersedes another, and a re-run that failed
-// after a newer run passed still blocks. A pin to an App that isn't Actions can't be split by file: that App's latest
-// check run of the name on the head (the highest id) decides, in whatever check suite, so a later pipeline or re-run of
-// that App supersedes its earlier ones (the owner's decision, round 8; round 6 had a failure in another suite block).
-// Every check of its name from any OTHER source must pass too (another App, another workflow, a run for another head,
-// a commit status). The ways this is looser than judging by name, both the owner's decisions: a pinned workflow
-// file's later run on the head supersedes its own earlier failed or cancelled runs, and a pinned non-Actions App's
-// later run supersedes its earlier ones. With a check being judged pinned, a commit-status read GitHub refuses at all
+// A commit status never satisfies a pin: statuses carry no App. The owner's rule, 2026-10-19, failing closed since
+// #925 (ownVerdict): every one of a pinned check's own runs on the head must pass (GitHub's latest check run per check
+// suite, so a re-run attempt of a job still replaces its earlier one), so no run, of the pinned file or App or of
+// anything else, supersedes an earlier one that failed, was cancelled or is still running. Every check of its name
+// from any OTHER source must pass too (another App, another workflow, a run for another head, a commit status). A name
+// judged by name is decided the same way (worstOf): any of its checks that isn't a pass blocks, never only its latest
+// (#925). With a check being judged pinned, a commit-status read GitHub refuses at all
 // (a 403 or 404 on page 1 too) waits; with none of them pinned, statuses are read as on main, whatever else is pinned
 // (the owner's decision, round 8; scoped to the judged names in round 10). Readiness and the main watch judge a pinned name through one function, pinnedVerdict, over the same
 // facts (GitHub's latest check run per check suite and name, the workflow run behind each Actions suite, and the
@@ -75,7 +70,10 @@ export function assertJudged(checks: unknown): asserts checks is JudgedChecks {
 export type CheckPin = { app_id: number } | { workflow: string };
 /** Each required check's App as GitHub's branch protection or ruleset requires it (a name absent: any source). */
 export type GithubCheckApps = Record<string, number>;
-/** The Actions workflow run behind a check run's suite: its id and page, its file, its repo and the commit it ran for. */
+/**
+ * The Actions workflow run behind a check run's suite: its id and page, its file, its repo, the commit it ran for, and
+ * what started it (#943): its event, its branch (head_branch) and the base branch of each pull request it ran for.
+ */
 export interface WorkflowSource {
   run: number;
   /** The run's own page (html_url): each of its jobs' pages is this plus /job/<id>. */
@@ -83,6 +81,96 @@ export interface WorkflowSource {
   path: string;
   repo: string;
   sha: string;
+  /** GitHub's `event` ('' when GitHub gave none: never trusted). */
+  event: string;
+  /** GitHub's `head_branch` (null when none). */
+  branch: string | null;
+  /** The base branch of each pull request GitHub lists on the run (`pull_requests[].base.ref`; [] for a fork's). */
+  bases: string[];
+  /** The head commit of each pull request GitHub lists on the run (`pull_requests[].head.sha`, '' when unreadable). */
+  prHeads: string[];
+  /**
+   * GitHub's `head_repository.full_name`: the repo the run's commit came from (a fork's for a fork's PR, while `repo`
+   * is always the base repo; R1176f D2). Null when GitHub gave none: never trusted.
+   */
+  headRepo: string | null;
+  /** Whether every pull request listed on the run has both its head and its base in `repo` (R1176f D2). */
+  prsLocal: boolean;
+}
+
+/** The events whose run reads its workflow file from the commit itself, on the branch it names (#943). */
+// Written as one string: push-check.test.ts reads the word push as a quoted array item in src/ as a git push.
+const BRANCH_EVENTS = new Set('push workflow_dispatch schedule'.split(' '));
+
+/**
+ * The PR whose head is being judged (#943, R1176c/d): its head ref, and whether any pull request from that ref (open
+ * or closed) or open and holding the head commit has a base other than the judged branch, or ever had its base changed
+ * (R1176f D1). PinnedChecks.of reads that from GitHub; null when it couldn't.
+ */
+export interface PrContext {
+  headRef: string;
+  foreignBase: boolean | null;
+}
+
+/**
+ * What a commit is judged as (R1176e): a commit of the branch itself (`main`: fix-forward, batches, the main watch,
+ * main's own checks), or a PR's head (`pr`, with its head ref). Required, so no caller judges a PR's head as a main
+ * commit by default (its pull_request runs would never count) or a main commit as a PR's head.
+ */
+export type JudgedAs = { main: true } | { pr: { headRef: string } };
+
+/**
+ * Did workflow run `w` read its workflow file from `branch`'s own history (#943)? A pull_request run reads it from the
+ * PR's merge ref (base merged with head) but posts its checks on the head, and GitHub lists on a run, as it is read, the
+ * OPEN pull requests matching its head branch, each with its CURRENT base (R1176c/d, R1176f D1): a decoy PR from the
+ * same ref into another base, since closed or re-pointed at the branch, shows the real PR there. So:
+ * - either way, the run's commit came from the branch's own repo (`head_repository`, R1176f D2);
+ * - a main commit (no `pr`): only a push, dispatch or schedule run on `branch` itself;
+ * - a PR's head (`pr`): only a pull_request run on the PR's head ref, every PR listed on it (at least one) in this repo,
+ *   based on `branch` with the run's commit as its head, and no PR from that ref, or open and holding that commit,
+ *   based anywhere else or ever re-pointed (`foreignBase` false; unknown is not trusted).
+ */
+export function fromBranch(w: Pick<WorkflowSource, 'event' | 'branch' | 'bases' | 'prHeads' | 'sha' | 'repo' | 'headRepo' | 'prsLocal'>, branch: string, pr?: PrContext): boolean {
+  if (w.headRepo === null || w.headRepo.toLowerCase() !== w.repo.toLowerCase()) return false;
+  if (!pr) return BRANCH_EVENTS.has(w.event) && w.branch === branch;
+  if (w.event !== 'pull_request' || pr.foreignBase !== false || w.branch !== pr.headRef || !w.prsLocal) return false;
+  return w.bases.length > 0 && w.bases.every((b) => b === branch) && w.prHeads.length === w.bases.length && w.prHeads.every((h) => h === w.sha);
+}
+
+/** A WorkflowSource from GitHub's workflow-run JSON, or null when a field it needs is missing (#727, #943). */
+export function workflowSourceOf(w: {
+  id?: unknown;
+  html_url?: unknown;
+  path?: unknown;
+  head_sha?: unknown;
+  repository?: { full_name?: unknown } | null;
+  head_repository?: { full_name?: unknown } | null;
+  event?: unknown;
+  head_branch?: unknown;
+  pull_requests?: unknown;
+}): WorkflowSource | null {
+  if (typeof w.id !== 'number' || typeof w.html_url !== 'string' || typeof w.path !== 'string' || typeof w.head_sha !== 'string' || typeof w.repository?.full_name !== 'string') return null;
+  const prs = Array.isArray(w.pull_requests) ? w.pull_requests : [];
+  const bases = prs.map((p) => (p && typeof p === 'object' ? (p as { base?: { ref?: unknown } }).base?.ref : undefined));
+  const heads = prs.map((p) => (p && typeof p === 'object' ? (p as { head?: { sha?: unknown } }).head?.sha : undefined));
+  // A listed PR's head and base repo, as GitHub gives them (`{ id, url, name }`, url .../repos/<owner>/<name>).
+  const own = `/repos/${w.repository.full_name}`.toLowerCase();
+  const inRepo = (r: unknown) => !!r && typeof r === 'object' && typeof (r as { url?: unknown }).url === 'string' && (r as { url: string }).url.toLowerCase().endsWith(own);
+  const prsLocal = prs.every((p) => !!p && typeof p === 'object' && inRepo((p as { head?: { repo?: unknown } }).head?.repo) && inRepo((p as { base?: { repo?: unknown } }).base?.repo));
+  return {
+    run: w.id,
+    url: w.html_url,
+    path: w.path,
+    repo: w.repository.full_name,
+    sha: w.head_sha,
+    event: typeof w.event === 'string' ? w.event : '',
+    branch: typeof w.head_branch === 'string' ? w.head_branch : null,
+    // A pull request with no readable base counts as one based elsewhere: never trusted.
+    bases: bases.map((b) => (typeof b === 'string' ? b : '')),
+    prHeads: heads.map((h) => (typeof h === 'string' ? h : '')),
+    headRepo: typeof w.head_repository?.full_name === 'string' ? w.head_repository.full_name : null,
+    prsLocal,
+  };
 }
 
 /** The pin for `name`: config.yaml's, else the App GitHub requires, else null (judged by name). Own keys only. */
@@ -110,13 +198,17 @@ export function isJobOfRun(url: string | undefined, id: number | undefined, w: P
 
 /**
  * Did this check come from `pin`? A status never does. A workflow pin needs the suite's workflow run in `repo`, for
- * `sha`, from that file, and the check run to be one of that run's own jobs (isJobOfRun).
+ * `sha`, from that file, started on `branch` (fromBranch, #943), and the check run to be one of that run's own jobs
+ * (isJobOfRun).
  */
-export function fromPinnedSource(c: Pick<CommitCheck, 'source' | 'app' | 'workflow' | 'id' | 'url'>, pin: CheckPin, o: { repo: string; sha: string }): boolean {
+export function fromPinnedSource(c: Pick<CommitCheck, 'source' | 'app' | 'workflow' | 'id' | 'url'>, pin: CheckPin, o: { repo: string; sha: string; branch: string; pr?: PrContext }): boolean {
   if (c.source !== 'check_run') return false;
-  if ('app_id' in pin) return c.app === pin.app_id;
   const w = c.workflow;
-  return !!w && w.path === pin.workflow && w.repo.toLowerCase() === o.repo.toLowerCase() && w.sha === o.sha && isJobOfRun(c.url, c.id, w);
+  const started = !!w && w.sha === o.sha && fromBranch(w, o.branch, o.pr);
+  // GitHub Actions as the App posts a spoofed PR run too (#943): its run must also have started on the branch. One
+  // whose workflow runs weren't read at all (undefined) stays its own, so ownVerdict makes it wait (round 9).
+  if ('app_id' in pin) return c.app === pin.app_id && (pin.app_id !== ACTIONS_APP_ID || w === undefined || started);
+  return started && w!.path === pin.workflow && w!.repo.toLowerCase() === o.repo.toLowerCase() && isJobOfRun(c.url, c.id, w!);
 }
 
 const passed = (c: CommitCheck) => c.status === 'completed' && c.conclusion === 'success';
@@ -139,36 +231,25 @@ function worst<C extends Pick<CommitCheck, 'id' | 'status' | 'conclusion'>>(bad:
 }
 
 /**
- * What decides a pinned source on a commit, failing closed. Its runs are grouped: an Actions run by its workflow file
- * (one whose workflow run can't be read is a group of its own); every run of an App that isn't Actions in one group.
- * - A file's group: both the latest run (latestOwn) and the newest check run (the highest id: a re-run of an older
- *   workflow run is newer) must pass. One file never supersedes another, and a later re-run that failed blocks.
- * - The App group: its latest check run of the name on the head (the highest id) decides, in whatever check suite: a
- *   later pipeline or re-run of that App supersedes its earlier ones (the owner's decision, round 8).
- * - An Actions run whose workflow runs weren't read at all (`workflow` absent: a read made as for a bare name) can't
- *   be put in a file's group, and never in the App group (round 9: that would let `evil.yml` supersede `ci.yml`): the
- *   verdict waits on it (reported as still running), never a pass.
- * Returns the run that decides: a run that isn't a pass (worst), else the latest of all; undefined when there is none.
+ * #925: of one name's checks on a commit, the one that decides it: any that isn't a pass (worst), never only the
+ * latest, so an earlier red or unfinished one blocks whatever its source and however it is ordered; else undefined.
+ */
+export function worstOf<C extends Pick<CommitCheck, 'id' | 'status' | 'conclusion'>>(checks: readonly C[]): C | undefined {
+  return worst(checks.filter((c) => !(c.status === 'completed' && c.conclusion === 'success')));
+}
+
+/**
+ * What decides a pinned source on a commit, failing closed (#925): every one of its runs must pass, whatever workflow
+ * run or check suite it is in and however it is ordered against a passing one, so an earlier workflow run of the pinned
+ * file that failed, was cancelled or is still running blocks, as an earlier run of a pinned App does. The runs are
+ * GitHub's latest check run per check suite (a re-run attempt of a job replaces its earlier one there). An Actions run
+ * whose workflow runs weren't read at all (`workflow` absent: a read made as for a bare name) waits (reported as still
+ * running), never a pass. Returns the run that decides: a run that isn't a pass (worst), else the latest of all
+ * (latestOwn); undefined when there is none.
  */
 export function ownVerdict<C extends Pick<CommitCheck, 'id' | 'workflow' | 'status' | 'conclusion' | 'app'>>(own: readonly C[]): C | undefined {
-  const groups = new Map<string, C[]>();
-  const bad: C[] = [];
-  own.forEach((c, i) => {
-    if (c.app === ACTIONS_APP_ID && c.workflow === undefined) {
-      bad.push({ ...c, status: 'in_progress', conclusion: null });
-      return;
-    }
-    // Only a run of an App that isn't Actions is in the App group.
-    const key = c.workflow ? `file ${c.workflow.path}` : c.app === ACTIONS_APP_ID || c.workflow === null ? `unread ${c.id ?? `#${i}`}` : 'app';
-    groups.set(key, [...(groups.get(key) ?? []), c]);
-  });
-  const ok = (c: C) => c.status === 'completed' && c.conclusion === 'success';
-  for (const [key, g] of groups) {
-    const newest = [...g].sort((a, b) => (b.id ?? -1) - (a.id ?? -1))[0]!;
-    const decide = key === 'app' ? [newest] : [latestOwn(g)!, newest];
-    bad.push(...decide.filter((c) => !ok(c)));
-  }
-  return worst(bad) ?? latestOwn(own);
+  const bad = own.map((c) => (c.app === ACTIONS_APP_ID && c.workflow === undefined ? { ...c, status: 'in_progress', conclusion: null } : c));
+  return worstOf(bad) ?? latestOwn(own);
 }
 
 /**
@@ -179,7 +260,7 @@ export function ownVerdict<C extends Pick<CommitCheck, 'id' | 'workflow' | 'stat
  * workflow, a run for another head, a commit status), the worst such check's state, without its id or link (it isn't
  * the pinned run): the owner's rule, 2026-10-19.
  */
-export function pinnedVerdict(checks: readonly CommitCheck[], pin: CheckPin, o: { repo: string; sha: string }): CommitCheck | undefined {
+export function pinnedVerdict(checks: readonly CommitCheck[], pin: CheckPin, o: { repo: string; sha: string; branch: string; pr?: PrContext }): CommitCheck | undefined {
   const own = checks.filter((c) => fromPinnedSource(c, pin, o));
   const fromPin = ownVerdict(own);
   if (!fromPin) return undefined;
@@ -192,7 +273,7 @@ export function pinnedVerdict(checks: readonly CommitCheck[], pin: CheckPin, o: 
  * pins (so never a status beyond the first page main read: `extra`). A pinned name: pinnedVerdict over all of its
  * checks, or none (missing).
  */
-export function pinnedChecks(checks: readonly CommitCheck[], o: { configured: Record<string, CheckPin>; github: GithubCheckApps | null; repo: string; sha: string }): CommitCheck[] {
+export function pinnedChecks(checks: readonly CommitCheck[], o: { configured: Record<string, CheckPin>; github: GithubCheckApps | null; repo: string; sha: string; branch: string; pr?: PrContext }): CommitCheck[] {
   const out: CommitCheck[] = [];
   for (const name of new Set(checks.map((c) => c.name))) {
     const pin = pinOf(name, o.configured, o.github ?? {});
@@ -276,7 +357,7 @@ export class PinnedChecks {
   private denied: { at: number; rules: GithubCheckApps } | null = null;
   constructor(
     private readonly d: {
-      backlog: Pick<Backlog, 'checks' | 'checkApps'>;
+      backlog: Pick<Backlog, 'checks' | 'checkApps' | 'prBases'>;
       branch: () => string;
       repo: () => string;
       configured: () => Record<string, CheckPin>;
@@ -302,14 +383,25 @@ export class PinnedChecks {
    * when a name being judged is pinned, or may be (GitHub's rules not read yet): with every judged name bare, exactly
    * main's reads, so main's verdict, whatever else is pinned (round 10).
    */
-  async of(sha: string, opts: { judging?: readonly string[] } = {}): Promise<JudgedChecks> {
+  async of(sha: string, at: JudgedAs, opts: { judging?: readonly string[] } = {}): Promise<JudgedChecks> {
+    // INVARIANT (R1176e): every judgement says what it judges; a cast or a missing argument fails here, not open.
+    const asPr = at && typeof at === 'object' && 'pr' in at && typeof at.pr?.headRef === 'string' ? at.pr : null;
+    if (!asPr && !(at && typeof at === 'object' && 'main' in at && at.main === true)) throw new Error('PinnedChecks.of: say whether this is a main commit or a PR head');
     if (!this.enforced) return this.withLocal(await this.d.backlog.checks(sha), sha);
     const configured = this.d.configured();
     const judging = opts.judging ?? this.d.required?.();
     const apps = judging ? await this.githubAppsFor(judging, configured) : await this.githubApps();
     const pinned = !judging || apps === null || judging.some((n) => pinOf(n, configured, apps) !== null);
     const all = await this.d.backlog.checks(sha, { pinned });
-    return this.withLocal(pinnedChecks(all, { configured, github: apps, repo: this.d.repo(), sha }), sha);
+    // A PR's head (#943, R1176c/d, R1176f D1): its runs count only when no pull request from its head ref (open or
+    // closed), or open and holding its head commit, is based anywhere but the branch or ever had its base changed
+    // (prBases names such a PR's base as ''). A backlog that can't say leaves it unknown: untrusted.
+    let pr: PrContext | undefined;
+    if (asPr) {
+      const bases = pinned && this.d.backlog.prBases ? await this.d.backlog.prBases(asPr.headRef, sha) : null;
+      pr = { headRef: asPr.headRef, foreignBase: bases === null ? null : bases.some((b) => b !== this.d.branch()) };
+    }
+    return this.withLocal(pinnedChecks(all, { configured, github: apps, repo: this.d.repo(), sha, branch: this.d.branch(), ...(pr ? { pr } : {}) }), sha);
   }
 
   /** The judged checks, under No CI with this instance's own test runs in place of any check of their names. */

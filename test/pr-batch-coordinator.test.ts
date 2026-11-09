@@ -204,16 +204,21 @@ test('batching: a stop raised while an approved merge is under way (during its c
   approveAsOwner(t);
   const stop = join(t.f.stateDir, 'auto-merge-stopped.json');
   // The main watch stops auto-merge while mergeTested reads the head's checks: the batched and Discord-batched paths both go through it.
-  const c = t.c as unknown as { headChecksOf(sha: string): Promise<unknown>; mergeTested(w: unknown, pr: unknown, how: 'approved'): Promise<void> };
+  const c = t.c as unknown as { headChecksOf(...a: unknown[]): Promise<unknown>; mergeTested(w: unknown, pr: unknown, how: 'approved'): Promise<void> };
   const read = c.headChecksOf.bind(c);
-  c.headChecksOf = async (sha) => {
+  const asked: unknown[] = [];
+  c.headChecksOf = async (...a) => {
+    asked.push(a[1]);
     writeFileSync(stop, JSON.stringify({ reason: 'unaccounted commit on main' }));
-    return read(sha);
+    return read(...a);
   };
   const w = t.f.log.read(0, ['pr.opened']).at(-1)!.payload;
-  await c.mergeTested(w, await t.f.backlog.pullRequest(t.opened.number), 'approved');
+  const pr = await t.f.backlog.pullRequest(t.opened.number);
+  await c.mergeTested(w, pr, 'approved');
   assert.ok(!t.pr().merged, 'not merged: the stop came in before the merge call');
   assert.equal(t.f.log.read(0, ['merge.done']).length, 0);
+  // R1176e: mergeTested judges the PR's head as a PR head (its head ref), never as a main commit.
+  assert.deepEqual(asked, [{ pr: { headRef: pr.head } }]);
 });
 
 test("batching: the issue's owner approving by review merges only if the one rule lets their repo role approve a high-risk merge (#715)", { skip }, async () => {

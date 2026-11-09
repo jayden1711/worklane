@@ -268,6 +268,22 @@ test('harness-eval run --spend: the suite runs under the ceiling; held-out tasks
   assert.ok(seen[1]!.tasks.some((x) => x.id === id), '--held-out-from-state reads it');
 });
 
+test('harness-eval run --keep-logs (shadow runs): the suite keeps its replay logs there; a directory already holding something is refused before any replay', async (t) => {
+  t.mock.method(console, 'log', () => {});
+  t.mock.method(console, 'error', () => {});
+  const root = mkdtempSync(join(tmpdir(), 'he-root-'));
+  const { suite, seen } = recordingSuite();
+  const logs = join(root, 'logs');
+  assert.equal(await harnessEvalCommand(root, 'run', ['--spend', '3', '--work', join(root, 'w1'), '--keep-logs', logs], helpers(suite)), 0);
+  assert.equal(seen[0]!.logsDir, logs);
+  mkdirSync(logs, { recursive: true });
+  writeFileSync(join(logs, 'old-1.db'), '');
+  assert.equal(await harnessEvalCommand(root, 'run', ['--spend', '3', '--work', join(root, 'w2'), '--keep-logs', logs], helpers(suite)), 2);
+  assert.equal(seen.length, 1, 'no replay ran: a log of an earlier run is never compared as this one\'s');
+  assert.equal(await harnessEvalCommand(root, 'run', ['--spend', '3', '--work', join(root, 'w3')], helpers(suite)), 0);
+  assert.equal(seen[1]!.logsDir, undefined, 'without it, nothing is kept');
+});
+
 test('spend gate: --spend takes a positive number of dollars; the ceiling cuts each call and stops at the limit', async () => {
   assert.equal(spendFromArgs([]), null);
   assert.equal(spendFromArgs(['--spend', '2.5']), 2.5);

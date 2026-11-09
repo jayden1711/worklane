@@ -1,6 +1,6 @@
 // `harness-eval run` and `harness-eval add-task`: the suite by hand (the coordinator runs it on its schedule; see
 // src/coordinator/harness-evals.ts).
-import { existsSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { BRAND } from '../brand.js';
 import { loadConfig } from '../config/load.js';
@@ -91,6 +91,13 @@ export async function harnessEvalCommand(root: string, sub: string | undefined, 
   const budget = Number(h.option(rest, '--budget') ?? he?.budget_usd ?? 20);
   const work = resolve(h.option(rest, '--work') ?? join(site.stateDir, 'harness-evals'));
   const keep = h.flag(rest, '--keep');
+  // Shadow runs (docs/shadow-runs.md): each replay's event log kept in a directory of its own, which must be empty, so a
+  // log of an earlier run is never compared as this one's.
+  const keepLogs = h.option(rest, '--keep-logs');
+  if (keepLogs !== undefined && existsSync(keepLogs) && readdirSync(keepLogs).length) {
+    console.error(`--keep-logs ${keepLogs} is not empty: give each run a directory of its own`);
+    return 2;
+  }
   const record = h.flag(rest, '--record');
   if (!Number.isInteger(samples) || samples < 1 || !(budget > 0)) {
     console.error('--samples must be a whole number from 1, --budget a positive amount');
@@ -135,6 +142,7 @@ export async function harnessEvalCommand(root: string, sub: string | undefined, 
       engine: engineSha(),
       pr: null,
       workDir: work,
+      ...(keepLogs !== undefined ? { logsDir: resolve(keepLogs) } : {}),
       source: (t) => `https://github.com/${t.repo}.git`,
       // This checkout is the harness under test: its harness config replaces each task's own (old) one.
       ...(existsSync(join(root, BRAND.configDir)) ? { harnessConfig: root } : {}),
