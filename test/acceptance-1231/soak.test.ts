@@ -9,7 +9,9 @@
 // Out of this file's reach (R1231c): the driver's own fixes (it records oldestUnlandedMs, and passes sampleMs and
 // issueEveryMs) and what the committed scripts/ci/fetch-pinned.sh does; the PR's own tests cover those.
 // Revised per the spec reviews R1231c (its N1-N15 split the shapes earlier cases merged, so each fix has a case) and
-// R1231e (its last cases). Frozen after R1231e by the owner's decision (c), 2026-11-08.
+// R1231e (its last cases). Frozen after R1231e by the owner's decision (c), 2026-11-08; the steps before the soak revised
+// by the owner's decision on R1181l (npm ci --ignore-scripts, the locked tsc, gitleaks first with no BASH_ENV, node's
+// path recorded after setup-node), in its own commit.
 // Each must-fail case names the failure it expects (R1231a's lesson: "any failure" lets a fix that refuses everything
 // pass); the healthy twins catch such a fix. Frozen once its spec review passes: a change then needs its own review.
 import { test } from 'node:test';
@@ -223,18 +225,25 @@ const BEFORE_SOAK: unknown[] = [
     }
   },
   {
-    "run": "npm ci"
+    "name": "record node",
+    "id": "node",
+    "shell": "bash",
+    "run": "echo \"path=$(command -v node)\" >> \"$GITHUB_OUTPUT\""
   },
   {
     "name": "install gitleaks",
     "shell": "bash",
     "env": {
-      "GITLEAKS_VERSION": "8.30.1"
+      "GITLEAKS_VERSION": "8.30.1",
+      "BASH_ENV": ""
     },
     "run": "f=\"gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz\"\nmkdir -p \"$RUNNER_TEMP/bin\" && cd \"$RUNNER_TEMP/bin\"\nbash \"$GITHUB_WORKSPACE/scripts/ci/fetch-pinned.sh\" \"https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${f}\" 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb \"$f\"\ntar -xzf \"$f\" gitleaks\necho \"$RUNNER_TEMP/bin\" >> \"$GITHUB_PATH\"\n"
   },
   {
-    "run": "npm run build"
+    "run": "npm ci --ignore-scripts"
+  },
+  {
+    "run": "${{ steps.node.outputs.path }} node_modules/typescript/bin/tsc -p tsconfig.json"
   }
 ];
 
@@ -280,7 +289,10 @@ test('must hold: the soak workflow can be green only on a soak run as asked (R11
     if (s !== job.steps[at] && typeof s.run === 'string') {
       assert.doesNotMatch(s.run, /GITHUB_ENV/, `step ${s.name ?? s.run}: no GITHUB_ENV`);
       for (const l of s.run.split('\n').filter((x) => /GITHUB_PATH/.test(x))) assert.match(l, /^\s*echo "\$RUNNER_TEMP\/bin" >> "\$GITHUB_PATH"$/, l);
-      assert.doesNotMatch(s.run, /\bnode\b(?!_modules)|\bnpm\s+(?!ci$|run build$)/m, `step ${s.name ?? s.run}: no node shim written`);
+      // No package script and no npm script (R1181l 1, as ci.yml's shards): npm ci --ignore-scripts and the locked tsc,
+      // run by the node recorded right after setup-node, which is the one node named.
+      const named = ['echo "path=$(command -v node)" >> "$GITHUB_OUTPUT"', '${{ steps.node.outputs.path }} node_modules/typescript/bin/tsc -p tsconfig.json'];
+      if (!named.includes(s.run)) assert.doesNotMatch(s.run, /\bnode\b(?!_modules)|\bnpm\s+(?!ci --ignore-scripts$)/m, `step ${s.name ?? s.run}: no node shim written`);
     }
   }
   const step = job.steps[at]!;
