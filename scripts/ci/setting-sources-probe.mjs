@@ -51,12 +51,14 @@ import { gitExecFileSync } from '../lib/git.cjs';
 
 const repoRoot = join(import.meta.dirname, '..', '..');
 /**
- * The src/ modules the probe runs: every module it loads with dist() below (read from this file, so a new one is never
- * missed), and the guard's hook entry, src/hook-main.ts, which the instance's agent settings spawn on every guarded
- * run's hooks (install.ts HOOK_ENTRY; spawned, so no import reaches it, R1185r D1). Not cli.js, which the runner
- * names by URL only for MCP runs: the probe starts none, and it imports nearly all of src/.
+ * The src/ modules the probe runs: LOADS, the only modules dist() below loads (it refuses any other, exit 2, and a
+ * test holds this script to no other import(), so the list can't miss one: R1185s S1), and the guard's hook entry, as
+ * src/install.ts's HOOK_ENTRY names it, which the instance's agent settings spawn on every guarded run's hooks
+ * (spawned, so no import reaches it, R1185r D1). Not cli.js, which the runner names by URL only for MCP runs: the
+ * probe starts none, and it imports nearly all of src/.
  */
-const ROOTS = [...new Set([...readFileSync(new URL(import.meta.url), 'utf8').matchAll(/\bdist\('([\w/-]+)\.js'\)/g)].map((m) => m[1])), 'hook-main'];
+const LOADS = ['runner', 'install', 'agent-settings', 'brand', 'roles'];
+const ROOTS = [...LOADS, /\bexport const HOOK_ENTRY = '([\w/-]+)\.js'/.exec(readFileSync(join(repoRoot, 'src', 'install.ts'), 'utf8'))?.[1] ?? 'hook-main'];
 /**
  * The probe's import closure (R1185p D3): ROOTS and every src/ module they import, statically or by a literal
  * import(), at any depth, plus this script and scripts/lib/git.cjs. scripts/ci/setting-sources-probe.files holds it
@@ -92,7 +94,13 @@ if (!bin) {
   console.error('usage: node scripts/ci/setting-sources-probe.mjs <claude binary>');
   process.exit(2);
 }
-const dist = (f) => import(pathToFileURL(join(repoRoot, 'dist', 'src', f)).href);
+const dist = (f) => {
+  if (!LOADS.includes(String(f).replace(/\.js$/, ''))) {
+    console.error(`the probe loads only ${LOADS.join(', ')} (its import closure, LOADS): add ${f} there`);
+    process.exit(2);
+  }
+  return import(pathToFileURL(join(repoRoot, 'dist', 'src', f)).href);
+};
 const { CliRunner } = await dist('runner.js');
 const { install } = await dist('install.js');
 const { guardrailSettings } = await dist('agent-settings.js');
@@ -129,6 +137,8 @@ const MARKS = {
   homeToolEnv: 'PLANTED-TOOL-ENV-HOME',
   // A CLAUDE.md in a folder only the resumed session reads, so a resume's folder-loaded files are measured (R1185p).
   resumeNested: 'PLANTED-SUB2-CLAUDE-MD',
+  // And one only the second turn's Read reaches, so a second turn's lazily loaded files are measured (R1185s S2).
+  secondNested: 'PLANTED-SUB3-CLAUDE-MD',
 };
 /** The second turn's text, as a request carries it once the runner delivered it. */
 const SECOND_TURN = 'PROBE-SECOND-TURN';
@@ -184,6 +194,8 @@ function plant() {
   w(join(repo, 'sub', 'x.txt'), 'a file the stand-in has claude read\n');
   w(join(repo, 'sub2', 'x.txt'), 'a file only a resumed session reads\n');
   w(join(repo, 'sub2', 'CLAUDE.md'), `# Read on resume\n${MARKS.resumeNested}\n`);
+  w(join(repo, 'sub3', 'x.txt'), 'a file only a second turn reads\n');
+  w(join(repo, 'sub3', 'CLAUDE.md'), `# Read on the second turn\n${MARKS.secondNested}\n`);
   w(join(repo, 'sub', 'CLAUDE.md'), `# Nested\n${MARKS.nestedClaudeMd}\n`);
   w(join(repo, 'sub', '.claude', 'CLAUDE.md'), `# Nested, .claude\n${MARKS.nestedDotClaudeMd}\n`);
   skill(join(repo, 'sub', '.claude', 'skills'), MARKS.nestedSkill);
@@ -214,6 +226,8 @@ function plant() {
 async function standIn(repo, ran, sub = 'sub') {
   const seen = [];
   let calls = 0;
+  let first = 0;
+  let second = false;
   const tag = Math.random().toString(36).slice(2, 10);
   const steps = [
     { name: 'Read', input: { file_path: join(repo, sub, 'x.txt') } },
@@ -230,7 +244,15 @@ async function standIn(repo, ran, sub = 'sub') {
         return res.end('{"type":"error","error":{"type":"not_found_error","message":"the probe serves messages only"}}');
       }
       calls++;
-      const step = steps[calls - 1];
+      // The second turn's first model call gets a Read of sub3/x.txt (a folder no other turn reads), once.
+      let j0 = {};
+      try {
+        j0 = JSON.parse(body);
+      } catch {}
+      const lastUser = [...(j0.messages ?? [])].reverse().find((m) => m.role === 'user');
+      const onSecond = !second && JSON.stringify(lastUser?.content ?? '').includes(SECOND_TURN);
+      if (onSecond) second = true;
+      const step = onSecond ? { name: 'Read', input: { file_path: join(repo, 'sub3', 'x.txt') } } : steps[first++];
       const tool = !!step;
       const content = tool ? [{ type: 'tool_use', id: `toolu_${tag}_${calls}`, ...step }] : [{ type: 'text', text: 'done' }];
       const msg = { id: `msg_probe_${calls}`, type: 'message', role: 'assistant', model: 'claude-sonnet-4-5', content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 1, output_tokens: 1 } };

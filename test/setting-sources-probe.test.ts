@@ -109,3 +109,22 @@ test("#958 (R1185p D3): a pull request touching anything the probe loads runs ad
   assert.doesNotMatch(jobs('src/sandbox.ts'), /wizard/, "and not the wizard's walk for that alone");
   assert.doesNotMatch(jobs('docs/x.md'), /add-project-real-systemd/, 'a file outside it does not');
 });
+
+test("#958 (R1185s S1): the probe loads src/ only through dist(), only what LOADS names, and its closure's hook entry is install.ts's HOOK_ENTRY", () => {
+  const text = readFileSync(probe, 'utf8');
+  // Its code, comments out (line and block), strings kept.
+  const code = text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  assert.equal((code.match(/\bimport\s*\(/g) ?? []).length, 1, 'one import(), the one inside dist()');
+  // Outside shim(), whose text is the source of the child it writes: no require() or createRequire beside it.
+  const shimAt = code.indexOf('function shim(');
+  const outside = shimAt < 0 ? code : code.slice(0, shimAt) + code.slice(code.indexOf('\n}\n', shimAt));
+  assert.ok(shimAt >= 0, 'shim() is where the probe says');
+  assert.doesNotMatch(outside, /\brequire\s*\(|createRequire/, 'no require() or createRequire beside it');
+  assert.match(code, /const dist = \(f\) => \{\n\s*if \(!LOADS\.includes\(/, 'dist() refuses a module LOADS doesn\'t name');
+  const loads = JSON.parse((/const LOADS = (\[[^\]]*\]);/.exec(code)?.[1] ?? '[]').replace(/'/g, '"')) as string[];
+  const calls = [...code.matchAll(/\bdist\(\s*(['"`])([^'"`]+)\1\s*\)/g)].map((m) => m[2]!.replace(/\.js$/, ''));
+  assert.ok(calls.length > 0 && calls.every((c) => loads.includes(c)), `every dist() call is in LOADS: ${calls.join(', ')}`);
+  assert.equal((code.match(/\bdist\(/g) ?? []).length, calls.length, 'every dist() call names a literal');
+  const entry = /export const HOOK_ENTRY = '([\w/-]+)\.js'/.exec(readFileSync(join(repoRoot, 'src', 'install.ts'), 'utf8'))?.[1];
+  assert.ok(entry && readFileSync(join(repoRoot, 'scripts', 'ci', 'setting-sources-probe.files'), 'utf8').split('\n').includes(`src/${entry}.ts`), 'the hook entry is in the closure');
+});
