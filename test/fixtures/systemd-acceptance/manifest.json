@@ -835,15 +835,15 @@
   ],
   "r1169y-g1-aliased-getbuiltinmodule": [
     2,
-    "passes 'node:test' to a call this can't read as a load"
+    "has 'node:test' where this can't read what it does"
   ],
   "r1169y-g2-destructured-getbuiltinmodule": [
     2,
-    "passes 'node:test' to a call this can't read as a load"
+    "has 'node:test' where this can't read what it does"
   ],
   "r1169y-g3-computed-getbuiltinmodule": [
     2,
-    "passes 'node:test' to a call this can't read as a load"
+    "has 'node:test' where this can't read what it does"
   ],
   "r1169y-g4-runtime-spec-destructured": [
     2,
@@ -851,7 +851,7 @@
   ],
   "r1169y-g5-require-call": [
     2,
-    "passes 'node:test' to a call this can't read as a load"
+    "has 'node:test' where this can't read what it does"
   ],
   "r1169y-g6-string-const-spec": [
     2,
@@ -905,6 +905,80 @@
     "test/y\\.test\\.ts:\\d+: acceptance: the engine unit starts"
   ],
   "r1169y-x9c-control-const-body": [
+    1,
+    "acceptance: the engine unit starts: SKIP not a booted host",
+    "test/y\\.test\\.ts:\\d+: acceptance: the engine unit starts"
+  ],
+  "r1169z-q1-loader-named-includes": [
+    2,
+    "has 'node:test' where this can't read what it does"
+  ],
+  "r1169z-q2-tagged-template-loader": [
+    2,
+    "has 'node:test' where this can't read what it does"
+  ],
+  "r1169z-q3-wrapper-returns-runtime-load": [
+    2,
+    "has 'node:test' where this can't read what it does"
+  ],
+  "r1169z-q4-new-loader": [
+    2,
+    "has 'node:test' where this can't read what it does"
+  ],
+  "r1169z-q5-control-direct": [
+    2,
+    "a skip reads src/os/probe\\.ts: lingerEnabled, which carries systemd's sign"
+  ],
+  "r1169z-z3-body-destructuring-assign": [
+    2,
+    "registers a test whose function isn't one this file defines"
+  ],
+  "r1169z-z4-body-for-of-assign": [
+    2,
+    "registers a test whose function isn't one this file defines"
+  ],
+  "r1169z-z5-function-decl-reassigned": [
+    2,
+    "registers a test whose function isn't one this file defines"
+  ],
+  "r1169z-z6-var-redeclared": [
+    2,
+    "registers a test whose function isn't one this file defines"
+  ],
+  "r1169z-z6b-var-redeclared-after": [
+    2,
+    "registers a test whose function isn't one this file defines"
+  ],
+  "r1169z-z11-body-assign-in-expression": [
+    2,
+    "registers a test whose function isn't one this file defines"
+  ],
+  "r1169z-z1-let-no-init-helper": [
+    1,
+    "acceptance: the engine unit starts: SKIP not a booted host",
+    "test/y\\.test\\.ts:\\d+: acceptance: the engine unit starts"
+  ],
+  "r1169z-z10-holder-reassigned-object": [
+    1,
+    "acceptance: the engine unit starts: SKIP not a booted host",
+    "test/y\\.test\\.ts:\\d+: acceptance: the engine unit starts"
+  ],
+  "r1169z-z2-helper-reassigned-to-name": [
+    1,
+    "acceptance: the engine unit starts: SKIP not a booted host",
+    "test/y\\.test\\.ts:\\d+: acceptance: the engine unit starts"
+  ],
+  "r1169z-z7-helper-destructuring-assign": [
+    1,
+    "acceptance: the engine unit starts: SKIP not a booted host",
+    "test/y\\.test\\.ts:\\d+: acceptance: the engine unit starts"
+  ],
+  "r1169z-z8-function-decl-helper-reassigned": [
+    1,
+    "acceptance: the engine unit starts: SKIP not a booted host",
+    "test/y\\.test\\.ts:\\d+: acceptance: the engine unit starts"
+  ],
+  "r1169z-z9-holder-property-assigned": [
     1,
     "acceptance: the engine unit starts: SKIP not a booted host",
     "test/y\\.test\\.ts:\\d+: acceptance: the engine unit starts"

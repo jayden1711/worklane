@@ -1,0 +1,1 @@
+{ "uses": { "src/os/probe.ts": { "why": "product code: asks loginctl for Linger (as src/os/index.ts does)", "uses": ["loginctl: return execFileSync('loginctl', ['show-user', user, '-p', 'Linger', '--value'], { encoding: 'utf8' }).trim() === 'yes';"] } }, "skipImports": {}, "runtime": {} }

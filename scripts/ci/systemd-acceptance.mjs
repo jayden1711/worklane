@@ -51,9 +51,11 @@
 // function, the same where it's called (an IIFE, a callback's call and its receiver, a same-file function at each
 // call; one used otherwise as a value stops the job; one in a method, a constructor or kept as a property stops it
 // too, R1169w D3), and an earlier process.exit()/abort() under a condition, or a
-// same-file function that ends the process (R1169w); process.getBuiltinModule() is a load as require() is; 'node:test'
-// handed to any other call (an aliased, destructured or computed loader, `.call`) stops the job, but a string's or an
-// array's lookup (R1169y D2); a function or holder name written again is no one function (R1169y D1). node:test
+// same-file function that ends the process (R1169w); process.getBuiltinModule() is a load as require() is; a
+// 'node:test' string anywhere but an allowlist of places stops the job (R1169z D2): a static import, a loader's first
+// argument, a lookup's (`.includes`, `.has`) argument or receiving array, a const or Set read only by lookups, or an
+// equality's operand; a function or holder name written anywhere but its declaration (any assignment, destructuring,
+// a for...of head, a property, a second `var`) is no one function (R1169y D1, R1169z D1). node:test
 // re-exported, or loaded (by name, or a module named at run time) where no declaration binds it (`import(...).then`,
 // an argument), stops the job (R1169w D2); a module named at run time is read as node:test for its test/describe
 // calls. A registration's function is its own inline, or one this file declares named there; any other (an import,
@@ -393,6 +395,9 @@ export function fileFlow(ts, path, text, source) {
   const scopes = new Map();
   const declare = (scope, name, d) => {
     if (!scopes.has(scope)) scopes.set(scope, new Map());
+    // A name declared twice in one scope (`var body = ...; var body = ...`, R1169z D1) is no single function.
+    const old = scopes.get(scope).get(name);
+    if (old) d.redeclares = old;
     scopes.get(scope).set(name, d);
   };
   const scopeOf = (n) => {
@@ -518,14 +523,6 @@ export function fileFlow(ts, path, text, source) {
     if (d) {
       d.nodes.push(st);
       d.texts.push(textOf(st));
-      // A function or holder name written again (R1169y D1): not one known function. As a test's function it can't
-      // be read (refused); as a helper, every function it's given is followed.
-      if (d.fnNode || d.holder) {
-        d.reassigned = true;
-        d.allFns ??= [d.fnNode ?? d.holder];
-        const r = unparen(right);
-        if (r && (ts.isArrowFunction(r) || ts.isFunctionExpression(r) || ts.isObjectLiteralExpression(r) || ts.isClassExpression(r))) d.allFns.push(r);
-      }
     }
   }
   // Every reference to each declaration (a name read, not a declaration, a property name, a label or a type).
@@ -542,6 +539,55 @@ export function fileFlow(ts, path, text, source) {
   };
   walkRefs(sf);
   const refsOf = (d) => refs.get(d) ?? [];
+  // Every write to a name, from its references (R1169z D1): an assignment of any operator, a destructuring target, a
+  // for...of/in head, ++/--, a property written on it (`h.need = ...`), or a second declaration. A name written
+  // anywhere but its declaration is no single function: as a test's function it can't be read (refused); as a helper,
+  // every function or holder in what it's given is followed (a name there, by its own).
+  const writeOf = (r) => {
+    let x = r;
+    for (;;) {
+      const p = x.parent;
+      if (!p) return null;
+      if (ts.isParenthesizedExpression(p) || ts.isArrayLiteralExpression(p) || ts.isObjectLiteralExpression(p) || ts.isSpreadElement(p) || ts.isSpreadAssignment(p) || (ts.isShorthandPropertyAssignment(p) && p.name === x) || (ts.isPropertyAssignment(p) && p.initializer === x) || ts.isNonNullExpression(p) || ts.isAsExpression(p)) {
+        x = p;
+        continue;
+      }
+      if ((ts.isPropertyAccessExpression(p) || ts.isElementAccessExpression(p)) && p.expression === x && x === r) {
+        // A property written on it: `h.need = ...`, `h['need'] = ...`.
+        const q = p.parent;
+        return q && ts.isBinaryExpression(q) && q.left === p && q.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && q.operatorToken.kind <= ts.SyntaxKind.LastAssignment ? { value: q.right } : null;
+      }
+      if (ts.isBinaryExpression(p) && p.left === x && p.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && p.operatorToken.kind <= ts.SyntaxKind.LastAssignment) return { value: p.right };
+      if ((ts.isForOfStatement(p) || ts.isForInStatement(p)) && p.initializer === x) return { value: p.expression };
+      if ((ts.isPrefixUnaryExpression(p) || ts.isPostfixUnaryExpression(p)) && (p.operator === ts.SyntaxKind.PlusPlusToken || p.operator === ts.SyntaxKind.MinusMinusToken)) return { value: null };
+      return null;
+    }
+  };
+  const valueFns = (v, acc, seen = new Set()) => {
+    const walk = (y) => {
+      if (!y) return;
+      if (ts.isArrowFunction(y) || ts.isFunctionExpression(y) || ts.isObjectLiteralExpression(y) || ts.isClassExpression(y) || ts.isArrayLiteralExpression(y)) return void acc.push(y);
+      if (ts.isIdentifier(y) && isRef(ts, y)) {
+        const e = resolve(y);
+        if (e && !seen.has(e)) {
+          seen.add(e);
+          for (const g of [e.fnNode, e.holder, ...(e.allFns ?? [])]) if (g) acc.push(g);
+        }
+      }
+      ts.forEachChild(y, walk);
+    };
+    walk(v);
+    return acc;
+  };
+  for (const d of decls) {
+    const writes = refsOf(d).map(writeOf).filter(Boolean);
+    const old = d.redeclares;
+    if (!writes.length && !old) continue;
+    d.reassigned = true;
+    d.allFns = [d.fnNode, d.holder, old?.fnNode, old?.holder].filter(Boolean);
+    if (old) old.reassigned = true;
+    for (const w of writes) valueFns(w.value, d.allFns);
+  }
   /** The declaration of the function `fn` is (a function declaration, or `const f = () => ...`), or null. */
   const fnDecl = (fn) => {
     if (ts.isFunctionDeclaration(fn) && fn.name) return resolve(fn.name);
@@ -818,6 +864,44 @@ export function skipReads(ts, path, text, source) {
   const isLoader = (c) => {
     return c.kind === ts.SyntaxKind.ImportKeyword || (ts.isIdentifier(c) && /^(?:require|getBuiltinModule)$/.test(c.text)) || (ts.isPropertyAccessExpression(c) && /^(?:getBuiltinModule|require)$/.test(c.name.text)) || (ts.isCallExpression(c) && ts.isIdentifier(c.expression) && c.expression.text === 'createRequire') || (ts.isIdentifier(c) && !!resolve(c)?.varDecl?.initializer && ts.isCallExpression(resolve(c).varDecl.initializer) && ts.isIdentifier(resolve(c).varDecl.initializer.expression) && resolve(c).varDecl.initializer.expression.text === 'createRequire');
   };
+  const LOOKUP = /^(?:includes|indexOf|lastIndexOf|startsWith|endsWith|has)$/;
+  const lookupOn = (x) => {
+    // `x` is a lookup's receiver: `x.includes(...)`, its argument nowhere else.
+    const p = x.parent;
+    return ts.isPropertyAccessExpression(p) && p.expression === x && LOOKUP.test(p.name.text) && ts.isCallExpression(p.parent) && p.parent.expression === p;
+  };
+  const onlyLooked = (decl) => {
+    const v = decl.parent;
+    if (!ts.isVariableDeclaration(v) || v.initializer !== decl || !ts.isIdentifier(v.name) || !(v.parent.flags & ts.NodeFlags.Const)) return false;
+    const d = resolve(v.name);
+    return !!d && refsOf(d).every(lookupOn);
+  };
+  const nodeTestPlace = (lit) => {
+    let x = lit;
+    while (ts.isParenthesizedExpression(x.parent)) x = x.parent;
+    const p = x.parent;
+    if ((ts.isImportDeclaration(p) && p.moduleSpecifier === x) || ts.isExternalModuleReference(p) || ts.isLiteralTypeNode(p)) return true;
+    if (ts.isCallExpression(p) && p.arguments[0] === x && isLoader(p.expression)) return true;
+    if (ts.isBinaryExpression(p) && [ts.SyntaxKind.EqualsEqualsEqualsToken, ts.SyntaxKind.ExclamationEqualsEqualsToken, ts.SyntaxKind.EqualsEqualsToken, ts.SyntaxKind.ExclamationEqualsToken].includes(p.operatorToken.kind)) return true;
+    if (ts.isCallExpression(p) && p.arguments.includes(x) && ts.isPropertyAccessExpression(p.expression) && LOOKUP.test(p.expression.name.text)) {
+      const r = p.expression.expression;
+      if (ts.isStringLiteralLike(r) || ts.isArrayLiteralExpression(r)) return true;
+      const d = ts.isIdentifier(r) ? resolve(r) : null;
+      // A same-file holder or function could be a loader under a lookup's name (`o.includes = getBuiltinModule`); an
+      // array of literals, never written, is data.
+      const data = d && !d.reassigned && d.holder && ts.isArrayLiteralExpression(d.holder) && d.holder.elements.every((e) => ts.isStringLiteralLike(e) || ts.isNumericLiteral(e));
+      return ts.isIdentifier(r) && (!!data || !(d && (d.fnNode || d.holder || d.allFns)));
+    }
+    if (ts.isArrayLiteralExpression(p)) {
+      let a = p;
+      while (ts.isParenthesizedExpression(a.parent)) a = a.parent;
+      if (lookupOn(a) || onlyLooked(a)) return true;
+      const q = a.parent;
+      // `new Set([...])` / `new Map([...])`, itself a const read only as a lookup's receiver.
+      return ts.isNewExpression(q) && q.arguments?.[0] === a && ts.isIdentifier(q.expression) && /^(?:Set|Map)$/.test(q.expression.text) && !resolve(q.expression) && onlyLooked(q);
+    }
+    return false;
+  };
   const statement = (call) => {
     let x = call;
     while (ts.isAwaitExpression(x.parent) || ts.isParenthesizedExpression(x.parent) || ts.isVoidExpression(x.parent)) x = x.parent;
@@ -978,9 +1062,12 @@ export function skipReads(ts, path, text, source) {
     // node:test named where this can't bind it (R1169w D2): a 'node:test' string that isn't a static import's, or a
     // require(), import() or getBuiltinModule() whose result a declaration binds directly (`.then`, a re-export,
     // `module.require`, anything later): refused, failing closed.
-    // And 'node:test' as any call's argument (R1169y D2: an aliased, destructured or computed loader, `.call`), but a
-    // string or array lookup's or a loader's (read just above, as its call).
-    if (ts.isStringLiteralLike(n) && n.text === 'node:test' && ts.isCallExpression(n.parent) && n.parent.arguments.includes(n) && !isLoader(n.parent.expression) && !(ts.isPropertyAccessExpression(n.parent.expression) && /^(?:includes|indexOf|lastIndexOf|startsWith|endsWith|has)$/.test(n.parent.expression.name.text))) refused.add(`${at(n)}: \`${snip(n.parent)}\` passes 'node:test' to a call this can't read as a load: load node:test only by an import, or a declaration of require(), import() or getBuiltinModule() by name`);
+    // Where 'node:test' may appear at all (R1169z D2, an allowlist, not a list of callers): a static import's or a type's
+    // specifier; a loader's first argument (its binding read just below, as its call); a lookup's argument
+    // (`.includes`, `.has`, ...) on a receiver that isn't a same-file holder or function; an element of an array that is
+    // such a lookup's receiver, or a const (or a `new Set`/`new Map` of one) read only as one; or an equality's operand.
+    // Anywhere else (a tagged template, `new`, an array or object handed to a call, `Reflect.apply`) stops the job.
+    if ((ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n)) && n.text === 'node:test' && !nodeTestPlace(n)) refused.add(`${at(n)}: \`${snip(n.parent)}\` has 'node:test' where this can't read what it does: load node:test only by an import, or a declaration of require(), import() or getBuiltinModule() by name`);
     if (refusedLoad(n)) refused.add(`${at(n)}: \`${snip(n.parent)}\` names node:test where this can't bind it: import it (\`import { test } from 'node:test'\`, or a declaration of require(), import() or getBuiltinModule()), so each registration is read`);
     const kind = callKind(n);
     if (kind) {
