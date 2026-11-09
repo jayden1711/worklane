@@ -290,9 +290,15 @@ test('must hold: the soak workflow can be green only on a soak run as asked (R11
       assert.doesNotMatch(s.run, /GITHUB_ENV/, `step ${s.name ?? s.run}: no GITHUB_ENV`);
       for (const l of s.run.split('\n').filter((x) => /GITHUB_PATH/.test(x))) assert.match(l, /^\s*echo "\$RUNNER_TEMP\/bin" >> "\$GITHUB_PATH"$/, l);
       // No package script and no npm script (R1181l 1, as ci.yml's shards): npm ci --ignore-scripts and the locked tsc,
-      // run by the node recorded right after setup-node, which is the one node named.
-      const named = ['echo "path=$(command -v node)" >> "$GITHUB_OUTPUT"', '${{ steps.node.outputs.path }} node_modules/typescript/bin/tsc -p tsconfig.json'];
-      if (!named.includes(s.run)) assert.doesNotMatch(s.run, /\bnode\b(?!_modules)|\bnpm\s+(?!ci --ignore-scripts$)/m, `step ${s.name ?? s.run}: no node shim written`);
+      // run by the node recorded right after setup-node. The check runs on every step; only the two exact fragments that
+      // name that recorded node are taken out first, and each may appear only in its own step, at its pinned place.
+      const recordAt = BEFORE_SOAK.findIndex((x) => (x as { id?: string }).id === 'node');
+      const tscAt = BEFORE_SOAK.findIndex((x) => /node_modules\/typescript\/bin\/tsc/.test(String((x as { run?: string }).run)));
+      const i = job.steps.indexOf(s);
+      assert.ok(!s.run.includes('$(command -v node)') || i === recordAt, `step ${s.name ?? s.run}: node recorded only in the record step`);
+      assert.ok(!s.run.includes('${{ steps.node.outputs.path }}') || i === tscAt, `step ${s.name ?? s.run}: the recorded node run only by the tsc step`);
+      const rest = s.run.replace('$(command -v node)', '').replace('${{ steps.node.outputs.path }} node_modules/', '');
+      assert.doesNotMatch(rest, /\bnode\b(?!_modules)|\bnpm\s+(?!ci --ignore-scripts$)/m, `step ${s.name ?? s.run}: no node shim written`);
     }
   }
   const step = job.steps[at]!;
