@@ -36,7 +36,8 @@ const checkRun = (r: Run, i: number) => ({
   app: { id: r.app ?? ACTIONS, slug: (r.app ?? ACTIONS) === ACTIONS ? 'github-actions' : `app-${r.app}` },
   check_suite: { id: r.suite },
 });
-const workflowRun = (suite: number, path: string, o: { repo?: string; sha?: string } = {}) => ({ id: suite * 10, html_url: `https://github.com/${o.repo ?? 'example-org/engine'}/actions/runs/${suite * 10}`, check_suite_id: suite, path, head_sha: o.sha ?? SHA, repository: { full_name: o.repo ?? 'example-org/engine' } });
+// A main commit's run as GitHub lists it: a push to main (#943), unless `o` says otherwise.
+const workflowRun = (suite: number, path: string, o: { repo?: string; sha?: string; event?: string; branch?: string | null; bases?: string[]; headRepo?: string } = {}) => ({ id: suite * 10, html_url: `https://github.com/${o.repo ?? 'example-org/engine'}/actions/runs/${suite * 10}`, check_suite_id: suite, path, head_sha: o.sha ?? SHA, repository: { full_name: o.repo ?? 'example-org/engine' }, head_repository: { full_name: o.headRepo ?? o.repo ?? 'example-org/engine' }, event: o.event ?? 'push', head_branch: o.branch === undefined ? 'main' : o.branch, pull_requests: (o.bases ?? []).map((ref) => ({ base: { ref } })) });
 
 /**
  * A GitHub that answers the updater's reads for commit SHA; `rules`: the branch's rulesets; `statuses`: the commit's
@@ -86,6 +87,18 @@ test('a same-name check from another workflow, a run for another commit, another
     // Adversarial pass: the job's path on another host, or over plain http, isn't its run's job page.
     ['the right path on another host', [{ name: 'test (ubuntu-latest, 22)', suite: 1, page: 'https://evil.example/example-org/engine/actions/runs/10/job/0' }, { name: 'scan', suite: 2 }], legit],
     ['the right page over http', [{ name: 'test (ubuntu-latest, 22)', suite: 1, page: 'http://github.com/example-org/engine/actions/runs/10/job/0' }, { name: 'scan', suite: 2 }], legit],
+    // #943: a pull_request run reads its workflow from the PR's merge ref but posts on the head. A PR from main into
+    // another base, with its own ci.yml, posts green runs on main's commit; so does anything not started on main.
+    ['the right file, from a PR into another base', [{ name: 'test (ubuntu-latest, 22)', suite: 9 }, { name: 'scan', suite: 2 }], [...legit.slice(1), workflowRun(9, '.github/workflows/ci.yml', { event: 'pull_request', branch: 'main', bases: ['evil'] })]],
+    // R1176c: a main commit counts only push, workflow_dispatch and schedule runs, never a pull_request run, even
+    // one started on main into main (its workflow came from a merge ref, not from main).
+    ['the right file, from a pull_request run on main into main', [{ name: 'test (ubuntu-latest, 22)', suite: 9 }, { name: 'scan', suite: 2 }], [...legit.slice(1), workflowRun(9, '.github/workflows/ci.yml', { event: 'pull_request', branch: 'main', bases: ['main'] })]],
+    ['the right file, from a PR GitHub lists no base for', [{ name: 'test (ubuntu-latest, 22)', suite: 9 }, { name: 'scan', suite: 2 }], [...legit.slice(1), workflowRun(9, '.github/workflows/ci.yml', { event: 'pull_request', branch: 'main', bases: [] })]],
+    ['the right file, pushed to another branch', [{ name: 'test (ubuntu-latest, 22)', suite: 9 }, { name: 'scan', suite: 2 }], [...legit.slice(1), workflowRun(9, '.github/workflows/ci.yml', { branch: 'evil' })]],
+    ['the right file, from pull_request_target', [{ name: 'test (ubuntu-latest, 22)', suite: 9 }, { name: 'scan', suite: 2 }], [...legit.slice(1), workflowRun(9, '.github/workflows/ci.yml', { event: 'pull_request_target', bases: ['main'] })]],
+    ['the right file, with no event', [{ name: 'test (ubuntu-latest, 22)', suite: 9 }, { name: 'scan', suite: 2 }], [...legit.slice(1), workflowRun(9, '.github/workflows/ci.yml', { event: '' })]],
+    // R1176f D2: a run whose commit came from a fork (`head_repository`), though it lives in this repo.
+    ['the right file, a push run whose commit came from a fork', [{ name: 'test (ubuntu-latest, 22)', suite: 9 }, { name: 'scan', suite: 2 }], [...legit.slice(1), workflowRun(9, '.github/workflows/ci.yml', { headRepo: 'attacker/engine' })]],
   ];
   for (const [what, runs, workflowRuns] of spoofs) {
     const r = await choose(engine, gitHub({ runs, workflowRuns }));
