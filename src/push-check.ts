@@ -223,7 +223,8 @@ function judge(cwd: string, snap: GitSnapshot, base: CommitId, head: CommitId, l
   return problems;
 }
 
-export type PushResult = { ok: true } | { ok: false; refused: string[] } | { ok: false; error: string };
+/** `held`: the caller's `hold`, asked right before `git push`, said not to push (its reason in `error`): nothing was pushed. */
+export type PushResult = { ok: true } | { ok: false; refused: string[] } | { ok: false; error: string; held?: true };
 
 /**
  * The only way the coordinator pushes code: the limits first, then the push.
@@ -233,8 +234,10 @@ export type PushResult = { ok: true } | { ok: false; refused: string[] } | { ok:
  * `guard`: the default branch is never pushed (push-guard.ts), except as the direct land (land_mode direct); a push
  * to it is refused before anything else and recorded through the guard.
  * What is pushed is the head commit the limits judged, by id (#981).
+ * `hold`: asked last, right before `git push`, after the limits' git runs (R1183f: a stop written while they ran is
+ * read); a reason from it pushes nothing and returns `held`.
  */
-export function checkedPush(o: { cwd: string; remote: string; base: string; head: string; ref: string; limits: PushLimits; guard: PushGuard; force?: boolean; expect?: string }): PushResult {
+export function checkedPush(o: { cwd: string; remote: string; base: string; head: string; ref: string; limits: PushLimits; guard: PushGuard; force?: boolean; expect?: string; hold?: () => string | null }): PushResult {
   const main = defaultBranchRefusal(o.guard, o.ref, o.head);
   if (main) return { ok: false, refused: [main] };
   const checked = checkRange(o.cwd, o.base, o.head, o.limits);
@@ -242,6 +245,9 @@ export function checkedPush(o: { cwd: string; remote: string; base: string; head
   // Once more right before the push, in this process: a cut written since the limits ran (#807).
   const late = shallowCut(o.cwd, checked.base, checked.head);
   if (late) return { ok: false, refused: [late] };
+  // The caller's last word, with nothing between it and the push but building the push's arguments.
+  const held = o.hold?.() ?? null;
+  if (held) return { ok: false, error: held, held: true };
   const lease = o.expect ? [`--force-with-lease=${o.ref}:${o.expect}`] : [];
   // The commit the limits judged, by id: never o.head's name, which may point elsewhere by now.
   const push = gitSpawnSync(['push', ...lease, o.remote, `${o.force ? '+' : ''}${checked.head}:${o.ref}`], { cwd: o.cwd, encoding: 'utf8' });
