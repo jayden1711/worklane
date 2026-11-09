@@ -240,37 +240,68 @@ export abstract class Decisions extends Recovery {
    * `approvals` as the default branch has it. A reply from anyone else answers nothing: a writer's `approve` of a
    * high-risk merge (`land`) or a held plan waits for an owner, as on the dashboard.
    *
-   * Only a reply to this question counts (#1248, R1182v, R1182x), decided by the tracker's own order, never by a clock:
-   * - a reply whose command names a decision id (`/<cli> approve d-…`) answers that decision and no other;
-   * - a reply that names none answers this question only if it comes after the question's own comment (the one ask()
-   *   posted, holding `decide <id> `) in the issue's comment order. Without that comment (it couldn't be posted), only
-   *   a reply naming the id counts.
-   * So an older reply (an approval of an earlier question on the same issue: a landing re-ask after the output changed,
-   * or a review-time approval) never answers a new one, whatever the instance's or the tracker's clock says.
+   * Only a reply to this question counts (#1248, R1182v, R1182w, R1182x, R1182y, R1182z), decided by the tracker's own
+   * order, never by a clock or by text anyone can write:
+   * - Each command line is read on its own, its option and its id from the same line (`/<cli> approve d-12-a3f9c1`; the
+   *   id ends at a word character, so `d-12-a3f9c1.` names d-12-a3f9c1). The last line naming this decision's id answers
+   *   it; a line naming another id never does.
+   * - A bare line (no id) answers this question only if the reply comes after the question's own comment (the one
+   *   ask() posted, found by the id the backlog gave back: `decision.posted`, never by its text) and that comment is
+   *   the nearest question comment above the reply, unedited. So a bare reply answers at most one decision.
+   * - No recorded comment (it couldn't be posted, or the backlog gives no ids): only a line naming the id counts.
+   * A writer's reply that can't count says so once (`reply_without_id`, `reply_unknown_id`), never ignored silently.
    */
   private async commentAnswer(n: number, q: EventPayload<'decision.asked'>, writers: Set<string>, cmd: RegExp): Promise<{ by: string; body: string; answer: string; role: 'owner' | 'writer' } | null> {
     const comments = await this.d.backlog.comments(n);
-    const question = comments.findIndex((c) => c.body.includes(`decide ${q.id} `));
-    // The token after the option, when it is a decision id: `/<cli> approve d-12-a3f9c1`.
-    const arg = new RegExp(`${cmd.source}[ \\t]+(d-\\S+)`, cmd.flags);
-    const toThis = (c: { body: string }, i: number) => {
-      const id = c.body.match(arg)?.[2];
-      return id !== undefined ? id === q.id : question >= 0 && i > question;
+    // Every question comment ask() posted on this issue, by comment id: the decision it asks.
+    const anchors = new Map<string, string>();
+    for (const e of this.d.log.read(0, ['decision.posted'])) {
+      const p = e.payload as EventPayload<'decision.posted'>;
+      if (p.issue === n) anchors.set(p.comment, p.id);
+    }
+    const anchorAt = (i: number) => {
+      const c = comments[i]!;
+      return c.id !== undefined && !c.edited ? anchors.get(c.id) : undefined;
     };
-    // A writer's bare reply set aside because the question's own comment isn't there: said once, where health and the
-    // dashboard show it, never ignored without a word (R1182x).
-    if (question < 0 && comments.some((c) => writers.has(c.author.toLowerCase()) && q.options.includes(c.body.match(cmd)?.[1] ?? '') && c.body.match(arg) === null)) {
-      const said = this.d.log.read(0, ['coordinator.error']).some((e) => (e.payload as { kind: string; message: string }).kind === 'reply_without_id' && (e.payload as { message: string }).message.includes(q.id));
-      if (!said) this.emit('coordinator.error', { instance: this.d.instance, where: 'decision reply', kind: 'reply_without_id', message: `#${n}: a reply to decision ${q.id} doesn't name it, and the question's comment isn't on the issue, so it answers nothing; reply \`/${BRAND.cli} <option> ${q.id}\`, answer on the dashboard, or run \`${BRAND.cli} decide ${q.id} <option>\`` });
+    const question = comments.findIndex((_, i) => anchorAt(i) === q.id);
+    /** The nearest question comment above comment i. */
+    const nearest = (i: number) => {
+      for (let j = i - 1; j >= 0; j--) {
+        const a = anchorAt(j);
+        if (a !== undefined) return a;
+      }
+      return undefined;
+    };
+    const line = new RegExp(`${cmd.source}(?:[ \\t]+(d-[\\w-]*\\w))?`, cmd.flags.includes('g') ? cmd.flags : `${cmd.flags}g`);
+    const lines = (body: string) => [...body.matchAll(line)].map((m) => ({ option: m[1]!, id: m[2] }));
+    const pick = (c: { body: string }, i: number): string | undefined => {
+      const ls = lines(c.body).filter((l) => q.options.includes(l.option));
+      const named = ls.filter((l) => l.id === q.id);
+      if (named.length) return named.at(-1)!.option;
+      const bare = ls.filter((l) => l.id === undefined);
+      return bare.length && question >= 0 && i > question && nearest(i) === q.id ? bare.at(-1)!.option : undefined;
+    };
+    const said = (kind: string, key: string) => this.d.log.read(0, ['coordinator.error']).some((e) => (e.payload as { kind: string }).kind === kind && (e.payload as { message: string }).message.includes(key));
+    const ours = comments.filter((c) => writers.has(c.author.toLowerCase()));
+    // A writer's bare reply set aside because the question's own comment isn't there: said once (R1182x).
+    if (question < 0 && ours.some((c) => lines(c.body).some((l) => l.id === undefined && q.options.includes(l.option))) && !said('reply_without_id', q.id)) {
+      this.emit('coordinator.error', { instance: this.d.instance, where: 'decision reply', kind: 'reply_without_id', message: `#${n}: a reply to decision ${q.id} doesn't name it, and the question's comment isn't on the issue, so it answers nothing; reply \`/${BRAND.cli} <option> ${q.id}\`, answer on the dashboard, or run \`${BRAND.cli} decide ${q.id} <option>\`` });
+    }
+    // A writer's command naming an id no decision on this issue has (a typo): said once (R1182z).
+    const known = new Set(this.d.log.read(0, ['decision.asked']).map((e) => e.payload as EventPayload<'decision.asked'>).filter((p) => p.issue === n).map((p) => p.id));
+    for (const c of ours) {
+      for (const l of lines(c.body)) {
+        if (l.id === undefined || known.has(l.id)) continue;
+        const key = `#${n}: a reply names decision ${l.id},`;
+        if (!said('reply_unknown_id', key)) this.emit('coordinator.error', { instance: this.d.instance, where: 'decision reply', kind: 'reply_unknown_id', message: `${key} which isn't one on this issue, so it answers nothing; reply with the id the question shows, answer on the dashboard, or run \`${BRAND.cli} decide <id> <option>\`` });
+      }
     }
     const replies = comments
-      .map((c, i) => ({ c, ok: writers.has(c.author.toLowerCase()) && toThis(c, i) }))
-      .filter((x) => x.ok)
-      .map(({ c }) => ({ by: c.author, body: c.body, m: c.body.match(cmd) }))
-      .filter((x) => x.m && q.options.includes(x.m[1]!));
+      .map((c, i) => ({ c, answer: writers.has(c.author.toLowerCase()) ? pick(c, i) : undefined }))
+      .filter((x) => x.answer !== undefined);
     for (const r of replies.reverse()) {
-      const role = await this.commenterRole(r.by);
-      if (mayAnswerKind(q.kind, role, this.approvals())) return { by: r.by, body: r.body, answer: r.m![1]!, role: role === 'owner' ? 'owner' : 'writer' };
+      const role = await this.commenterRole(r.c.author);
+      if (mayAnswerKind(q.kind, role, this.approvals())) return { by: r.c.author, body: r.c.body, answer: r.answer!, role: role === 'owner' ? 'owner' : 'writer' };
     }
     return null;
   }

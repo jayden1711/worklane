@@ -150,7 +150,9 @@ const commentAnswer = (f: Fixture, q: EventPayload<'decision.asked'>): Promise<A
 const askLand = (f: Fixture, id: string) => {
   const q = { id, kind: 'land' as const, issue: 1, owner: 'example-owner', question: 'Approve landing #1 (L3)?', options: OPTS, recommendation: 'reject', receipts: [] };
   const e = f.log.append('decision.asked', q, 'coordinator');
-  f.backlog.humanComment(1, 'coordinator', `[worklane] @example-owner decision needed: **${q.question}**\n\nReply \`/worklane approve ${id}\` or \`/worklane reject ${id}\`, or run \`worklane decide ${id} <option>\`.`);
+  // As ask() posts and records it (R1182z: the anchor is this comment, by its id).
+  const comment = f.backlog.humanComment(1, 'coordinator', `[worklane] @example-owner decision needed: **${q.question}**\n\nReply \`/worklane approve ${id}\` or \`/worklane reject ${id}\`, or run \`worklane decide ${id} <option>\`.`);
+  f.log.append('decision.posted', { id, issue: 1, comment }, 'coordinator');
   return { q, ts: (f.log.read(0, ['decision.asked']).find((x) => (x.payload as { id: string }).id === id)!).ts, e };
 };
 const blobOnMain = (f: Fixture, p: string) => {

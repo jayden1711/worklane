@@ -3,7 +3,11 @@
 // their label history.
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { randomBytes } from 'node:crypto';
 import { redactString, TRACKER } from '../events/redact.js';
+
+/** A comment's id: never reused on an issue, also after a comment is deleted (as GitHub's ids). */
+const commentId = (n: number) => `${n}-${randomBytes(6).toString('hex')}`;
 import type { Backlog, CommitCheck, Issue, PrReview, PrReviewComment, PullRequest, RerunJobs } from './types.js';
 
 interface FilePr {
@@ -37,7 +41,7 @@ interface FilePr {
 
 interface FileState {
   // As on GitHub, a pull request is an issue too (same numbering, labels and comments), with `pr` set.
-  issues: (Issue & { labelEvents: { label: string; actor: string }[]; comments: { author: string; body: string; at?: string }[]; pr?: FilePr })[];
+  issues: (Issue & { labelEvents: { label: string; actor: string }[]; comments: { id?: string; author: string; body: string; at?: string; edited?: boolean }[]; pr?: FilePr })[];
   labels: string[];
   /** Checks per commit sha (tests set them). */
   checks?: Record<string, CommitCheck[]>;
@@ -91,9 +95,21 @@ export class FileBacklog implements Backlog {
     });
   }
 
-  /** Test helper: a human comments on an issue (now, or at `at`). */
+  /** Test helper: a human comments on an issue (now, or at `at`). Returns the comment's id. */
   humanComment(n: number, author: string, body: string, at = new Date().toISOString()) {
-    this.edit(n, (i) => i.comments.push({ author, body, at }));
+    let id = '';
+    this.edit(n, (i) => i.comments.push({ id: (id = commentId(n)), author, body, at }));
+    return id;
+  }
+
+  /** Test helper: someone edits comment `id` (as GitHub allows its author or any writer): same place, author and time. */
+  editComment(n: number, id: string, body: string) {
+    this.edit(n, (i) => {
+      const c = i.comments.find((x) => x.id === id);
+      if (!c) throw new Error(`no comment ${id} on #${n}`);
+      c.body = body;
+      c.edited = true;
+    });
   }
 
   async list(label: string) {
@@ -131,7 +147,9 @@ export class FileBacklog implements Backlog {
   // What the harness writes is redacted first (events/redact.ts), as the GitHub backlog does for everything it sends:
   // secrets, and in issue, comment and PR text the identifiers too (emails, internal hosts, private IPs, paths).
   async comment(n: number, body: string) {
-    this.edit(n, (i) => i.comments.push({ author: this.actor, body: redactString(body, TRACKER), at: new Date().toISOString() }));
+    let id = '';
+    this.edit(n, (i) => i.comments.push({ id: (id = commentId(n)), author: this.actor, body: redactString(body, TRACKER), at: new Date().toISOString() }));
+    return id;
   }
   async comments(n: number) {
     return this.load().issues.find((x) => x.number === n)?.comments ?? [];

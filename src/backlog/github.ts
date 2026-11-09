@@ -163,12 +163,14 @@ export class GitHubBacklog implements Backlog {
   // Issue, comment and PR text drops identifiers too (emails, internal hosts, private IPs, paths: events/redact.ts);
   // req() redacts secrets from everything else it sends. A merge's commit message is left as written (its sign-off).
   async comment(n: number, body: string) {
-    await this.req('POST', `/repos/${this.repo}/issues/${n}/comments`, { body: redactString(body, TRACKER) });
+    const made = await this.req<{ id?: number } | null>('POST', `/repos/${this.repo}/issues/${n}/comments`, { body: redactString(body, TRACKER) });
+    return made?.id !== undefined ? String(made.id) : undefined;
   }
 
   async comments(n: number) {
-    const list = await this.req<{ user: { login: string } | null; body: string; created_at?: string }[]>('GET', `/repos/${this.repo}/issues/${n}/comments?per_page=100`);
-    return list.map((c) => ({ author: c.user?.login ?? '', body: c.body ?? '', ...(c.created_at ? { at: c.created_at } : {}) }));
+    const list = await this.req<{ id?: number; user: { login: string } | null; body: string; created_at?: string; updated_at?: string }[]>('GET', `/repos/${this.repo}/issues/${n}/comments?per_page=100`);
+    // `edited`: GitHub moves updated_at on every edit of the body (by its author or anyone with write access).
+    return list.map((c) => ({ ...(c.id !== undefined ? { id: String(c.id) } : {}), author: c.user?.login ?? '', body: c.body ?? '', ...(c.created_at ? { at: c.created_at } : {}), edited: c.updated_at !== undefined && c.updated_at !== c.created_at }));
   }
 
   async close(n: number) {

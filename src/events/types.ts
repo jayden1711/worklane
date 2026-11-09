@@ -528,6 +528,11 @@ export const EventSchemas = {
   'automation.poll_held': z.strictObject({ why: z.string(), until: z.string() }),
   /** One superfan pass (src/superfan/): the instance's or the machine's; what it read, what it did, what it cost, today's spend. Notes: what it couldn't read. */
   'superfan.pass': z.strictObject({ scope: z.enum(['instance', 'machine']), outcome: z.enum(['quiet', 'nothing', 'posted', 'duplicate', 'budget', 'instance_budget', 'failed']), items: z.number().int().nonnegative(), cost_usd: z.number().nonnegative(), spent_usd: z.number().nonnegative(), filed: issue.nullable(), notes: z.array(z.string()) }),
+  /**
+   * The comment ask() posted for decision `id` on `issue`, by the id the backlog gave back (R1182z). A reply answers the
+   * question by its place after this very comment, never after any comment that happens to hold the same text.
+   */
+  'decision.posted': z.strictObject({ id: z.string(), issue, comment: z.string() }),
   /** `role`: answered on the dashboard by someone it read as an owner or writer of the instance's repo. */
   'decision.answered': z.strictObject({ id: z.string(), by: z.string(), answer: z.string(), role: z.enum(['owner', 'writer']).optional() }),
   // the setup console's asks (src/console/asks.ts): what the harness needs from the owner and can't do itself

@@ -52,9 +52,14 @@ function askLand(f: Fixture, kind: EventPayload<'decision.asked'>['kind'] = 'lan
   return { n, id };
 }
 
-/** The question's own comment, as ask() (src/coordinator/base.ts) posts it: a reply counts only after it (#1248, R1182x). */
-const questionComment = (f: Fixture, n: number, id: string) =>
-  f.backlog.humanComment(n, 'coordinator', `[${BRAND.cli}] @${OWNER} decision needed: **Land it?**\n\nReply \`/${BRAND.cli} approve ${id}\` or \`/${BRAND.cli} reject ${id}\`, or run \`${BRAND.cli} decide ${id} <option>\`.`);
+/**
+ * The question's own comment, as ask() (src/coordinator/base.ts) posts it and records it (`decision.posted`, by the
+ * comment's id): a bare reply counts only after it (#1248, R1182x, R1182z).
+ */
+const questionComment = (f: Fixture, n: number, id: string) => {
+  const comment = f.backlog.humanComment(n, 'coordinator', `[${BRAND.cli}] @${OWNER} decision needed: **Land it?**\n\nReply \`/${BRAND.cli} approve ${id}\` or \`/${BRAND.cli} reject ${id}\`, or run \`${BRAND.cli} decide ${id} <option>\`.`);
+  f.log.append('decision.posted', { id, issue: n, comment }, 'alice');
+};
 
 const handleDecisions = (c: Coordinator) => (c as unknown as { handleDecisions(): Promise<void> }).handleDecisions();
 const of = <T>(f: Fixture, type: Parameters<Fixture['log']['read']>[1] extends (infer U)[] | undefined ? U : never) => f.log.read(0, [type]).map((e) => e.payload as T);
