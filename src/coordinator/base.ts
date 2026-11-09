@@ -9,6 +9,7 @@ import type { Config } from '../config/load.js';
 import { claim, release } from '../claims.js';
 import { settleRecommendation } from '../decision-ask.js';
 import type { EventLog } from '../events/log.js';
+import { redactString, TRACKER } from '../events/redact.js';
 import type { EventPayload, StoredEvent } from '../events/types.js';
 import { agentReadableDir, cpuCount, diskFree, groupOnlyDir, machineLoad, writeAgentReadable, writeGroupOnly } from '../os/index.js';
 import { currentCoreShare, envWithCores, withCores } from '../cores.js';
@@ -624,9 +625,11 @@ export abstract class CoordinatorBase {
     this.emit('decision.asked', { id, kind, issue, owner, question, options, recommendation, receipts, ...(context ? { context } : {}) });
     if (issue === null) return id; // not tied to an issue: answered from the dashboard or CLI
     await this.d.backlog.addLabels(issue, ['needs:decision']);
+    // R1182v: each line redacted on its own, as the tracker redacts (the backlog redacts the body again): a redaction that
+    // runs to an end marker (a private key's) can't cross from one line into the next and hide the lines between.
     await this.d.backlog.comment(
       issue,
-      `[${BRAND.cli}] @${owner} decision needed: **${question}**\n\nOptions: ${options.join(' / ')}.${recommendation ? ` Recommendation: **${recommendation}**.` : ''}\n\n${receipts.map((r) => `- ${r}`).join('\n')}\n\nReply \`/${BRAND.cli} ${options.join('` or `/' + BRAND.cli + ' ')}\` (owner or a writer), or run \`${BRAND.cli} decide ${id} <option>\`.`,
+      `[${BRAND.cli}] @${owner} decision needed: **${question}**\n\nOptions: ${options.join(' / ')}.${recommendation ? ` Recommendation: **${recommendation}**.` : ''}\n\n${receipts.map((r) => `- ${redactString(r, TRACKER)}`).join('\n')}\n\nReply \`/${BRAND.cli} ${options.join('` or `/' + BRAND.cli + ' ')}\` (owner or a writer), or run \`${BRAND.cli} decide ${id} <option>\`.`,
     );
     return id;
   }

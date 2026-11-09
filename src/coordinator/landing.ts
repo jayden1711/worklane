@@ -22,7 +22,7 @@ import { changedPathBytes, treeEntries } from './change-files.js';
 import { Decisions } from './decisions.js';
 import { evalLines, pushRefusal, DEFAULT_REVIEW, lockScopeOf } from './shared.js';
 import { SANDBOX_UNAVAILABLE } from '../os/index.js';
-import { redactString } from '../events/redact.js';
+import { redactString, TRACKER } from '../events/redact.js';
 import { shownPath } from '../path-text.js';
 import { slotDeferringSince } from './wait-caps.js';
 import { optimizePrLines } from '../optimize.js';
@@ -101,9 +101,11 @@ export abstract class Landing extends Decisions {
   }
 
   /**
-   * Seed with the oldest; add later changes whose files don't overlap, at most one L3, up to batch_max. R1182t: L3
-   * entries the owner approved together at landing (the same landing print, which names that batch) go together again,
-   * so the batch they approved is the one built; the landing floor still checks the print against what this land holds.
+   * Seed with the oldest; add later changes whose files don't overlap, at most one L3, up to batch_max. An entry the
+   * owner approved at landing carries that question's print, and the print names its batch (every entry's issue@head):
+   * R1182t, R1182v: a batch seeded by such an entry holds only the entries with that same print (the batch the owner
+   * approved, built exactly again), and a batch seeded otherwise never takes one in (it waits for its own). A member
+   * missing (rejected, or not queued) leaves a batch whose print doesn't match: the floor asks again (fails closed).
    */
   buildBatch(queue: EventPayload<'land.queued'>[]): EventPayload<'land.queued'>[] {
     const max = this.d.cfg.tests.land.batch_max;
@@ -114,15 +116,13 @@ export abstract class Landing extends Decisions {
       if (!prints.has(q)) prints.set(q, q.level === 'L3' ? this.landingPrint(q) : null);
       return prints.get(q)!;
     };
-    const together = (q: EventPayload<'land.queued'>) => {
-      const p = printOf(q);
-      return p !== null && batch.every((b) => b.level !== 'L3' || printOf(b) === p);
-    };
+    const seedPrint = queue.length ? printOf(queue[0]!) : null;
     for (const q of queue) {
       if (batch.length >= max) break;
+      if (batch.length && printOf(q) !== seedPrint) continue;
       const f = this.filesOf(q.issue, q.head);
       if (batch.length && f.some((x) => files.has(x))) continue;
-      if (q.level === 'L3' && batch.some((b) => b.level === 'L3') && !together(q)) continue;
+      if (seedPrint === null && q.level === 'L3' && batch.some((b) => b.level === 'L3')) continue;
       batch.push(q);
       f.forEach((x) => files.add(x));
     }
@@ -592,7 +592,10 @@ export abstract class Landing extends Decisions {
     // in the question (an HTML comment that hides the next files) and no bidi override reorders it.
     const named = (hex: string) => {
       const t = text(hex);
-      return t !== null ? shownPath(t) : `${shownPath(Buffer.from(hex, 'hex').toString('utf8'))} (not UTF-8; bytes ${hex})`;
+      const shown = t !== null ? shownPath(t) : `${shownPath(Buffer.from(hex, 'hex').toString('utf8'))} (not UTF-8; bytes ${hex})`;
+      // R1182v: a name the tracker's redaction would change (a key marker, an email, an address) shows by its bytes
+      // alone, so it reaches the comment as itself and two such names never show as the same text.
+      return redactString(shown, TRACKER) === shown ? shown : `a name the tracker would redact (bytes ${hex})`;
     };
     // The files real-path categories name first (R1182p, R1182r 3), then the rest the print binds, then the others: a
     // capped question shows the held files before the rest.
