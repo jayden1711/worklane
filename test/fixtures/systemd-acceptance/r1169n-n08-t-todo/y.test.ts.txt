@@ -1,0 +1,9 @@
+import { test } from 'node:test';
+import { existsSync } from 'node:fs';
+test('acceptance: the engine unit restarts after a crash', (t) => {
+  if (!existsSync('/run/systemd/system')) {
+    t.todo('needs systemd');
+    return;
+  }
+  throw new Error('would really run here');
+});

@@ -1,0 +1,6 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+test('a step list keeps its order', () => {
+  const steps = [{ run: 'systemctl --user daemon-reload', skip: false }];
+  assert.equal(steps[0].run.split(' ')[0], 'systemctl');
+});

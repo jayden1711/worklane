@@ -1,0 +1,5 @@
+import { test } from 'node:test';
+import { spawnSync } from 'node:child_process';
+const ctl = process.env.WORKLANE_JOURNAL_BIN ?? 'journalctl';
+const hasJournal = spawnSync(ctl, ['--version']).status === 0;
+test('y: the engine logs to the journal', { skip: !hasJournal && 'needs the journal' }, () => {});

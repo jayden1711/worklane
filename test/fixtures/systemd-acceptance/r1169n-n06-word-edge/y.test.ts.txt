@@ -1,0 +1,4 @@
+import { test } from 'node:test';
+import { spawnSync } from 'node:child_process';
+const underManager = Boolean(process.env.SYSTEMD_EXEC_PID) || spawnSync('busctl', ['status', 'org.freedesktop.systemd1']).status === 0;
+test('y: the unit sees its exec pid', { skip: !underManager && 'needs a service manager' }, () => {});

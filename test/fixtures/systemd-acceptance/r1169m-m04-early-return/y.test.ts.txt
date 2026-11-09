@@ -1,0 +1,6 @@
+import { test } from 'node:test';
+import { existsSync } from 'node:fs';
+test('y: a unit restarts', () => {
+  if (!(existsSync('/run/systemd/system') && process.env.NEVER === '1')) return;
+  throw new Error('would really run here');
+});

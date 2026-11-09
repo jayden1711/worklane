@@ -1,0 +1,4 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+const cases = [['systemctl show', true], ['ls', false]] as const;
+for (const [cmd, want] of cases) test(`classifies ${cmd}`, () => { assert.equal(cmd.startsWith('sys'), want); });

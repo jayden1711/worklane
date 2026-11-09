@@ -1,5 +1,5 @@
 {
-  "//": "Each folder is one attack on scripts/ci/systemd-acceptance.mjs (its files are *.test.ts.txt, copied to test/ and dist/test/, and *.root, copied to the root, so neither npm test nor the script's own scan reads them). Each is [exit, reason]: the script must exit with that code (2 refused statically, 1 refused at run time) and its stderr match that pattern, so it's refused for its own reason. Kept as regression inputs (the owner's decision on #1169, 2026-11-08).",
+  "//": "Each folder is one attack on scripts/ci/systemd-acceptance.mjs (its files are *.test.ts.txt, copied to test/ and dist/test/, and *.root, copied to the root, so neither npm test nor the script's own scan reads them). Each is [exit, reason, listed?]: the script must exit with that code (2 refused statically, 1 refused at run time, 0 for a shape the VM runs or a stated limit) and its stderr match that pattern, so it's refused for its own reason; `listed`, when there, must match its stdout: the shape is among the tests it runs on the VM (R1169n). Kept as regression inputs (the owner's decision on #1169, 2026-11-08).",
   "r1169h-a1": [
     2,
     "isn't its line's first statement"
@@ -70,7 +70,7 @@
   ],
   "r1169g-c2": [
     2,
-    "test/x\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside"
+    "a gate on a subtest"
   ],
   "r1169j-b01-path-const": [
     2,
@@ -98,11 +98,11 @@
   ],
   "r1169k-body-skip": [
     2,
-    "test/x\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside"
+    "a skip reads test/x\\.test\\.ts: booted, which carries"
   ],
   "r1169k-src-flag": [
     2,
-    "test/x\\.test\\.ts: a skip reads src/flags\\.ts: onVm, from src/"
+    "test/x\\.test\\.ts: a skip reads src/flags\\.ts: onVm, which carries systemd's sign \\(from src/\\)"
   ],
   "r1169k-t01-const-chain": [
     2,
@@ -159,5 +159,104 @@
   "r1169k-t14-proc1-cmdline": [
     2,
     "test/y\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside"
+  ],
+  "r1169n-f1-describe-name": [
+    0,
+    "^$"
+  ],
+  "r1169n-f2-body-with-skip-data": [
+    0,
+    "^$",
+    "test/F2-body-with-skip-data\\.test\\.ts:\\d+: a step list keeps its order"
+  ],
+  "r1169n-f3-before-hook": [
+    2,
+    "test/F3-before-hook\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside"
+  ],
+  "r1169n-f4-table": [
+    2,
+    "test/F4-table\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside"
+  ],
+  "r1169n-n01-scripts-ci-mjs": [
+    2,
+    "a skip reads \\?: \\*, which carries"
+  ],
+  "r1169n-n02-json-table": [
+    2,
+    "a skip reads test/y\\.test\\.ts: booted, which carries"
+  ],
+  "r1169n-n03-sudo-proxy": [
+    1,
+    "acceptance: the engine unit restarts after a crash: SKIP needs passwordless sudo"
+  ],
+  "r1169n-n04-root-cgroup": [
+    0,
+    "^$"
+  ],
+  "r1169n-n05-env-binary": [
+    2,
+    "test/y\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside"
+  ],
+  "r1169n-n06-word-edge": [
+    2,
+    "test/y\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside"
+  ],
+  "r1169n-n07-early-return": [
+    0,
+    "^$",
+    "test/y\\.test\\.ts:\\d+: acceptance: the engine unit restarts after a crash"
+  ],
+  "r1169n-n08-t-todo": [
+    1,
+    "acceptance: the engine unit restarts after a crash: TODO needs systemd"
+  ],
+  "r1169n-n09-skip-helper": [
+    1,
+    "acceptance: the engine unit restarts after a crash: SKIP needs systemd"
+  ],
+  "r1169n-n10-describe-proxy": [
+    1,
+    "restarts after a crash: didn't run"
+  ],
+  "r1169n-n11-conditional-reg": [
+    1,
+    "acceptance: the engine unit restarts after a crash: didn't run"
+  ],
+  "r1169n-n12-test-skip-method": [
+    1,
+    "acceptance: the engine unit restarts after a crash: didn't run"
+  ],
+  "r1169n-n13-subtest-todo": [
+    2,
+    "a skip reads test/y\\.test\\.ts: booted, which carries"
+  ],
+  "r1169n-n14-bracket-skip": [
+    1,
+    "acceptance: the engine unit restarts after a crash: SKIP needs systemd"
+  ],
+  "r1169n-n15-unicode-escape": [
+    2,
+    "a skip reads test/y\\.test\\.ts: booted, which carries"
+  ],
+  "r1169n-n16-allowlist-swap": [
+    2,
+    "names aren't there any more"
+  ],
+  "r1169n-n17-tsconfig-exclude": [
+    2,
+    "ENOENT"
+  ],
+  "r1169m-m01-src-const-local": [
+    2,
+    "a skip reads test/y\\.test\\.ts: booted, which carries"
+  ],
+  "r1169m-m03-allowlisted-data-skip": [
+    2,
+    "a skip reads test/y\\.test\\.ts: UNITS, which carries"
+  ],
+  "r1169m-m04-early-return": [
+    0,
+    "^$",
+    "test/y\\.test\\.ts:\\d+: y: a unit restarts"
   ]
 }

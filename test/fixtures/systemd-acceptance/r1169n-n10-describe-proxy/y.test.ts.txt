@@ -1,0 +1,9 @@
+import { describe, test } from 'node:test';
+import { spawnSync } from 'node:child_process';
+const canSudo = spawnSync('sudo', ['-n', 'true']).status === 0;
+describe('the engine unit', { skip: !canSudo && 'needs passwordless sudo' }, () => {
+  test('restarts after a crash', () => {
+    const r = spawnSync('sudo', ['-n', 'systemctl', 'restart', 'worklane.service'], { encoding: 'utf8' });
+    if (r.status !== 0) throw new Error(r.stderr);
+  });
+});
