@@ -159,3 +159,31 @@ test('a number a table can\'t hold as itself (not finite, or -0) fails to parse,
   for (const n of ['1e400', '-1e400', '-0']) assert.deepEqual(held(`{"CHECKS": {"kind": "never-shrink", "value": [${n}]}}`), [UNREADABLE], n);
   assert.deepEqual(held(change((t) => (t.CHECKS!.value as unknown[]).push(0, 1.5))), [], 'plain numbers added');
 });
+
+test('an exact table waits on an entry added, lost or changed (#941, R1184n N1/N2: SHORT_WITH_VALUE, GIT_GUARD_PAIRS)', () => {
+  const base = file({ SHORT_WITH_VALUE: ['exact', { $set: ['S', 't'] }] });
+  assert.deepEqual(held(file({ SHORT_WITH_VALUE: ['exact', { $set: ['S', 't', 'v'] }] }), base), [GROWN], 'a letter added');
+  assert.deepEqual(held(file({ SHORT_WITH_VALUE: ['exact', { $set: ['S'] }] }), base), [SHRUNK], 'a letter taken out');
+  const pairs = file({ GIT_GUARD_PAIRS: ['exact', [['credential.helper', '']]] });
+  assert.deepEqual(held(file({ GIT_GUARD_PAIRS: ['exact', [['credential.helper', ''], ['credential.https://example.com.helper', '!f']]] }), pairs), [GROWN], 'a URL-scoped helper added');
+  assert.deepEqual(held(file({ SHORT_WITH_VALUE: ['exact', { $set: ['t', 'S'] }] }), base), [], 'reordered');
+});
+
+test("a twin is found by the base's tree, not by text: a base tables file spelling its keys with escapes still counts; a twin by NFKC (the long s) waits (#941, R1184n N4, N5)", () => {
+  // Step A of N4 (the base's file with "kind") then step B (a case twin), in one repo through weakeningOf; the twin
+  // is written with git plumbing, so it never meets this file system's case folding.
+  const dir = exampleProject().dir;
+  const g = (input: string | null, ...a: string[]) => execFileSync('git', a, { cwd: dir, encoding: 'utf8', input: input ?? undefined, stdio: [input === null ? 'ignore' : 'pipe', 'pipe', 'pipe'] }).trim();
+  mkdirSync(join(dir, 'src'), { recursive: true });
+  writeFileSync(join(dir, F), BASE.replace(/"kind"/g, '"\\u006bind"'));
+  g(null, 'add', '-A');
+  g(null, 'commit', '-q', '-m', 'escaped keys');
+  const base = g(null, 'rev-parse', 'HEAD');
+  const blob = g(file({ CHECKS: ['never-shrink', ['a']] }), 'hash-object', '-w', '--stdin');
+  g(null, 'update-index', '--add', '--cacheinfo', `100644,${blob},src/X-rules.tables.json`);
+  g(null, 'commit', '-q', '-m', 'twin');
+  const head = g(null, 'rev-parse', 'HEAD');
+  assert.ok(kinds(weakening.weakeningOf(dir, base, head, changeFiles(dir, base, head), undefined, base)).includes(GONE), 'a case twin of an escaped-key file');
+  // N5: U+017F folds to s under NFKC.
+  assert.deepEqual(weakens({ [F]: BASE }, { [F]: BASE, 'src/x-ruleſ.tables.json': file({ CHECKS: ['never-shrink', ['a']] }) }, new Set([F])), [GONE]);
+});

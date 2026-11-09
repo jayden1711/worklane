@@ -16,8 +16,8 @@
     ]
   },
   "CP_LONG": {
-    "//": "GNU cp's long options (coreutils 9) and whether each takes a value (src/guardrails/engine.ts). One added lets a word through that is refused today, so the list never grows on its own.",
-    "kind": "never-grow",
+    "//": "GNU cp's long options (coreutils 9) and whether each takes a value (src/guardrails/engine.ts). One added lets a word through that is refused today, so the list never grows on its own. exact (#941, R1184n): an option added that takes a value takes the next word as it, so the operand after it is never judged; any change waits.",
+    "kind": "exact",
     "value": {
       "archive": "none",
       "attributes-only": "none",
@@ -52,8 +52,8 @@
     }
   },
   "LN_LONG": {
-    "//": "GNU ln's long options (coreutils 9), as CP_LONG: never grows on its own.",
-    "kind": "never-grow",
+    "//": "GNU ln's long options (coreutils 9), as CP_LONG: never grows on its own. exact (#941, R1184n): an option added that takes a value takes the next word as it, so the operand after it is never judged; any change waits.",
+    "kind": "exact",
     "value": {
       "backup": "optional",
       "directory": "none",
@@ -73,8 +73,8 @@
     }
   },
   "SHORT_WITH_VALUE": {
-    "//": "cp's and ln's short options that take a value: the rest of their cluster, or the next word.",
-    "kind": "never-shrink",
+    "//": "cp's and ln's short options that take a value: the rest of their cluster, or the next word. exact (#941, R1184n): an option added that takes a value takes the next word as it, so the operand after it is never judged; any change waits.",
+    "kind": "exact",
     "value": {
       "$set": [
         "S",

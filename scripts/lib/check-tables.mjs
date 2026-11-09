@@ -10,7 +10,7 @@ export const TABLES_FILE = /(?:^|\/)[^/]+\.tables\.json$/;
 export const TABLE_NAME = /^[A-Z][A-Z0-9_]*$/;
 export const COMMENT = '//';
 
-const KINDS = ['never-shrink', 'never-grow'];
+const KINDS = ['never-shrink', 'never-grow', 'exact'];
 const FLAGS = /^[dgimsuvy]*$/;
 
 const isObject = (v) => typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -59,7 +59,7 @@ export function parseTables(text, file) {
     if (!isObject(t)) throw new Error(`${file}: ${name} is not {"kind": ..., "value": ...}`);
     const keys = Object.keys(t).filter((k) => k !== COMMENT);
     if (keys.length !== 2 || !keys.includes('kind') || !keys.includes('value')) throw new Error(`${file}: ${name} must have exactly "kind" and "value" (and comments)`);
-    if (typeof t.kind !== 'string' || !KINDS.includes(t.kind)) throw new Error(`${file}: ${name}'s kind must be never-shrink or never-grow`);
+    if (typeof t.kind !== 'string' || !KINDS.includes(t.kind)) throw new Error(`${file}: ${name}'s kind must be never-shrink, never-grow or exact`);
     out.set(name, { kind: t.kind, value: dataOf(t.value, name) });
   }
   return out;

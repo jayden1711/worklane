@@ -103,3 +103,20 @@ for (const [name, head, base] of OPEN) {
     assert.deepEqual(reasons(head(), base), [], 'held now: make this a held case, and take it out of the open list in the PR body and design.md');
   });
 }
+
+test("R1184m P1d/P1e: a module's TABLES.get('NAME') line changed waits, as its load does; R1184n N3: an added line that loads the loader another way, or reassigns import.meta.url, waits (#941)", () => {
+  const LOAD = "removes or changes the line that loads a check's table from its data";
+  const ADDED = "adds a line that loads a check's table some other way than its module's one load";
+  const has = (r: string[], k: string) => r.some((x) => x.includes(k));
+  const split = "import { tablesOf } from './check-tables.js';\nconst TABLES = tablesOf(import.meta.url);\nexport const CHECKS: readonly string[] = TABLES.get('CHECKS');\n";
+  const base = { 'src/x-rules.ts': split };
+  // P1d: the table filtered on its binding line; P1e: sliced.
+  assert.ok(has(reasons({ 'src/x-rules.ts': split.replace("TABLES.get('CHECKS');", "TABLES.get<readonly string[]>('CHECKS').filter((c) => c !== 'a');") }, base), LOAD), 'P1d filtered');
+  assert.ok(has(reasons({ 'src/x-rules.ts': split.replace("TABLES.get('CHECKS');", "TABLES.get<readonly string[]>('CHECKS').slice(0, -1);") }, base), LOAD), 'P1e sliced');
+  // N3: a second module loads another's tables through an alias; a namespace; import.meta.url reassigned.
+  assert.ok(has(reasons({ 'scripts/zz.mjs': "import { tablesOf as load } from './lib/check-tables.mjs';\nconst T = load(new URL('../src/x-rules.ts', import.meta.url).href);\n" }), ADDED), 'an alias');
+  assert.ok(has(reasons({ 'src/zz.ts': "import * as L from './check-tables.js';\nvoid L;\n" }), ADDED), 'a namespace');
+  assert.ok(has(reasons({ 'src/x-rules.ts': split.replace('const TABLES', "import.meta.url = new URL('./x-decoy.ts', import.meta.url).href;\nconst TABLES") }, base), ADDED), 'import.meta.url reassigned');
+  // Control: a new module's own load, imported the plain way, adds nothing to hold.
+  assert.deepEqual(reasons({ 'src/x-new.ts': "import { tablesOf } from './check-tables.js';\nexport const NEW_RULES: readonly string[] = tablesOf(import.meta.url).get('NEW_RULES');\n", 'src/x-new.tables.json': '{ "NEW_RULES": { "kind": "never-shrink", "value": ["a"] } }\n' }), []);
+});

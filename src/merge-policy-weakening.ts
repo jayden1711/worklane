@@ -32,7 +32,7 @@
 // stand aside in a managed app's repo, as the locks do there (src/review.ts lockedCategories).
 import { BRAND } from './brand.js';
 import { parseTables, TABLES_FILE, type ParsedTable } from './check-tables.js';
-import { changedNames, changeFiles, exactMoves, filesAt, filesWithText, mergeBaseOf, mergedTree } from './coordinator/change-files.js';
+import { changedNames, changeFiles, exactMoves, filesAt, filesWithText, mergeBaseOf, mergedTree, presentNames } from './coordinator/change-files.js';
 import { globRegExp } from './guardrails/glob.js';
 import { escapedPath, isNonUtf8Path, shownPath } from './path-text.js';
 import { engineSourceGlob, LOCKED_CATEGORIES, lockedCategories, type ChangeFile, type LockScope } from './review.js';
@@ -402,6 +402,7 @@ const KINDS = {
   'table-used': "changes a check's or guard's table outside its own list",
   'table-hidden': "adds a line that could hide a check's table from the line reader, an escaped name, a name on the next line or a global binding",
   'table-load-gone': "removes or changes the line that loads a check's table from its data",
+  'table-load-added': "adds a line that loads a check's table some other way than its module's one load",
   'guard-lines': 'removes or changes a line of a guard or lint',
   marker: 'adds a line with a skip, only or lint or type-check suppression mark',
 } as const;
@@ -418,7 +419,19 @@ export const isTipConflict = (reason: string): boolean => reason.startsWith(`${W
  * A line that loads a table (#941): a module's own load, any `.tables.json` name, or a generated copy's marker line
  * (scripts/lib/table-copies.mjs, scripts/lib/redact-vendor.mjs). A removed or changed one waits.
  */
-export const TABLE_LOAD = /tablesOf\(\s*import\.meta\.url\s*\)|\.tables\.json\b|\/\/ (?:BEGIN|END) tables from |TABLES_DATA = /;
+export const TABLE_LOAD = /tablesOf\(\s*import\.meta\.url\s*\)|\bTABLES\.get\s*\(|\.tables\.json\b|\/\/ (?:BEGIN|END) tables from |TABLES_DATA = /;
+
+/**
+ * The one way a module may import the loader (#941, R1184n N3): a plain named import of the names a load site uses,
+ * none of them under another name, on one line. Any other added line naming the loader's module (an alias, a namespace,
+ * a dynamic import, `tablesFrom` or `parseTables`, an import split over lines) waits; so does a line that assigns
+ * `import.meta.url` (the URL a module's load reads its own tables file by).
+ */
+export const LOADER_IMPORT = /^\s*import\s*\{\s*(?:(?:type\s+)?(?:tablesOf|frozenSet|regExpOf|regExpsOf|FrozenSet|Pattern|Tables)\s*,?\s*)+\}\s*from\s*['"](?:\.\.?\/)+(?:[\w-]+\/)*check-tables\.(?:js|mjs)['"];?\s*$/;
+const LOADER_NAMED = /check-tables/;
+/** The loader, the parser, the copy generators and this hold: the only code that loads tables some other way. */
+export const LOADER_CODE: ReadonlySet<string> = new Set(['src/check-tables.ts', 'src/merge-policy-weakening.ts', 'scripts/lib/check-tables.mjs', 'scripts/lib/table-copies.mjs', 'scripts/gen-table-copies.mjs', 'scripts/lib/redact-vendor.mjs']);
+const META_URL_SET = /\bimport\.meta\.url\s*(?:[-+*/%&|^]|\*\*|<<|>>>?|&&|\|\||\?\?)?=(?!=)/;
 
 /** A JSON value as text, its keys sorted at every depth: the same data gives the same text. */
 const canonical = (v: unknown): string => {
@@ -1086,8 +1099,9 @@ function findings(i: WeakeningInput): Found {
   // The data tables (#941), compared before and after as parsed data.
   for (const f of i.files) if (dataTables(f.path)) jsonTableFindings(f.path, i.before, i.after, hit);
   // A tables file the change adds whose name differs only in case from another's (R1184l #4): on a checkout that folds
-  // case, one is written over the other, and the module reads data the compare never saw.
-  const fold = (p: string) => p.toLowerCase();
+  // case, one is written over the other, and the module reads data the compare never saw. Folded as a file system may
+  // fold it: NFKC first (U+017F, the long s, is an s), then lower case (R1184n N5).
+  const fold = (p: string) => p.normalize('NFKC').toLowerCase();
   const tablesFiles = [...new Set([...(i.tablesFiles ?? []), ...i.files.map((f) => f.path).filter((p) => dataTables(p) && !i.deleted.has(p))])];
   for (const f of i.files) {
     if (!dataTables(f.path) || i.deleted.has(f.path) || i.tablesFiles?.has(f.path)) continue;
@@ -1103,6 +1117,11 @@ function findings(i: WeakeningInput): Found {
   for (const f of i.files) {
     if (!MARKABLE.test(f.path) || !holds(f.path, i.scope) || isTest(f.path)) continue;
     for (const l of f.removedLines ?? []) if (TABLE_LOAD.test(l) && !commentOnly(l)) hit('table-load-gone', f.path, l.trim());
+    if (LOADER_CODE.has(f.path)) continue;
+    for (const l of f.addedLines ?? []) {
+      if (commentOnly(l)) continue;
+      if ((LOADER_NAMED.test(l) && !LOADER_IMPORT.test(l)) || META_URL_SET.test(l)) hit('table-load-added', f.path, l.trim());
+    }
   }
 
   // The registered tables, compared before and after, line by line.
@@ -1255,7 +1274,8 @@ export function jsonTableFindings(path: string, before: (p: string) => string | 
     }
     if (n.kind !== t.kind) hit('registration-gone', path, `${name}: ${t.kind} -> ${n.kind}`);
     const [b, a] = [tableEntries(t.value), tableEntries(n.value)];
-    const held = heldKinds(name, t.kind);
+    // exact (#941, R1184n): an entry added, lost or changed waits, as for a table whose any change loosens it.
+    const held = t.kind === 'exact' ? new Set<TableKind>(['never-shrink', 'never-grow']) : heldKinds(name, t.kind);
     if (held.has('never-shrink')) for (const e of missing(b, a)) hit('table-shrunk', path, `${name}: ${e}`);
     if (held.has('never-grow')) for (const e of missing(a, b)) hit('table-grown', path, `${name}: ${e}`);
   }
@@ -1324,8 +1344,9 @@ function measured(cwd: string, from: string, to: string, files: ChangeFile[], sc
       return texts.get(p) ?? null;
     };
   };
-  // The base's tables files, for the case-folded name check: git grep for the key every tables file has.
-  const tablesFiles = new Set(filesWithText(cwd, from, ['"kind"']).filter((p) => TABLES_FILE.test(p)));
+  // The base's tables files, for the case-folded name check: by path, from its tree (R1184n N4: by text, a file
+  // spelling its keys with escapes wasn't one).
+  const tablesFiles = new Set([...presentNames(cwd, from)].filter((p) => TABLES_FILE.test(p)));
   const input: WeakeningInput = { files, deleted, moved, before: side(from), after: side(to), scope, marked, tablesFiles, ...(conflicts ? { conflicts } : {}) };
   return at ? { ...input, tip: side(at.tip), tipMarked, meet: side(at.meet) } : input;
 }

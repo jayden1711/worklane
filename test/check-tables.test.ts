@@ -116,6 +116,9 @@ test('both loaders, and so the hold, refuse a file that is not a tables file (#9
     ['a tagged set with more', one({ $set: [], more: 1 })],
     ["a regexp that doesn't compile", one({ $regexp: '(', flags: '' })],
     ['flags not among dgimsuvy', one({ $regexp: 'x', flags: 'q' })],
+    ['a number that is not finite', '{"T": {"kind": "never-shrink", "value": [1e400]}}'],
+    ['a -0', '{"T": {"kind": "never-shrink", "value": [-0]}}'],
+    ['another kind still', JSON.stringify({ T: { kind: 'never-loosen', value: [] } })],
   ];
   for (const [label, text] of bad) {
     assert.throws(() => parseTables(text, 'bad.tables.json'), Error, `src: ${label}`);

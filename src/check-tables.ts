@@ -2,10 +2,14 @@
 // `<module>.tables.json` (`src/review.ts` reads `src/review.tables.json`). The weakening hold reads that file as
 // parsed data, before and after a change, and never runs code (src/merge-policy-weakening.ts, jsonTableFindings). A
 // module loads its own file here, by its own URL, and gets each table deep-frozen: nothing can change a table after
-// load. No path is written at the load site, so no edit can point it at another file.
+// load. No path is written at the load site. The load line and each `TABLES.get('NAME')` line can't be removed or
+// changed without the owner (the hold's TABLE_LOAD), and an added line that imports the loader any other way, or
+// reassigns `import.meta.url` (which this reads the path from), waits too (LOADER_IMPORT). A use moved off a table
+// while its load stays is the open class the owner named (#941).
 //
 // A tables file is one JSON object: each key a table's name (A-Z, 0-9, `_`), each value
-// `{ "kind": "never-shrink" | "never-grow", "value": <data> }`. A `"//"` key, in any object, is a comment: it is
+// `{ "kind": "never-shrink" | "never-grow" | "exact", "value": <data> }` (exact: an entry added, lost or changed
+// waits, for a table that any change can loosen). A `"//"` key, in any object, is a comment: it is
 // dropped at load and by the hold. The data is JSON, plus two tagged shapes:
 //   - `{ "$set": [...] }`: a FrozenSet (frozenSet), a read-only set (no add, delete or clear; not a Set, so
 //     Set.prototype's methods can't be called on it either);
@@ -25,7 +29,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { BRAND } from './brand.js';
 
-export type TableKind = 'never-shrink' | 'never-grow';
+export type TableKind = 'never-shrink' | 'never-grow' | 'exact';
 
 /** One table as its file declares it: its kind, and its data with every comment taken out. */
 export interface ParsedTable {
@@ -40,7 +44,7 @@ export const TABLE_NAME = /^[A-Z][A-Z0-9_]*$/;
 /** A comment key, in any object. */
 export const COMMENT = '//';
 
-const KINDS: readonly string[] = ['never-shrink', 'never-grow'];
+const KINDS: readonly string[] = ['never-shrink', 'never-grow', 'exact'];
 const FLAGS = /^[dgimsuvy]*$/;
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -95,7 +99,7 @@ export function parseTables(text: string, file: string): Map<string, ParsedTable
     if (!isObject(t)) throw new Error(`${file}: ${name} is not {"kind": ..., "value": ...}`);
     const keys = Object.keys(t).filter((k) => k !== COMMENT);
     if (keys.length !== 2 || !keys.includes('kind') || !keys.includes('value')) throw new Error(`${file}: ${name} must have exactly "kind" and "value" (and comments)`);
-    if (typeof t.kind !== 'string' || !KINDS.includes(t.kind)) throw new Error(`${file}: ${name}'s kind must be never-shrink or never-grow`);
+    if (typeof t.kind !== 'string' || !KINDS.includes(t.kind)) throw new Error(`${file}: ${name}'s kind must be never-shrink, never-grow or exact`);
     out.set(name, { kind: t.kind as TableKind, value: dataOf(t.value, name) });
   }
   return out;

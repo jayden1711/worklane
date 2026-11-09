@@ -1,7 +1,7 @@
 {
   "GIT_GUARD_PAIRS": {
-    "//": "Command scope (GIT_CONFIG_COUNT) on every guarded git, ahead of the caller's own pairs (src/os/git.ts): each key a config file could set to a command, set over here. {noProgram} is a program path that can't exist (the OS's null device's no-program): a signing or verifying git fails closed.",
-    "kind": "never-shrink",
+    "//": "Command scope (GIT_CONFIG_COUNT) on every guarded git, ahead of the caller's own pairs (src/os/git.ts): each key a config file could set to a command, set over here. {noProgram} is a program path that can't exist (the OS's null device's no-program): a signing or verifying git fails closed. exact (#941, R1184n): git takes a key's last value, so a pair added anywhere can override the guard's (a URL-scoped credential helper, include.path); any change waits.",
+    "kind": "exact",
     "value": [
       [
         "credential.helper",

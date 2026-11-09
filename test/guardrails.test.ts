@@ -227,3 +227,12 @@ test('agents never write AGENTS.md, at the root or below it, by tool or shell; a
   assert.equal(write('/p/AGENTS.md', false).decision, 'none', "a person's own session");
   assert.equal(write('/p/docs/agents.md').decision, 'none');
 });
+
+test("a link to harness config is refused behind any other short option of ln: only those that take a value (SHORT_WITH_VALUE) take the next word (#941, R1184n N1)", () => {
+  // SHORT_WITH_VALUE is `exact` data (src/guardrails/engine.tables.json): a letter added there would take the protected
+  // path as its value, and the link's target would go unjudged. Every other letter leaves the path an operand.
+  const takesValue = new Set(['S', 't']);
+  const letters = [...'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'].filter((x) => !takesValue.has(x));
+  for (const x of letters) assert.equal(bash(`ln -s${x} .claude/settings.json evil`), 'deny', `ln -s${x}`);
+  assert.equal(bash('ln -sv .claude/settings.json evil'), 'deny', "R1184n's shape");
+});
