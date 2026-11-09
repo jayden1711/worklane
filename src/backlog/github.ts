@@ -167,10 +167,31 @@ export class GitHubBacklog implements Backlog {
     return made?.id !== undefined ? String(made.id) : undefined;
   }
 
-  async comments(n: number) {
-    const list = await this.req<{ id?: number; user: { login: string } | null; body: string; created_at?: string; updated_at?: string }[]>('GET', `/repos/${this.repo}/issues/${n}/comments?per_page=100`);
-    // `edited`: GitHub moves updated_at on every edit of the body (by its author or anyone with write access).
-    return list.map((c) => ({ ...(c.id !== undefined ? { id: String(c.id) } : {}), author: c.user?.login ?? '', body: c.body ?? '', ...(c.created_at ? { at: c.created_at } : {}), edited: c.updated_at !== undefined && c.updated_at !== c.created_at }));
+  async comments(n: number, opts: { edits?: boolean } = {}) {
+    const list = await this.req<{ id?: number; user: { login: string } | null; body: string; created_at?: string }[]>('GET', `/repos/${this.repo}/issues/${n}/comments?per_page=100`);
+    const edited = opts.edits ? await this.commentEdits(n) : null;
+    return list.map((c) => {
+      const id = c.id !== undefined ? String(c.id) : undefined;
+      // R1182aa: an edit is GraphQL's lastEditedAt, never REST's updated_at, which also moves on a hide or other
+      // moderation. A comment GraphQL didn't list, or no answer at all, reads as edited (fails closed).
+      const e = edited === null ? {} : { edited: id === undefined || edited === 'unknown' || edited.get(id) !== null };
+      return { ...(id !== undefined ? { id } : {}), author: c.user?.login ?? '', body: c.body ?? '', ...(c.created_at ? { at: c.created_at } : {}), ...e };
+    });
+  }
+
+  /** Each comment's lastEditedAt (null: never edited), by REST id, for the same first 100 comments; 'unknown' when GraphQL can't say. */
+  private async commentEdits(n: number): Promise<Map<string, string | null> | 'unknown'> {
+    const [owner, name] = this.repo.split('/');
+    const query = 'query($owner: String!, $name: String!, $n: Int!) { repository(owner: $owner, name: $name) { issueOrPullRequest(number: $n) { ... on Issue { comments(first: 100) { nodes { databaseId lastEditedAt } } } ... on PullRequest { comments(first: 100) { nodes { databaseId lastEditedAt } } } } } }';
+    try {
+      type Nodes = { comments?: { nodes?: { databaseId?: number | null; lastEditedAt?: string | null }[] } };
+      const r = await this.req<{ data?: { repository?: { issueOrPullRequest?: Nodes | null } | null }; errors?: unknown[] }>('POST', '/graphql', { query, variables: { owner, name, n } });
+      const nodes = r.data?.repository?.issueOrPullRequest?.comments?.nodes;
+      if (r.errors?.length || !nodes) return 'unknown';
+      return new Map(nodes.filter((x) => typeof x.databaseId === 'number').map((x) => [String(x.databaseId), x.lastEditedAt ?? null]));
+    } catch {
+      return 'unknown';
+    }
   }
 
   async close(n: number) {

@@ -630,7 +630,7 @@ export abstract class CoordinatorBase {
       // runs to an end marker (a private key's) can't cross from one line into the next and hide the lines between.
       const comment = await this.d.backlog.comment(
         issue,
-        `[${BRAND.cli}] @${owner} decision needed: **${question}**\n\nOptions: ${options.join(' / ')}.${recommendation ? ` Recommendation: **${recommendation}**.` : ''}\n\n${receipts.map((r) => `- ${redactString(r, TRACKER)}`).join('\n')}\n\nReply \`${options.map((o) => `/${BRAND.cli} ${o} ${id}`).join('` or `')}\` (owner or a writer; a reply after this comment may leave out the id), or run \`${BRAND.cli} decide ${id} <option>\`.`,
+        `[${BRAND.cli}] @${owner} decision needed: **${question}**\n\nOptions: ${options.join(' / ')}.${recommendation ? ` Recommendation: **${recommendation}**.` : ''}\n\n${receipts.map((r) => `- ${redactString(r, TRACKER)}`).join('\n')}\n\nReply \`${options.map((o) => `/${BRAND.cli} ${o} ${id}`).join('` or `')}\` (owner or a writer; a reply without the id counts only while this is the only open question on the issue), or run \`${BRAND.cli} decide ${id} <option>\`.`,
       );
       // R1182z: the question's comment by its id, so a reply's place is measured from this very comment.
       if (typeof comment === 'string' && comment) this.emit('decision.posted', { id, issue, comment });

@@ -31,8 +31,11 @@ export interface Backlog {
   /** The new comment's id, when the backlog has one (R1182z: a decision's question is found again by it). */
   comment(n: number, body: string): Promise<string | void>;
   /** An issue's or PR's comments, oldest first; `at`: when it was made (ISO), when the tracker says. */
-  /** Oldest first. `id`: the comment's id; `edited`: changed since it was posted (its body is not what was posted). */
-  comments(n: number): Promise<{ id?: string; author: string; body: string; at?: string; edited?: boolean }[]>;
+  /**
+   * Oldest first. `id`: the comment's id. With `edits`, `edited`: its body was changed after it was posted (an edit by
+   * anyone, never a hide or other moderation); a backlog that can't tell says edited (fails closed).
+   */
+  comments(n: number, opts?: { edits?: boolean }): Promise<{ id?: string; author: string; body: string; at?: string; edited?: boolean }[]>;
   close(n: number): Promise<void>;
   createIssue(title: string, body: string, labels: string[]): Promise<number>;
   /** WHY (#468): the open issues (not PRs), at most 100, in ONE read: the Issues page's "not picked up" list. Absent: this tracker can't. */
