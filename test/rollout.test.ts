@@ -639,3 +639,56 @@ test('R1174p D2: a CR, an ESC or a line separator in --file reaches no error lin
   assert.match(errs.join('\n'), /\\u000d|\\r/);
   assert.match(errs.join('\n'), /\\u001b/);
 });
+
+// --- R1174r D1: a start stopped before any tick soaked nothing, however short (ported from attacks-1174r R1, R6c) ---
+/** Runs from `fromH`: each a start 1 min after the stop before it, then a clean stop `runMin` later; `ticks` puts one
+ * tick in each. Ends before `toH`. `at[h]` goes in the run that spans `h` hours ago (merges). */
+const runs = (fromH: number, toH: number, runMin: number, o: { ticks?: boolean; at?: Record<number, StoredEvent[]> } = {}) => {
+  const l: StoredEvent[] = [];
+  const pending = new Map(Object.entries(o.at ?? {}).map(([h, e]) => [Number(h), e] as const));
+  for (let h = fromH; h - 1 / 60 - runMin / 60 > toH; h -= 1 / 60 + runMin / 60) {
+    const start = h - 1 / 60;
+    const stop = start - runMin / 60;
+    l.push(started(start));
+    if (o.ticks) l.push(tick(start - 1 / 60));
+    for (const [k, e] of [...pending]) {
+      if (k <= start && k > stop) {
+        l.push(...e);
+        pending.delete(k);
+      }
+    }
+    l.push(stopped(stop));
+  }
+  return l;
+};
+/** R1: ticks to 50.9 h, then `runMin` runs from 50.85 h to about 1 h ago, then a healthy final run with 3 merges. */
+const r1 = (runMin = 25, ticks = false) => {
+  const chain = runs(50.85, 1, runMin, { ticks });
+  const finalStart = ev('coordinator.started', { instance: 'i', pid: 1, version: 'v' }, new Date(Date.parse(chain.at(-1)!.ts) + 60_000).toISOString());
+  return [started(52), on(51), ...everyMin(50.95, 50.9), stopped(50.85), ...chain, finalStart, ...minTicks(0.95, 0.85), ...merges(3, 0.8), ...minTicks(0.8, 0.02)];
+};
+
+test('R1174r D1 (R1): clean restarts under live_minutes that never tick are no soak; the same runs ticking once each, or 31 min long, read as before', () => {
+  assert.equal(ring0(r1()), 'soaking', `downMs ${downOf(r1()).toFixed(2)} h`);
+  assert.ok(downOf(r1()) > 45, `downMs ${downOf(r1())} h`);
+  assert.equal(ring0(r1(25, true)), 'promoted', 'control: one tick in each run (the per-gap rule between ticks)');
+  assert.equal(ring0(r1(31)), 'soaking', 'control: 31-min runs');
+});
+
+test('R1174r D1 (R1 order): ring 1 turned on 0.5 h ago reads out of order against the R1 log (about 1 h really running)', () => {
+  const s = status({ e1: r1(), p1: [started(0.6), on(0.5), ...minTicks(0.45, 0.02)] }, { rollout: R2 });
+  assert.equal(s.rings[1]!.state, 'out of order', s.rings[1]!.why);
+});
+
+test('R1174r D1 (R1 T2b): the frozen T2b log with its 70 h restart cut into 26-min runs that never tick is still held', () => {
+  const l = [started(101), on(100), ...merges(2, 80), stopped(70), ...runs(70, 0.2, 25, { at: { 50: merges(1, 50) } }), started(0.1), tick()];
+  assert.equal(l.filter((e) => e.type === 'merge.done').length, 3, 'the merge at 50 h is in the chain');
+  assert.equal(ring0(l), 'soaking', `downMs ${downOf(l).toFixed(2)} h`);
+});
+
+test('R1174r D1 (R6c): one 25-min start-to-stop with no tick adds its 25 min and both 1-min stop gaps; with a tick in it, only the gaps', () => {
+  const near = (a: number, b: number, msg: string) => assert.ok(Math.abs(a - b) < 1e-6, `${msg}: ${a} h, expected ${b} h`);
+  const mk = (ticked: boolean) => [started(61), on(60), ...minTicks(59.9, 30), stopped(30), started(30 - 1 / 60), ...(ticked ? [tick(30 - 2 / 60)] : []), stopped(30 - 26 / 60), started(30 - 27 / 60), ...minTicks(29.5, 0.02)];
+  near(downOf(mk(false)), 2 / 60 + 25 / 60, 'no tick');
+  near(downOf(mk(true)), 2 / 60, 'a tick in the run');
+});

@@ -178,6 +178,9 @@ export function readInstance(events: readonly StoredEvent[], flag: string, maxEr
   // R1174k D1, R1174l A1/A2: a coordinator suspended, paused, frozen or hung, or a clock stepped forward, records no
   // stop: a gap of more than live_minutes between two ticks of one run is no soak either.
   let prevTick: number | null = null;
+  // R1174r D1: whether the run since the last start has ticked. A start stopped before any tick soaked nothing, however
+  // short: else chained runs of under live_minutes that never ticked promoted a ring.
+  let runTicked = true;
   // A coordinator.started with no clean stop since the one before it: the process died (a crash loop shows as several).
   let running = false;
   for (const [i, e] of events.entries()) {
@@ -202,18 +205,24 @@ export function readInstance(events: readonly StoredEvent[], flag: string, maxEr
     if (after && e.type === 'coordinator.stopped' && (e.payload as { clean?: boolean }).clean === true) stoppedAt = ts;
     // A stop ends a run: the silence from its last tick to the stop is no soak either (R1174m P1, R1174n N1: a host
     // suspended for 46 h, then a clean stop and restart on resume, promoted); the stop's own time to the next start is
-    // the clean stop's (above). A start ends a run too, so nothing is counted twice.
-    if (after && e.type === 'coordinator.stopped' && prevTick !== null && Number.isFinite(ts) && ts - prevTick > liveMs) downMs += ts - prevTick;
+    // the clean stop's (above). A start begins a new run from its own stamp, so nothing is counted twice. A run that
+    // never ticked is counted whatever its length (R1174r D1); Math.max keeps a stop stamped before its start from
+    // subtracting.
+    if (after && e.type === 'coordinator.stopped' && prevTick !== null && Number.isFinite(ts) && (ts - prevTick > liveMs || !runTicked)) downMs += Math.max(0, ts - prevTick);
     if (after && e.type === 'coordinator.stopped') prevTick = null;
     // R1174m D3, R1174n N2 (the owner's decision (b)): a start is life only once a tick follows it, so its time to the
     // first tick (or to a stop with none) is a gap like any other: a coordinator that hung right after starting soaked
     // nothing. The flip to the first tick stays a stated limit.
-    if (after && e.type === 'coordinator.started') prevTick = Number.isFinite(ts) ? ts : null;
+    if (after && e.type === 'coordinator.started') {
+      prevTick = Number.isFinite(ts) ? ts : null;
+      runTicked = false;
+    }
     if (after && e.type === 'coordinator.tick' && Number.isFinite(ts)) {
       if (prevTick !== null && ts - prevTick > liveMs) downMs += ts - prevTick;
       // R1174p D1: each gap from the tick before as stamped, never the furthest stamp seen: a tick stamped ahead (the
       // first after a flip or start, or a ratchet of steps under live_minutes) hid the silence after it.
       prevTick = ts;
+      runTicked = true;
     }
     if (after && e.type === 'coordinator.started' && stoppedAt !== null) {
       if (Number.isFinite(stoppedAt) && Number.isFinite(ts)) downMs += Math.max(0, ts - stoppedAt);

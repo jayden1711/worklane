@@ -50,8 +50,9 @@ A ring is **promoted** when all of these hold:
 - it has been on for at least `soak_hours` (counted from the latest instance to turn it on), less any time its
   coordinator wasn't seen running: a clean stop to the next start, and any gap of more than `live_minutes` between
   two of its ticks after the flip, from a start to its first tick, or from its last tick to a stop (a suspended
-  host, a paused VM, a frozen or hung coordinator, a clock stepped forward). Each gap is from the tick before, as stamped: a tick stamped ahead hides
-  nothing after it, and one stamped back can only hold the ring longer;
+  host, a paused VM, a frozen or hung coordinator, a clock stepped forward). A start stopped before any tick is
+  counted whatever its length: a run that never ticked soaked nothing. Each gap is from the tick before, as stamped:
+  a tick stamped ahead hides nothing after it, and one stamped back can only hold the ring longer;
 - **each** of the ring's instances merged at least `min_merges` PRs since then (`merge.done`, one per PR number; a
   merge with no number never counts), so an instance that does no work isn't promoted on the others'. `min_merges: 0`
   is allowed: an explicit opt-out by whoever writes root's `rollout.json`;
