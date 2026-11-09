@@ -25,33 +25,27 @@ import { BRAND } from '../src/brand.js';
 import { SYSTEMD_MARKERS, SYSTEM_ROOT_VAR, TEST_MACHINE_VAR, TEST_MARK_FILE, TEST_TOKEN_VAR } from '../src/os/system-paths.js';
 
 /**
- * A test table, deep-frozen (#941): its lists and objects frozen, and a Set's or a Map's own add, delete, clear and set
- * replaced by ones that throw (then the object frozen). A RegExp is left as it is: freezing one breaks a global one's
- * lastIndex and doesn't stop RegExp.prototype.compile (it rewrites the pattern before it throws), and so is a Buffer or
- * another typed array (it can't be frozen), so a test table of them is still held only by the line reader. Neither is a call through Set.prototype or Map.prototype on the table
- * (`Set.prototype.add.call(T, x)`) stopped: a test table is still a real Set or Map. The src/ and scripts/ tables are
- * data (src/check-tables.ts), which has neither gap.
+ * A test table, deep-frozen (#941): its lists and objects frozen. A Set or a Map, anywhere in it, is refused (it throws,
+ * so the test file fails to load): it can't be frozen, and Set.prototype's and Map.prototype's methods change one
+ * through any wrapper (R1184k). A test table that is a set is `frozenSet([...])` (src/check-tables.ts) or a list. A
+ * RegExp is left as it is: freezing one breaks a global one's lastIndex and doesn't stop RegExp.prototype.compile (it
+ * rewrites the pattern before it throws); so is a Buffer or another typed array (its elements are its memory). A test
+ * table of RegExps or typed arrays is held only by the line reader. The src/ and scripts/ tables are data
+ * (src/check-tables.ts), which has neither gap.
  */
 export function freezeTestTable(v: unknown, where = 'a test table'): void {
   const seen = new Set<object>();
-  const refuse = (what: string) => () => {
-    throw new TypeError(`${where} is frozen (#941): ${what} refused`);
-  };
   const walk = (x: unknown) => {
-    // A Buffer or another typed array can't be frozen (its elements are its memory): left as it is, as a RegExp.
     if (typeof x !== 'object' || x === null || x instanceof RegExp || ArrayBuffer.isView(x) || seen.has(x)) return;
+    if (x instanceof Set || x instanceof Map) throw new TypeError(`${where} is a ${x instanceof Set ? 'Set' : 'Map'}: a registered test table can't be one (#941): use frozenSet from src/check-tables.ts, or a list`);
     seen.add(x);
-    if (x instanceof Set || x instanceof Map) {
-      for (const m of x instanceof Set ? ['add', 'delete', 'clear'] : ['set', 'delete', 'clear']) Object.defineProperty(x, m, { value: refuse(m), writable: false, configurable: false });
-      for (const e of x.values()) walk(e);
-      if (x instanceof Map) for (const k of x.keys()) walk(k);
-    } else for (const k of Reflect.ownKeys(x)) walk((x as Record<PropertyKey, unknown>)[k]);
+    for (const k of Reflect.ownKeys(x)) walk((x as Record<PropertyKey, unknown>)[k]);
     Object.freeze(x);
   };
   walk(v);
 }
 (globalThis as Record<symbol, unknown>)[Symbol.for('worklane.test.freezeTable')] = freezeTestTable;
-// Every test module that registers a table gets it frozen once its own code has run (test/table-freeze.ts).
+// Every test module that registers a table gets it frozen right after its declaration (test/table-freeze.ts).
 register('./table-freeze.js', import.meta.url);
 
 /** Engine settings that only tune speed, kept from the shell (a slow CI runner scales the browser's timeouts). */

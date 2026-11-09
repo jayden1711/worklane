@@ -23,6 +23,7 @@ import { childEnvOf, execFile, execFileSync, spawn, spawnSync, startSetupWorker 
 import { ownEnv } from '../src/os/own-env.js';
 import { repoRoot } from './helpers.js';
 import { withHostStandIns } from './isolate.js';
+import { frozenSet } from '../src/check-tables.js';
 
 const CANARY = 'WL846_CANARY_NEVER_SET';
 const NODE = process.execPath;
@@ -295,13 +296,13 @@ test('childEnvOf: a fresh null-prototype copy of the own variables, in order; an
 
 const MODULE = 'src/os/child-process.ts';
 // check-table: never-shrink
-const SPECIFIERS = new Set(['child_process', 'node:child_process', 'cluster', 'node:cluster']);
+const SPECIFIERS = frozenSet(['child_process', 'node:child_process', 'cluster', 'node:cluster']);
 /** worker_threads: a worker's own side (parentPort, workerData) is fine; starting one (Worker) goes through MODULE. */
 // check-table: never-shrink
-const WORKER_SPECIFIERS = new Set(['worker_threads', 'node:worker_threads']);
+const WORKER_SPECIFIERS = frozenSet(['worker_threads', 'node:worker_threads']);
 /** Node's internal bindings that start a process without child_process. */
 // check-table: never-shrink
-const BINDINGS = new Set(['spawn_sync', 'process_wrap']);
+const BINDINGS = frozenSet(['spawn_sync', 'process_wrap']);
 type Finding = { file: string; line: number; what: string };
 
 /** The name an import or export specifier takes from its module (`Worker` in `Worker as W`). */

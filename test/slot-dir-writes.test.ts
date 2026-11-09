@@ -62,16 +62,17 @@ import { INCIDENTS_FILE, readIncidents } from '../src/watchdog/incidents.js';
 import { takeOpsPost } from '../src/watchdog/post.js';
 import { PID_LIMIT, repoRoot } from './helpers.js';
 import { processIdentity, processPlace } from '../src/os/index.js';
+import { frozenSet } from '../src/check-tables.js';
 
 // ---------------------------------------------------------------------------------------------------------------
 // The lint
 
 /** Names that carry a slot-dir path (or a path in it): a module that uses one is a slot module. */
 // check-table: never-shrink
-const SLOT_NAMES = new Set(['slotsDir', 'SYSTEM_SLOTS', 'AGENT_SLOTS_DIR', 'incidentsDir', 'claimsDir', 'machineDir', 'superfanSlots', 'updateDrainPath', 'slotsConfigPath']);
+const SLOT_NAMES = frozenSet(['slotsDir', 'SYSTEM_SLOTS', 'AGENT_SLOTS_DIR', 'incidentsDir', 'claimsDir', 'machineDir', 'superfanSlots', 'updateDrainPath', 'slotsConfigPath']);
 /** Calls that open a file for write. */
 // check-table: never-shrink
-const WRITE_CALLS = new Set(['writeFileSync', 'writeFile', 'appendFileSync', 'appendFile', 'createWriteStream', 'openSync', 'open', 'copyFileSync', 'copyFile', 'cpSync', 'cp', 'truncateSync', 'truncate']);
+const WRITE_CALLS = frozenSet(['writeFileSync', 'writeFile', 'appendFileSync', 'appendFile', 'createWriteStream', 'openSync', 'open', 'copyFileSync', 'copyFile', 'cpSync', 'cp', 'truncateSync', 'truncate']);
 /** The one module that writes slot-dir files: a new temp file of its own (flag wx), renamed or linked into place. */
 const HELPER = 'src/slot-file.ts';
 
@@ -264,11 +265,11 @@ function helperWrite(call: ts.CallExpression, name: string, own: (a: ts.Expressi
 
 /** Calls that set a file's mode by its name: they follow a symlink. */
 // check-table: never-shrink
-const CHMOD_BY_NAME = new Set(['chmodSync', 'chmod', 'lchmodSync', 'lchmod']);
+const CHMOD_BY_NAME = frozenSet(['chmodSync', 'chmod', 'lchmodSync', 'lchmod']);
 
 /** Calls that write, truncate or change the mode of the file behind a descriptor (their first argument). */
 // check-table: never-shrink
-const FD_WRITES = new Set(['writeSync', 'write', 'writev', 'writevSync', 'ftruncate', 'ftruncateSync', 'fchmod', 'fchmodSync']);
+const FD_WRITES = frozenSet(['writeSync', 'write', 'writev', 'writevSync', 'ftruncate', 'ftruncateSync', 'fchmod', 'fchmodSync']);
 
 /** Every declaration of `name` in a function (or the module), its parameters included, outside nested functions. */
 function declarationsIn(scope: ts.Node, name: string): ts.Node[] {

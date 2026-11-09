@@ -490,7 +490,7 @@ const NAMES_IT = /\bTauri\b|(^|[^\w.-])desktop\/|build:desktop|_DESKTOP\b|\bdesk
  * dropping a glob is a loosening, the owner's call, so it goes with the job's removal, not here.
  */
 // check-table: never-grow
-const MAY_NAME_IT = new Set(['CHANGELOG.md', 'docs/progress.md', 'docs/prior-art.md', '.worklane/review.yaml']);
+const MAY_NAME_IT = Object.freeze(['CHANGELOG.md', 'docs/progress.md', 'docs/prior-art.md', '.worklane/review.yaml']);
 
 function filesUnder(dir: string, keep: (p: string) => boolean): string[] {
   const out: string[] = [];
@@ -950,7 +950,7 @@ test('the desktop app is gone: its folder, module, build script, notice and docs
   ];
   const named = files
     .map((f) => relative(repoRoot, f).split('\\').join('/'))
-    .filter((r) => !MAY_NAME_IT.has(r))
+    .filter((r) => !MAY_NAME_IT.includes(r))
     .flatMap((r) => readFileSync(join(repoRoot, r), 'utf8').split('\n').map((line, i) => ({ at: `${r}:${i + 1}`, line })).filter((x) => NAMES_IT.test(x.line)))
     .map((x) => `${x.at}: ${x.line.trim()}`);
   assert.deepEqual(named, [], 'nothing but the CHANGELOG (and the dated build log and other projects\' rows) names it');
@@ -1027,7 +1027,7 @@ test('a later change that narrows one of these rules waits for the owner: this f
  * `node:module`, `node:vm` or `node:child_process`, which could load one.
  */
 // check-table: never-grow
-const MAY_IMPORT = new Set(['node:test', 'node:assert/strict', 'node:fs', 'node:os', 'node:path', 'node:url', 'yaml', 'typescript', '../src/merge-policy-weakening.js']);
+const MAY_IMPORT = Object.freeze(['node:test', 'node:assert/strict', 'node:fs', 'node:os', 'node:path', 'node:url', 'yaml', 'typescript', '../src/merge-policy-weakening.js']);
 
 /**
  * The packages this backstop, its preload and their modules load, each with its lockfile entry pinned to this
@@ -1081,7 +1081,7 @@ function importsIn(text: string, kind: ts.ScriptKind): { names: string[]; comput
 function importProblems(text: string): string[] {
   const { names, computed } = importsIn(text, ts.ScriptKind.TS);
   const r18 = [...text.matchAll(/^(?:import|export)\s[^'"]*?\sfrom\s+['"]([^'"]+)['"]/gm), ...text.matchAll(/^import\s+['"]([^'"]+)['"]/gm)].map((m) => m[1]!);
-  const out = [...new Set([...names, ...r18])].filter((s) => !MAY_IMPORT.has(s)).map((s) => `imports ${s}`);
+  const out = [...new Set([...names, ...r18])].filter((s) => !MAY_IMPORT.includes(s)).map((s) => `imports ${s}`);
   if (computed > 0) out.push('a dynamic import or require by a computed name');
   if (/\bimport\s*\(|\brequire\s*\(/.test(text)) out.push('a dynamic import or require');
   for (const w of LOADER_WORDS) if (text.includes(w)) out.push(`the text ${w}`);
