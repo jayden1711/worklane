@@ -316,3 +316,34 @@ test('auto-merge, not batched: a stop raised while the combined gate runs holds 
     } else assert.ok(t.pr().merged, 'control: with no stop it merges');
   }
 });
+
+// #1248 (found as R1182v defect 1): a reply answers only the question it replies to. On main, the latest matching reply
+// of any age answered every later question on the issue.
+test('#1248: an owner reply posted before a question never answers it; one posted after it, or naming its id, does', { skip }, async () => {
+  for (const kind of ['land', 'question'] as const) {
+    const f = fixture();
+    const c = coordinator(f, new FakeRunner(() => ({ structured: {} })), { roleOf: exampleRoles });
+    const n = f.backlog.open({ title: 'Totals', body: 'b', author: OWNER, labels: [] });
+    // An approval of an earlier question on the same issue, a minute before this one is asked.
+    f.backlog.humanComment(n, OWNER, `/${BRAND.cli} approve`, new Date(Date.now() - 60_000).toISOString());
+    const id = `d-${kind}-old-${n}`;
+    f.log.append('decision.asked', { id, kind, issue: n, owner: OWNER, question: 'Land it?', options: ['approve', 'reject'], recommendation: 'approve', receipts: [] }, 'alice');
+    f.log.append('review.level_set', { issue: n, head: 'a'.repeat(40), level: 'L3', reasons: ['money-path: src/price.js'] }, 'alice');
+    await handleDecisions(c);
+    assert.deepEqual(of(f, 'decision.answered'), [], `${kind}: the older reply answered a question asked after it`);
+    // A reply after the question answers it.
+    f.backlog.humanComment(n, OWNER, `/${BRAND.cli} approve`);
+    await handleDecisions(c);
+    assert.deepEqual(of<EventPayload<'decision.answered'>>(f, 'decision.answered').map((a) => [a.id, a.by]), [[id, OWNER]], `${kind}: the reply after it`);
+  }
+  // A reply that names the question's id answers it whatever its time says.
+  const f = fixture();
+  const c = coordinator(f, new FakeRunner(() => ({ structured: {} })), { roleOf: exampleRoles });
+  const n = f.backlog.open({ title: 'Totals', body: 'b', author: OWNER, labels: [] });
+  const id = `d-land-named-${n}`;
+  f.backlog.humanComment(n, OWNER, `/${BRAND.cli} approve ${id}`, new Date(Date.now() - 60_000).toISOString());
+  f.log.append('decision.asked', { id, kind: 'land', issue: n, owner: OWNER, question: 'Land it?', options: ['approve', 'reject'], recommendation: 'approve', receipts: [] }, 'alice');
+  f.log.append('review.level_set', { issue: n, head: 'a'.repeat(40), level: 'L3', reasons: ['money-path: src/price.js'] }, 'alice');
+  await handleDecisions(c);
+  assert.deepEqual(of<EventPayload<'decision.answered'>>(f, 'decision.answered').map((a) => a.id), [id]);
+});
