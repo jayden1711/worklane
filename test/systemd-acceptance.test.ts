@@ -23,7 +23,7 @@ type Script = {
   summaryProblems: (tap: string, file: string, gates: number, whole?: boolean) => string[];
   gateLikeCount: (text: string) => number;
   signUses: (ts: unknown, path: string, text: string) => string[];
-  skipReads: (ts: unknown, path: string, text: string, source: { paths: Set<string>; carries: (m: string, b: string) => boolean; direct?: (m: string, b: string) => boolean }) => string[];
+  skipReads: (ts: unknown, path: string, text: string, source: { paths: Set<string>; carries: (m: string, b: string) => boolean; direct?: (m: string, b: string) => boolean }) => string[] & { refused: string[] };
   signTests: (ts: unknown, path: string, text: string, source: unknown, all?: boolean) => { name: string | null; line: number; column: number; label: string; subtests: boolean }[];
   signSource: (ts: unknown, texts: Map<string, string>, allow: Allow) => { select: unknown };
   signUseList: (ts: unknown, path: string, text: string) => { at: string; pin: string }[];
@@ -258,7 +258,7 @@ test('end to end, refused (exit 2): a gate sharing its line, a template name, no
   const g = `{ ${gate()} && 'x' }`;
   const known = `test('acceptance: known', ${g}, () => {});`;
   const cases: [string, string, Record<string, string>, RegExp][] = [
-    ['a namesake on its line', `false && test('acceptance: x', ${g}, () => {}); test('acceptance: x', () => {});`, {}, /isn't its line's first statement/],
+    ['a namesake on its line', `false && test('acceptance: x', ${g}, () => {}); test('acceptance: x', () => {});`, {}, /isn't its line's first statement|registers a test inside an expression/],
     ['a template name', `const v = 'x';\ntest(\`acceptance: \${v}\`, ${g}, () => {});`, {}, /computed \(template\) name/],
     ['node:vm in a gated file', `import vm from 'node:vm';\nvoid vm;\n${known}`, {}, /uses node:vm, new Function or eval/],
     ['a detector built from parts', `const booted = existsSync(join('/run', 'sys' + 'temd', 'system')) || existsSync(join('/run', '${'sys'}temd', 'system'));\n${known}\ntest('acceptance: y', { skip: !booted && 'x' }, () => {});`, {}, /test\/x\.test\.ts: 1 use\(s\) of systemd's sign outside/],
@@ -509,21 +509,25 @@ test('R1169t: a registration chosen on what carries the sign is read; a for-of v
   const paths = new Set(['test/x.test.ts', 'src/os.ts']);
   const source = { paths, carries: (m: string) => m === 'src/os.ts', direct: (m: string) => m.startsWith('src/') };
   const reads = (text: string) => sa.skipReads(ts, 'test/x.test.ts', text, source);
-  const head = `import { lingerEnabled } from '../src/os.js';\n`;
-  // D1: a ternary choosing test.skip or describe.skip, through a local or called directly.
-  assert.deepEqual(reads(`${head}const maybe = lingerEnabled() === null ? test.skip : test;\nmaybe('n', () => {});`), ['src/os.ts: lingerEnabled']);
-  assert.deepEqual(reads(`${head}(lingerEnabled() === null ? describe.skip : describe)('s', () => { it('n', () => {}); });`), ['src/os.ts: lingerEnabled']);
-  // D2: an if, or && / ||, around a registration; a return from a suite's body.
+  const nt = `import { test, it, describe } from 'node:test';\n`;
+  const head = `${nt}import { lingerEnabled } from '../src/os.js';\n`;
+  const refused = (text: string) => sa.skipReads(ts, 'test/x.test.ts', text, source).refused.join('\n');
+  // D1: a ternary choosing test.skip or describe.skip is a use of node:test's value that isn't a call: refused since R1169v.
+  assert.match(refused(`${head}const maybe = lingerEnabled() === null ? test.skip : test;\nmaybe('n', () => {});`), /`test\.skip` uses node:test's test as a value/);
+  assert.match(refused(`${head}(lingerEnabled() === null ? describe.skip : describe)('s', () => { it('n', () => {}); });`), /uses node:test's describe as a value/);
+  // D2: an if, or && / ||, around a registration (the latter refused too: not a statement); a return from a suite's body.
   assert.deepEqual(reads(`${head}if (lingerEnabled() !== null) test('n', () => {});`), ['src/os.ts: lingerEnabled']);
   assert.deepEqual(reads(`${head}lingerEnabled() !== null && test('n', () => {});`), ['src/os.ts: lingerEnabled']);
+  assert.match(refused(`${head}lingerEnabled() !== null && test('n', () => {});`), /registers a test inside an expression/);
   assert.deepEqual(reads(`${head}describe('s', () => {\n  if (lingerEnabled() === null) return;\n  it('n', () => {});\n});`), ['src/os.ts: lingerEnabled']);
   assert.deepEqual(reads(`${head}if (lingerEnabled() !== null) console.log('x');\ntest('n', () => {});`), [], 'an if that registers nothing');
-  // A registration read in a file with no skip or todo text; options passed to a chosen registration are read.
-  assert.deepEqual(reads(`${head}const go = lingerEnabled();\nconst maybe = go ? test : test.skip;\nmaybe('n', { timeout: 1 }, () => {});`), ['test/x.test.ts: go']);
-  assert.deepEqual(reads(`${head}const on = test;\nconst maybe2 = lingerEnabled() ? on : on;\nmaybe2('n', () => {});`), [], 'not a choice between registrations');
-  // A function the file defines under such a name is its own helper, not node:test's; a non-literal name is read.
+  // A registration read in a file with no skip or todo text; a local holding test is refused, whatever chooses it.
+  assert.match(refused(`${head}const go = lingerEnabled();\nconst maybe = go ? test : test.skip;\nmaybe('n', { timeout: 1 }, () => {});`), /uses node:test's test as a value/);
+  assert.match(refused(`${head}const on = test;\non('n', () => {});`), /`on = test` uses node:test's test as a value/);
+  // A function the file defines under such a name is its own helper, not node:test's; a wrapper of node:test's is refused.
   assert.deepEqual(reads(`${head}function suite(a, b) { return [a, b]; }\nconst r = lingerEnabled();\nsuite(r, { x: 1 });`), []);
-  assert.deepEqual(reads(`${head}const test = wrap(nodeTest);\nconst r = lingerEnabled();\ntest(r, () => {});`), ['test/x.test.ts: r'], 'a wrapper of that name still registers');
+  assert.equal(refused(`${head}function suite(a, b) { return [a, b]; }\nsuite(1, { x: 1 });`), '');
+  assert.match(refused(`import { test as nodeTest } from 'node:test';\nconst test = wrap(nodeTest);\ntest('n', () => {});`), /`wrap\(nodeTest\)` uses node:test's nodeTest as a value/);
   // D7: a getter (or a method) named skip or todo is read.
   assert.deepEqual(reads(`${head}test('n', { get skip() { return lingerEnabled() === null; } }, () => {});`), ['src/os.ts: lingerEnabled']);
   // D3: a for-of loop variable carries what it iterates.
@@ -543,4 +547,65 @@ test('R1169t: a registration chosen on what carries the sign is read; a for-of v
   // D5: a use in an if (or a loop, a function, a block) pins the whole statement, so its body is pinned too.
   const pins = (text: string) => sa.signUseList(ts, 'test/x.test.ts', text).map((u) => u.pin);
   assert.deepEqual(pins(`if (existsSync('/run/${sd}/system')) {\n  console.log('x');\n}`), [`systemd: if (existsSync('/run/${sd}/system')) {\nconsole.log('x');\n}`]);
+});
+
+test('R1169u/v: node:test read by binding, failing closed: every use a call as a statement; what decides a registration read through loops, exits, labels, functions and callers; parameters traced; options by name settled; a stop anywhere in the code a test runs picks it', () => {
+  const paths = new Set(['test/x.test.ts', 'src/os.ts', 'test/helpers/reg.ts']);
+  const source = { paths, carries: (m: string) => m === 'src/os.ts', direct: (m: string) => m.startsWith('src/') };
+  const run = (text: string) => sa.skipReads(ts, 'test/x.test.ts', text, source);
+  const reads = (text: string) => [...run(text)];
+  const refused = (text: string) => run(text).refused.join('\n');
+  const linger = `import { lingerEnabled } from '../src/os.js';\n`;
+  const skip = `{ skip: lingerEnabled() === null }`;
+  // D2: renamed, default, namespace, require() and import() bindings are node:test's test; their options are read.
+  assert.deepEqual(reads(`import { test as check } from 'node:test';\n${linger}check('n', ${skip}, () => {});`), ['src/os.ts: lingerEnabled']);
+  assert.deepEqual(reads(`import nt from 'node:test';\n${linger}nt('n', ${skip}, () => {});`), ['src/os.ts: lingerEnabled']);
+  assert.deepEqual(reads(`import * as nt from 'node:test';\n${linger}nt.test('n', ${skip}, () => {});`), ['src/os.ts: lingerEnabled']);
+  assert.deepEqual(reads(`${linger}const nt = (await import('node:test')).default;\nnt('n', ${skip}, () => {});`), ['src/os.ts: lingerEnabled']);
+  assert.deepEqual(reads(`${linger}const { test } = await import('node:test');\ntest('n', ${skip}, () => {});`), ['src/os.ts: lingerEnabled']);
+  // Any use that isn't a call, or a call of .skip/.only/.todo (a hook or mock member is fine), is refused.
+  const nt = `import { test } from 'node:test';\n`;
+  for (const [use, why] of [[`Reflect.apply(test, null, ['n', () => {}]);`, 'Reflect.apply'], [`test.call(null, 'n', () => {});`, '.call'], [`[test, test.skip][0]('n', () => {});`, 'an array'], [`test[process.env.X ? 'skip' : 'only']('n', () => {});`, 'a computed key'], [`let m = test;\nm('n', () => {});`, 'a let'], [`export { test };`, 'a re-export']]) assert.match(refused(`${nt}${use}`), /uses node:test's test as a value/, why);
+  assert.equal(refused(`${nt}test.afterEach(() => {});\ntest.skip('n', () => {});\nawait test('m', () => {});`), '', 'a hook member, .skip and an awaited call');
+  // A registration must be a statement of its own.
+  assert.match(refused(`${nt}const r = test('n', () => {});`), /registers a test inside an expression/);
+  assert.match(refused(`${nt}const reg = (n) => test(n, () => {});\nreg('x');`), /registers a test inside an expression/);
+  // D4: a loop's iterable (a fixed table isn't read), an early exit in a function, a label or an IIFE, a callback's receiver.
+  const nl = `${nt}${linger}`;
+  assert.deepEqual(reads(`${nl}for (const _ of lingerEnabled() !== null ? [1] : []) test('n', () => {});`), ['src/os.ts: lingerEnabled']);
+  assert.deepEqual(reads(`${nl}const T = [{ n: 'a' }, { n: 'b' }];\nfor (const r of T) test(r.n, () => {});`), [], 'a const literal table');
+  assert.deepEqual(reads(`${nl}const T = lingerEnabled() ? ['a'] : [];\nfor (const r of T) test(\`\${r}\`, () => {});`), ['test/x.test.ts: T'], 'a table that varies');
+  assert.deepEqual(reads(`${nl}function register() {\n  if (lingerEnabled() === null) return;\n  test('n', () => {});\n}\nregister();`), ['src/os.ts: lingerEnabled']);
+  assert.deepEqual(reads(`${nl}await (async () => {\n  if (lingerEnabled() === null) return;\n  test('n', () => {});\n})();`), ['src/os.ts: lingerEnabled']);
+  assert.deepEqual(reads(`${nl}if (lingerEnabled() !== null) (() => {\n  test('n', () => {});\n})();`), ['src/os.ts: lingerEnabled'], 'a guard outside an IIFE');
+  assert.deepEqual(reads(`${nl}reg: {\n  if (lingerEnabled() === null) break reg;\n  test('n', () => {});\n}`), ['src/os.ts: lingerEnabled']);
+  assert.deepEqual(reads(`${nl}(lingerEnabled() !== null ? ['a'] : []).forEach((n) => { test(\`\${n}\`, () => {}); });`), ['src/os.ts: lingerEnabled']);
+  assert.deepEqual(reads(`${nl}function cases() { test('n', () => {}); }\nif (lingerEnabled() !== null) cases();`), ['src/os.ts: lingerEnabled'], "a same-file function's caller");
+  assert.match(refused(`${nl}function cases() { test('n', () => {}); }\nconst all = [cases];`), /uses cases, a function that registers tests, as a value/);
+  // D3: a parameter is what each call passes; one of an exported function, read by a skip, is refused.
+  assert.deepEqual(reads(`${nl}function needs(name, skip) {\n  test(name, { skip }, () => {});\n}\nneeds('n', lingerEnabled() === null);`), ['test/x.test.ts: skip']);
+  assert.match(refused(`${nl}export function needs(name, skip) {\n  test(name, { skip }, () => {});\n}`), /reads `skip`, a parameter of a function that is exported/);
+  // D5: options by name: a const literal used only as options is read; one changed or used elsewhere is refused.
+  assert.deepEqual(reads(`${nl}const o = ${skip};\ntest('n', o, () => {});`), ['src/os.ts: lingerEnabled']);
+  assert.match(refused(`${nl}const o = {};\nObject.defineProperty(o, 'skip', { get: () => lingerEnabled() === null, enumerable: true });\ntest('n', o, () => {});`), /options \(or name\) are `o`/);
+  assert.match(refused(`${nl}let o = {};\ntest('n', o, () => {});`), /options \(or name\) are `o`/);
+  assert.equal(refused(`${nl}for (const u of ['a', 'b']) test(u, () => { console.log(u); });`), '', 'a loop variable read only as a name and inside its test');
+  // D6: a subtest registered under a condition on what carries the sign; a subtest's loop is the run's to judge.
+  const sub = `${nl}test('t', async (t) => {\n  const up = lingerEnabled() !== null;\n`;
+  assert.deepEqual(reads(`${sub}  if (up) await t.test('s', () => {});\n});`), ['test/x.test.ts: up']);
+  assert.deepEqual(reads(`${sub}  for (const u of up ? ['a'] : []) await t.test(\`\${u}\`, () => {});\n});`), []);
+  // U7: t['test'](...)'s options are read as t.test(...)'s.
+  assert.deepEqual(reads(`${nl}test('t', async (t) => { await t['test']('s', ${skip}, () => {}); });`), ['src/os.ts: lingerEnabled']);
+  // Bindings: product code's own describe() isn't node:test's; a test-side module's test is.
+  assert.equal(refused(`import { describe } from '../src/os.js';\nconst x = [describe(1)];`), '');
+  assert.match(refused(`import { test } from './helpers/reg.js';\nconst r = test('n', () => {});`), /registers a test inside an expression/);
+  // D1, picking: a stop through a same-file helper, a hook, a bound skip, a computed key or an IIFE is judged on the VM.
+  const none = { paths: new Set<string>(), carries: () => false };
+  const picked = (body: string) => sa.signTests(ts, 'test/x.test.ts', `import { test, describe, it, beforeEach } from 'node:test';\nlet booted = false;\ntest('probe', () => { booted = existsSync('/run/${sd}/system'); });\n${body}`, none).map((t) => t.name);
+  assert.deepEqual(picked(`const onBoot = (t, fn) => (booted ? fn() : t.skip('x'));\ntest('a', (t) => onBoot(t, () => {}));`), ['probe', 'a']);
+  assert.deepEqual(picked(`describe('s', () => {\n  beforeEach((t) => { if (!booted && 'skip' in t) t.skip('x'); });\n  it('b', () => {});\n});`), ['probe', 'b']);
+  assert.deepEqual(picked(`test('c', (t) => { const s = t.skip.bind(t); if (!booted) s('x'); });`), ['probe', 'c']);
+  assert.deepEqual(picked(`test('d', (t) => { t[booted ? 'diagnostic' : 'skip']('x'); });`), ['probe', 'd']);
+  assert.deepEqual(picked(`test('e', (t) => { if (!booted) (() => t.skip('x'))(); });`), ['probe', 'e']);
+  assert.deepEqual(picked(`test('f', () => { assert.equal(booted, booted); });`), ['probe'], 'reads it, never a stop');
 });

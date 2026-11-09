@@ -2,15 +2,15 @@
   "//": "Each folder is one attack on scripts/ci/systemd-acceptance.mjs (its files are *.test.ts.txt, copied to test/ and dist/test/, and *.root, copied to the root, so neither npm test nor the script's own scan reads them). Each is [exit, reason, listed?]: the script must exit with that code (2 refused statically, 1 refused at run time, 0 for a shape the VM runs or a stated limit) and its stderr match that pattern, so it's refused for its own reason; `listed`, when there, must match its stdout: the shape is among the tests it runs on the VM (R1169n). Kept as regression inputs (the owner's decision on #1169, 2026-11-08).",
   "r1169h-a1": [
     2,
-    "isn't its line's first statement"
+    "registers a test inside an expression"
   ],
   "r1169h-a2": [
     2,
-    "isn't its line's first statement"
+    "test/x\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside"
   ],
   "r1169h-a3": [
     2,
-    "isn't its line's first statement"
+    "uses node:test's test as a value"
   ],
   "r1169h-b1": [
     2,
@@ -375,9 +375,8 @@
     "test/y\\.test\\.ts:4: /run/systemd/system"
   ],
   "r1169r-r1b-suite-name-options": [
-    1,
-    "acceptance: units start: SKIP no init here",
-    "test/y\\.test\\.ts:4: acceptance: units start"
+    2,
+    "a skip reads test/y\\.test\\.ts: s, which carries systemd's sign"
   ],
   "r1169r-r6-zero-subtests-bracket": [
     1,
@@ -464,11 +463,11 @@
   ],
   "r1169t-t4-ternary-test-skip": [
     2,
-    "a skip reads src/os/probe\\.ts: lingerEnabled, which carries systemd's sign"
+    "uses node:test's (test|describe) as a value"
   ],
   "r1169t-t4b-ternary-describe-skip": [
     2,
-    "a skip reads src/os/probe\\.ts: lingerEnabled, which carries systemd's sign"
+    "uses node:test's (test|describe) as a value"
   ],
   "r1169t-t4c-control-options-skip": [
     2,
@@ -523,6 +522,162 @@
   "r1169t-t9d-control-const-body-guard": [
     1,
     "acceptance: the engine unit starts: SKIP",
+    "test/y\\.test\\.ts:\\d+: acceptance: the engine unit starts"
+  ],
+  "r1169u-u0-control-ternary-member": [
+    2,
+    "uses node:test's (test|describe) as a value"
+  ],
+  "r1169u-u1-ternary-call-branches": [
+    2,
+    "registers a test inside an expression"
+  ],
+  "r1169u-u1b-ternary-call-undefined": [
+    2,
+    "registers a test inside an expression"
+  ],
+  "r1169u-u2-suite-body-named-function": [
+    2,
+    "a skip reads src/os/probe\\.ts: lingerEnabled, which carries systemd's sign"
+  ],
+  "r1169u-u3-let-reassigned": [
+    2,
+    "uses node:test's (test|describe) as a value"
+  ],
+  "r1169u-u4-and-or-member": [
+    2,
+    "uses node:test's (test|describe) as a value"
+  ],
+  "r1169u-u5-alias-of-test": [
+    2,
+    "uses node:test's (test|describe) as a value"
+  ],
+  "r1169u-u6-import-renamed": [
+    2,
+    "a skip reads src/os/probe\\.ts: lingerEnabled, which carries systemd's sign"
+  ],
+  "r1169u-u7-bracket-subtest-options": [
+    2,
+    "a skip reads src/os/probe\\.ts: lingerEnabled, which carries systemd's sign"
+  ],
+  "r1169u-u7c-control-dot-subtest-options": [
+    2,
+    "a skip reads src/os/probe\\.ts: lingerEnabled, which carries systemd's sign"
+  ],
+  "r1169u-u8-chosen-local-options": [
+    2,
+    "uses node:test's (test|describe) as a value"
+  ],
+  "r1169v-b0-control-if-skip": [
+    1,
+    "acceptance: the engine unit starts: SKIP not a booted host",
+    "test/y\\.test\\.ts:\\d+: acceptance: the engine unit starts"
+  ],
+  "r1169v-b9-conditional-subtest": [
+    2,
+    "a skip reads test/y\\.test\\.ts: up, which carries systemd's sign"
+  ],
+  "r1169v-b9c-control-subtest-skip": [
+    2,
+    "a skip reads test/y\\.test\\.ts: up, which carries systemd's sign"
+  ],
+  "r1169v-b7-aliased-test": [
+    2,
+    "uses node:test's (test|describe) as a value"
+  ],
+  "r1169v-s0-control-options": [
+    2,
+    "a skip reads src/os/probe\\.ts: lingerEnabled, which carries systemd's sign"
+  ],
+  "r1169v-s1-import-alias": [
+    2,
+    "a skip reads src/os/probe\\.ts: lingerEnabled, which carries systemd's sign"
+  ],
+  "r1169v-s2-default-import": [
+    2,
+    "a skip reads src/os/probe\\.ts: lingerEnabled, which carries systemd's sign"
+  ],
+  "r1169v-s2b-dynamic-import-default": [
+    2,
+    "a skip reads src/os/probe\\.ts: lingerEnabled, which carries systemd's sign"
+  ],
+  "r1169v-s3b-reflect-apply": [
+    2,
+    "uses node:test's (test|describe) as a value"
+  ],
+  "r1169v-s4-helper-parameter": [
+    2,
+    "registers a test inside an expression"
+  ],
+  "r1169v-s5-ternary-of-calls": [
+    2,
+    "registers a test inside an expression"
+  ],
+  "r1169v-s5c-control-and": [
+    2,
+    "registers a test inside an expression"
+  ],
+  "r1169v-s6-loop-registration": [
+    2,
+    "a skip reads src/os/probe\\.ts: lingerEnabled, which carries systemd's sign"
+  ],
+  "r1169v-s7-helper-early-return": [
+    2,
+    "a skip reads src/os/probe\\.ts: lingerEnabled, which carries systemd's sign"
+  ],
+  "r1169v-s7b-async-iife-tla": [
+    2,
+    "a skip reads src/os/probe\\.ts: lingerEnabled, which carries systemd's sign"
+  ],
+  "r1169v-s7c-labelled-block": [
+    2,
+    "a skip reads src/os/probe\\.ts: lingerEnabled, which carries systemd's sign"
+  ],
+  "r1169v-s8-array-index": [
+    2,
+    "uses node:test's (test|describe) as a value"
+  ],
+  "r1169v-s8b-computed-member": [
+    2,
+    "uses node:test's (test|describe) as a value"
+  ],
+  "r1169v-s9-defineproperty": [
+    2,
+    "a test's options \\(or name\\) are `o`"
+  ],
+  "r1169v-b1-same-file-helper": [
+    1,
+    "acceptance: the engine unit starts: SKIP not a booted host",
+    "test/y\\.test\\.ts:\\d+: acceptance: the engine unit starts"
+  ],
+  "r1169v-b2-iife-in-branch": [
+    1,
+    "acceptance: the engine unit starts: SKIP not a booted host",
+    "test/y\\.test\\.ts:\\d+: acceptance: the engine unit starts"
+  ],
+  "r1169v-b3-computed-key": [
+    1,
+    "acceptance: the engine unit starts: SKIP not a booted host",
+    "test/y\\.test\\.ts:\\d+: acceptance: the engine unit starts"
+  ],
+  "r1169v-b4-bound-skip": [
+    1,
+    "acceptance: the engine unit starts: SKIP not a booted host",
+    "test/y\\.test\\.ts:\\d+: acceptance: the engine unit starts"
+  ],
+  "r1169v-b5-loop-guard": [
+    1,
+    "acceptance: the engine unit starts: SKIP not a booted host",
+    "test/y\\.test\\.ts:\\d+: acceptance: the engine unit starts"
+  ],
+  "r1169v-b6-labelled-block": [
+    1,
+    "acceptance: the engine unit starts: SKIP not a booted host",
+    "test/y\\.test\\.ts:\\d+: acceptance: the engine unit starts"
+  ],
+  "r1169v-b8-beforeeach-hook": [
+    1,
+    "acceptance: the engine unit starts: SKIP not a booted host",
     "test/y\\.test\\.ts:\\d+: acceptance: the engine unit starts"
   ]
 }

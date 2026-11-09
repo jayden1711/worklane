@@ -1,0 +1,3 @@
+import { test } from 'node:test';
+import { lingerEnabled } from '../src/os/probe.js';
+Reflect.apply(test, null, ['acceptance: linger', { skip: lingerEnabled() === null }, () => {}]);

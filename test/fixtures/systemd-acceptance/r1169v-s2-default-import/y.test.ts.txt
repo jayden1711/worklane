@@ -1,0 +1,4 @@
+import { test } from 'node:test';
+import { lingerEnabled } from '../src/os/probe.js';
+import nt from 'node:test';
+nt('acceptance: linger', { skip: lingerEnabled() === null }, () => {});

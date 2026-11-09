@@ -1,0 +1,3 @@
+import { test } from 'node:test';
+import { lingerEnabled } from '../src/os/probe.js';
+for (const _ of lingerEnabled() !== null ? [1] : []) test('acceptance: linger', () => {});

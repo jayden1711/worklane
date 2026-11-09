@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import { spawnSync } from 'node:child_process';
 async function each(t, names, fn) {
-  for (const n of names) await t.test(n, () => fn(n));
+  for (const n of names) await t.test(`${n}`, () => fn(n));
 }
 test('acceptance: every failed unit is reported', async (t) => {
   const out = process.env.NEVER ? (spawnSync('systemctl', ['list-units', '--failed', '--plain', '--no-legend'], { encoding: 'utf8' }).stdout ?? '') : '';

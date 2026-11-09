@@ -1,0 +1,5 @@
+import { test } from 'node:test';
+import { lingerEnabled } from '../src/os/probe.js';
+const t2 = test;
+const maybe = lingerEnabled() === null ? t2.skip : t2;
+maybe('acceptance: the engine keeps running after its user logs out (linger)', () => {});

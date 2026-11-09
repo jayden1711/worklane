@@ -547,13 +547,12 @@
         "import test/isolate.ts: machineTool"
       ]
     },
-    "test/locks-process.test.ts: linuxIdentity": {
-      "why": "a known process place and start time, from src/os/index.ts (processPlace, processIdentity), not a service manager",
+    "test/locks-process.test.ts: known": {
+      "why": "a known process place and start time, from src/os/index.ts (processPlace, processIdentity), not a service manager; read through linuxIdentity, a const options literal (R1169v D5)",
       "pin": [
         "const here = processPlace();",
         "const identity = processIdentity(process.pid);",
         "const known = !!(here.host && here.boot && here.pidns && identity && identity !== UNKNOWN_IDENTITY);",
-        "const linuxIdentity = { skip: !known && 'known process place and start time required' };",
         "import src/os/index.ts: UNKNOWN_IDENTITY",
         "import src/os/index.ts: processIdentity",
         "import src/os/index.ts: processPlace"
@@ -574,7 +573,47 @@
         "for (const name of Object.keys(RUNNERS)) { const bin = installed(name); test(`${name}: every option the guard reads as taking the next word takes one in the installed program (#993)`, { skip: bin ? false : `${name} is not installed` }, () => { const check = CHECKS[name]; if (check) check(bin!); else { assertRequiresValue(name, bin!, valueWords(name)); // #1126 item 1: each listed option is checked above, which a dropped one escapes (flock -w, nsenter -S). So the // program's own getopt string must give a required value to exactly the table's letters, none more. const { short } = RUNNERS[name]!.value; if (short) assert.ok(getoptStringIn(bin!, short), `${name}: no getopt string in ${bin} with required values exactly ${short}`); } }); }",
         "import src/guardrails/push-hook.ts: RUNNERS"
       ]
+    },
+    "src/guardrails/push-hook.ts: RUNNERS": {
+      "why": "the push guard's table of runner programs and their options, a const literal in product code: the loop registers one test per row, a fixed set, and no row is a service manager check (R1169v D4 reads a loop's table)"
+    },
+    "test/adversarial/adversarial.test.ts: controls": {
+      "why": "the adversarial suite's case files under test/adversarial/ (cases/*.json, controls.json, todo.json), read with readFileSync: one test per case in the repo's own data, none a service manager check (R1169v D4 reads a loop's table)",
+      "pin": [
+        "const controls = ControlFile.parse(readJson('controls.json')).controls;",
+        "const readJson = (file: string): unknown => JSON.parse(readFileSync(join(DIR, file), 'utf8'));"
+      ]
+    },
+    "test/adversarial/adversarial.test.ts: groups": {
+      "why": "the adversarial suite's case files under test/adversarial/ (cases/*.json, controls.json, todo.json), read with readFileSync: one test per case in the repo's own data, none a service manager check (R1169v D4 reads a loop's table)",
+      "pin": [
+        "const groups = caseFiles.map((f) => ({ file: f, ...CaseFile.parse(readJson(join('cases', f))) }));",
+        "const readJson = (file: string): unknown => JSON.parse(readFileSync(join(DIR, file), 'utf8'));"
+      ]
+    },
+    "test/adversarial/adversarial.test.ts: g": {
+      "why": "the adversarial suite's case files under test/adversarial/ (cases/*.json, controls.json, todo.json), read with readFileSync: one test per case in the repo's own data, none a service manager check (R1169v D4 reads a loop's table)",
+      "pin": [
+        "const groups = caseFiles.map((f) => ({ file: f, ...CaseFile.parse(readJson(join('cases', f))) }));",
+        "const readJson = (file: string): unknown => JSON.parse(readFileSync(join(DIR, file), 'utf8'));",
+        "for (const g of groups) { for (const c of g.cases) { test(`adversarial ${g.group} / ${c.id}: ${c.attack} (${c.source}) waits`, () => { const r = made(c, false); const injected = made(c, true); for (const cfg of c.expect.configs) { for (const scope of c.expect.scopes) { const at = `${c.id} under ${cfg} review.yaml, ${scope} scope`; const d = decide(r, c, cfg, scope); assert.equal(d.auto, false, `${at}: merged with the evaluator fooled`); for (const want of c.expect.reasons) assert.ok(d.reasons.some((x) => x.includes(want)), `${at}: no reason with \"${want}\" in ${JSON.stringify(d.reasons)}`); // A1: an injection in the PR's own files (and, by construction, in its body and issue, which the gate never // reads: only the evaluator does, and it is already fully fooled) changes no reason. // The one comment line per file it adds is counted, so only a size reason's number may move. assert.deepEqual(decide(injected, c, cfg, scope).reasons.map(sizeless), d.reasons.map(sizeless), `${at}: the injection changed the decision`); // A3: a worker claiming a lower class (or none) never lowers anything: the same reasons, the same class. // The class comparison is what holds a lower claim. The reasons comparison can't fail through claim handling: // the claim reaches the decision only as `claimedProtected` (merge-flow.ts: claim === 'protected'), which a // lower claim leaves false, so both calls get the same input. It guards determinism instead, together with // assertSameEveryTime below. const unclaimed = classOf(r, c, cfg, scope, undefined); for (const claim of ['docs-only', 'logic'] as const) { if (c.pr.claim === 'protected') break; assert.deepEqual(decide(r, c, cfg, scope, claim).reasons, decide(r, c, cfg, scope, undefined).reasons, `${at}: claiming ${claim} changed the decision`); assert.equal(classOf(r, c, cfg, scope, claim), unclaimed, `${at}: claiming ${claim} changed the class`); } assertSameEveryTime(r, c, cfg, scope, d, at); } } }); } }"
+      ]
+    },
+    "test/adversarial/adversarial.test.ts: todos": {
+      "why": "the adversarial suite's case files under test/adversarial/ (cases/*.json, controls.json, todo.json), read with readFileSync: one test per case in the repo's own data, none a service manager check (R1169v D4 reads a loop's table)",
+      "pin": [
+        "const readJson = (file: string): unknown => JSON.parse(readFileSync(join(DIR, file), 'utf8'));",
+        "const todos = TodoFile.parse(readJson('todo.json')).todo;"
+      ]
     }
   },
-  "runtime": {}
+  "runtime": {
+    "test/dashboard-switch-speed.test.ts: the test can tell the instances apart: each has its own newest PR, its own cards and its own last event": "a web-UI speed test (real Chrome against the built dist/web): it skips where the UI isn't built or Chrome is missing (webUiSkip), as this job doesn't build it; the shards run it with CI_REQUIRE_WEB=1. Picked only by R1169v's fail-closed rule (its skip reads findChrome, from a module named at run time), never for systemd",
+    "test/dashboard-switch-speed.test.ts: `gated, ${GATED.name}: a cold first load shows the busy instance's Overview in under ${COLD_MS} ms (median of ${COLD_LOA": "a web-UI speed test (real Chrome against the built dist/web): it skips where the UI isn't built or Chrome is missing (webUiSkip), as this job doesn't build it; the shards run it with CI_REQUIRE_WEB=1. Picked only by R1169v's fail-closed rule (its skip reads findChrome, from a module named at run time), never for systemd",
+    "test/dashboard-switch-speed.test.ts: `gated, ${GATED.name}: an instance switch and a page switch from cache each show the new view's own data in under ${SWIT": "a web-UI speed test (real Chrome against the built dist/web): it skips where the UI isn't built or Chrome is missing (webUiSkip), as this job doesn't build it; the shards run it with CI_REQUIRE_WEB=1. Picked only by R1169v's fail-closed rule (its skip reads findChrome, from a module named at run time), never for systemd",
+    "test/dashboard-switch-speed.test.ts: `${GATED.name}, without the cache (dash-cache-off): the same switches take over ${SWITCH_MS} ms, so the test above would": "a web-UI speed test (real Chrome against the built dist/web): it skips where the UI isn't built or Chrome is missing (webUiSkip), as this job doesn't build it; the shards run it with CI_REQUIRE_WEB=1. Picked only by R1169v's fail-closed rule (its skip reads findChrome, from a module named at run time), never for systemd",
+    "test/dashboard-switch-speed.test.ts: `gated, ${GATED.name}: a PR opened while its page is shown fades in, in at most ${NEW_DATA_FADE_MAX_MS} ms; the rows alr": "a web-UI speed test (real Chrome against the built dist/web): it skips where the UI isn't built or Chrome is missing (webUiSkip), as this job doesn't build it; the shards run it with CI_REQUIRE_WEB=1. Picked only by R1169v's fail-closed rule (its skip reads findChrome, from a module named at run time), never for systemd",
+    "test/dashboard-switch-speed.test.ts: `measured, not gated, ${RELAY.name}: the cold first load and the switches from cache`": "a web-UI speed test (real Chrome against the built dist/web): it skips where the UI isn't built or Chrome is missing (webUiSkip), as this job doesn't build it; the shards run it with CI_REQUIRE_WEB=1. Picked only by R1169v's fail-closed rule (its skip reads findChrome, from a module named at run time), never for systemd",
+    "test/security-fixed.test.ts: #859: on a checkout with the whole history, each merge commit the table names is an ancestor of HEAD": "skips on a shallow checkout (git rev-parse --is-shallow-repository), which this job's checkout is, as the shards' are; the security-fixed job checks it on full history. Picked only by R1169v's fail-closed rule (its function reads scripts/ci/security-fixed.mjs, a module named at run time, and holds a skip), never for systemd"
+  }
 }

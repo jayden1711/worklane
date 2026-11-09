@@ -12,7 +12,11 @@
 // At run time, on the VM (R1169n, R1169p, R1169r, signTests): every test in a *.test.ts file that (a) holds
 // systemd's sign (below) in its own function, (b) has a skip, a todo or an early return there whose condition reads
 // what carries the sign, one name away (a local from it, an import whose export reads it in its own module, a module
-// named at run time), or (c) has a name holding the sign, or sits in a suite whose name does, runs here too. Its whole
+// named at run time), (c) has a name holding the sign, or sits in a suite whose name does, or (d) (R1169v D1, fail
+// closed) runs code that reads what carries the sign and mentions skip or todo in any form (a property, a key, a
+// string): its own function with every function in it, each same-file function that code names, at any depth, and
+// the hooks (before, beforeEach, after, afterEach) of each block around it, so a stop through a helper, a bound or
+// computed t.skip, a loop, a label or a hook is judged here too. Each runs here. Its whole
 // file runs at once with no name filter, and each such test must have run and passed with no skip or todo, all of it,
 // matched by built file, line and column as a gate is; and one whose function reads `test` on its context (a subtest)
 // must have run one (the owner's option (b): no zero subtests). So a test that detects systemd and skips, marks itself
@@ -32,9 +36,21 @@
 // module named at run time (a non-literal import(), require() or createRequire(...)(...), or a module outside the build
 // roots), or a local whose value comes, through any number of that file's own declarations and assignments (read with
 // scopes), from one of those, from the sign or from a file read; unless the allowlist's skipImports names it, with
-// why, and a local by the text of what makes it carry the sign. The same holds for a condition that decides whether a
-// test or suite is registered at all (R1169t): a ternary choosing test or test.skip (or describe), an if whose branch
-// registers or returns from a suite's body, and `&&`, `||` or `??` whose right side registers.
+// why, and a local by the text of what makes it carry the sign.
+//
+// Registration is read by binding, failing closed (R1169u, R1169v): node:test's test, it, describe, suite, its
+// default and the module itself (a named, renamed, default or namespace import, require(), import()) are known by what
+// each name is bound to. Every reference to one must be a call, or a call of its .skip/.only/.todo (or a hook's,
+// mock's), as a statement of its own; any other (an alias, an argument, Reflect.apply or .call, an array or object, a
+// computed key, a conditional, a reassignment) stops the job. And what decides whether a registration runs is read as
+// a skip is: each if, ?:, &&/||/??, switch or catch around it; each loop around it (its condition or iterable, unless
+// it is a fixed table: a const array or object literal with no spread); each earlier statement in any block around it
+// (a function's, a label's, the file's) that can return, break, continue or throw under a condition; and through a
+// function, the same where it's called (an IIFE, a callback's call and its receiver, a same-file function at each
+// call; one used otherwise as a value stops the job). A subtest's (`t.test`, a test() inside a test) is read up to its
+// test's function. A parameter is what each call passes in its place; one of a function that is exported, used as a
+// value or called with a spread, read by a skip or such a condition, stops the job. Options by name must be a const
+// object literal used only as options; any other stops the job (it could be set after: `Object.defineProperty`).
 //
 // What neither can see (named limits, by the owner's choice, 2026-11-08, option (a): tests whose body holds the sign,
 // guarded stops and the name rule): a skip on a proxy with no sign anywhere in its file (`process.getuid() === 0`, a
@@ -43,8 +59,10 @@
 // indirect reach (a property of a shared object, a global, an env variable set from the sign: D2; an aliased
 // createRequire: D3; a re-export: D4); a stop inside a catch or a switch (R1169q); a name rule that is lexical (a
 // name built at run time, or a test registered through a helper whose own name and body hold no sign, isn't read as
-// holding it); and the subtest rule's reach (a subtest started through a helper in another module, or through a
-// property of an object that holds the context, isn't counted). #1250 tracks measuring the
+// holding it); the subtest rule's reach (a subtest started through a helper in another module, or through a
+// property of an object that holds the context, isn't counted); a registration in another module (a helper module's
+// exported function, called from here under a condition, is read only as a call); and a skip or todo spelled from
+// parts (`t['sk' + 'ip']`, deliberate, as a split sign is). #1250 tracks measuring the
 // alternative, the whole suite on the VM. A test that passes without checking (an early return on the VM's answer)
 // does run on the VM, where it checks for real.
 //
@@ -201,20 +219,18 @@ function leafSign(ts, sf, n) {
   return null;
 }
 
-/** `test(...)`/`it(...)`, with `.only`, `.skip` or `.todo`. */
-function isTestCall(ts, n) {
-  if (!ts.isCallExpression(n)) return false;
-  let c = n.expression;
-  if (ts.isPropertyAccessExpression(c) && ts.isIdentifier(c.expression) && /^(?:only|skip|todo)$/.test(c.name.text)) c = c.expression;
-  return ts.isIdentifier(c) && (c.text === 'test' || c.text === 'it');
+/** Whether `node` holds the sign in any leaf. */
+function leafSignIn(ts, sf, node) {
+  let hit = false;
+  const walk = (x) => {
+    if (hit) return;
+    if (leafSign(ts, sf, x)) hit = true;
+    else ts.forEachChild(x, walk);
+  };
+  walk(node);
+  return hit;
 }
-/** `describe(...)`/`suite(...)`, with `.only`, `.skip` or `.todo`. */
-function isSuiteCall(ts, n) {
-  if (!ts.isCallExpression(n)) return false;
-  let c = n.expression;
-  if (ts.isPropertyAccessExpression(c) && ts.isIdentifier(c.expression) && /^(?:only|skip|todo)$/.test(c.name.text)) c = c.expression;
-  return ts.isIdentifier(c) && (c.text === 'describe' || c.text === 'suite');
-}
+
 /** A test call's own function: its last argument, when it is a function (`test(name, fn)`, `test(options, fn)`, `test(fn)`). */
 const ownFunction = (ts, n) => {
   const fn = n.arguments[n.arguments.length - 1];
@@ -231,8 +247,11 @@ const nameArg = (ts, n) => {
  * a test's or a suite's name, and a test's own function. A test whose own function holds the sign is run on the VM by
  * the acceptance job (signTests), where any skip or todo in it fails, so a detector there can't hide it.
  */
-function allowedSpans(ts, sf, testFile) {
+function allowedSpans(ts, sf, testFile, kindOf) {
   const spans = [];
+  // What a call registers, by binding as signTests reads it (R1169v D2): an aliased or default test() is a test here too.
+  const isTestCall = (_, n) => kindOf(n) === 'test';
+  const isSuiteCall = (_, n) => kindOf(n) === 'suite';
   const visit = (n) => {
     if (testFile && ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.name.text === 'systemCi' && n.initializer) spans.push([n.initializer.getStart(sf), n.initializer.end]);
     // Only in a *.test.ts file: the run picks tests from those alone, so a helper module's test() is never run on the
@@ -263,7 +282,8 @@ function allowedSpans(ts, sf, testFile) {
 export function signUseList(ts, path, text) {
   if (!maySign(text)) return [];
   const sf = parsed(ts, path, text);
-  const spans = allowedSpans(ts, sf, path.endsWith('.test.ts'));
+  const kindOf = fileFlow(ts, path, text, { paths: new Set(), carries: () => false, fileReads: false }).callKind;
+  const spans = allowedSpans(ts, sf, path.endsWith('.test.ts'), kindOf);
   const lines = text.split('\n');
   const out = [];
   const visit = (n) => {
@@ -302,6 +322,28 @@ export const signUses = (ts, path, text) => signUseList(ts, path, text).map((u) 
  * A relative specifier from `path`, resolved to a build-root path in `paths` (`./x.js` to `test/x.ts`); `?` for one
  * outside them; a package's name as written.
  */
+/** A member access's name: `x.name`, or `x['name']` with a literal key; else null. */
+function memberName(ts, x) {
+  if (ts.isPropertyAccessExpression(x)) return x.name.text;
+  if (ts.isElementAccessExpression(x) && ts.isStringLiteralLike(x.argumentExpression)) return x.argumentExpression.text;
+  return null;
+}
+/** Whether an identifier reads a name: not a declaration's own name, a property's name, a label, or in a type. */
+function isRef(ts, id) {
+  const p = id.parent;
+  if (!p) return false;
+  if ((ts.isPropertyAccessExpression(p) || ts.isQualifiedName(p)) && p.name === id) return false;
+  if ((ts.isPropertyAssignment(p) || ts.isMethodDeclaration(p) || ts.isPropertyDeclaration(p) || ts.isPropertySignature(p) || ts.isMethodSignature(p) || ts.isGetAccessorDeclaration(p) || ts.isSetAccessorDeclaration(p) || ts.isEnumMember(p)) && p.name === id) return false;
+  if ((ts.isVariableDeclaration(p) || ts.isParameter(p) || ts.isFunctionDeclaration(p) || ts.isFunctionExpression(p) || ts.isClassDeclaration(p) || ts.isClassExpression(p) || ts.isBindingElement(p) || ts.isImportSpecifier(p) || ts.isImportClause(p) || ts.isNamespaceImport(p) || ts.isImportEqualsDeclaration(p) || ts.isTypeAliasDeclaration(p) || ts.isInterfaceDeclaration(p) || ts.isEnumDeclaration(p) || ts.isTypeParameterDeclaration(p)) && (p.name === id || p.propertyName === id)) return false;
+  if (ts.isLabeledStatement(p) || ts.isBreakOrContinueStatement(p)) return false;
+  if (ts.isExportSpecifier(p) && p.propertyName && p.name === id) return false;
+  for (let q = p; q && !ts.isSourceFile(q); q = q.parent) {
+    if (ts.isTypeNode(q) && !ts.isExpressionWithTypeArguments(q)) return false;
+    if (ts.isBlock(q) || ts.isFunctionLike(q)) break;
+  }
+  return true;
+}
+
 function resolveFrom(path, spec, paths) {
   if (!spec.startsWith('.')) return spec;
   const parts = path.split('/').slice(0, -1);
@@ -326,6 +368,10 @@ function resolveFrom(path, spec, paths) {
  */
 export function fileFlow(ts, path, text, source) {
   const sf = parsed(ts, path, text);
+  const unparen = (x) => {
+    while (x && ts.isParenthesizedExpression(x)) x = x.expression;
+    return x;
+  };
   // Scopes: each declaration's name belongs to the nearest block, function, loop or file around it, and a name read is
   // the nearest declaration of it outward, so two functions' own `r` are two names.
   const isScope = (n) => ts.isSourceFile(n) || ts.isBlock(n) || ts.isModuleBlock(n) || ts.isCaseBlock(n) || ts.isCatchClause(n) || ts.isForStatement(n) || ts.isForOfStatement(n) || ts.isForInStatement(n) || ts.isFunctionLike(n) || ts.isClassLike(n);
@@ -355,10 +401,13 @@ export function fileFlow(ts, path, text, source) {
     if (ts.isIdentifier(name)) add(scope, name, `${module}: ${imported}`, null);
     else for (const e of name.elements ?? []) if (!ts.isOmittedExpression(e)) bindAll(scope, e.name, module, e.propertyName && ts.isIdentifier(e.propertyName) ? e.propertyName.text : ts.isIdentifier(e.name) ? e.name.text : imported, node);
   };
-  const declAll = (scope, name, node) => {
-    if (ts.isIdentifier(name)) add(scope, name, null, node);
-    else for (const e of name.elements ?? []) if (!ts.isOmittedExpression(e)) declAll(scope, e.name, node);
+  const declAll = (scope, name, node, acc = []) => {
+    if (ts.isIdentifier(name)) acc.push(add(scope, name, null, node));
+    else for (const e of name.elements ?? []) if (!ts.isOmittedExpression(e)) declAll(scope, e.name, node, acc);
+    return acc;
   };
+  /** Each function's parameters, to link them to what its callers pass (R1169v D3). */
+  const params = [];
   /** A statement's text, its whitespace runs made one space: what pins a local the allowlist names (R1169o C4). */
   const textOf = (n) => statementOf(n).getText(sf).replace(/\s+/g, ' ').trim();
   /** Names bound to a `createRequire(...)` result, which load a module as `require` does (R1169o C2). */
@@ -424,11 +473,22 @@ export function fileFlow(ts, path, text, source) {
       if (spec) bindAll(scope, n.name, spec === '?' ? '?' : resolveFrom(path, spec, source.paths), '*', n.initializer);
       // systemCi is the gate itself: its declaration is the one place the sign may feed a skip.
       // A for...of or for...in variable's value comes from its loop's expression (R1169t D3).
-      else if (!n.initializer && n.parent && ts.isVariableDeclarationList(n.parent) && n.parent.parent && (ts.isForOfStatement(n.parent.parent) || ts.isForInStatement(n.parent.parent))) declAll(scope, n.name, n.parent.parent.expression);
-      else if (!(ts.isIdentifier(n.name) && n.name.text === 'systemCi')) declAll(scope, n.name, n.initializer ?? null);
-      else add(scope, n.name, null, null);
-    } else if ((ts.isFunctionDeclaration(n) || ts.isClassDeclaration(n)) && n.name) add(scopeOf(n), n.name, null, n);
-    else if (ts.isParameter(n)) declAll(n.parent, n.name, n.initializer ?? null);
+      else if (!n.initializer && n.parent && ts.isVariableDeclarationList(n.parent) && n.parent.parent && (ts.isForOfStatement(n.parent.parent) || ts.isForInStatement(n.parent.parent))) for (const d of declAll(scope, n.name, n.parent.parent.expression)) d.varDecl = n;
+      else if (!(ts.isIdentifier(n.name) && n.name.text === 'systemCi')) {
+        for (const d of declAll(scope, n.name, n.initializer ?? null)) {
+          d.varDecl = n;
+          const init = n.initializer && unparen(n.initializer);
+          if (ts.isIdentifier(n.name) && init && (ts.isArrowFunction(init) || ts.isFunctionExpression(init))) d.fnNode = init;
+        }
+      } else add(scope, n.name, null, null);
+    } else if ((ts.isFunctionDeclaration(n) || ts.isClassDeclaration(n)) && n.name) {
+      const d = add(scopeOf(n), n.name, null, n);
+      if (ts.isFunctionDeclaration(n) && n.body) d.fnNode = n;
+    } else if (ts.isParameter(n)) {
+      const ds = declAll(n.parent, n.name, n.initializer ?? null);
+      for (const d of ds) d.param = true;
+      params.push({ fn: n.parent, index: n.parent.parameters.indexOf(n), rest: !!n.dotDotDotToken, ds });
+    }
     else if (ts.isBinaryExpression(n) && n.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && n.operatorToken.kind <= ts.SyntaxKind.LastAssignment && ts.isIdentifier(n.left)) assignments.push([n.left, statementOf(n)]);
     ts.forEachChild(n, visit);
   };
@@ -441,6 +501,99 @@ export function fileFlow(ts, path, text, source) {
       d.texts.push(textOf(st));
     }
   }
+  // Every reference to each declaration (a name read, not a declaration, a property name, a label or a type).
+  const refs = new Map();
+  const walkRefs = (x) => {
+    if (ts.isIdentifier(x) && isRef(ts, x)) {
+      const d = resolve(x);
+      if (d) {
+        if (!refs.has(d)) refs.set(d, []);
+        refs.get(d).push(x);
+      }
+    }
+    ts.forEachChild(x, walkRefs);
+  };
+  walkRefs(sf);
+  const refsOf = (d) => refs.get(d) ?? [];
+  /** The declaration of the function `fn` is (a function declaration, or `const f = () => ...`), or null. */
+  const fnDecl = (fn) => {
+    if (ts.isFunctionDeclaration(fn) && fn.name) return resolve(fn.name);
+    let fx = fn;
+    while (fx.parent && ts.isParenthesizedExpression(fx.parent)) fx = fx.parent;
+    const v = fx.parent;
+    return v && ts.isVariableDeclaration(v) && v.initializer === fx && ts.isIdentifier(v.name) ? resolve(v.name) : null;
+  };
+  /** What a callback's parameters come from: its call's receiver and the call's other arguments (`xs.forEach((x) => ...)`). */
+  const callbackSources = (call, fx) => [...(ts.isPropertyAccessExpression(call.expression) || ts.isElementAccessExpression(call.expression) ? [call.expression.expression] : []), ...call.arguments.filter((a) => a !== fx)];
+  // A parameter's value comes from what each call passes in its place (R1169v D3): an IIFE's or a same-file function's
+  // arguments; a callback's call's receiver and other arguments. A same-file function that escapes (used as a value
+  // other than a callback, exported, or called with a spread) has callers this can't read: its parameters say so.
+  const link = (entry, call) => {
+    const args = entry.rest ? call.arguments.slice(entry.index) : call.arguments[entry.index] ? [call.arguments[entry.index]] : [];
+    for (const d of entry.ds) for (const a of args) (d.nodes.push(a), d.texts.push(textOf(a)));
+  };
+  const byFn = new Map();
+  for (const e of params) byFn.set(e.fn, [...(byFn.get(e.fn) ?? []), e]);
+  for (const [fn, entries] of byFn) {
+    let fx = fn;
+    while (fx.parent && ts.isParenthesizedExpression(fx.parent)) fx = fx.parent;
+    const up = fx.parent;
+    const escape = () => entries.forEach((e) => e.ds.forEach((d) => (d.escapes = true)));
+    if (up && ts.isCallExpression(up) && up.expression === fx) for (const e of entries) link(e, up);
+    else if (up && ts.isCallExpression(up) && up.arguments.includes(fx)) {
+      for (const e of entries) for (const d of e.ds) for (const a of callbackSources(up, fx)) (d.nodes.push(a), d.texts.push(textOf(a)));
+    } else {
+      const d = fnDecl(fn);
+      if (!d) continue;
+      if (exportedNow(ts.isFunctionDeclaration(fn) ? fn : d.varDecl?.parent?.parent ?? fn)) escape();
+      for (const r of refsOf(d)) {
+        const rp = r.parent;
+        if (ts.isCallExpression(rp) && rp.expression === r) {
+          if (rp.arguments.some((a) => ts.isSpreadElement(a))) escape();
+          else for (const e of entries) link(e, rp);
+        } else if (ts.isCallExpression(rp) && rp.arguments.includes(r)) {
+          for (const e of entries) for (const x of e.ds) for (const a of callbackSources(rp, r)) (x.nodes.push(a), x.texts.push(textOf(a)));
+        } else escape();
+      }
+    }
+  }
+  // node:test's values, by what each name is bound to (R1169v D2): `<kind>` for a name bound to node:test's test, it
+  // or default (`test`), describe or suite (`suite`), the module itself (`space`: a namespace, require() or import()
+  // result, which is test too), or another export (`other`: a hook, mock); null for anything else.
+  const NT = 'node:test: ';
+  const testValue = (id) => {
+    const b = resolve(id)?.binding;
+    if (!b?.startsWith(NT)) return null;
+    const x = b.slice(NT.length);
+    return /^(?:test|it|default)$/.test(x) ? 'test' : /^(?:describe|suite)$/.test(x) ? 'suite' : x === '*' ? 'space' : 'other';
+  };
+  /**
+   * What a call registers: `test` (a test), `suite`, `sub` (a subtest: a `test` read on another object, `t.test(...)`,
+   * `t['test'](...)`), or null. With `.skip`, `.only` or `.todo`. node:test's values by binding (aliases, the default,
+   * a namespace); an unbound name by its spelling, unless it names a function this file defines itself.
+   */
+  const callKind = (n) => {
+    if (!ts.isCallExpression(n)) return null;
+    let c = unparen(n.expression);
+    if (/^(?:only|skip|todo)$/.test(memberName(ts, c) ?? '')) c = unparen(c.expression);
+    if (ts.isIdentifier(c)) {
+      const v = testValue(c);
+      if (v === 'test' || v === 'space') return 'test';
+      if (v) return v === 'suite' ? 'suite' : null;
+      // Bound to anything else (a local, a parameter, product code's own describe()): not node:test's; unbound (a
+      // global), or a test-side module's test/it/describe/suite (a re-export of node:test's), by its name.
+      const d = resolve(c);
+      const name = !d ? c.text : d.binding?.startsWith('test/') ? d.binding.slice(d.binding.lastIndexOf(': ') + 2) : null;
+      return name && /^(?:test|it)$/.test(name) ? 'test' : name && /^(?:describe|suite)$/.test(name) ? 'suite' : null;
+    }
+    const nm = memberName(ts, c);
+    if (!nm) return null;
+    const o = unparen(c.expression);
+    if (ts.isIdentifier(o) && testValue(o) === 'space') return /^(?:test|it|default)$/.test(nm) ? 'test' : /^(?:describe|suite)$/.test(nm) ? 'suite' : null;
+    // Another object's test(name, ..., fn): a subtest (`t.test`, `t['test']`), not a regex's `.test(s)`.
+    const last = n.arguments[n.arguments.length - 1];
+    return /^(?:test|it|describe|suite)$/.test(nm) && n.arguments.length >= 2 && last && (ts.isArrowFunction(last) || ts.isFunctionExpression(last) || (ts.isIdentifier(last) && !!resolve(last)?.fnNode)) ? 'sub' : null;
+  };
   const sourceOf = (b) => source.carries(b.slice(0, b.lastIndexOf(': ')), b);
   const tainted = new Set();
   /** Whether `node` reads the sign, a carrying binding, a file, or a name already tainted. */
@@ -494,7 +647,7 @@ export function fileFlow(ts, path, text, source) {
     if (exported.has(name)) return one(exported.get(name)());
     return reexportAll.length ? reexportAll.some((m) => source.carries(m, `${m}: ${name}`)) : true;
   };
-  return { sf, resolve, tainted, carries, sourceOf, chain, exportCarries };
+  return { sf, resolve, tainted, carries, sourceOf, chain, exportCarries, refsOf, fnDecl, callbackSources, testValue, callKind };
 }
 
 /**
@@ -504,11 +657,14 @@ export function fileFlow(ts, path, text, source) {
  * from `module` carries it.
  */
 export function skipReads(ts, path, text, source) {
-  // No skip, todo or registration to read (a registration's guard is read too, R1169t D2).
-  if (!/\b(?:skip|todo|test|it|describe|suite)\b/.test(text)) return [];
-  const { sf, resolve, tainted, sourceOf, chain } = fileFlow(ts, path, text, source);
+  const done = (out, pins, refused) => Object.defineProperties(out, { pins: { value: pins, enumerable: false }, refused: { value: refused, enumerable: false } });
+  if (!/\b(?:skip|todo|test|it|describe|suite)\b|node:test/.test(text)) return done([], new Map(), []);
+  const { sf, resolve, tainted, sourceOf, chain, refsOf, fnDecl, callbackSources, testValue, callKind } = fileFlow(ts, path, text, source);
   const out = new Set();
   const pins = new Map();
+  const refused = new Set();
+  const at = (n) => `${path}:${sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1}`;
+  const snip = (n) => n.getText(sf).replace(/\s+/g, ' ').slice(0, 100);
   const read = (n) => {
     if (ts.isIdentifier(n) && !(n.parent && ts.isPropertyAccessExpression(n.parent) && n.parent.name === n)) {
       const d = resolve(n);
@@ -518,31 +674,15 @@ export function skipReads(ts, path, text, source) {
         out.add(`${path}: ${n.text}`);
         pins.set(`${path}: ${n.text}`, chain(d));
       }
+      // A parameter whose callers can't all be read (R1169v D3): fail closed.
+      if (d?.escapes) refused.add(`${at(n)}: a skip, todo or registration's condition reads \`${n.text}\`, a parameter of a function that is exported, used as a value or called with a spread, so not every value it gets can be read: pass the value where this file calls it`);
     }
     ts.forEachChild(n, read);
   };
-  // A test's or suite's options (any argument but a text name and its function, R1169p D3: `test(options, fn)` too),
-  // `t.test(...)`'s included: their `skip` and `todo`, or the whole argument when it isn't an object literal.
-  // A function the file defines itself under one of those names (`function suite(...) {...}`, `const it = () => ...`)
-  // is its own helper, not node:test's. Any other local of that name (an alias, a wrapper's result) still counts.
-  const own = new Set();
-  const declares = (x) => {
-    if (ts.isFunctionDeclaration(x) && x.name && x.body) own.add(x.name.text);
-    else if (ts.isVariableDeclaration(x) && ts.isIdentifier(x.name) && x.initializer && (ts.isArrowFunction(x.initializer) || ts.isFunctionExpression(x.initializer))) own.add(x.name.text);
-    ts.forEachChild(x, declares);
-  };
-  declares(sf);
-  const mine = (x) => ts.isIdentifier(x) && own.has(x.text);
-  const isCall = (n) => {
-    if (!ts.isCallExpression(n) || n.arguments.length < 2) return false;
-    const c = n.expression;
-    if (ts.isIdentifier(c) && registersBy.has(c.text)) return true;
-    if (mine(c) || (ts.isPropertyAccessExpression(c) && mine(c.expression))) return false;
-    const last = ts.isPropertyAccessExpression(c) ? c.name.text : ts.isIdentifier(c) ? c.text : '';
-    const base = ts.isPropertyAccessExpression(c) && ts.isPropertyAccessExpression(c.expression) ? c.expression.name.text : ts.isPropertyAccessExpression(c) && ts.isIdentifier(c.expression) ? c.expression.text : '';
-    return /^(?:test|it|describe|suite)$/.test(last) || (/^(?:only|skip|todo)$/.test(last) && /^(?:test|it|describe|suite)$/.test(base));
-  };
+  // A test's or suite's options (any argument but a text name and its function, R1169p D3: `test(options, fn)` too):
+  // their `skip` and `todo`, or the whole argument when it isn't an object literal.
   const options = (o) => {
+    if (ts.isIdentifier(o)) return optionsName(o);
     if (!ts.isObjectLiteralExpression(o)) return read(o);
     for (const x of o.properties) {
       if (ts.isPropertyAssignment(x) && (ts.isIdentifier(x.name) || ts.isStringLiteral(x.name)) && /^(?:skip|todo)$/.test(x.name.text)) read(x.initializer);
@@ -552,66 +692,193 @@ export function skipReads(ts, path, text, source) {
       else if ((ts.isGetAccessorDeclaration(x) || ts.isMethodDeclaration(x)) && (ts.isComputedPropertyName(x.name) || ((ts.isIdentifier(x.name) || ts.isStringLiteral(x.name)) && /^(?:skip|todo)$/.test(x.name.text)))) read(x);
     }
   };
-  /** Whether `x` is test, it, describe or suite, or one's .skip/.only/.todo: a function that registers a test or suite. */
-  const registers = (x) => {
-    while (x && ts.isParenthesizedExpression(x)) x = x.expression;
-    if (!x) return false;
-    if (ts.isIdentifier(x)) return !mine(x) && /^(?:test|it|describe|suite)$/.test(x.text);
-    if (ts.isPropertyAccessExpression(x)) return /^(?:only|skip|todo)$/.test(x.name.text) && ts.isIdentifier(x.expression) && !mine(x.expression) && /^(?:test|it|describe|suite)$/.test(x.expression.text);
-    return false;
+  const optionsArg = (r) => {
+    const c = r.parent;
+    return ts.isCallExpression(c) && !!callKind(c) && c.arguments.includes(r) && r !== ownFunction(ts, c);
   };
-  /** Whether `x` registers a test or a suite anywhere in it (a call to one, or one picked by a condition). */
-  const registersIn = (x) => {
-    let hit = false;
-    const walk = (y) => {
-      if (hit) return;
-      if (ts.isCallExpression(y) && (registers(y.expression) || (ts.isIdentifier(y.expression) && registersBy.has(y.expression.text)))) hit = true;
-      else ts.forEachChild(y, walk);
-    };
-    walk(x);
-    return hit;
-  };
-  /** Local names that hold a registering function chosen at run time (`const maybe = c ? test.skip : test`). */
-  const registersBy = new Set();
-  const suiteBody = (x) => {
-    for (let p = x.parent; p; p = p.parent) if (ts.isFunctionLike(p)) return !!(p.parent && ts.isCallExpression(p.parent) && registers(p.parent.expression) && /^(?:describe|suite)$/.test(ts.isIdentifier(p.parent.expression) ? p.parent.expression.text : ts.isPropertyAccessExpression(p.parent.expression) && ts.isIdentifier(p.parent.expression.expression) ? p.parent.expression.expression.text : ''));
-    return false;
-  };
-  /** Whether `x` returns, outside any function inside it. */
-  const returns = (x) => {
-    let hit = false;
-    const walk = (y) => {
-      if (hit || (y !== x && ts.isFunctionLike(y))) return;
-      if (ts.isReturnStatement(y)) hit = true;
-      else ts.forEachChild(y, walk);
-    };
-    walk(x);
-    return hit;
-  };
-  // A skip chosen at run time (R1169t D1): `c ? test.skip : test`, a condition choosing between registering functions.
-  // A guard outside the test's function (D2): an `if` or a `&&`/`||` whose branch registers a test or a suite, or,
-  // in a suite's body, returns before its tests are registered. Each condition is read as a skip's is.
-  const guards = (n) => {
-    if (ts.isConditionalExpression(n) && (registers(n.whenTrue) || registers(n.whenFalse))) {
-      read(n.condition);
-      if (n.parent && ts.isVariableDeclaration(n.parent) && ts.isIdentifier(n.parent.name)) registersBy.add(n.parent.name.text);
-    } else if (ts.isIfStatement(n) && (registersIn(n.thenStatement) || (n.elseStatement && registersIn(n.elseStatement)) || (suiteBody(n) && (returns(n.thenStatement) || (n.elseStatement && returns(n.elseStatement)))))) read(n.expression);
-    else if (ts.isBinaryExpression(n) && [ts.SyntaxKind.AmpersandAmpersandToken, ts.SyntaxKind.BarBarToken, ts.SyntaxKind.QuestionQuestionToken].includes(n.operatorToken.kind) && registersIn(n.right)) read(n.left);
-    ts.forEachChild(n, guards);
-  };
-  const skips = (n) => {
-    if (isCall(n)) {
-      const fn = ownFunction(ts, n);
-      n.arguments.forEach((a, k) => {
-        if (a !== fn && !(k === 0 && (ts.isStringLiteralLike(a) || ts.isTemplateExpression(a)))) options(a);
-      });
+  // Options (or a name) by name (R1169v D5): a const object literal, whose skip and todo are read; a const text; a
+  // parameter or a loop variable, read whole (through what its callers pass, or what it iterates). Each only if
+  // nothing can change it before the test is registered: every other read of it is as a test's name or options, or
+  // inside the function of a test it is passed to (which runs after its options are read). Anything else
+  // (`Object.defineProperty(o, 'skip', ...)`, `o.skip = ...`, a let) could set its skip where this can't read it.
+  const loopVar = (v) => !!v && !v.initializer && ts.isVariableDeclarationList(v.parent) && (ts.isForOfStatement(v.parent.parent) || ts.isForInStatement(v.parent.parent));
+  const optionsName = (o) => {
+    const d = resolve(o);
+    // A function this file defines, passed as a test's or suite's function (`describe('x', body)`): not options; when
+    // its tests are registered is read through it (conditionsOf).
+    if (d?.fnNode && o === o.parent.arguments?.[o.parent.arguments.length - 1]) return;
+    if (!d || d.binding) return read(o);
+    const v = d.varDecl;
+    const init = v?.initializer && (ts.isAsExpression(v.initializer) ? v.initializer.expression : v.initializer);
+    const isConst = !!v && !!(v.parent.flags & ts.NodeFlags.Const) && ts.isIdentifier(v.name);
+    const refs = refsOf(d);
+    const later = refs.filter(optionsArg).map((r) => ownFunction(ts, r.parent)).filter(Boolean);
+    const settled = refs.every((r) => optionsArg(r) || later.some((f) => r.pos >= f.pos && r.end <= f.end));
+    if (isConst && init && (ts.isStringLiteralLike(init) || ts.isTemplateExpression(init) || ts.isNumericLiteral(init))) return;
+    if (settled && isConst && init && ts.isObjectLiteralExpression(init)) {
+      // The literal itself holding the sign (as data the allowlist names) carries it, as any local from the sign does.
+      if (tainted.has(d) && leafSignIn(ts, sf, init)) {
+        out.add(`${path}: ${o.text}`);
+        pins.set(`${path}: ${o.text}`, chain(d));
+      }
+      return options(init);
     }
-    ts.forEachChild(n, skips);
+    if (settled && (d.param || loopVar(v))) return read(o);
+    refused.add(`${at(o)}: a test's options (or name) are \`${o.text}\`, which isn't a const object literal, a const text, a parameter or a loop variable read only as a test's name or options, so its skip or todo could be set where this can't read it: write them inline, or as such a const`);
   };
-  guards(sf);
-  skips(sf);
+  // Every reference to node:test's test, it, describe, suite, default or the module (R1169v D2, R1169u condition 1)
+  // must register: a call, or a call of its .skip, .only or .todo (or another member: a hook, mock), as a statement.
+  // Anything else (an alias, an argument, Reflect.apply or .call, an array or object, a computed key, a conditional,
+  // a reassignment) could register a test this can't read: refused, so every registration is one it reads.
+  const called = (y) => ts.isCallExpression(y.parent) && y.parent.expression === y;
+  const allowed = (id, v) => {
+    if (called(id)) return true;
+    const p = id.parent;
+    const nm = p.expression === id ? memberName(ts, p) : null;
+    if (nm === null) return false;
+    if (/^(?:only|skip|todo)$/.test(nm)) return called(p);
+    if (v === 'space' && /^(?:test|it|describe|suite|default)$/.test(nm)) {
+      if (called(p)) return true;
+      const q = p.parent;
+      return q.expression === p && /^(?:only|skip|todo)$/.test(memberName(ts, q) ?? '') && called(q);
+    }
+    // Another member: on test/describe, only a hook, mock or snapshot (never .call, .apply or .bind, which register
+    // a test this can't read); on the module, any export but those above.
+    return v === 'space' ? !/^(?:call|apply|bind)$/.test(nm) : /^(?:before|after|beforeEach|afterEach|mock|snapshot)$/.test(nm);
+  };
+  const statement = (call) => {
+    let x = call;
+    while (ts.isAwaitExpression(x.parent) || ts.isParenthesizedExpression(x.parent) || ts.isVoidExpression(x.parent)) x = x.parent;
+    return ts.isExpressionStatement(x.parent);
+  };
+  // What decides whether a registration runs (R1169t D1/D2, R1169v D4, R1169u condition 1): each `if`, `?:`, `&&`/`||`/`??`,
+  // switch or catch around it; each loop around it (its condition or iterable); each earlier statement in any block
+  // around it (a function's, a label's, the file's) that can return, break, continue or throw under a condition; and,
+  // through a function, the same at each place it's called: an IIFE, a callback's call (and its receiver: `xs.forEach`),
+  // a same-file function at each call. A subtest's (`t.test`, a test() inside a test) stops at its test's function:
+  // an early return or a loop there runs on the VM, where the zero-subtest rule and the run judge it.
+  const LOGICAL = [ts.SyntaxKind.AmpersandAmpersandToken, ts.SyntaxKind.BarBarToken, ts.SyntaxKind.QuestionQuestionToken];
+  const exits = (s) => {
+    let hit = false;
+    const w = (y) => {
+      if (hit || (y !== s && ts.isFunctionLike(y))) return;
+      if (ts.isReturnStatement(y) || ts.isThrowStatement(y) || ts.isBreakStatement(y) || ts.isContinueStatement(y)) hit = true;
+      else ts.forEachChild(y, w);
+    };
+    w(s);
+    return hit;
+  };
+  const exitConds = (s, acc) => {
+    const w = (y) => {
+      if (ts.isFunctionLike(y)) return;
+      if (ts.isIfStatement(y) && (exits(y.thenStatement) || (y.elseStatement && exits(y.elseStatement)))) acc.push(y.expression);
+      else if ((ts.isWhileStatement(y) || ts.isDoStatement(y) || ts.isForOfStatement(y) || ts.isForInStatement(y)) && exits(y.statement)) acc.push(y.expression);
+      else if (ts.isForStatement(y) && exits(y.statement)) acc.push(...[y.initializer, y.condition, y.incrementor].filter(Boolean));
+      else if (ts.isSwitchStatement(y) && y.caseBlock.clauses.some((c) => c.statements.some(exits))) acc.push(y.expression, ...y.caseBlock.clauses.filter(ts.isCaseClause).map((c) => c.expression));
+      ts.forEachChild(y, w);
+    };
+    w(s);
+  };
+  const insideTest = (call) => {
+    for (let p = call.parent; p; p = p.parent) {
+      if (!ts.isFunctionLike(p)) continue;
+      let fx = p;
+      while (fx.parent && ts.isParenthesizedExpression(fx.parent)) fx = fx.parent;
+      const c = fx.parent;
+      if (c && ts.isCallExpression(c) && c.arguments.includes(fx) && ['test', 'sub'].includes(callKind(c))) return true;
+    }
+    return false;
+  };
+  // A loop over a fixed table registers a fixed number of tests: a const array or object literal with no spread (or
+  // Object.entries/keys/values of one). What its rows carry reaches each test's options and conditions, read there.
+  const staticTable = (e) => {
+    while (e && ts.isParenthesizedExpression(e)) e = e.expression;
+    if (e && ts.isCallExpression(e) && ts.isPropertyAccessExpression(e.expression) && ts.isIdentifier(e.expression.expression) && e.expression.expression.text === 'Object' && /^(?:entries|keys|values)$/.test(e.expression.name.text) && e.arguments.length === 1) e = e.arguments[0];
+    if (e && ts.isIdentifier(e)) {
+      const v = resolve(e)?.varDecl;
+      e = v && v.parent.flags & ts.NodeFlags.Const && ts.isIdentifier(v.name) ? v.initializer : null;
+      while (e && (ts.isAsExpression(e) || ts.isSatisfiesExpression?.(e) || ts.isParenthesizedExpression(e))) e = e.expression;
+    }
+    return !!e && ((ts.isArrayLiteralExpression(e) && !e.elements.some(ts.isSpreadElement)) || (ts.isObjectLiteralExpression(e) && !e.properties.some(ts.isSpreadAssignment)));
+  };
+  const conditionsOf = (call, full, acc = [], seen = new Set()) => {
+    let x = call;
+    for (;;) {
+      const p = x.parent;
+      if (!p) break;
+      if (ts.isIfStatement(p) && x !== p.expression) acc.push(p.expression);
+      else if (ts.isConditionalExpression(p) && x !== p.condition) acc.push(p.condition);
+      else if (ts.isBinaryExpression(p) && LOGICAL.includes(p.operatorToken.kind) && x === p.right) acc.push(p.left);
+      else if (ts.isCaseClause(p) || ts.isDefaultClause(p)) acc.push(p.parent.parent.expression, ...p.parent.clauses.filter(ts.isCaseClause).map((c) => c.expression));
+      else if (ts.isCatchClause(p)) acc.push(p.parent.tryBlock);
+      else if (full && ts.isForStatement(p) && x === p.statement) acc.push(...[p.initializer, p.condition, p.incrementor].filter(Boolean));
+      else if (full && (ts.isForOfStatement(p) || ts.isForInStatement(p)) && x === p.statement && !staticTable(p.expression)) acc.push(p.expression);
+      else if (full && (ts.isWhileStatement(p) || ts.isDoStatement(p)) && x === p.statement) acc.push(p.expression);
+      if (full && (ts.isBlock(p) || ts.isSourceFile(p) || ts.isCaseClause(p) || ts.isDefaultClause(p) || ts.isModuleBlock(p))) {
+        for (const st of p.statements) {
+          if (st === x) break;
+          exitConds(st, acc);
+        }
+      }
+      if (ts.isFunctionLike(p)) {
+        if (!full) break;
+        let fx = p;
+        while (fx.parent && ts.isParenthesizedExpression(fx.parent)) fx = fx.parent;
+        const up = fx.parent;
+        if (up && ts.isCallExpression(up) && up.expression === fx) {
+          x = up;
+          continue;
+        }
+        if (up && ts.isCallExpression(up) && up.arguments.includes(fx)) {
+          if (!callKind(up)) acc.push(...callbackSources(up, fx));
+          x = up;
+          continue;
+        }
+        const d = fnDecl(p);
+        if (d && !seen.has(d)) {
+          seen.add(d);
+          for (const r of refsOf(d)) {
+            const rp = r.parent;
+            if (ts.isExportSpecifier(rp)) continue;
+            if (ts.isCallExpression(rp) && rp.expression === r) conditionsOf(rp, full, acc, seen);
+            else if (ts.isCallExpression(rp) && rp.arguments.includes(r)) {
+              if (!callKind(rp)) acc.push(...callbackSources(rp, r));
+              conditionsOf(rp, full, acc, seen);
+            } else refused.add(`${at(r)}: \`${snip(rp)}\` uses ${d.name}, a function that registers tests, as a value: call it (or pass it as a callback), so this can read when its tests are registered`);
+          }
+        }
+        break;
+      }
+      x = p;
+    }
+    return acc;
+  };
+  const visit = (n) => {
+    if (ts.isIdentifier(n) && isRef(ts, n)) {
+      const v = testValue(n);
+      if ((v === 'test' || v === 'suite' || v === 'space') && !allowed(n, v)) refused.add(`${at(n)}: \`${snip(n.parent)}\` uses node:test's ${n.text} as a value: register a test only by calling it (\`${n.text}(...)\`, \`${n.text}.skip(...)\`), so this can read each one`);
+    }
+    const kind = callKind(n);
+    if (kind) {
+      if (kind !== 'sub' && !statement(n)) refused.add(`${at(n)}: \`${snip(n)}\` registers a test inside an expression: register it as a statement of its own, so this can read what decides it`);
+      const sub = kind === 'sub' || insideTest(n);
+      const conds = conditionsOf(n, !sub);
+      for (const c of conds) {
+        read(c);
+        if (sub && leafSignIn(ts, sf, c)) refused.add(`${at(n)}: a subtest is registered only when \`${snip(c)}\`, which holds systemd's sign: register it always, and let the run on the VM judge it`);
+      }
+      if (n.arguments.length >= 2) {
+        const fn = ownFunction(ts, n);
+        n.arguments.forEach((a, k) => {
+          if (a !== fn && !(k === 0 && (ts.isStringLiteralLike(a) || ts.isTemplateExpression(a)))) options(a);
+        });
+      }
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(sf);
   // Each local's pin (chain): what the allowlist must name it by.
-  return Object.defineProperty([...out], 'pins', { value: pins, enumerable: false });
+  return done([...out], pins, [...refused]);
 }
 
 /** Every build-root file's sign uses, and what makes a binding carry the sign (src/, a holder, `?`, not a named import). */
@@ -672,6 +939,8 @@ export function signProblems(ts, texts, allow = {}) {
   const read = new Set();
   for (const [p, t] of texts) {
     const reads = skipReads(ts, p, t, source);
+    // What can't be read at all (R1169v): never allowlisted, since nothing names what it would excuse.
+    out.push(...reads.refused);
     for (const b of reads) {
       read.add(b);
       // A local is named by what makes it carry the sign (R1169o C4): its pin must be that text, all of it.
@@ -701,7 +970,9 @@ export function signProblems(ts, texts, allow = {}) {
  */
 export function signTests(ts, path, text, source, all = false) {
   if (!all && !maySign(text) && !/\b(?:import|require)\b/.test(text)) return [];
-  const { sf, resolve, tainted, sourceOf } = fileFlow(ts, path, text, source);
+  const { sf, resolve, tainted, sourceOf, callKind, refsOf, testValue } = fileFlow(ts, path, text, source);
+  const isTestCall = (_, n) => callKind(n) === 'test';
+  const isSuiteCall = (_, n) => callKind(n) === 'suite';
   const carriesHere = (node) => {
     let hit = false;
     const walk = (x) => {
@@ -802,6 +1073,58 @@ export function signTests(ts, path, text, source, all = false) {
     walk(node);
     return hit;
   };
+  // R1169v D1, fail closed: a test is picked when the code that runs for it reads what carries the sign and mentions
+  // skip or todo in any form (a property, a key, a string, `.bind`): its own function with every function in it, every
+  // same-file function that code names (a helper it calls or hands its context to), at any depth, and the hooks
+  // (before, beforeEach, after, afterEach) of each block around it. A stop through a helper, a bound or computed
+  // t.skip, a loop, a label or a hook is then judged on the VM, as a stop in its own function is.
+  const reach = (start) => {
+    const seen = new Set(start);
+    const stack = [...start];
+    while (stack.length) {
+      const f = stack.pop();
+      const w = (y) => {
+        if (ts.isIdentifier(y) && isRef(ts, y)) {
+          const g = resolve(y)?.fnNode;
+          if (g && !seen.has(g)) (seen.add(g), stack.push(g));
+        }
+        ts.forEachChild(y, w);
+      };
+      w(f);
+    }
+    return [...seen];
+  };
+  const HOOK = /^(?:before|after|beforeEach|afterEach)$/;
+  const hooksAround = (call) => {
+    const fns = [];
+    for (let p = call.parent; p; p = p.parent) {
+      if (!(ts.isBlock(p) || ts.isSourceFile(p))) continue;
+      for (const st of p.statements) {
+        let e = ts.isExpressionStatement(st) ? st.expression : null;
+        while (e && (ts.isAwaitExpression(e) || ts.isParenthesizedExpression(e))) e = e.expression;
+        if (!e || !ts.isCallExpression(e)) continue;
+        const c = e.expression;
+        const nm = ts.isIdentifier(c) ? c.text : memberName(ts, c);
+        const bound = ts.isIdentifier(c) && testValue(c) === 'other' && HOOK.test((resolve(c)?.binding ?? '').split(': ').pop());
+        if (bound || (nm && HOOK.test(nm))) for (const a of e.arguments) if (ts.isFunctionLike(a)) fns.push(a); else if (ts.isIdentifier(a) && resolve(a)?.fnNode) fns.push(resolve(a).fnNode);
+      }
+    }
+    return fns;
+  };
+  const mentions = (node) => {
+    let hit = false;
+    const walk = (x) => {
+      if (hit) return;
+      if ((ts.isIdentifier(x) || ts.isPrivateIdentifier(x) || ts.isStringLiteralLike(x) || ts.isTemplateHead(x) || ts.isTemplateMiddle(x) || ts.isTemplateTail(x)) && /skip|todo/i.test(x.text)) hit = true;
+      else ts.forEachChild(x, walk);
+    };
+    walk(node);
+    return hit;
+  };
+  const coarse = (call, fn) => {
+    const code = reach([fn, ...hooksAround(call)]);
+    return code.some(carriesHere) && code.some(mentions);
+  };
   const out = [];
   // A test whose name holds the sign, or any test under a suite whose name does: its function can read the name back
   // (`t.name`, `s.name`, R1169r D1).
@@ -814,7 +1137,7 @@ export function signTests(ts, path, text, source, all = false) {
     if (isTestCall(ts, n)) {
       const fn = ownFunction(ts, n);
       const name = nameArg(ts, n);
-      if (fn && (all || holdsSign(fn) || guarded(fn) || signSuite || (name && holdsSign(name)))) {
+      if (fn && (all || holdsSign(fn) || guarded(fn) || signSuite || (name && holdsSign(name)) || coarse(n, fn))) {
         const { line, character } = sf.getLineAndCharacterOfPosition(n.expression.getStart(sf));
         const a = nameArg(ts, n);
         out.push({ name: a && ts.isStringLiteralLike(a) ? a.text : null, line: line + 1, column: character + 1, label: (a ?? n.arguments[0])?.getText(sf).slice(0, 120) ?? '', subtests: startsSubtests(fn) });

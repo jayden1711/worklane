@@ -1,0 +1,5 @@
+import { test } from 'node:test';
+import { lingerEnabled } from '../src/os/probe.js';
+test('linger', async (t) => {
+  await t['test']('acceptance: the engine keeps running after its user logs out (linger)', { skip: lingerEnabled() === null && 'no linger' }, () => {});
+});
