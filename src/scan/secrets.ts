@@ -2,7 +2,7 @@
 // A scanner that can't run is reported as unavailable, never as "clean".
 import { spawn, spawnSync } from '../os/child-process.js';
 import { createHash } from 'node:crypto';
-import { accessSync, constants, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { accessSync, constants, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, delimiter, dirname, isAbsolute, join, resolve as resolvePath } from 'node:path';
 import { BRAND } from '../brand.js';
@@ -140,8 +140,11 @@ export function commitHookSkipped(top: string): string | null {
  * write the admin dir (checkout.sh leaves it writable for the index and HEAD), so it can point `commondir` at a common
  * dir of its own (its own config without the hooks pin, its own hooks) whose objects and refs are links to the real
  * ones: the commit lands on the real branch with no engine hook. So: a linked worktree's common dir must be the one
- * its admin dir sits in, and no common dir's objects, refs, heads or logs may be a link (git never makes one). Checked
- * when the decision is made; a rewrite after it is the race the changelog lists.
+ * its admin dir sits in, and the repository may hold no link git would write through (git never makes one): not
+ * `objects`, `refs` or `logs` themselves, nothing anywhere under `refs/` (R1124t F1: `refs/heads/worklane` linked to
+ * the checkout's), and nothing directly under `objects/`, `objects/pack` or `objects/info` (each `objects/xx` linked).
+ * A repository of the agent's own (`git init --separate-git-dir`) is judged the same way. Checked when the decision is
+ * made; a rewrite after it is the race the changelog lists.
  */
 function repositoryElsewhere(gitDir: string, common: string): string | null {
   const real = (p: string) => {
@@ -158,12 +161,41 @@ function repositoryElsewhere(gitDir: string, common: string): string | null {
     const parent = dirname(dir);
     if (basename(parent) !== 'worktrees' || real(dirname(parent)) !== com) return `this worktree's commondir names ${common}, not the repository its admin dir ${gitDir} is in`;
   }
-  for (const part of ['objects', 'refs', join('refs', 'heads'), 'logs']) {
+  const link = linkIn(com, ['objects', 'refs', 'logs'], 0) ?? linkIn(com, ['refs'], 64) ?? linkIn(com, ['objects', join('objects', 'pack'), join('objects', 'info')], 0);
+  return link ? `the repository ${common} has ${link} as a link elsewhere; git never makes one, so its commits would land in another repository` : null;
+}
+
+/**
+ * The first symbolic link among `parts` of `root` (with `depth` 0: the parts' own entries; more: their folders' entries
+ * that far down), as a path relative to `root`; null when none. `parts` themselves are checked first. A part that
+ * isn't there has nothing to follow. Fail closed: a folder deeper than `depth` counts as a link.
+ */
+function linkIn(root: string, parts: string[], depth: number): string | null {
+  const walk = (rel: string, left: number): string | null => {
+    let entries;
     try {
-      if (lstatSync(join(com, part)).isSymbolicLink()) return `the repository ${common} has ${part} as a link elsewhere; git never makes one, so its commits would land in another repository`;
+      entries = readdirSync(join(root, rel), { withFileTypes: true });
     } catch {
-      // absent (a fresh repo's logs): nothing to follow
+      return null;
     }
+    for (const e of entries) {
+      const p = join(rel, e.name);
+      if (e.isSymbolicLink()) return p;
+      if (e.isDirectory() && left > 0) {
+        const found = walk(p, left - 1);
+        if (found) return found;
+      } else if (e.isDirectory() && depth > 0) return `${p} (deeper than the guard reads)`;
+    }
+    return null;
+  };
+  for (const part of parts) {
+    try {
+      if (lstatSync(join(root, part)).isSymbolicLink()) return part;
+    } catch {
+      continue;
+    }
+    const found = walk(part, depth);
+    if (found) return found;
   }
   return null;
 }

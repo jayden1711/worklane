@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { BRAND } from '../../src/brand.js';
@@ -64,6 +64,15 @@ async function decide(cwd: string, tool: string, input: Record<string, unknown>)
   assert.equal(r.exitCode, 0, r.stderr);
   if (!r.stdout) return 'allow';
   return (JSON.parse(r.stdout) as { hookSpecificOutput: { permissionDecision: string } }).hookSpecificOutput.permissionDecision;
+}
+
+/** The decision and its reason, as `deny: <reason>` or `allow`. */
+async function decideWhy(cwd: string, command: string): Promise<string> {
+  const r = await runHook('pre-tool-use', { hook_event_name: 'PreToolUse', cwd, tool_name: 'Bash', tool_input: { command } }, agentEnv());
+  assert.equal(r.exitCode, 0, r.stderr);
+  if (!r.stdout) return 'allow';
+  const o = (JSON.parse(r.stdout) as { hookSpecificOutput: { permissionDecision: string; permissionDecisionReason?: string } }).hookSpecificOutput;
+  return `${o.permissionDecision}: ${o.permissionDecisionReason ?? ''}`;
 }
 
 test('content a hook the commit chains stages after the guard has scanned is refused by the commit itself', { skip }, async () => {
@@ -596,6 +605,63 @@ test("R1124s F1: a commit in a worktree whose repository was swapped (commondir,
   writeFileSync(join(fakeAdmin, 'commondir'), '../..\n');
   writeFileSync(join(wt, '.git'), `gitdir: ${fakeAdmin}\n`);
   assert.equal(await decide(wt, 'Bash', { command: 'git commit -m wip' }), 'deny', "the worktree's .git file rewritten");
+});
+
+test("R1124t: a repository of the agent's own whose links reach the checkout's refs or objects below the top level is refused, by every route; so is a commondir naming a copy with no links at all", { skip }, async () => {
+  const d = checkout();
+  const root = dirname(d);
+  const wt = join(root, 'task-1');
+  git(d, 'worktree', 'add', '-q', '-b', `${BRAND.cli}/task-1`, wt);
+  const real = join(d, '.git');
+  const admin = join(real, 'worktrees', 'task-1');
+  writeFileSync(join(wt, 'ok.js'), 'export const y = 2;\n');
+  git(wt, 'add', 'ok.js');
+  assert.equal(await decide(wt, 'Bash', { command: 'git commit -m wip' }), 'allow', 'control: a plain linked worktree on a task branch');
+  /** A common dir of the agent's own: real objects/, refs/, refs/heads/ and logs/ dirs, the links one level down. */
+  const fakeCommon = (name: string) => {
+    const f = join(root, name);
+    for (const p of ['hooks', 'objects', join('refs', 'heads'), 'refs/tags', 'logs', 'worktrees']) mkdirSync(join(f, p), { recursive: true });
+    for (const x of readdirSync(join(real, 'objects')).filter((n) => /^[0-9a-f]{2}$/.test(n))) symlinkSync(join(real, 'objects', x), join(f, 'objects', x));
+    symlinkSync(join(real, 'refs', 'heads', BRAND.cli), join(f, 'refs', 'heads', BRAND.cli));
+    writeFileSync(join(f, 'config'), readFileSync(join(real, 'config'), 'utf8').split('\n').filter((l) => !/hookspath/i.test(l)).join('\n'));
+    writeFileSync(join(f, 'HEAD'), `ref: refs/heads/${BRAND.cli}/task-1\n`);
+    return f;
+  };
+  // Route 1: the admin dir's commondir names it.
+  const f1 = fakeCommon('fc1');
+  writeFileSync(join(admin, 'commondir'), `${f1}\n`);
+  assert.match(await decideWhy(wt, 'git commit -m wip'), /^deny: .*(commondir names|as a link elsewhere)/, 'commondir, links below the top level');
+  // A copy with no links at all, named by commondir: only the admin-dir check refuses it (R1124t F2).
+  const copy = join(root, 'copy');
+  cpSync(real, copy, { recursive: true });
+  // As an agent would: its own config without the pin, so git runs the copy's (absent) hooks.
+  writeFileSync(join(copy, 'config'), readFileSync(join(real, 'config'), 'utf8').split('\n').filter((l) => !/hookspath/i.test(l)).join('\n'));
+  rmSync(join(copy, 'hooks'), { recursive: true, force: true });
+  writeFileSync(join(admin, 'commondir'), `${copy}\n`);
+  assert.match(await decideWhy(wt, 'git commit -m wip'), /^deny: .*commondir names/, 'commondir naming a plain copy');
+  writeFileSync(join(admin, 'commondir'), '../..\n');
+  assert.equal(await decide(wt, 'Bash', { command: 'git commit -m wip' }), 'allow', 'restored');
+  // Route 2: the worktree's .git file names an admin dir inside the fake common dir.
+  const f2 = fakeCommon('fc2');
+  const fakeAdmin = join(f2, 'worktrees', 'task-1');
+  cpSync(admin, fakeAdmin, { recursive: true });
+  writeFileSync(join(fakeAdmin, 'commondir'), '../..\n');
+  writeFileSync(join(wt, '.git'), `gitdir: ${fakeAdmin}\n`);
+  assert.match(await decideWhy(wt, 'git commit -m wip'), /^deny: .*as a link elsewhere/, "the worktree's .git file, links below the top level");
+  writeFileSync(join(wt, '.git'), `gitdir: ${admin}\n`);
+  // Route 3: a repository of the agent's own, made by git init --separate-git-dir; no worktree file is touched.
+  const r = join(root, 'r');
+  const f3 = join(root, 'fc3');
+  execFileSync('git', ['init', '-q', '--separate-git-dir', f3, r]);
+  cpSync(join(repoRoot, 'examples', 'basic', '.worklane'), join(r, BRAND.configDir), { recursive: true });
+  writeFileSync(join(r, 'ok.js'), 'export const y = 2;\n');
+  git(r, 'add', 'ok.js');
+  // Only the task branches' folder linked, two levels under refs/: the refs walk alone refuses it.
+  symlinkSync(join(real, 'refs', 'heads', BRAND.cli), join(f3, 'refs', 'heads', BRAND.cli));
+  assert.match(await decideWhy(r, 'git commit -m wip'), new RegExp(`^deny: .*refs/heads/${BRAND.cli} as a link elsewhere`), 'refs/heads/<branch folder> linked');
+  const own = new Set(readdirSync(join(f3, 'objects')));
+  for (const x of readdirSync(join(real, 'objects')).filter((n) => /^[0-9a-f]{2}$/.test(n) && !own.has(n))) symlinkSync(join(real, 'objects', x), join(f3, 'objects', x));
+  assert.match(await decideWhy(r, 'git commit -m wip'), /^deny: .*as a link elsewhere/, 'git init --separate-git-dir, links below the top level');
 });
 
 test('R1124p F2: every word of sort, uniq and tree is a write destination, however their options are spelt', { skip }, async () => {
