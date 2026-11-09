@@ -578,6 +578,13 @@ test('R1169u/v: node:test read by binding, failing closed: every use a call as a
   assert.deepEqual(reads(`${nl}function register() {\n  if (lingerEnabled() === null) return;\n  test('n', () => {});\n}\nregister();`), ['src/os.ts: lingerEnabled']);
   assert.deepEqual(reads(`${nl}await (async () => {\n  if (lingerEnabled() === null) return;\n  test('n', () => {});\n})();`), ['src/os.ts: lingerEnabled']);
   assert.deepEqual(reads(`${nl}if (lingerEnabled() !== null) (() => {\n  test('n', () => {});\n})();`), ['src/os.ts: lingerEnabled'], 'a guard outside an IIFE');
+  // R1169w: an earlier process.exit() (as a statement's condition, or through a same-file function) stops what follows.
+  assert.deepEqual(reads(`${nl}if (lingerEnabled() === null) process.exit(0);\ntest('n', () => {});`), ['src/os.ts: lingerEnabled']);
+  assert.deepEqual(reads(`${nl}lingerEnabled() === null && process.exit(0);\ntest('n', () => {});`), ['src/os.ts: lingerEnabled']);
+  assert.deepEqual(reads(`${nl}function quit() { process.exit(0); }\nif (lingerEnabled() === null) quit();\ntest('n', () => {});`), ['src/os.ts: lingerEnabled']);
+  assert.deepEqual(reads(`${nl}if (lingerEnabled() === null) console.log('x');\nconst v = lingerEnabled() && String(1);\ntest('n', () => {});`), [], 'a call that ends nothing, and a value');
+  // process.getBuiltinModule('node:test') is node:test, as an import is.
+  assert.match(refused(`const nt = process.getBuiltinModule('node:test');\nconst t2 = nt.test;\nt2('n', () => {});`), /uses node:test's nt as a value/);
   assert.deepEqual(reads(`${nl}reg: {\n  if (lingerEnabled() === null) break reg;\n  test('n', () => {});\n}`), ['src/os.ts: lingerEnabled']);
   assert.deepEqual(reads(`${nl}(lingerEnabled() !== null ? ['a'] : []).forEach((n) => { test(\`\${n}\`, () => {}); });`), ['src/os.ts: lingerEnabled']);
   assert.deepEqual(reads(`${nl}function cases() { test('n', () => {}); }\nif (lingerEnabled() !== null) cases();`), ['src/os.ts: lingerEnabled'], "a same-file function's caller");
@@ -616,12 +623,14 @@ test("R1169w: a sign test the allowlist lets skip on the VM still runs for real 
   const shards = Object.entries(wf.jobs).filter(([k]) => /^test-shard-/.test(k));
   assert.ok(shards.length >= 2, 'the test shards');
   // Where each kind runs for real, checked against the workflow that runs it.
-  const holds: Record<string, (file: string, text: string, call: string) => void> = {
+  const holds: Record<string, (file: string, text: string, call: string, body: string) => void> = {
     // A web-UI test whose only skip is webUiSkip: every shard builds the UI before its tests and sets CI_REQUIRE_WEB=1,
     // under which webUiSkip throws instead of skipping (test/browser-helpers.ts), so in the shards it runs or fails.
-    web: (file, text, call) => {
+    web: (file, text, call, body) => {
       assert.match(text, /^const skip = webUiSkip\(/m, `${file}: its skip is webUiSkip's`);
       assert.match(call, /\{ skip[,} ]/, `${file}: the test's skip is that one`);
+      // And its only one (R1169w): its own function starts no other skip or todo, which CI_REQUIRE_WEB wouldn't stop.
+      assert.doesNotMatch(body, /\.(?:skip|todo)\s*\(|\[\s*['"`](?:skip|todo)['"`]\s*\]|\.(?:skip|todo)\.(?:bind|call|apply)\b/, `${file}: its function starts no other skip or todo`);
       assert.match(readFileSync(join(repoRoot, 'test', 'browser-helpers.ts'), 'utf8'), /if \(!chrome\) required\(/, 'webUiSkip throws under CI_REQUIRE_WEB');
       for (const [k, j] of shards) {
         const steps = j.steps ?? [];
@@ -647,6 +656,14 @@ test("R1169w: a sign test the allowlist lets skip on the VM still runs for real 
     const text = readFileSync(join(repoRoot, file), 'utf8');
     const at = text.indexOf(name.startsWith('`') ? name : `'${name}'`) >= 0 ? text.indexOf(name.startsWith('`') ? name : `'${name}'`) : text.indexOf(`"${name}"`);
     assert.ok(at > 0, `${key}: the test is in ${file}`);
-    holds[entry.runsIn]!(file, text, text.slice(at, at + name.length + 200));
+    // Its own function: from the call's last `=> {` (or `function`) to the brace that closes it.
+    const open = text.indexOf('{', text.indexOf('=>', at + name.length));
+    let depth = 0;
+    let end = open;
+    for (; end < text.length; end++) {
+      if (text[end] === '{') depth++;
+      else if (text[end] === '}' && --depth === 0) break;
+    }
+    holds[entry.runsIn]!(file, text, text.slice(at, at + name.length + 200), text.slice(open, end + 1));
   }
 });

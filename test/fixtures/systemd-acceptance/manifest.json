@@ -679,5 +679,29 @@
     1,
     "acceptance: the engine unit starts: SKIP not a booted host",
     "test/y\\.test\\.ts:\\d+: acceptance: the engine unit starts"
+  ],
+  "r1169w-w1-exit-before-registration": [
+    2,
+    "a skip reads src/os/probe\\.ts: lingerEnabled, which carries systemd's sign"
+  ],
+  "r1169w-w1b-and-exit": [
+    2,
+    "a skip reads src/os/probe\\.ts: lingerEnabled, which carries systemd's sign"
+  ],
+  "r1169w-w1c-control-plain-call": [
+    0,
+    "^$"
+  ],
+  "r1169w-w1d-helper-exits": [
+    2,
+    "a skip reads src/os/probe\\.ts: lingerEnabled, which carries systemd's sign"
+  ],
+  "r1169w-w2-getbuiltin-alias": [
+    2,
+    "uses node:test's nt as a value"
+  ],
+  "r1169w-w2c-control-getbuiltin-call": [
+    0,
+    "^$"
   ]
 }

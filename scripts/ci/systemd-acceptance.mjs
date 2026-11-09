@@ -47,7 +47,8 @@
 // it is a fixed table: a const array or object literal with no spread); each earlier statement in any block around it
 // (a function's, a label's, the file's) that can return, break, continue or throw under a condition; and through a
 // function, the same where it's called (an IIFE, a callback's call and its receiver, a same-file function at each
-// call; one used otherwise as a value stops the job). A subtest's (`t.test`, a test() inside a test) is read up to its
+// call; one used otherwise as a value stops the job), and an earlier process.exit()/abort() under a condition, or a
+// same-file function that ends the process (R1169w); process.getBuiltinModule() is a load as require() is. A subtest's (`t.test`, a test() inside a test) is read up to its
 // test's function. A parameter is what each call passes in its place; one of a function that is exported, used as a
 // value or called with a spread, read by a skip or such a condition, stops the job. Options by name must be a const
 // object literal used only as options; any other stops the job (it could be set after: `Object.defineProperty`).
@@ -61,8 +62,9 @@
 // name built at run time, or a test registered through a helper whose own name and body hold no sign, isn't read as
 // holding it); the subtest rule's reach (a subtest started through a helper in another module, or through a
 // property of an object that holds the context, isn't counted); a registration in another module (a helper module's
-// exported function, called from here under a condition, is read only as a call); and a skip or todo spelled from
-// parts (`t['sk' + 'ip']`, deliberate, as a split sign is). #1250 tracks measuring the
+// exported function, called from here under a condition, is read only as a call); a skip or todo spelled from
+// parts (`t['sk' + 'ip']`, deliberate, as a split sign is); and a throw at load that something catches (one that
+// isn't caught fails its file, which isn't silent; a process.exit() before a registration is read, R1169w). #1250 tracks measuring the
 // alternative, the whole suite on the VM. A test that passes without checking (an early return on the VM's answer)
 // does run on the VM, where it checks for real.
 //
@@ -418,7 +420,9 @@ export function fileFlow(ts, path, text, source) {
     let spec = null;
     const walk = (x) => {
       if (spec) return;
-      if (ts.isCallExpression(x) && (x.expression.kind === ts.SyntaxKind.ImportKeyword || (ts.isIdentifier(x.expression) && requires.has(x.expression.text)) || isCreateRequire(x.expression))) spec = x.arguments[0] && ts.isStringLiteralLike(x.arguments[0]) ? x.arguments[0].text : '?';
+      // process.getBuiltinModule(...) loads a built-in as require() does (R1169w): any getBuiltinModule call.
+      const builtin = ts.isCallExpression(x) && ((ts.isIdentifier(x.expression) && x.expression.text === 'getBuiltinModule') || (ts.isPropertyAccessExpression(x.expression) && x.expression.name.text === 'getBuiltinModule'));
+      if (ts.isCallExpression(x) && (builtin || x.expression.kind === ts.SyntaxKind.ImportKeyword || (ts.isIdentifier(x.expression) && requires.has(x.expression.text)) || isCreateRequire(x.expression))) spec = x.arguments[0] && ts.isStringLiteralLike(x.arguments[0]) ? x.arguments[0].text : '?';
       else ts.forEachChild(x, walk);
     };
     walk(n);
@@ -758,23 +762,65 @@ export function skipReads(ts, path, text, source) {
   // a same-file function at each call. A subtest's (`t.test`, a test() inside a test) stops at its test's function:
   // an early return or a loop there runs on the VM, where the zero-subtest rule and the run judge it.
   const LOGICAL = [ts.SyntaxKind.AmpersandAmpersandToken, ts.SyntaxKind.BarBarToken, ts.SyntaxKind.QuestionQuestionToken];
-  const exits = (s) => {
+  // What can stop what follows without a failure: a return, break or continue, a throw (as before), and (R1169w) a
+  // call that ends the process (`process.exit()`, `abort()`, `kill()`) or of a function this file defines that does, at
+  // any depth. Inside such a function (`inFn`), only the process ending or such a call: a return there ends it alone. A
+  // throw at load fails its file, which isn't silent, unless something catches it (a named limit). A function in it
+  // isn't run by it.
+  const ends = (y) => ts.isCallExpression(y) && ts.isPropertyAccessExpression(y.expression) && ts.isIdentifier(y.expression.expression) && y.expression.expression.text === 'process' && /^(?:exit|abort|kill|reallyExit)$/.test(y.expression.name.text);
+  const endsFns = new Map();
+  const ender = (g, seen = new Set()) => {
+    if (endsFns.has(g)) return endsFns.get(g);
+    if (seen.has(g)) return false;
+    seen.add(g);
+    let hit = false;
+    const w = (y) => {
+      if (hit || (y !== g && ts.isFunctionLike(y))) return;
+      if (ends(y)) hit = true;
+      else if (ts.isCallExpression(y) && ts.isIdentifier(y.expression)) {
+        const h = resolve(y.expression)?.fnNode;
+        if (h && ender(h, seen)) hit = true;
+      }
+      if (!hit) ts.forEachChild(y, w);
+    };
+    if (g.body) w(g.body);
+    endsFns.set(g, hit);
+    return hit;
+  };
+  const exits = (s, inFn = false) => {
     let hit = false;
     const w = (y) => {
       if (hit || (y !== s && ts.isFunctionLike(y))) return;
-      if (ts.isReturnStatement(y) || ts.isThrowStatement(y) || ts.isBreakStatement(y) || ts.isContinueStatement(y)) hit = true;
+      if (ends(y) || (!inFn && (ts.isReturnStatement(y) || ts.isThrowStatement(y) || ts.isBreakStatement(y) || ts.isContinueStatement(y)))) hit = true;
+      else if (ts.isCallExpression(y) && ts.isIdentifier(y.expression) && resolve(y.expression)?.fnNode && ender(resolve(y.expression).fnNode)) hit = true;
       else ts.forEachChild(y, w);
     };
     w(s);
     return hit;
   };
-  const exitConds = (s, acc) => {
+  const exitConds = (s, acc, inFn = false, seen = new Set()) => {
     const w = (y) => {
       if (ts.isFunctionLike(y)) return;
-      if (ts.isIfStatement(y) && (exits(y.thenStatement) || (y.elseStatement && exits(y.elseStatement)))) acc.push(y.expression);
-      else if ((ts.isWhileStatement(y) || ts.isDoStatement(y) || ts.isForOfStatement(y) || ts.isForInStatement(y)) && exits(y.statement)) acc.push(y.expression);
-      else if (ts.isForStatement(y) && exits(y.statement)) acc.push(...[y.initializer, y.condition, y.incrementor].filter(Boolean));
-      else if (ts.isSwitchStatement(y) && y.caseBlock.clauses.some((c) => c.statements.some(exits))) acc.push(y.expression, ...y.caseBlock.clauses.filter(ts.isCaseClause).map((c) => c.expression));
+      if (ts.isIfStatement(y) && (exits(y.thenStatement, inFn) || (y.elseStatement && exits(y.elseStatement, inFn)))) acc.push(y.expression);
+      else if ((ts.isForOfStatement(y) || ts.isForInStatement(y)) && !staticTable(y.expression) && exits(y.statement, inFn)) acc.push(y.expression);
+      else if ((ts.isWhileStatement(y) || ts.isDoStatement(y)) && exits(y.statement, inFn)) acc.push(y.expression);
+      else if (ts.isForStatement(y) && exits(y.statement, inFn)) acc.push(...[y.initializer, y.condition, y.incrementor].filter(Boolean));
+      else if (ts.isSwitchStatement(y) && y.caseBlock.clauses.some((c) => c.statements.some((x) => exits(x, inFn)))) acc.push(y.expression, ...y.caseBlock.clauses.filter(ts.isCaseClause).map((c) => c.expression));
+      else if (ts.isExpressionStatement(y)) {
+        // A statement that is a condition (`c && process.exit()`, `c ? bail() : 0`); not a value a declaration computes.
+        let e = y.expression;
+        while (ts.isAwaitExpression(e) || ts.isParenthesizedExpression(e) || ts.isVoidExpression(e)) e = e.expression;
+        if (ts.isConditionalExpression(e) && (exits(e.whenTrue, inFn) || exits(e.whenFalse, inFn))) acc.push(e.condition);
+        else if (ts.isBinaryExpression(e) && LOGICAL.includes(e.operatorToken.kind) && exits(e.right, inFn)) acc.push(e.left);
+      }
+      // A function this file defines, called here: what in it can end its caller.
+      if (ts.isCallExpression(y) && ts.isIdentifier(y.expression)) {
+        const g = resolve(y.expression)?.fnNode;
+        if (g?.body && !seen.has(g) && ender(g)) {
+          seen.add(g);
+          exitConds(g.body, acc, true, seen);
+        }
+      }
       ts.forEachChild(y, w);
     };
     w(s);

@@ -1,0 +1,4 @@
+import { test } from 'node:test';
+import { lingerEnabled } from '../src/os/probe.js';
+if (lingerEnabled() === null) process.exit(0);
+test('acceptance: the engine keeps running after its user logs out (linger)', () => {});
