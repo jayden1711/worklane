@@ -141,8 +141,9 @@ export function commitHookSkipped(top: string): string | null {
  * dir of its own (its own config without the hooks pin, its own hooks) whose objects and refs are links to the real
  * ones: the commit lands on the real branch with no engine hook. So: a linked worktree's common dir must be the one
  * its admin dir sits in, and the repository may hold no link git would write through (git never makes one): not
- * `objects`, `refs` or `logs` themselves, nothing anywhere under `refs/` (R1124t F1: `refs/heads/worklane` linked to
- * the checkout's), and nothing directly under `objects/`, `objects/pack` or `objects/info` (each `objects/xx` linked).
+ * `objects`, `refs` or `logs` themselves, nothing anywhere under `refs/` (R1124t F1: the task branches' folder under
+ * `refs/heads/` linked to the checkout's), and nothing directly under `objects/`, `objects/pack` or `objects/info`
+ * (each `objects/xx` linked).
  * A repository of the agent's own (`git init --separate-git-dir`) is judged the same way. Checked when the decision is
  * made; a rewrite after it is the race the changelog lists.
  */
