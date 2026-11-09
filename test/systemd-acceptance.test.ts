@@ -46,7 +46,7 @@ type Ev = { type: 'test:pass' | 'test:fail'; name: string; nesting: number; file
 /** One of node's results, as the reporter writes it: in `file` (built), at `line`, passed unless `o` says otherwise. */
 const ev = (name: string, line: number, o: Partial<Ev> = {}, file = '/r/dist/test/f.test.js'): Ev => ({ type: 'test:pass', name, nesting: 0, file, line, column: 1, skip: null, todo: null, ...o });
 
-type Step = { run?: string; uses?: string; name?: string };
+type Step = { run?: string; uses?: string; name?: string; env?: Record<string, string> };
 type Job = { name?: string; if?: string; 'runs-on'?: unknown; container?: unknown; 'continue-on-error'?: unknown; 'timeout-minutes'?: unknown; steps?: Step[] };
 
 test('every test gated on the systemd CI flag is found by its gate, and the 3 from #1165 are among them', () => {
@@ -149,6 +149,19 @@ test("ci.yml's systemd-acceptance job: GitHub's VM on each push to main, never s
   assert.ok(i((s) => s.run === 'npm ci --ignore-scripts') >= 0 && pins > i((s) => s.run === 'npm ci --ignore-scripts'), 'installed with no package scripts, pins checked before the build');
   assert.ok(i((s) => /tsc -p tsconfig\.json/.test(s.run ?? '')) > pins, 'built with the locked tsc after the pin check');
   assert.ok(i((s) => /scripts\/setup\/machine\.sh/.test(s.run ?? '')) < steps.length - 1, 'machine.sh before the tests');
+  // R1169s: the machine exactly as the test shards set it up (bubblewrap, subordinate ids, the ci-unshare profile), and
+  // a missing sandbox a failure: tests this job runs whole skip without them, and here a skip fails the job.
+  const NS = 'bubblewrap (machine.sh), startable by another user; user namespaces for the stand-in tests';
+  const shardStep = Object.values(wf.jobs).flatMap((j) => j.steps ?? []).find((st) => st.name === NS && !(job.steps ?? []).includes(st));
+  const ownStep = steps.find((st) => st.name === NS);
+  assert.ok(shardStep && ownStep, "both the shards and this job have the user-namespace step");
+  // Less the shards' first block, their branch for the self-hosted container, which this job never runs in (and whose
+  // words the check above keeps out of this job).
+  const container = /^if \[ "\$\{WORKLANE_CI_CONTAINER:-\}" = 1 \]; then\n[\s\S]*?\n {2}exit 0\nfi\n/;
+  assert.match(shardStep.run!, container, "the shards' step starts with its container branch");
+  assert.equal(ownStep.run, shardStep.run!.replace(container, ''), "this job's machine step is the shards' own, word for word");
+  assert.ok(steps.indexOf(ownStep) < steps.length - 1, 'before the script');
+  assert.equal(steps.at(-1)?.env?.PROJECT_SANDBOX_REQUIRED, '1', 'a missing sandbox fails the tests it runs, as in the shards');
 });
 
 test("a gated test passes only when all of it ran: a subtest that skips, is a todo or fails fails it (R1169d #3); a test here skipped for systemd fails the run (R1169f's floor)", () => {
@@ -396,13 +409,13 @@ test('a test whose own function holds the sign runs on the VM: it fails the job 
   const t = { name: 'unit restarts', line: 5, column: 1, label: "'unit restarts'" };
   const run = (events: Ev[], excused: string[] = []) => sa.problems([{ file: 'f.test.ts', gates: [], events, signTests: [t], excused: new Set(excused) } as never]);
   assert.deepEqual(run([ev('unit restarts', 5)]), []);
-  assert.deepEqual(run([]), ["test/f.test.ts: unit restarts: didn't run (its own function holds systemd's sign, so it must run here; registered only sometimes, or under a skipped suite?)"]);
-  assert.deepEqual(run([ev('unit restarts', 5, { skip: 'needs sudo' })]), ["test/f.test.ts: unit restarts: SKIP needs sudo (its own function holds systemd's sign: it must run here, where systemd is)"]);
-  assert.deepEqual(run([ev('unit restarts', 5, { todo: 'later' })]), ["test/f.test.ts: unit restarts: TODO later (its own function holds systemd's sign: it must run here, where systemd is)"]);
+  assert.deepEqual(run([]), ["test/f.test.ts: unit restarts: didn't run (it reads systemd's sign: its function, a guarded stop or its name; so it must run here. Registered only sometimes, or under a skipped suite?)"]);
+  assert.deepEqual(run([ev('unit restarts', 5, { skip: 'needs sudo' })]), ["test/f.test.ts: unit restarts: SKIP needs sudo (it reads systemd's sign: its function, a guarded stop or its name; so it must run here, where systemd is)"]);
+  assert.deepEqual(run([ev('unit restarts', 5, { todo: 'later' })]), ["test/f.test.ts: unit restarts: TODO later (it reads systemd's sign: its function, a guarded stop or its name; so it must run here, where systemd is)"]);
   assert.deepEqual(run([ev('half', 6, { nesting: 1, todo: 'x' }), ev('unit restarts', 5)]), ['test/f.test.ts: unit restarts: its subtest "half" TODO x (all of it must run here)']);
   assert.deepEqual(run([ev('unit restarts', 5), ev('unit restarts', 5, { skip: 'x' })]).length, 1, 'each registration is judged (a loop)');
   assert.deepEqual(run([ev('unit restarts', 5, { skip: 'needs root' })], ['unit restarts']), [], 'excused by name: it may skip');
-  assert.deepEqual(run([ev('unit restarts', 5, { type: 'test:fail' })], ['unit restarts']), ["test/f.test.ts: unit restarts: failed (its own function holds systemd's sign: it must run here, where systemd is)"], 'never a failure');
+  assert.deepEqual(run([ev('unit restarts', 5, { type: 'test:fail' })], ['unit restarts']), ["test/f.test.ts: unit restarts: failed (it reads systemd's sign: its function, a guarded stop or its name; so it must run here, where systemd is)"], 'never a failure');
   assert.deepEqual(sa.summaryProblems('# tests 3\n# pass 2\n# fail 0\n# cancelled 0\n# skipped 1\n# todo 0\n', 'f.test.ts', 1, true), [], 'a whole file may skip its other tests');
   assert.deepEqual(sa.summaryProblems('# tests 0\n# pass 0\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n', 'f.test.ts', 0, true), ['test/f.test.ts: its TAP summary counts no test at all']);
 });
@@ -490,4 +503,44 @@ test('R1169q/r: subtests are reads of `test` on the context; a name holding the 
   const pins = (text: string) => sa.signUseList(ts, 'test/x.test.ts', text).map((u) => u.pin);
   assert.deepEqual(pins('const STUB =\n  `#!/bin/sh\nsystemctl is-system-running\n`;'), ['systemctl: const STUB =\n`#!/bin/sh\nsystemctl is-system-running\n`;']);
   assert.deepEqual(pins('const S = `#!/bin/sh\necho "\\x73ystemctl"\nexit 0`;'), ['systemctl: const S = `#!/bin/sh\necho "\\x73ystemctl"\nexit 0`;']);
+});
+
+test('R1169t: a registration chosen on what carries the sign is read; a for-of variable carries it; subtests through a bare test(), an alias, destructuring or a same-file helper; a compound statement is pinned whole; a getter skip is read', () => {
+  const paths = new Set(['test/x.test.ts', 'src/os.ts']);
+  const source = { paths, carries: (m: string) => m === 'src/os.ts', direct: (m: string) => m.startsWith('src/') };
+  const reads = (text: string) => sa.skipReads(ts, 'test/x.test.ts', text, source);
+  const head = `import { lingerEnabled } from '../src/os.js';\n`;
+  // D1: a ternary choosing test.skip or describe.skip, through a local or called directly.
+  assert.deepEqual(reads(`${head}const maybe = lingerEnabled() === null ? test.skip : test;\nmaybe('n', () => {});`), ['src/os.ts: lingerEnabled']);
+  assert.deepEqual(reads(`${head}(lingerEnabled() === null ? describe.skip : describe)('s', () => { it('n', () => {}); });`), ['src/os.ts: lingerEnabled']);
+  // D2: an if, or && / ||, around a registration; a return from a suite's body.
+  assert.deepEqual(reads(`${head}if (lingerEnabled() !== null) test('n', () => {});`), ['src/os.ts: lingerEnabled']);
+  assert.deepEqual(reads(`${head}lingerEnabled() !== null && test('n', () => {});`), ['src/os.ts: lingerEnabled']);
+  assert.deepEqual(reads(`${head}describe('s', () => {\n  if (lingerEnabled() === null) return;\n  it('n', () => {});\n});`), ['src/os.ts: lingerEnabled']);
+  assert.deepEqual(reads(`${head}if (lingerEnabled() !== null) console.log('x');\ntest('n', () => {});`), [], 'an if that registers nothing');
+  // A registration read in a file with no skip or todo text; options passed to a chosen registration are read.
+  assert.deepEqual(reads(`${head}const go = lingerEnabled();\nconst maybe = go ? test : test.skip;\nmaybe('n', { timeout: 1 }, () => {});`), ['test/x.test.ts: go']);
+  assert.deepEqual(reads(`${head}const on = test;\nconst maybe2 = lingerEnabled() ? on : on;\nmaybe2('n', () => {});`), [], 'not a choice between registrations');
+  // A function the file defines under such a name is its own helper, not node:test's; a non-literal name is read.
+  assert.deepEqual(reads(`${head}function suite(a, b) { return [a, b]; }\nconst r = lingerEnabled();\nsuite(r, { x: 1 });`), []);
+  assert.deepEqual(reads(`${head}const test = wrap(nodeTest);\nconst r = lingerEnabled();\ntest(r, () => {});`), ['test/x.test.ts: r'], 'a wrapper of that name still registers');
+  // D7: a getter (or a method) named skip or todo is read.
+  assert.deepEqual(reads(`${head}test('n', { get skip() { return lingerEnabled() === null; } }, () => {});`), ['src/os.ts: lingerEnabled']);
+  // D3: a for-of loop variable carries what it iterates.
+  const loop = `for (const dir of ['/run/${sd}/system']) {\n  test('n', { skip: !existsSync(dir) && 'x' }, () => {});\n}`;
+  assert.match(sa.signProblems(ts, new Map([['test/x.test.ts', loop]]), { uses: { 'test/x.test.ts': { why: 'x', uses: sa.signUseList(ts, 'test/x.test.ts', loop).map((u) => u.pin) } } }).join('\n'), /a skip reads test\/x\.test\.ts: dir/);
+  // D4: subtests started by a nested bare test()/it(), an alias of the context, destructuring, or a same-file helper.
+  const none = { paths: new Set<string>(), carries: () => false };
+  const subs = (text: string) => sa.signTests(ts, 'test/x.test.ts', text, none).map((t) => [t.name, t.subtests]);
+  const body = `run('${sd}-run');`;
+  assert.deepEqual(subs(`test('a', async () => { ${body} await test('s', () => {}); });`), [['a', true]]);
+  assert.deepEqual(subs(`test('b', async () => { ${body} await it('s', () => {}); });`), [['b', true]]);
+  assert.deepEqual(subs(`test('c', async (t) => { const ctx = t; ${body} await ctx.test('s', () => {}); });`), [['c', true]]);
+  assert.deepEqual(subs(`test('d', async ({ test: sub }) => { ${body} await sub('s', () => {}); });`), [['d', true]]);
+  assert.deepEqual(subs(`test('e', async (t) => { const { test: sub } = t; ${body} await sub('s', () => {}); });`), [['e', true]]);
+  assert.deepEqual(subs(`async function each(c, names) { for (const n of names) await c.test(n, () => {}); }\ntest('f', async (t) => { ${body} await each(t, []); });`), [['f', true]]);
+  assert.deepEqual(subs(`function log(c) { c.diagnostic('x'); }\ntest('g', (t) => { ${body} log(t); });`), [['g', false]], 'a helper that starts none');
+  // D5: a use in an if (or a loop, a function, a block) pins the whole statement, so its body is pinned too.
+  const pins = (text: string) => sa.signUseList(ts, 'test/x.test.ts', text).map((u) => u.pin);
+  assert.deepEqual(pins(`if (existsSync('/run/${sd}/system')) {\n  console.log('x');\n}`), [`systemd: if (existsSync('/run/${sd}/system')) {\nconsole.log('x');\n}`]);
 });

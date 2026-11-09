@@ -1,0 +1,6 @@
+import { test } from 'node:test';
+import { spawnSync } from 'node:child_process';
+import assert from 'node:assert/strict';
+test('acceptance: the engine unit is active', function* () {
+  assert.equal(spawnSync('systemctl', ['is-active', 'worklane'], { encoding: 'utf8' }).status, 0);
+});

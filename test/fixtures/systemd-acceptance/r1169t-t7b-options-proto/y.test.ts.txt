@@ -1,0 +1,3 @@
+import { test } from 'node:test';
+import { lingerEnabled } from '../src/os/probe.js';
+test('acceptance: linger', { __proto__: { skip: lingerEnabled() === null } }, () => {});

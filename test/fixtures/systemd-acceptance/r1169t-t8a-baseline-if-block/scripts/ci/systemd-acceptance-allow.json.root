@@ -1,0 +1,12 @@
+{
+ "uses": {
+  "test/y.test.ts": {
+   "why": "fixture data, reviewed by the owner",
+   "uses": [
+    "systemd: if (existsSync('/run/systemd/system')) {\nconsole.log('# a booted host');\n}"
+   ]
+  }
+ },
+ "skipImports": {},
+ "runtime": {}
+}

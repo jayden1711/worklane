@@ -1,0 +1,7 @@
+import { test } from 'node:test';
+import { existsSync } from 'node:fs';
+for (const dir of ['/run/systemd/system']) {
+  test('acceptance: the engine unit starts', (t) => {
+    if (!existsSync(dir) || !process.env.NEVER) { t.skip('not a booted host'); return; }
+  });
+}

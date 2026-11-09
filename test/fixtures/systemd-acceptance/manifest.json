@@ -394,5 +394,135 @@
   "r1169r-r7a-baseline-pinned-stub": [
     0,
     "^$"
+  ],
+  "r1169t-h1-describe-options-fn": [
+    2,
+    "a skip reads test/y\\.test\\.ts: opts, which carries systemd's sign"
+  ],
+  "r1169t-h2-foreach-table": [
+    2,
+    "a skip reads src/os/probe\\.ts: lingerEnabled, which carries systemd's sign"
+  ],
+  "r1169t-h3-top-level-await-import": [
+    2,
+    "a skip reads src/os/probe\\.ts: \\*, which carries systemd's sign"
+  ],
+  "r1169t-h4-spread-options": [
+    2,
+    "a skip reads src/os/probe\\.ts: lingerEnabled, which carries systemd's sign"
+  ],
+  "r1169t-h5-plan-todo-string-key": [
+    2,
+    "a skip reads src/os/probe\\.ts: lingerEnabled, which carries systemd's sign"
+  ],
+  "r1169t-h6-async-iter-subtests": [
+    2,
+    "test/y\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside"
+  ],
+  "r1169t-h7-it-skip-alias-var": [
+    2,
+    "a skip reads test/y\\.test\\.ts: off, which carries systemd's sign"
+  ],
+  "r1169t-t1-nested-bare-test": [
+    1,
+    "acceptance: every failed unit is reported: ran no subtest",
+    "test/y\\.test\\.ts:\\d+: acceptance: every failed unit is reported"
+  ],
+  "r1169t-t1b-nested-it": [
+    1,
+    "acceptance: every failed unit is reported: ran no subtest",
+    "test/y\\.test\\.ts:\\d+: acceptance: every failed unit is reported"
+  ],
+  "r1169t-t1c-control-t-test": [
+    1,
+    "acceptance: every failed unit is reported: ran no subtest",
+    "test/y\\.test\\.ts:\\d+: acceptance: every failed unit is reported"
+  ],
+  "r1169t-t2-ctx-to-helper": [
+    1,
+    "acceptance: every failed unit is reported: ran no subtest",
+    "test/y\\.test\\.ts:\\d+: acceptance: every failed unit is reported"
+  ],
+  "r1169t-t2b-ctx-alias": [
+    1,
+    "acceptance: every failed unit is reported: ran no subtest",
+    "test/y\\.test\\.ts:\\d+: acceptance: every failed unit is reported"
+  ],
+  "r1169t-t2c-ctx-destructured": [
+    1,
+    "acceptance: every failed unit is reported: ran no subtest",
+    "test/y\\.test\\.ts:\\d+: acceptance: every failed unit is reported"
+  ],
+  "r1169t-t3-generator-fn": [
+    0,
+    "^$"
+  ],
+  "r1169t-t3c-control-plain-fn": [
+    1,
+    "acceptance: the engine unit is active: failed",
+    "test/y\\.test\\.ts:\\d+: acceptance: the engine unit is active"
+  ],
+  "r1169t-t4-ternary-test-skip": [
+    2,
+    "a skip reads src/os/probe\\.ts: lingerEnabled, which carries systemd's sign"
+  ],
+  "r1169t-t4b-ternary-describe-skip": [
+    2,
+    "a skip reads src/os/probe\\.ts: lingerEnabled, which carries systemd's sign"
+  ],
+  "r1169t-t4c-control-options-skip": [
+    2,
+    "a skip reads src/os/probe\\.ts: lingerEnabled, which carries systemd's sign"
+  ],
+  "r1169t-t5-conditional-registration": [
+    2,
+    "a skip reads src/os/probe\\.ts: lingerEnabled, which carries systemd's sign"
+  ],
+  "r1169t-t6-suite-body-return": [
+    2,
+    "a skip reads src/os/probe\\.ts: lingerEnabled, which carries systemd's sign"
+  ],
+  "r1169t-t6c-control-test-body-return": [
+    1,
+    "acceptance: the engine keeps running after its user logs out: (didn't run|failed)",
+    "test/y\\.test\\.ts:\\d+: acceptance: the engine keeps running after its user logs out"
+  ],
+  "r1169t-t7-options-getter": [
+    2,
+    "a skip reads src/os/probe\\.ts: lingerEnabled, which carries systemd's sign"
+  ],
+  "r1169t-t7b-options-proto": [
+    0,
+    "^$"
+  ],
+  "r1169t-t8-pin-if-block-body": [
+    2,
+    "test/y\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside"
+  ],
+  "r1169t-t8a-baseline-if-block": [
+    0,
+    "^$"
+  ],
+  "r1169t-t8c-control-one-line": [
+    2,
+    "test/y\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside"
+  ],
+  "r1169t-t9-forof-options-skip": [
+    2,
+    "a skip reads test/y\\.test\\.ts: dir, which carries systemd's sign"
+  ],
+  "r1169t-t9b-forof-body-guard": [
+    1,
+    "acceptance: the engine unit starts: SKIP",
+    "test/y\\.test\\.ts:\\d+: acceptance: the engine unit starts"
+  ],
+  "r1169t-t9c-control-const": [
+    2,
+    "a skip reads test/y\\.test\\.ts: dir, which carries systemd's sign"
+  ],
+  "r1169t-t9d-control-const-body-guard": [
+    1,
+    "acceptance: the engine unit starts: SKIP",
+    "test/y\\.test\\.ts:\\d+: acceptance: the engine unit starts"
   ]
 }

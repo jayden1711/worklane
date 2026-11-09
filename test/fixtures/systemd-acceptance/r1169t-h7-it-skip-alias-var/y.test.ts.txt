@@ -1,0 +1,4 @@
+import { test } from 'node:test';
+import { lingerEnabled } from '../src/os/probe.js';
+const off = lingerEnabled() === null;
+test('acceptance: linger', { skip: off }, () => {});

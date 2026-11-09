@@ -1,0 +1,4 @@
+import { test } from 'node:test';
+import { spawnSync } from 'node:child_process';
+async function* units() { for (const l of (spawnSync('systemctl', ['list-units', '--plain'], { encoding: 'utf8' }).stdout ?? '').split('\n').filter(Boolean)) yield l; }
+test('acceptance: units', async (t) => { for await (const u of units()) await t.test(u, () => {}); });

@@ -1,0 +1,12 @@
+{
+ "uses": {
+  "test/y.test.ts": {
+   "why": "fixture data, reviewed by the owner",
+   "uses": [
+    "systemd: for (const dir of ['/run/systemd/system']) {\ntest('acceptance: the engine unit starts', (t) => {\nif (!existsSync(dir) || !process.env.NEVER) { t.skip('not a booted host'); return; }\n});\n}"
+   ]
+  }
+ },
+ "skipImports": {},
+ "runtime": {}
+}
