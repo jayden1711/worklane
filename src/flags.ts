@@ -33,11 +33,14 @@ let snapshot: Readonly<{ sha: string; on: readonly string[] }> | null = null;
 /** Flags this process turned off whose off record isn't durable yet, each with the commit that turned it off. */
 const offUnrecorded = new Map<string, string | null>();
 /**
- * The same offs, kept on disk beside the event log until a tick is durable (R1173r 1: a SQLITE_BUSY longer than the
- * busy timeout ends the tick and the process, and the next process knew nothing of them). Written, synced, before the
- * turn-off takes effect; read once per process. A full disk that stops this write too is the stated limit.
+ * The same offs, kept on disk beside the event log until the log stores their off rows (R1173r 1: a SQLITE_BUSY longer
+ * than the busy timeout ends the tick and the process, and the next process knew nothing of them). Written, synced,
+ * before the turn-off takes effect; read once per process. A full disk that stops this write too is the stated limit.
  */
-let offFile: { path: string; held: Map<string, string | null>; saved: boolean } | null = null;
+// Each entry keeps the log's last stored id when the flag went off: the entry is done once a stored off row of the flag
+// comes after it, whatever the timing of a flush, a stop or a rewrite (R1173u, R1173v: three rounds of clearing it at
+// the right moment each left a stale entry, whose off and on a restart then wrote again).
+let offFile: { path: string; held: Map<string, { sha: string | null; after: number }>; saved: boolean } | null = null;
 const OFF_FILE = 'flags-unrecorded.json';
 function loadOffFile(log: EventLog): void {
   if (typeof log.path !== 'string' || log.path === ':memory:') return; // no folder to keep it in: memory only
@@ -51,11 +54,14 @@ function loadOffFile(log: EventLog): void {
     return; // none (or unreadable: nothing to add)
   }
   if (!saved || typeof saved !== 'object' || Array.isArray(saved)) return;
-  for (const [flag, sha] of Object.entries(saved as Record<string, unknown>)) {
+  for (const [flag, v] of Object.entries(saved as Record<string, unknown>)) {
+    const { sha, after } = (v && typeof v === 'object' ? v : {}) as { sha?: unknown; after?: unknown };
     if (!FLAG_NAME.test(flag) || !(sha === null || (typeof sha === 'string' && /^[0-9a-f]{40,64}$/.test(sha)))) continue;
-    offFile.held.set(flag, sha);
-    if (!offUnrecorded.has(flag)) offUnrecorded.set(flag, sha);
+    if (typeof after !== 'number' || !Number.isSafeInteger(after) || after < 0) continue;
+    offFile.held.set(flag, { sha, after });
   }
+  pruneOffFile(log);
+  for (const [flag, e] of offFile.held) if (!offUnrecorded.has(flag)) offUnrecorded.set(flag, e.sha);
 }
 function saveOffFile(): void {
   if (!offFile) return;
@@ -70,9 +76,28 @@ function saveOffFile(): void {
     offFile.saved = false;
   }
 }
-/** A flag whose off is now a row on disk (nothing held in memory) leaves the file too (R1173s 1, R1173t D1). */
-function offOnDisk(log: EventLog, flag: string): void {
-  if (log.buffered().count === 0 && offFile?.held.delete(flag)) saveOffFile();
+/** The id of each flag's last stored off row (held records are not stored: a process that stops loses them). */
+function storedOffs(log: EventLog): Map<string, number> {
+  const last = new Map<string, number>();
+  for (const r of log.db.prepare("SELECT id, payload FROM events WHERE type = 'flag.flipped' ORDER BY id").all() as { id: number; payload: string }[]) {
+    const p = JSON.parse(r.payload) as EventPayload<'flag.flipped'>;
+    if (!p.to) last.set(p.flag, r.id);
+  }
+  return last;
+}
+/** Each entry whose off is a stored row after it went off leaves the file (and the map). */
+function pruneOffFile(log: EventLog): void {
+  if (!offFile?.held.size) return;
+  const stored = storedOffs(log);
+  let changed = false;
+  for (const [flag, e] of offFile.held) {
+    if ((stored.get(flag) ?? -1) > e.after) {
+      offFile.held.delete(flag);
+      offUnrecorded.delete(flag);
+      changed = true;
+    }
+  }
+  if (changed) saveOffFile();
 }
 
 /** Whether a flag is on: only when the default branch's committed config, at the adopted commit, says `true` for it. */
@@ -206,7 +231,7 @@ export function adoptFlags(o: { log: EventLog; repo: string; actor: string; bran
   const turnedOff = before.filter((n) => !keep.includes(n) && !offUnrecorded.has(n));
   for (const n of turnedOff) {
     offUnrecorded.set(n, sha);
-    offFile?.held.set(n, sha);
+    offFile?.held.set(n, { sha, after: o.log.lastId() });
   }
   if (turnedOff.length || offFile?.saved === false) saveOffFile();
   snapshot = sha ? Object.freeze({ sha, on: Object.freeze([...keep]) }) : null;
@@ -215,20 +240,14 @@ export function adoptFlags(o: { log: EventLog; repo: string; actor: string; bran
   const write = (p: EventPayload<'flag.flipped'>) => {
     if (o.log.append('flag.flipped', p, o.actor).id === 0) durable = false;
     // Its off appended (written or held): never written again (R1173q 1: every held tick wrote the pair again).
-    else if (!p.to) {
-      offUnrecorded.delete(p.flag);
-      offOnDisk(o.log, p.flag);
-    }
+    else if (!p.to) offUnrecorded.delete(p.flag);
     out.push(p);
   };
   let durable = true;
   for (const flag of [...new Set([...known, ...was.keys()])].sort()) {
     let from = was.get(flag) ?? false;
     // The log already reads off: nothing unrecorded.
-    if (!from) {
-      offUnrecorded.delete(flag);
-      offOnDisk(o.log, flag);
-    }
+    if (!from) offUnrecorded.delete(flag);
     // The log still reads on for a flag turned off (by this process, or one before it): record that off first, as it ran.
     if (from && offUnrecorded.has(flag)) {
       write({ flag, from: true, to: false, sha: offUnrecorded.get(flag) ?? null });
@@ -240,13 +259,9 @@ export function adoptFlags(o: { log: EventLog; repo: string; actor: string; bran
   // Durable only when nothing is held in memory: a held record reads as recorded on the next tick (R1173m 1: a real
   // SQLITE_FULL turned a flag on with no row on disk). A held record from an earlier tick is still held here.
   if (o.log.buffered().count > 0) durable = false;
-  if (durable) {
-    offUnrecorded.clear();
-    if (offFile?.held.size) {
-      offFile.held.clear();
-      saveOffFile();
-    }
-  }
+  if (durable) offUnrecorded.clear();
+  // The file keeps an entry until its off is a stored row: checked at every tick, and at a process's start.
+  pruneOffFile(o.log);
   // Durably recorded: the head's flags on; otherwise nothing goes on that wasn't (the turn-offs above stand).
   if (durable && sha) snapshot = Object.freeze({ sha, on: Object.freeze([...on]) });
   return out;

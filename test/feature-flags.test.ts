@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 import { EventLog } from '../src/events/log.js';
@@ -883,9 +883,10 @@ test('R1173s 2a: a flag in flags-unrecorded.json whose off the log already holds
       a();
       const s2 = onMain(f, turnOff, 'off');
       fetch(f);
+      const at = log.lastId();
       a();
       // A file left naming the flag (a stop between the off's row and the file's rewrite), then a restart.
-      writeFileSync(offFilePath(f), JSON.stringify({ [T]: s2 }));
+      writeFileSync(offFilePath(f), JSON.stringify({ [T]: { sha: s2, after: at } }));
       log = restart(log, f.log.path);
       const s3 = onMain(f, turnOn, 'on again');
       fetch(f);
@@ -927,6 +928,203 @@ test('R1173s 2b: flags-unrecorded.json stays while the off is only held, so a st
       a();
       assert.deepEqual(flips(f), [[T, false, true, s1], [T, true, false, s2], [T, false, true, s3]]);
       assert.equal(existsSync(offFilePath(f)), false, 'removed once durable');
+    });
+  } finally {
+    clearFlags();
+    log.close();
+    f.log.close();
+    rmSync(f.base, { recursive: true, force: true });
+  }
+});
+
+/** main's flags set to exactly `flags` (the `flags:` block these tests append last, replaced). */
+const setFlags = (f: Fixture, flags: Record<string, boolean>, msg: string) =>
+  onMain(f, (p) => writeFileSync(cfgFile(p), `${readFileSync(cfgFile(p), 'utf8').replace(/\nflags:\n[\s\S]*$/, '\n')}flags:\n${Object.entries(flags).map(([k, v]) => `  ${k}: ${v}\n`).join('')}`), msg);
+/** A graceful stop (the service's last flush, then close), then a fresh process. */
+const gracefulStop = (log: EventLog, path: string) => {
+  assert.equal(log.flush().error, null, 'the last flush writes the held rows');
+  return restart(log, path);
+};
+
+test('R1173v V1: a full disk that empties and fills again leaves a stored off in flags-unrecorded.json; a restart never writes its pair again', async () => {
+  const f = fixture();
+  const A = 'a_flag';
+  const B = 'b_flag';
+  let log = new EventLog(f.log.path, { buffer: {} });
+  try {
+    await withKnownFlags([A, B], async () => {
+      const s1 = setFlags(f, { [B]: true }, 'b on');
+      fetch(f);
+      const a = () => adoptFlags({ log, repo: f.repo, actor: 'i', branch: 'main', check: () => [] });
+      a();
+      const s2 = setFlags(f, { [B]: false }, 'b off');
+      fetch(f);
+      fillLog(log);
+      a(); // b's off held, the file names b
+      roomLog(log);
+      assert.equal(log.flush().written, 1, "b's off is a stored row");
+      const s3 = setFlags(f, { [A]: true, [B]: true }, 'a on, b on again');
+      fetch(f);
+      fillLog(log);
+      a(); // a's and b's ons held
+      roomLog(log);
+      assert.equal(log.flush().written, 2);
+      log = restart(log, f.log.path);
+      a();
+      a();
+      assert.ok(flagOn(A) && flagOn(B));
+      assert.deepEqual(flips(f), [[B, false, true, s1], [B, true, false, s2], [A, false, true, s3], [B, false, true, s3]]);
+    });
+  } finally {
+    clearFlags();
+    log.close();
+    f.log.close();
+    rmSync(f.base, { recursive: true, force: true });
+  }
+});
+
+test("R1173v V2: a rewrite of flags-unrecorded.json that fails after the off's row is stored never gives a second pair after a restart", { skip: process.platform === 'win32' || process.getuid?.() === 0 }, async () => {
+  const f = fixture();
+  const A = 'a_flag';
+  const dir = f.base;
+  let log = new EventLog(f.log.path, { buffer: {} });
+  try {
+    await withKnownFlags([A], async () => {
+      const s1 = setFlags(f, { [A]: true }, 'a on');
+      fetch(f);
+      const a = () => adoptFlags({ log, repo: f.repo, actor: 'i', branch: 'main', check: () => [] });
+      a();
+      const s2 = setFlags(f, { [A]: false }, 'a off');
+      fetch(f);
+      // Right after a's off row is stored, the folder takes no new entry: the file's rewrite fails.
+      const off = log.subscribe((e) => {
+        const p = e.payload as EventPayload<'flag.flipped'>;
+        if (e.type === 'flag.flipped' && p.flag === A && !p.to) chmodSync(dir, 0o500);
+      });
+      a();
+      off();
+      assert.ok(existsSync(offFilePath(f)), 'the rewrite failed: the file still names a');
+      chmodSync(dir, 0o700);
+      const s3 = setFlags(f, { [A]: true }, 'a on again');
+      fetch(f);
+      chmodSync(dir, 0o500);
+      a();
+      assert.ok(flagOn(A));
+      chmodSync(dir, 0o700);
+      log = restart(log, f.log.path);
+      a();
+      assert.deepEqual(flips(f), [[A, false, true, s1], [A, true, false, s2], [A, false, true, s3]]);
+    });
+  } finally {
+    chmodSync(dir, 0o700);
+    clearFlags();
+    log.close();
+    f.log.close();
+    rmSync(f.base, { recursive: true, force: true });
+  }
+});
+
+test('R1173u D1: the off and the on held on a full disk, then a graceful stop flushes both (no tick after): the restart writes neither again', async () => {
+  for (const blocked of [false, true]) {
+    const f = fixture();
+    let log = new EventLog(f.log.path, { buffer: {} });
+    try {
+      await withKnownFlags([T], async () => {
+        const s1 = onMain(f, (p) => appendFileSync(cfgFile(p), `flags:\n  ${T}: true\n`), 'on');
+        fetch(f);
+        const a = () => adoptFlags({ log, repo: f.repo, actor: 'i', branch: 'main', check: () => [] });
+        a();
+        fillLog(log);
+        if (blocked) mkdirSync(offFilePath(f)); // the file's first save fails too, as on ENOSPC
+        const s2 = onMain(f, turnOff, 'off');
+        fetch(f);
+        a();
+        if (blocked) rmSync(offFilePath(f), { recursive: true });
+        const s3 = onMain(f, turnOn, 'on again');
+        fetch(f);
+        if (blocked) roomLog(log);
+        a(); // the on held behind the off
+        if (!blocked) roomLog(log);
+        log = gracefulStop(log, f.log.path);
+        assert.deepEqual(flips(f), [[T, false, true, s1], [T, true, false, s2], [T, false, true, s3]], `blocked=${blocked}: every row stored before the restart`);
+        a();
+        assert.deepEqual(flips(f), [[T, false, true, s1], [T, true, false, s2], [T, false, true, s3]], `blocked=${blocked}: the off and the on once each`);
+        assert.equal(existsSync(offFilePath(f)), false, `blocked=${blocked}: the file is gone`);
+      });
+    } finally {
+      clearFlags();
+      log.close();
+      f.log.close();
+      rmSync(f.base, { recursive: true, force: true });
+    }
+  }
+});
+
+test("R1173v V3: a stop between an off's stored row and the file's rewrite, then main on: the restart writes no pair again", async () => {
+  const f = fixture();
+  const A = 'a_flag';
+  let log = new EventLog(f.log.path, { buffer: {} });
+  try {
+    await withKnownFlags([A], async () => {
+      const s1 = setFlags(f, { [A]: true }, 'a on');
+      fetch(f);
+      const a = () => adoptFlags({ log, repo: f.repo, actor: 'i', branch: 'main', check: () => [] });
+      a();
+      const s2 = setFlags(f, { [A]: false }, 'a off');
+      fetch(f);
+      // The process dies right after a's off row is stored: a listener that throws stands in for the kill.
+      const off = log.subscribe((e) => {
+        const p = e.payload as EventPayload<'flag.flipped'>;
+        if (e.type === 'flag.flipped' && p.flag === A && !p.to) throw new Error('killed');
+      });
+      assert.throws(a, /killed/);
+      off();
+      assert.ok(existsSync(offFilePath(f)), 'the file still names a');
+      log = restart(log, f.log.path);
+      const s3 = setFlags(f, { [A]: true }, 'a on again');
+      fetch(f);
+      a();
+      assert.ok(flagOn(A));
+      assert.deepEqual(flips(f), [[A, false, true, s1], [A, true, false, s2], [A, false, true, s3]]);
+    });
+  } finally {
+    clearFlags();
+    log.close();
+    f.log.close();
+    rmSync(f.base, { recursive: true, force: true });
+  }
+});
+
+test('flags-unrecorded.json: an entry counts only an off stored after it went off; an older off of the same flag never stands for it, and the file is gone once its off is stored', async () => {
+  const f = fixture();
+  let log = new EventLog(f.log.path, { buffer: {} });
+  try {
+    await withKnownFlags([T], async () => {
+      const s1 = onMain(f, (p) => appendFileSync(cfgFile(p), `flags:\n  ${T}: true\n`), 'on');
+      fetch(f);
+      const a = () => adoptFlags({ log, repo: f.repo, actor: 'i', branch: 'main', check: () => [] });
+      a();
+      const s2 = onMain(f, turnOff, 'off');
+      fetch(f);
+      a();
+      const s3 = onMain(f, turnOn, 'on');
+      fetch(f);
+      a();
+      // Off again, its record refused (a lock past the busy timeout); the process ends.
+      const s4 = onMain(f, turnOff, 'off again');
+      fetch(f);
+      const lock = lockLog(f.log.path);
+      try {
+        assert.throws(a, /locked/);
+      } finally {
+        lock.release();
+      }
+      log = restart(log, f.log.path);
+      const s5 = onMain(f, turnOn, 'on again');
+      fetch(f);
+      a();
+      assert.deepEqual(flips(f), [[T, false, true, s1], [T, true, false, s2], [T, false, true, s3], [T, true, false, s4], [T, false, true, s5]], 'the lost off at s4 recorded, s2 never standing for it');
+      assert.equal(existsSync(offFilePath(f)), false, 'its off stored: the file is gone, in the same process');
     });
   } finally {
     clearFlags();
