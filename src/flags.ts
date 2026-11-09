@@ -40,27 +40,73 @@ const offUnrecorded = new Map<string, string | null>();
 // Each entry keeps the log's last stored id when the flag went off: the entry is done once a stored off row of the flag
 // comes after it, whatever the timing of a flush, a stop or a rewrite (R1173u, R1173v: three rounds of clearing it at
 // the right moment each left a stale entry, whose off and on a restart then wrote again).
-let offFile: { path: string; held: Map<string, { sha: string | null; after: number }>; saved: boolean } | null = null;
-const OFF_FILE = 'flags-unrecorded.json';
+// R1173w, R1173x: an id means something only in the log it was taken from, so each entry also keeps that row's stamp
+// (`at`). A log restored from a backup, replaced, or with an `after` past its last id doesn't have that row: the entry
+// is from another log, and is judged against this one (below).
+type OffEntry = { sha: string | null; after: number; at: string | null };
+let offFile: { path: string; held: Map<string, OffEntry>; saved: boolean; judged: boolean } | null = null;
+/** The file's name, beside the event log (instance-move clears it when a log is imported over this one). */
+export const OFF_FILE = 'flags-unrecorded.json';
+/** The log's last stored id and that row's stamp: where an entry stands in this log. */
+function anchorOf(log: EventLog): { after: number; at: string | null } {
+  const after = log.lastId();
+  const r = after ? (log.db.prepare('SELECT ts FROM events WHERE id = ?').get(after) as { ts: string } | undefined) : undefined;
+  return { after, at: r?.ts ?? null };
+}
+/** Whether the entry was taken from this log: its row is here, with its stamp. */
+function anchored(log: EventLog, e: OffEntry): boolean {
+  if (e.at === null) return false;
+  const r = log.db.prepare('SELECT ts FROM events WHERE id = ?').get(e.after) as { ts: string } | undefined;
+  return r?.ts === e.at;
+}
 function loadOffFile(log: EventLog): void {
   if (typeof log.path !== 'string' || log.path === ':memory:') return; // no folder to keep it in: memory only
   const path = join(dirname(log.path), OFF_FILE);
-  if (offFile?.path === path) return;
-  offFile = { path, held: new Map(), saved: true };
-  let saved: unknown;
+  if (offFile?.path !== path) {
+    offFile = { path, held: new Map(), saved: true, judged: false };
+    let saved: unknown;
+    try {
+      saved = JSON.parse(readFileSync(path, 'utf8'));
+    } catch {
+      saved = null; // none (or unreadable: nothing to add)
+    }
+    if (saved && typeof saved === 'object' && !Array.isArray(saved)) {
+      for (const [flag, v] of Object.entries(saved as Record<string, unknown>)) {
+        const { sha, after, at } = (v && typeof v === 'object' ? v : {}) as { sha?: unknown; after?: unknown; at?: unknown };
+        if (!FLAG_NAME.test(flag) || !(sha === null || (typeof sha === 'string' && /^[0-9a-f]{40,64}$/.test(sha)))) continue;
+        if (typeof after !== 'number' || !Number.isSafeInteger(after) || after < 0) continue;
+        offFile.held.set(flag, { sha, after, at: typeof at === 'string' ? at : null });
+      }
+    }
+  }
+  if (!offFile.judged) judgeOffFile(log);
+}
+/**
+ * The file's entries judged against this log, once per process: one from another log (restored, replaced, a bad
+ * `after`) is anchored here when the log still reads the flag on, so its off is written once and then pruned as any
+ * other; else it is dropped. Then those whose off is stored are pruned, and the rest handed to the map. A read that
+ * fails (R1173x X5: SQLITE_BUSY at a process's first tick) leaves them to judge at the next tick; their flags stay off
+ * until then.
+ */
+function judgeOffFile(log: EventLog): void {
+  if (!offFile) return;
   try {
-    saved = JSON.parse(readFileSync(path, 'utf8'));
+    if (offFile.held.size) {
+      const recorded = recordedFlags(log);
+      let changed = false;
+      for (const [flag, e] of offFile.held) {
+        if (anchored(log, e)) continue;
+        if (recorded.get(flag)) offFile.held.set(flag, { sha: e.sha, ...anchorOf(log) });
+        else offFile.held.delete(flag);
+        changed = true;
+      }
+      if (changed) saveOffFile();
+      pruneOffFile(log);
+    }
+    offFile.judged = true;
   } catch {
-    return; // none (or unreadable: nothing to add)
+    return;
   }
-  if (!saved || typeof saved !== 'object' || Array.isArray(saved)) return;
-  for (const [flag, v] of Object.entries(saved as Record<string, unknown>)) {
-    const { sha, after } = (v && typeof v === 'object' ? v : {}) as { sha?: unknown; after?: unknown };
-    if (!FLAG_NAME.test(flag) || !(sha === null || (typeof sha === 'string' && /^[0-9a-f]{40,64}$/.test(sha)))) continue;
-    if (typeof after !== 'number' || !Number.isSafeInteger(after) || after < 0) continue;
-    offFile.held.set(flag, { sha, after });
-  }
-  pruneOffFile(log);
   for (const [flag, e] of offFile.held) if (!offUnrecorded.has(flag)) offUnrecorded.set(flag, e.sha);
 }
 function saveOffFile(): void {
@@ -220,18 +266,29 @@ export function adoptFlags(o: { log: EventLog; repo: string; actor: string; bran
     read = null;
   }
   const sha = read && head ? head.sha : null;
-  const on = read ?? [];
+  // The file of offs not yet recorded, judged against this log (it catches its own failures: R1173x X5). A flag it
+  // names that couldn't be judged yet stays off this tick.
+  loadOffFile(o.log);
+  const unjudged = offFile && !offFile.judged ? [...offFile.held.keys()] : [];
+  const on = (read ?? []).filter((n) => !unjudged.includes(n));
   const before = snapshot?.on ?? [];
   // Turn-offs first, before anything here can throw (R1173m/n N2, N3: a failed record write kept a flag on while the
   // log said off): only what is on now and still on at the head stays on until the records are written.
   const keep = on.filter((n) => before.includes(n));
   // A flag turned off here is off unrecorded until its record is durable (R1173p 2: its off record lost, then main
   // turned it on again, and the log, still reading on, recorded no change), kept on disk first (R1173r 1).
-  loadOffFile(o.log);
   const turnedOff = before.filter((n) => !keep.includes(n) && !offUnrecorded.has(n));
   for (const n of turnedOff) {
     offUnrecorded.set(n, sha);
-    offFile?.held.set(n, { sha, after: o.log.lastId() });
+    // Where it stands in this log; a read that fails must not stop the turn-off: then an anchor no log has, so the
+    // entry is never pruned in this process and is judged as from another log at the next start.
+    let anchor: { after: number; at: string | null };
+    try {
+      anchor = anchorOf(o.log);
+    } catch {
+      anchor = { after: Number.MAX_SAFE_INTEGER, at: null };
+    }
+    offFile?.held.set(n, { sha, ...anchor });
   }
   if (turnedOff.length || offFile?.saved === false) saveOffFile();
   snapshot = sha ? Object.freeze({ sha, on: Object.freeze([...keep]) }) : null;
@@ -245,6 +302,9 @@ export function adoptFlags(o: { log: EventLog; repo: string; actor: string; bran
   };
   let durable = true;
   for (const flag of [...new Set([...known, ...was.keys()])].sort()) {
+    // A flag the file names that couldn't be judged yet: no record this tick (its own off, with its commit, comes first
+    // once it is judged); it stays off meanwhile (R1173x X5).
+    if (unjudged.includes(flag)) continue;
     let from = was.get(flag) ?? false;
     // The log already reads off: nothing unrecorded.
     if (!from) offUnrecorded.delete(flag);
@@ -261,7 +321,7 @@ export function adoptFlags(o: { log: EventLog; repo: string; actor: string; bran
   if (o.log.buffered().count > 0) durable = false;
   if (durable) offUnrecorded.clear();
   // The file keeps an entry until its off is a stored row: checked at every tick, and at a process's start.
-  pruneOffFile(o.log);
+  if (offFile?.judged) pruneOffFile(o.log);
   // Durably recorded: the head's flags on; otherwise nothing goes on that wasn't (the turn-offs above stand).
   if (durable && sha) snapshot = Object.freeze({ sha, on: Object.freeze([...on]) });
   return out;
