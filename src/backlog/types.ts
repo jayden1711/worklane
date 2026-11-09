@@ -52,6 +52,11 @@ export interface Backlog {
    * where checks come from GitHub, and then every pinned check judged must come from its source (src/check-source.ts).
    */
   checkApps?(branch: string): Promise<GithubCheckApps>;
+  /**
+   * #943 (R1176c/d): the base branch of every pull request, open or closed, from `headRef` (this repo's) or that holds
+   * commit `sha`. Present where checks come from GitHub; throws when GitHub doesn't answer (readiness waits).
+   */
+  prBases?(headRef: string, sha: string): Promise<string[]>;
   /** Take a draft PR out of draft. */
   markReady(n: number): Promise<void>;
   /**
