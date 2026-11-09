@@ -127,8 +127,10 @@ export function importBundle(o: { file: string; stateDir: string; root: string |
   const r: ImportResult = { state: [], config: [], configDiffers: [], skipped: [] };
   // The flags' unrecorded offs belong to the log they were made beside (R1173x X2), and an import brings another log, with
   // --force or after the old one was moved aside (R1173y Y-2): gone at every import; the bundle's own, from the log it
-  // carries, comes in with that log.
-  rmSync(join(o.stateDir, OFF_FILE), { force: true });
+  // carries, comes in with that log. R1173aa AA-2: only when the bundle carries a log; one with none leaves the target's
+  // log and so its file (a real pending off), and a file the bundle brings without its log is not taken.
+  const carriesLog = b.files.some((f) => f.path === `state/${EVENTS}`);
+  if (carriesLog) rmSync(join(o.stateDir, OFF_FILE), { force: true });
   const cfgDir = o.root ? join(o.root, BRAND.configDir) : null;
   const hasConfig = cfgDir !== null && existsSync(cfgDir);
   for (const f of b.files) {
@@ -147,6 +149,10 @@ export function importBundle(o: { file: string; stateDir: string; root: string |
       // Removed with Siri (#743): an older bundle's device token store and gateway token are never brought back.
       if (rel === 'siri-gateway-token' || rel.startsWith('siri/')) {
         r.skipped.push({ path: f.path, why: 'Siri was removed; its tokens are not imported' });
+        continue;
+      }
+      if (rel === OFF_FILE && !carriesLog) {
+        r.skipped.push({ path: f.path, why: "the flags' unrecorded offs of a log this bundle doesn't carry" });
         continue;
       }
       const to = join(o.stateDir, rel);

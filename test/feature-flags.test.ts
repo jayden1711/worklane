@@ -1726,3 +1726,285 @@ test('Y-5: a restored backup that reads the flag off, grown past `after` by othe
     rmSync(f.base, { recursive: true, force: true });
   }
 });
+
+// --- R1173aa, R1173ab: an off is appended only after its entry's anchor is read and saved; a judge that fails puts its
+// entries back; an import removes the file only with the log it belongs to (ported from the reviewers' probes) ---
+const IOERR = () => Object.assign(new Error('disk I/O error'), { code: 'ERR_SQLITE_ERROR', errcode: 266, errstr: 'disk I/O error' });
+const BUSY = () => Object.assign(new Error('database is locked'), { code: 'ERR_SQLITE_ERROR', errcode: 5, errstr: 'database is locked' });
+/** A fault on every `prepare` whose SQL matches `re` while `on`, or on the k-th match from now (`nth(k)`, 0-based). */
+function fault(log: EventLog, re: RegExp, mk: () => Error = IOERR) {
+  const db = log.db as unknown as { prepare: (sql: string) => unknown };
+  const real = db.prepare.bind(db);
+  const c = { on: false, n: 0, shots: new Set<number>(), fired: 0, nth(k: number) { c.shots.add(c.n + k); } };
+  db.prepare = (sql: string) => {
+    if (re.test(sql)) {
+      const k = c.n++;
+      if (c.on || c.shots.has(k)) {
+        c.fired++;
+        throw mk();
+      }
+    }
+    return real(sql);
+  };
+  return c;
+}
+const aRows = (path: string, A: string) => rowsAt(path).filter((r) => r[0] === A);
+
+for (const shots of [0, 1, 2]) {
+  test(`R1173aa AA-1 (shots=${shots}): the anchor read fails ${shots}x in the turn-off tick (the turn-off's, then write()'s); off stored once, main on again, restarts: no second pair`, async () => {
+    const f = fixture();
+    f.log.close();
+    const A = 'a_flag';
+    const path = f.log.path;
+    try {
+      await withKnownFlags([A], async () => {
+        let log = proc(path);
+        const a = () => adoptFlags({ log, repo: f.repo, actor: 'i', branch: 'main', check: () => [] });
+        const s1 = setFlags(f, { [A]: true }, 'a on');
+        fetch(f);
+        a();
+        ticksOf(20, log);
+        const s2 = setFlags(f, { [A]: false }, 'a off');
+        fetch(f);
+        const fl = fault(log, /SELECT ts FROM events WHERE id = \?/, BUSY);
+        for (let k = 0; k < shots; k++) fl.nth(k);
+        a();
+        assert.equal(fl.fired, shots);
+        assert.equal(flagOn(A), false);
+        if (shots === 2) assert.deepEqual(rowsAt(path).at(-1), [A, false, true, s1], 'no off appended while its anchor is unread');
+        const s3 = setFlags(f, { [A]: true }, 'a on again');
+        fetch(f);
+        a();
+        assert.ok(flagOn(A));
+        log.close();
+        for (let i = 0; i < 3; i++) {
+          log = proc(path);
+          a();
+          a();
+          log.close();
+        }
+        assert.deepEqual(rowsAt(path), [[A, false, true, s1], [A, true, false, s2], [A, false, true, s3]]);
+      });
+    } finally {
+      clearFlags();
+      rmSync(f.base, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const mode of ['control', 'reads', 'reads+insert'] as const) {
+  test(`R1173ab AB1 (${mode}): every by-id read fails during the turn-off tick; the off stored at the next; main on again; restarts: no second pair`, async () => {
+    const f = fixture();
+    f.log.close();
+    const A = 'a_flag';
+    const path = f.log.path;
+    try {
+      await withKnownFlags([A], async () => {
+        let log = proc(path);
+        const a = () => adoptFlags({ log, repo: f.repo, actor: 'i', branch: 'main', check: () => [] });
+        const s1 = setFlags(f, { [A]: true }, 'a on');
+        fetch(f);
+        a();
+        ticksOf(20, log);
+        const s2 = setFlags(f, { [A]: false }, 'a off');
+        fetch(f);
+        const fl = fault(log, mode === 'reads+insert' ? /WHERE id = \?|^INSERT INTO events/ : /WHERE id = \?/);
+        fl.on = mode !== 'control';
+        try { a(); } catch { /* the tick may end */ }
+        fl.on = false;
+        assert.equal(flagOn(A), false);
+        if (mode === 'reads+insert') assert.equal(log.flush().error, null);
+        a(); // the next tick, the fault gone
+        assert.deepEqual(rowsAt(path).at(-1), [A, true, false, s2], 'the off is a stored row');
+        const s3 = setFlags(f, { [A]: true }, 'a on again');
+        fetch(f);
+        a();
+        assert.ok(flagOn(A));
+        log.close();
+        for (let i = 0; i < 3; i++) {
+          log = proc(path);
+          a();
+          a();
+          log.close();
+        }
+        assert.deepEqual(rowsAt(path), [[A, false, true, s1], [A, true, false, s2], [A, false, true, s3]]);
+      });
+    } finally {
+      clearFlags();
+      rmSync(f.base, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const blocked of [false, true]) {
+  test(`R1173ab AB2 (${blocked ? 'attack' : 'control'}): the write()-time anchor's save ${blocked ? 'fails' : 'works'}; main on; a stop; restarts: the off once, no second pair`, { skip: process.platform === 'win32' || process.getuid?.() === 0 }, async () => {
+    const f = fixture();
+    f.log.close();
+    const A = 'a_flag';
+    const dir = join(f.base, 'st');
+    mkdirSync(dir);
+    const path = join(dir, 'events.db');
+    try {
+      await withKnownFlags([A], async () => {
+        let log = proc(path);
+        const a = () => adoptFlags({ log, repo: f.repo, actor: 'i', branch: 'main', check: () => [] });
+        const s1 = setFlags(f, { [A]: true }, 'a on');
+        fetch(f);
+        a();
+        ticksOf(20, log);
+        const s2 = setFlags(f, { [A]: false }, 'a off');
+        fetch(f);
+        const fl = fault(log, /WHERE id = \?|SELECT MAX\(id\)|type IN/, BUSY);
+        fl.on = true;
+        assert.throws(() => a(), /locked/, 'the BUSY ends the tick after the turn-off is saved');
+        fl.on = false;
+        assert.equal(flagOn(A), false);
+        assert.deepEqual(pendingAt(path)?.[A], { sha: s2, after: Number.MAX_SAFE_INTEGER, at: null });
+        if (blocked) chmodSync(dir, 0o500);
+        try { a(); } catch { /* the blocked folder */ }
+        if (blocked) assert.deepEqual(rowsAt(path).at(-1), [A, false, true, s1], 'no off appended while its anchor is unsaved');
+        const s3 = setFlags(f, { [A]: true }, 'a on again');
+        fetch(f);
+        try { a(); } catch { /* the blocked folder */ }
+        if (blocked) assert.equal(flagOn(A), false, 'off until its off is recorded');
+        log.close();
+        chmodSync(dir, 0o700);
+        for (let i = 0; i < 3; i++) {
+          log = proc(path);
+          a();
+          a();
+          log.close();
+        }
+        assert.deepEqual(rowsAt(path), [[A, false, true, s1], [A, true, false, s2], [A, false, true, s3]]);
+      });
+    } finally {
+      chmodSync(dir, 0o700);
+      clearFlags();
+      rmSync(f.base, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const fail of [false, true]) {
+  test(`R1173ab AB3 (${fail ? 'attack' : 'control'}): a judge read ${fail ? 'that throws after a re-anchor' : 'that works'}; offs held; main on; a flush at the stop; restarts: a's pair once`, async () => {
+    const f = fixture();
+    f.log.close();
+    const A = 'a_flag';
+    const B = 'b_flag';
+    const path = f.log.path;
+    try {
+      await withKnownFlags([A, B], async () => {
+        let log = proc(path);
+        const a = () => adoptFlags({ log, repo: f.repo, actor: 'i', branch: 'main', check: () => [] });
+        const s1 = setFlags(f, { [A]: true, [B]: true }, 'both on');
+        fetch(f);
+        a();
+        ticksOf(20, log);
+        const s2 = setFlags(f, { [A]: false, [B]: true }, 'a off');
+        fetch(f);
+        const p1 = fault(log, /WHERE id = \?|SELECT MAX\(id\)|type IN/, BUSY);
+        p1.on = true;
+        assert.throws(() => a(), /locked/);
+        log.close(); // the BUSY ends the tick and the process; a's entry {after: MAX, at: null} is on disk
+        log = proc(path);
+        const g = fault(log, /SELECT MAX\(id\)|SELECT ts FROM events WHERE id = \?/, BUSY);
+        g.nth(0); // the judge's first by-id read: a stays unjudged (off); b goes on
+        a();
+        assert.equal(flagOn(B), true);
+        assert.equal(flagOn(A), false);
+        setFlags(f, { [A]: false, [B]: false }, 'b off');
+        fetch(f);
+        fillLog(log); // the disk is full from here
+        g.nth(0); // the judge fails again; b's turn-off is anchored and saved after a's entry
+        a();
+        const ts = fault(log, /SELECT ts FROM events WHERE id = \?/, BUSY);
+        if (fail) ts.nth(1); // a re-anchored (its ts read is the first); b's anchored() read (the second) throws
+        a();
+        a(); // judged: a's off is written (held), b's off was held at its turn-off
+        const s4 = setFlags(f, { [A]: true, [B]: false }, 'a on again');
+        fetch(f);
+        a(); // a's on, held
+        roomLog(log);
+        assert.equal(log.flush().error, null, "the service's last flush: every held row stored, no tick after");
+        log.close();
+        for (let i = 0; i < 3; i++) {
+          log = proc(path);
+          a();
+          a();
+          log.close();
+        }
+        assert.deepEqual(aRows(path, A), [[A, false, true, s1], [A, true, false, s2], [A, false, true, s4]]);
+      });
+    } finally {
+      clearFlags();
+      rmSync(f.base, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const doImport of [false, true]) {
+  test(`R1173aa AA-2 (${doImport ? 'attack' : 'control'}): import --force of a bundle with no events.db keeps the target's pending off, so its off/on pair is recorded`, async () => {
+    const f = fixture();
+    f.log.close();
+    const A = 'a_flag';
+    const src = join(f.base, 'src-state');
+    const dst = join(f.base, 'dst-state');
+    mkdirSync(src);
+    mkdirSync(dst);
+    writeFileSync(join(src, 'notes.json'), '{}\n'); // a state folder with no history yet
+    const dstLog = join(dst, 'events.db');
+    try {
+      await withKnownFlags([A], async () => {
+        const s1 = setFlags(f, { [A]: true }, 'a on');
+        fetch(f);
+        let log = proc(dstLog);
+        adoptFlags({ log, repo: f.repo, actor: 'i', branch: 'main', check: () => [] });
+        ticksOf(20, log);
+        const s2 = setFlags(f, { [A]: false }, 'a off');
+        fetch(f);
+        fillLog(log); // the target's off held, then lost at the stop: its file names a
+        adoptFlags({ log, repo: f.repo, actor: 'i', branch: 'main', check: () => [] });
+        log.close();
+        assert.equal(existsSync(sideOf(dstLog)), true, 'a pending off of this log');
+        const out = join(f.base, 'bundle.wlb');
+        const ex = exportBundle({ stateDir: src, root: null, repo: null, host: 'laptop', out });
+        assert.ok(!ex.files.includes('state/events.db'), 'the bundle carries no log');
+        if (doImport) importBundle({ file: out, stateDir: dst, root: null, instance: true, force: true });
+        assert.equal(existsSync(sideOf(dstLog)), true, "the target's file stays with its log");
+        const s3 = setFlags(f, { [A]: true }, 'a on again');
+        fetch(f);
+        for (let i = 0; i < 3; i++) {
+          log = proc(dstLog);
+          adoptFlags({ log, repo: f.repo, actor: 'i', branch: 'main', check: () => [] });
+          log.close();
+        }
+        assert.deepEqual(rowsAt(dstLog), [[A, false, true, s1], [A, true, false, s2], [A, false, true, s3]], "the log's own off/on pair");
+      });
+    } finally {
+      clearFlags();
+      rmSync(f.base, { recursive: true, force: true });
+    }
+  });
+}
+
+test("R1173aa AA-2: a bundle's flags-unrecorded.json without its log is not taken; the target's file is kept as it was", () => {
+  const base = mkdtempSync(join(tmpdir(), 'ff-aa2b-'));
+  try {
+    const src = join(base, 'src');
+    const dst = join(base, 'dst');
+    mkdirSync(src);
+    mkdirSync(dst);
+    const theirs = `${JSON.stringify({ a_flag: { sha: null, after: 3, at: 'x' } })}\n`;
+    const ours = `${JSON.stringify({ b_flag: { sha: null, after: 7, at: 'y' } })}\n`;
+    writeFileSync(join(src, 'flags-unrecorded.json'), theirs);
+    writeFileSync(join(dst, 'flags-unrecorded.json'), ours);
+    const out = join(base, 'bundle.wlb');
+    const ex = exportBundle({ stateDir: src, root: null, repo: null, host: 'laptop', out });
+    assert.ok(ex.files.includes('state/flags-unrecorded.json') && !ex.files.includes('state/events.db'));
+    const r = importBundle({ file: out, stateDir: dst, root: null, instance: true, force: true });
+    assert.equal(readFileSync(join(dst, 'flags-unrecorded.json'), 'utf8'), ours);
+    assert.ok(r.skipped.some((s) => s.path === 'state/flags-unrecorded.json'));
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
