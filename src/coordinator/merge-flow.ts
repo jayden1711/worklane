@@ -1111,45 +1111,53 @@ export abstract class MergeFlow extends FixRuns {
     const now = this.mainChecksNow();
     /** This pass's merges whose checks never reported by the timeout: one stop for them all (#731). */
     const unknown: { m: EventPayload<'merge.done'>; missing: string[]; how: string; polls: number }[] = [];
-    for (const e of this.d.log.read(0, ['merge.done'])) {
-      const m = e.payload as EventPayload<'merge.done'>;
-      if (judged.has(m.sha) || now - (this.mainPolled.get(m.sha) ?? 0) < (this.d.prPollMs ?? 60_000)) continue;
-      this.mainPolled.set(m.sha, now);
-      const required = this.requiredChecks();
-      // WHY (#469): nothing to judge by is never "green": no result is recorded (the config_invalid incident and the
-      // first-run step say why); a merge is never marked green with nothing checked.
-      if (!required.length) continue;
-      // No CI: every test_run tier (fast and full) runs on the merge commit, in the sandbox; judged from the log.
-      if (ciIsNone(this.d.cfg.project)) this.startMainRuns(m.sha);
-      // Still not reported, up to a timeout: in polls, so it holds whatever the poll interval, and from the merge
-      // itself, so a restart (which forgets the polls) never starts it again. At it, unknown is not green (#731).
-      // Nothing is logged here: mainUnknown marks it judged only once its stop is durable.
-      const timedOut = (missing: string[], how: string) => {
-        const polls = this.waitPolls.bump(`main:${m.sha}`);
-        if (polls < pollsFor(MAIN_CHECKS_TIMEOUT_MS, this.d.prPollMs ?? 60_000, MAIN_CHECKS_MIN_POLLS) && now - Date.parse(e.ts) < MAIN_CHECKS_TIMEOUT_MS) return;
-        unknown.push({ m, missing, how, polls });
-      };
-      // A read that fails (a GitHub error) or never answers is no answer: never green, and a poll toward the timeout.
-      const read = await this.mainChecksRead(m.sha, required);
-      if ('error' in read) {
-        timedOut(required, `couldn't be read (${read.error})`);
-        continue;
+    // INVARIANT (#907, the owner's addition): the merges this pass timed out get their stop even when a later merge's
+    // handling throws (a GitHub read, the flaky gate), so an earlier merge's stop is never held back by a later one.
+    try {
+      for (const e of this.d.log.read(0, ['merge.done'])) {
+        const m = e.payload as EventPayload<'merge.done'>;
+        if (judged.has(m.sha) || now - (this.mainPolled.get(m.sha) ?? 0) < (this.d.prPollMs ?? 60_000)) continue;
+        this.mainPolled.set(m.sha, now);
+        const required = this.requiredChecks();
+        // WHY (#469): nothing to judge by is never "green": no result is recorded (the config_invalid incident and the
+        // first-run step say why); a merge is never marked green with nothing checked.
+        if (!required.length) continue;
+        // No CI: every test_run tier (fast and full) runs on the merge commit, in the sandbox; judged from the log.
+        if (ciIsNone(this.d.cfg.project)) this.startMainRuns(m.sha);
+        // Still not reported, up to a timeout: in polls, so it holds whatever the poll interval, and from the merge
+        // itself, so a restart (which forgets the polls) never starts it again. At it, unknown is not green (#731).
+        // Nothing is logged here: mainUnknown marks it judged only once its stop is durable.
+        const timedOut = (missing: string[], how: string) => {
+          const polls = this.waitPolls.bump(`main:${m.sha}`);
+          if (polls < pollsFor(MAIN_CHECKS_TIMEOUT_MS, this.d.prPollMs ?? 60_000, MAIN_CHECKS_MIN_POLLS) && now - Date.parse(e.ts) < MAIN_CHECKS_TIMEOUT_MS) return;
+          unknown.push({ m, missing, how, polls });
+        };
+        // A read that fails (a GitHub error) or never answers is no answer: never green, and a poll toward the timeout.
+        const read = await this.mainChecksRead(m.sha, required);
+        if ('error' in read) {
+          timedOut(required, `couldn't be read (${read.error})`);
+          continue;
+        }
+        // Failing checks are re-run on this same commit first (src/flaky.ts): passing then, they are flaky, quarantined,
+        // and don't turn the branch red here; a quarantined check's failure doesn't either. Only the harness's own
+        // decision changes: the checks on GitHub, and what the updater requires, stay as they are.
+        const gate = await this.flakyGate.judge({ sha: m.sha, number: m.number, outcomes: requiredOutcomes(required, read.checks) });
+        if (gate.wait) continue;
+        const outcomes = gate.outcomes;
+        const failed = outcomes.filter((c) => c.outcome === 'fail' || c.outcome === 'cancelled').map((c) => c.name);
+        if (!failed.length && outcomes.some((c) => c.outcome !== 'pass')) {
+          timedOut(outcomes.filter((c) => c.outcome !== 'pass').map((c) => c.name), 'never reported');
+          continue;
+        }
+        // INVARIANT (#907, as #731 round 2 for timed_out): a red merge is marked judged only after what holds the next
+        // merge is in place: fix-forward's episode, or the stop. A pass cut off before that (a restart, a throw) leaves
+        // it unjudged, so a later pass takes it on again; never a judged red with nothing holding merges.
+        if (failed.length) await this.holdForRed(m, failed);
+        this.emit('merge.main_result', { issue: m.issue, number: m.number, sha: m.sha, outcome: failed.length ? 'red' : 'green', failed, ...(gate.flaky.length ? { flaky: gate.flaky } : {}), ...(gate.quarantined.length ? { quarantined: gate.quarantined } : {}) });
       }
-      // Failing checks are re-run on this same commit first (src/flaky.ts): passing then, they are flaky, quarantined,
-      // and don't turn the branch red here; a quarantined check's failure doesn't either. Only the harness's own
-      // decision changes: the checks on GitHub, and what the updater requires, stay as they are.
-      const gate = await this.flakyGate.judge({ sha: m.sha, number: m.number, outcomes: requiredOutcomes(required, read.checks) });
-      if (gate.wait) continue;
-      const outcomes = gate.outcomes;
-      const failed = outcomes.filter((c) => c.outcome === 'fail' || c.outcome === 'cancelled').map((c) => c.name);
-      if (!failed.length && outcomes.some((c) => c.outcome !== 'pass')) {
-        timedOut(outcomes.filter((c) => c.outcome !== 'pass').map((c) => c.name), 'never reported');
-        continue;
-      }
-      this.emit('merge.main_result', { issue: m.issue, number: m.number, sha: m.sha, outcome: failed.length ? 'red' : 'green', failed, ...(gate.flaky.length ? { flaky: gate.flaky } : {}), ...(gate.quarantined.length ? { quarantined: gate.quarantined } : {}) });
-      if (failed.length) await this.mainWentRed(m, failed);
+    } finally {
+      if (unknown.length) await this.mainUnknown(unknown);
     }
-    if (unknown.length) await this.mainUnknown(unknown);
   }
 
   /**
@@ -1247,6 +1255,26 @@ export abstract class MergeFlow extends FixRuns {
   /** A real red after auto-merging `m`: fix-forward takes it (coordinator/fix-forward.ts), unless the branch was red already. */
   private async mainWentRed(m: EventPayload<'merge.done'>, failed: string[]) {
     await this.fixForward.start({ sha: m.sha, number: m.number, failed });
+  }
+
+  /**
+   * What holds merges after a real red on `m`, in place before its verdict is recorded (#907): fix-forward's episode
+   * (mainWentRed). When fix-forward can't take it on (it throws before its episode is open), auto-merge stops instead
+   * (fail closed), with a stop of its own naming this merge, even beside another stop in force (R1186c); either way
+   * something holds the next merge. A throw after the episode opened (a read in its first move or bisect step) leaves the episode holding, and
+   * its next step() carries on: a stop there would also hold fix-forward's own fix PR (trainMerge), so a one-off error
+   * would need an admin's resume (R1186a).
+   */
+  private async holdForRed(m: EventPayload<'merge.done'>, failed: string[]) {
+    try {
+      await this.mainWentRed(m, failed);
+    } catch (e) {
+      const message = String((e as Error)?.message ?? e).replace(/\s+/g, ' ').slice(0, 300);
+      this.emit('coordinator.error', { instance: this.d.instance, where: `fix-forward on ${m.sha.slice(0, 8)}`, kind: 'error', message });
+      // A stop of its own, naming this merge, even with another gated stop in force (R1186c): kept, an earlier stop
+      // could be resumed (its own id, acknowledged for its own reason) while this red holds nothing.
+      if (!this.fixForward.open()) this.stopFor(`${this.branch} went red after auto-merging #${m.number} (\`${m.sha.slice(0, 8)}\`: ${failed.join(', ')}), and fix-forward couldn't take it on (${message})`.slice(0, 2000), m.number, m.sha, null);
+    }
   }
 
   private get stopResume() {
