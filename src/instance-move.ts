@@ -108,7 +108,7 @@ export function readBundle(file: string): Bundle {
   if (b.format !== BUNDLE_FORMAT) throw new Error(`${file} is not a ${BRAND.cli} export bundle`);
   if (b.version !== 1) throw new Error(`${file} is a version ${b.version} bundle; this engine reads version 1: update the engine`);
   for (const f of b.files) {
-    if (!/^(state|config)\//.test(f.path) || f.path.split('/').some((s) => s === '..' || s === '') || f.path.includes('\\')) throw new Error(`${file}: refused, a path outside the bundle's places: ${f.path}`);
+    if (!/^(state|config)\//.test(f.path) || f.path.split('/').some((s) => s === '..' || s === '.' || s === '') || f.path.includes('\\')) throw new Error(`${file}: refused, a path outside the bundle's places: ${f.path}`);
   }
   return b;
 }
@@ -130,7 +130,6 @@ export function importBundle(o: { file: string; stateDir: string; root: string |
   // carries, comes in with that log. R1173aa AA-2: only when the bundle carries a log; one with none leaves the target's
   // log and so its file (a real pending off), and a file the bundle brings without its log is not taken.
   const carriesLog = b.files.some((f) => f.path === `state/${EVENTS}`);
-  if (carriesLog) rmSync(join(o.stateDir, OFF_FILE), { force: true });
   const cfgDir = o.root ? join(o.root, BRAND.configDir) : null;
   const hasConfig = cfgDir !== null && existsSync(cfgDir);
   for (const f of b.files) {
@@ -157,6 +156,9 @@ export function importBundle(o: { file: string; stateDir: string; root: string |
       }
       const to = join(o.stateDir, rel);
       mkdirSync(dirname(to), { recursive: true });
+      // R1173ac AC-4: the target's file goes just before the log it belongs to is replaced, so an import that fails
+      // before then keeps the target's pending offs.
+      if (rel === EVENTS) rmSync(join(o.stateDir, OFF_FILE), { force: true });
       writeGroupOnly(to, data);
       r.state.push(f.path);
     } else if (cfgDir) {

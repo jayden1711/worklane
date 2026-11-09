@@ -38,11 +38,14 @@ new behaviour can be tried on one repo before it reaches the rest. Code: `src/co
     backup (the updater's rollback restores migration backups), replaced, or a position past every row. Such an
     entry, at a process's start, is written once to this log if it still reads the flag on, else dropped. An entry
     whose position couldn't be read at the turn-off takes it just before its off is written, and the off is written
-    only once that position is read and saved: if either fails, the flag stays off and its off waits for the next
-    tick. An import that carries a log removes the file with the log it replaces; one that carries none keeps the
-    target's file, and a bundle's file is never taken without its log. If the log can't be read when the file is
-    judged, or the file can't be saved after it is, the entries stay as they were before and their flags stay off,
-    with no record, until a later tick can. A save that fails (a full disk) is tried again at every tick.
+    only once that position is read and saved: if either fails, that flag alone stays off and its off waits for the
+    next tick; the tick's other records take effect. An import that carries a log removes the target's file just
+    before it writes that log, so an import that fails before then keeps it; one that carries none keeps the
+    target's file, and a bundle's file is never taken without its log (a bundle path with a `.` or `..` segment is
+    refused). If the log can't be read when the file is judged, or the file can't be saved after it is, the entries
+    stay as they were before and their flags stay off, with no record, until a later tick can. A save that fails (a
+    full disk) is tried again at every tick. **Never silent:** while a flag is held off either way, each tick ends
+    with an error naming it, so the config step records a `coordinator.error` at every tick until it clears.
     Limits:
     - A restored or replaced log whose row at an entry's position was written again with the very same millisecond
       stamp reads as the entry's own log: if main turns the flag on, the next start writes that off and the on once
