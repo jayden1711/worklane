@@ -31,8 +31,10 @@ new behaviour can be tried on one repo before it reaches the rest. Code: `src/co
     `flags-unrecorded.json` beside the event log, written and synced to disk before the off takes effect, and is
     written to the log at the next tick that can, by this process or the next one (a log locked past its busy
     timeout ends the tick and the process): before any later change, once, so a flag the default branch turns on
-    again has both records. A flag leaves the file once its off is a row on disk (nothing held in memory), and the
-    file is removed once a tick's records are durable; a save that fails (a full disk) is tried again at every tick.
+    again has both records. Each entry keeps the log's position when the flag went off, and leaves the file once the
+    log has an off row of that flag stored after it, checked at every tick and at a process's start: so an entry left
+    behind (a stop, a flush outside a tick, a rewrite that failed) is dropped, never written again. A save that fails
+    (a full disk) is tried again at every tick.
     The coordinator adopts flags even when refreshing its config failed.
   - It reads `flags:` in plain code, not through the zod schema.
   - A coordinator started on the checkout's config (main's invalid or missing) adopts nothing until main's config is
@@ -51,9 +53,7 @@ new behaviour can be tried on one repo before it reaches the rest. Code: `src/co
   A flip made while the coordinator was down is recorded at its first tick. A limit: the coordinator being down is
   itself an off with no record, and so is an off on a disk too full for `flags-unrecorded.json` too, when the
   process stops before the disk has room (its record is then held in memory, or dropped, and lost); the log shows
-  the flag on through that time. And a process killed between an off's row and the file's rewrite (one synchronous
-  step) leaves the flag in the file; if main has turned it on again by the next start, that off and on are recorded a
-  second time. A flag the engine stopped knowing that
+  the flag on through that time. A flag the engine stopped knowing that
   was on is recorded off. The events are covered by the audit chain ([audit-log.md](audit-log.md)), and the config's
   git history shows who made the change.
 
