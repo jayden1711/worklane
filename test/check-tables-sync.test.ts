@@ -5,6 +5,7 @@
 // drift of each kind.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import ts from 'typescript';
 import { neverLoosenProblems, NEVER_LOOSEN } from '../src/delegation.js';
 import { redactTableProblems } from '../src/events/redact.js';
 import { HOOK_IMPORTS } from '../src/hook-imports.js';
@@ -81,4 +82,60 @@ test("every replacer the redaction data names is in REPLACERS, in the module and
     assert.ok(block, `${file}: the hold finds its REPLACERS block`);
     for (const n of names) assert.ok(new RegExp(`^\\s*${n}\\b`, 'm').test(block), `${file}: REPLACERS holds ${n}`);
   }
+});
+
+/**
+ * The names REPLACERS's literal defines, read with TypeScript's parser, and what it holds that isn't a plain named
+ * property (R1184t D1: a spread, a computed or quoted key, an accessor, or a name defined twice can replace a replacer
+ * the data names while each name still starts a line of the block).
+ */
+function replacerProblems(text: string, file: string): { names: string[]; problems: string[] } {
+  const src = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, /\.tsx?$/.test(file) ? ts.ScriptKind.TS : ts.ScriptKind.JS);
+  const names: string[] = [];
+  const problems: string[] = [];
+  let found = 0;
+  const visit = (n: ts.Node): void => {
+    if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.name.text === 'REPLACERS') {
+      found++;
+      const init = n.initializer;
+      const lit = init && ts.isCallExpression(init) && init.arguments.length === 1 && ts.isObjectLiteralExpression(init.arguments[0]!) ? init.arguments[0] : undefined;
+      if (!lit) problems.push(`${file}: REPLACERS is not Object.freeze({ ... })`);
+      else
+        for (const p of lit.properties) {
+          const line = src.getLineAndCharacterOfPosition(p.getStart(src)).line + 1;
+          const name = (ts.isPropertyAssignment(p) || ts.isMethodDeclaration(p) || ts.isShorthandPropertyAssignment(p)) && ts.isIdentifier(p.name) ? p.name.text : undefined;
+          if (name === undefined) problems.push(`${file}:${line}: not a plain named property (${p.getText(src).slice(0, 50)})`);
+          else if (names.includes(name)) problems.push(`${file}:${line}: ${name} defined twice`);
+          else names.push(name);
+        }
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(src);
+  if (found !== 1) problems.push(`${file}: REPLACERS declared ${found} times`);
+  return { names, problems };
+}
+
+test("REPLACERS is plain named properties, each defined once, in the module and the updater's copy, and holds at run time just the names it defines (#941, R1184t D1)", async () => {
+  const { readFileSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const { REPLACER_NAMES } = await import('../src/events/redact.js');
+  const { repoRoot } = await import('./helpers.js');
+  const { BRAND } = await import('../src/brand.js');
+  for (const file of [join('src', 'events', 'redact.ts'), join('scripts', 'machine', `${BRAND.cli}-update.cjs`)]) {
+    const { names, problems } = replacerProblems(readFileSync(join(repoRoot, file), 'utf8'), file);
+    assert.deepEqual(problems, [], file);
+    assert.deepEqual([...REPLACER_NAMES].sort(), [...names].sort(), `${file}: the run-time names are the names the block defines`);
+  }
+  // The shapes it refuses: T2a and T2b (a new key, then a spread), a computed key, a quoted key, an accessor, a twin.
+  const block = (props: string) => `const REPLACERS = Object.freeze({\n  stripe: (m) => m,\n${props}\n});\n`;
+  for (const [label, props] of [
+    ['T2a', "  zz: (m) => m, ...({ stripe: (m) => m }),"],
+    ['T2b', "  zz(m) { return m; }, ...({ stripe: (m) => m }),"],
+    ['computed', "  ['basic']: (m) => m,"],
+    ['quoted', "  'basic': (m) => m,"],
+    ['accessor', '  get basic() { return (m) => m; },'],
+    ['twice', '  stripe: (m) => m.slice(1),'],
+  ] as const) assert.ok(replacerProblems(block(props), 'x.js').problems.length > 0, label);
+  assert.deepEqual(replacerProblems(block('  zz: (m) => m,\n  orphanEnd,\n  basic(m) { return m; },'), 'x.js').problems, [], 'the control');
 });

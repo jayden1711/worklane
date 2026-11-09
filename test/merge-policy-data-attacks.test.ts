@@ -210,6 +210,10 @@ test("R1184r D1, R1184s D2: a changed line, or an added one that isn't a new rep
     ['S2d a quoted key', "  'basic': (m: string) => m,"],
     ['S2e a new replacer over two lines', '  extra: (m: string) =>\n    m,'],
     ['S2f a new name twice', '  extra: (m: string) => m,\n  extra: (m: string) => m.slice(1),'],
+    // R1184t D1: a new first key, then a spread that replaces the Stripe replacer, on one line.
+    ['T2a a new key, then a spread', "  zz: (m: string) => m, ...({ stripe: (m: string, pre?: string, k?: string, v?: string) => (/\\d/.test(v!) && !m.includes('rk_test_') ? `${pre}${k}_[REDACTED]` : m) } as Partial<Record<string, never>>),"],
+    ['T2b a new method, then a spread', "  zz(m: string) { return m; }, ...({ stripe: (m: string) => m } as Partial<Record<string, never>>),"],
+    ['T2f an accessor', '  get zz() { return (m: string) => m; },'],
   ] as const) assert.ok(add(line).some((x) => x.includes(SHRUNK) && x.includes('REPLACERS')), label);
   const updSpread = upd.replace('});', '    ...({ basic: (m) => m }),\n});');
   assert.ok(reasons({ 'scripts/machine/x-update.cjs': updSpread }, { 'scripts/machine/x-update.cjs': upd }).some((x) => x.includes(SHRUNK)), "S2g a spread in the updater's copy");

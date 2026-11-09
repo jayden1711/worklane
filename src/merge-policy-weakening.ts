@@ -448,7 +448,7 @@ export const LOADER_CODE: ReadonlySet<string> = new Set(['src/check-tables.ts', 
 // `… satisfies string`, `<string>import.meta.url`), a parenthesized target (`(import.meta.url) = …`), and a line that
 // ends at `import.meta.<x>` or `import`, or starts at `.meta` (a target split over lines). No line of src/ or scripts/
 // reads one so today. The loader is the real stop: tablesOf refuses a URL that isn't its caller's own file
-// (src/check-tables.ts callerFile), so a write in any spelling gets no other file's tables.
+// (src/check-tables.ts callerScript), so a write in any spelling gets no other file's tables.
 const META_URL_TARGET = new RegExp(
   [
     /\bimport\s*\.\s*meta\s*\.\s*\w+\s*[\]},]/,
@@ -1184,21 +1184,30 @@ function findings(i: WeakeningInput): Found {
     const block = new Set(was.map((l) => l.trim()));
     for (const l of f.removedLines ?? []) if (l.trim() && block.has(l.trim())) hit('table-shrunk', f.path, `REPLACERS: ${l.trim()}`);
     // An added line in the block (R1184s D2: `...({ stripe: … } as Partial<…>),` overrides a replacer and removes no
-    // line): it passes only as a comment, or as a new replacer's one line, `name: …` or `name,`, its name in neither the
-    // old block nor anywhere else in the new one. Anything else (a spread, a computed or quoted key, a name used before,
-    // a replacer over several lines) waits.
+    // line): it passes only as a comment, or as one new replacer on one line, its name in neither the old block nor
+    // anywhere else in the new one. Anything else (a spread, a computed or quoted key, get/set, a name used before, a
+    // second property on the line, a replacer over several lines) waits.
     const keyOf = (l: string) => /^\s*([A-Za-z_$][\w$]*)\s*(?::|,\s*$|\()/.exec(l)?.[1];
     const keys = (ls: string[]) => ls.slice(1, -1).flatMap((l) => (/^\s*(?:\/\/|\/\*|\*)/.test(l) ? [] : [keyOf(l) ?? '']));
     const [old, fresh] = [new Set(keys(was)), keys(now)];
     const inBlock = new Set(now.slice(1, -1));
     for (const l of f.addedLines ?? []) {
       if (!inBlock.has(l) || !l.trim() || /^\s*\/\//.test(l)) continue;
-      const k = keyOf(l);
-      // One whole line: it ends its property with `,` and closes every bracket it opens (a replacer over several lines
-      // waits from its first line; a bracket in a string or a regexp makes it wait too, fail closed).
-      const depth = [...l].reduce((d, c) => d + ('([{'.includes(c) ? 1 : ')]}'.includes(c) ? -1 : 0), 0);
-      const whole = /,\s*$/.test(l) && depth === 0;
-      const lone = !!k && whole && !old.has(k) && fresh.filter((x) => x === k).length === 1;
+      // Exactly one property (R1184t D1: `zz: (m) => m, ...({ stripe: … }),` is a new key and then a spread): cut at its
+      // commas outside brackets, the line is one part and an empty one after its last `,`, and it closes every bracket
+      // it opens (a replacer over several lines waits from its first line). The part is `name: …`, `name(…) {…}` or
+      // `name`: no spread, computed or quoted key, and no get/set. A bracket or a comma in a string, a regexp or type
+      // arguments makes it wait too: fail closed.
+      const parts: string[] = [''];
+      let depth = 0;
+      for (const c of l) {
+        depth += '([{'.includes(c) ? 1 : ')]}'.includes(c) ? -1 : 0;
+        if (c === ',' && depth === 0) parts.push('');
+        else parts[parts.length - 1] += c;
+      }
+      const one = depth === 0 && parts.length === 2 && parts[1]!.trim() === '' && /^\s*[A-Za-z_$][\w$]*\s*(?::|\(|$)/.test(parts[0]!);
+      const k = one ? keyOf(l) : undefined;
+      const lone = !!k && !old.has(k) && fresh.filter((x) => x === k).length === 1;
       if (!lone) hit('table-shrunk', f.path, `REPLACERS: ${l.trim()}`);
     }
   }

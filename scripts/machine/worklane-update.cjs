@@ -115,7 +115,7 @@ const sharedRedact = (() => {
 const exports = {};
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.CUT_MARGIN = exports.UNSCANNABLE = exports.MAX_PASSES = exports.UNSCANNABLE_KIND = exports.TRACKER = exports.REDACTION_PATTERNS = exports.isDashboardKey = exports.DASHBOARD_KEY_PREFIX = void 0;
+exports.CUT_MARGIN = exports.UNSCANNABLE = exports.MAX_PASSES = exports.UNSCANNABLE_KIND = exports.TRACKER = exports.REDACTION_PATTERNS = exports.REPLACER_NAMES = exports.isDashboardKey = exports.DASHBOARD_KEY_PREFIX = void 0;
 exports.secretKinds = secretKinds;
 exports.redactTableProblems = redactTableProblems;
 exports.fixedPoint = fixedPoint;
@@ -209,6 +209,7 @@ const REPLACERS = Object.freeze({
     basic: (m, s, sp, v) => (basicShaped(v) ? `${s}${sp}[REDACTED]` : m),
     jsonKey: (m, q, k, sep, vq, v) => (credentialKey(k) && credentialShaped(v) ? `${q}${k}${q}${sep}${vq}[REDACTED]${vq}` : m),
 });
+exports.REPLACER_NAMES = Object.freeze(Object.keys(REPLACERS));
 function replacementOf(rep) {
     if (typeof rep === 'string')
         return rep;

@@ -116,6 +116,8 @@ const REPLACERS: Readonly<Record<string, (match: string, ...groups: string[]) =>
   // A JSON string value under a credential key, credential-shaped (credentialKey, credentialShaped).
   jsonKey: (m: string, q?: string, k?: string, sep?: string, vq?: string, v?: string) => (credentialKey(k!) && credentialShaped(v!) ? `${q}${k}${q}${sep}${vq}[REDACTED]${vq}` : m),
 });
+/** The names REPLACERS has at run time: test/check-tables-sync.test.ts holds them to the names its block defines (R1184t D1). */
+export const REPLACER_NAMES: readonly string[] = Object.freeze(Object.keys(REPLACERS));
 
 /** A replacement as the data gives it: a string, or the name of one of REPLACERS. Throws on a name that isn't one. */
 function replacementOf(rep: string | { replacer: string }): Replacement {
