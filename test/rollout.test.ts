@@ -375,3 +375,14 @@ test('rollout status: a linked instance folder is on the list; a name both in th
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("the wait step names what holds: a ring unknown because an instance runs with the flag off by itself names that instance, not an empty list (#1231 R1231h)", () => {
+  const nullOff = (h: number) => ev('flag.flipped', { flag: 'f', from: true, to: false, sha: null }, hoursAgo(h));
+  const s = status({ e1: healthy(300), p1: healthy(200), p2: [tick()], p3: [on(120), ...merges(3, 110), nullOff(105), tick()] });
+  assert.equal(s.rings[2]!.state, 'unknown');
+  assert.match(s.next, /^wait: ring second is unknown \(p3 runs with the flag off by itself/);
+  assert.doesNotMatch(s.next, /event log of :/);
+  // With an unread log too, both are named.
+  const both = status({ e1: healthy(300), p1: healthy(200), p3: [on(120), ...merges(3, 110), nullOff(105), tick()] });
+  assert.match(both.next, /^wait: can't read the event log of p2/);
+});

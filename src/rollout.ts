@@ -307,7 +307,13 @@ export function rolloutStatus(o: {
   } else if (outsideBack) next = outsideBack;
   else if (o.ringZero) next = `wait: ${o.ringZero}: fix rollout.json first (docs/rollout.md); nothing is turned on until ring 0 is the engine's own repo`;
   else if (o.listing) next = `wait: ${o.listing}: nothing is turned on while an instance may be missing`;
-  else if (unknown.length || outsideUnread.length) next = `wait: can't read the event log of ${[...unknown.flatMap((r) => r.instances.filter((n) => !o.logs.has(n))), ...outsideUnread].join(', ')}: nothing is turned on while the flag may be on there`;
+  else if (unknown.length || outsideUnread.length) {
+    // Name what holds: each unread log, and each ring unknown for another reason (R1231h: an instance running with the
+    // flag off by itself named no one).
+    const unread = [...unknown.flatMap((r) => r.instances.filter((n) => !o.logs.has(n))), ...outsideUnread];
+    const held = [...(unread.length ? [`can't read the event log of ${unread.join(', ')}`] : []), ...unknown.filter((r) => r.instances.every((n) => o.logs.has(n))).map((r) => `ring ${r.ring} is unknown (${r.why})`)];
+    next = `wait: ${held.join('; ')}: nothing is turned on while the flag may be on there`;
+  }
   else {
     const first = rings.find((r) => r.state !== 'promoted');
     if (!first) next = `every ring is promoted: ${o.flag} can become the default (remove the flag, docs/feature-flags.md)`;
