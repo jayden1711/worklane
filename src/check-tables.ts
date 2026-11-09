@@ -3,7 +3,7 @@
 // parsed data, before and after a change, and never runs code (src/merge-policy-weakening.ts, jsonTableFindings). A
 // module loads its own file here, by its own URL, and gets each table deep-frozen: no write to a table succeeds after
 // load. What the load returns can still be changed by code that runs before it and replaces a built-in it calls
-// (JSON.parse, Array.prototype.map, Object.freeze, readFileSync): open (R1184p P1, the owner's call). No path is
+// (JSON.parse, Array.prototype.map, Object.freeze, readFileSync): open, named by the owner (R1184p P1; #1251). No path is
 // written at the load site. The load line and each `TABLES.get('NAME')` line can't be removed or
 // changed without the owner (the hold's TABLE_LOAD; each load statement is on one line), and an added line that
 // imports the loader any other way, or uses `import.meta` other than to read it (this reads the path from its `.url`),

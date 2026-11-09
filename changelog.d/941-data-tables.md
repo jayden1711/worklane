@@ -16,5 +16,5 @@
   guard's command-scope pairs, cp's and ln's options) waits on any change. The syntax matcher this PR first added is
   gone. Still open, and named by the owner: a use moved off a data table while its data and its load line stay the
   same (a decoy, a shadow, a re-pointed import of its module, a tsconfig line that takes its user out of the build).
-  Also open, and the owner's call: code that runs before a table's load and replaces a built-in the loader calls
+  Also open, named by the owner (#1251): code that runs before a table's load and replaces a built-in the loader calls
   (`JSON.parse`, `Array.prototype.map`, `Object.freeze`, `readFileSync`) changes what the load returns.

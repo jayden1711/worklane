@@ -1,5 +1,5 @@
 // #941: the tables of src/ and scripts/ are data (src/check-tables.ts): loaded deep-frozen, so no write to one succeeds
-// after load (code that runs before the load and replaces a built-in the loader calls is open: R1184p P1). The write shapes R1184g-j found against the line reader (a member write, a callback's array, a replacer, an
+// after load (code that runs before the load and replaces a built-in the loader calls is open, named by the owner: R1184p P1, #1251). The write shapes R1184g-j found against the line reader (a member write, a callback's array, a replacer, an
 // entry changed through an index or a for...of, delete, a shadowed built-in, a template's ${}, a namespace member, a
 // RegExp's compile) each throw here against a real loaded table, or have nothing to write to. The two loaders (src/ and
 // scripts/lib/) give the same answers on every tables file in the repo, and refuse the same bad files.
@@ -136,7 +136,7 @@ test("a module reads only its own tables file, by its own URL: no path is writte
   assert.throws(() => tablesFrom(one([]), 'x.tables.json').get('MISSING'), /has no table MISSING/);
 });
 
-test("OPEN (R1184p P1, the owner's call): a built-in the loader calls, replaced before a load, changes what the load returns, frozen like any table", () => {
+test("OPEN (R1184p P1, named by the owner; #1251): a built-in the loader calls, replaced before a load, changes what the load returns, frozen like any table", () => {
   const parse = JSON.parse;
   try {
     JSON.parse = ((t: string) => {

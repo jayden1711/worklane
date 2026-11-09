@@ -134,10 +134,10 @@ test("R1184m P1d/P1e: a module's TABLES.get('NAME') line changed waits, as its l
 });
 
 /**
- * OPEN, and the owner's call (R1184p P1, ~/projects/QUESTIONS.md): an added line in a module that runs before a table's
+ * OPEN, named by the owner (2026-11-08, R1184p P1; the hold side is #1251): an added line in a module that runs before a table's
  * load replaces a built-in the loader calls, so the load returns other data, frozen like any table. No use moves and
  * no load line changes, so neither the compare, the load rule nor the freeze sees it. Each case asserts it gives no
- * reason today; if the owner chooses to hold such lines, each becomes a held case.
+ * reason today; when #1251 holds such lines, each becomes a held case.
  */
 const BUILTIN_OPEN: [string, string][] = [
   ['P1a JSON.parse replaced', "const parse = JSON.parse;\nJSON.parse = (t: string) => { const v = parse(t); if (v.CHECKS) v.CHECKS.value = ['a']; return v; };\n"],
@@ -146,7 +146,7 @@ const BUILTIN_OPEN: [string, string][] = [
   ['P1d readFileSync redirected for every importer', "import fs from 'node:fs';\nimport { syncBuiltinESMExports } from 'node:module';\nconst read = fs.readFileSync;\nfs.readFileSync = ((p: string, o: never) => read(String(p).replace('x-rules', 'x-weak'), o)) as never;\nsyncBuiltinESMExports();\n"],
 ];
 for (const [name, early] of BUILTIN_OPEN) {
-  test(`OPEN (R1184p P1, the owner's call): ${name} in a module that runs first gives no reason today`, () => {
+  test(`OPEN (R1184p P1, named by the owner; #1251): ${name} in a module that runs first gives no reason today`, () => {
     assert.deepEqual(reasons({ 'src/x-early.ts': early, 'src/x-user.ts': `import './x-early.js';\n${USER}` }), [], 'held now: make this a held case, and update the body and design.md');
   });
 }
