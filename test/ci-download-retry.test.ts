@@ -29,7 +29,8 @@ const HELPER = 'scripts/ci/fetch-pinned.sh';
 /** How ci-slow's WSL steps name the workspace: the one assignment a run with a `$ws/` helper line may make to `ws`. */
 const WS_FROM_WORKSPACE = `ws="$(wslpath -u '\${{ github.workspace }}')"`;
 /** The step shells used today (R1228i D3: a custom shell is a command line, so `curl -K {0}` would be the downloader). */
-const SHELLS_ALLOWED = ['bash', 'wsl-bash {0}', 'wsl-sudo {0}'];
+// check-table: never-grow
+const SHELLS_ALLOWED =['bash', 'wsl-bash {0}', 'wsl-sudo {0}'];
 /** A shell variable reference, `$x` or `${x}`: no `$(…)`, no `${x:-…}`. */
 const VAR = String.raw`\$\{?[A-Za-z_][A-Za-z0-9_]*\}?`;
 /** A quoted path: plain characters and variables only. */
