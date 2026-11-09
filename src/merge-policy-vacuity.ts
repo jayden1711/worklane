@@ -39,10 +39,36 @@
 // where V8 makes no block range of its own, so a change there counts when the code around it ran (measured, round-8
 // reviews): an optional call's arguments, a default parameter, a destructuring default, a logical assignment's right
 // side (`??=`, `||=`, `&&=`), code in a string (`new Function('…')`), and built code, which its map places only by line.
-// Each of these has a todo test (merge-vacuity-r8, -r9-limits; B1 in -r6). And two where an untested change merges
-// (round 13): code moved in a way git doesn't pair (a file renamed and re-indented or edited, a function moved into
-// another file or within its file, moved code re-wrapped) reads as added code, so a test that runs it merges the PR
-// (measured: todo tests R1, R3, R4 in merge-vacuity-r12; M3, M4b, M5b, R3s in -r13); and deleting an app file, or
+// Each of these has a todo test (merge-vacuity-r8, -r9-limits; B1 in -r6). And two where an untested change merges:
+// code moved in a way git doesn't pair is measured as if git had paired it (#1014: a file renamed and re-indented or
+// edited, a function moved into another file or within its file, moved code re-wrapped; must-holds R1, R3, R4 in
+// merge-vacuity-r12, M3 to R3s, P1a to P5, E1 to E8, X2, X3 and Z-A1 to Z-N4 in -r13), but only a top-level
+// statement moved whole, paired by its code or its declared name (the closest same-named pair first, each pair
+// compared on its own, by character or by code token, its code only either way, and the PR waits when two, or one
+// run of their edited tokens, are too large to compare: ZN1B, ZN4B, ZN1spent, ZN1T, ZN1L, ZN1L-cmt, ZN4L to ZN4L-P,
+// SEMI, CMT, WRAP-1of2 to WRAP-3of4z, UB100, UB100z, BR220, BR220z, BR300, BR220t and LNG100 must hold); one git paired
+// in place with a removed statement of its name (or, unnamed, an unnamed one) whose code it keeps at a similarity of
+// at least 0.8 pairs with nothing (Z-F6 to Z-F11, G1, D1, U1), and one keeping less, or too large to align with it
+// (ALIGN_CELLS, each pair on its own), took its place and pairs as any other (N5, N6, BL1wb, BUDf, B3: must hold).
+// Only formatting is no change: whitespace,
+// semicolons, a comma before a closing bracket, and parentheses around an arrow function's one parameter or around
+// one expression with no `,` or `;` of its own, not starting with `{`, opened right after an assignment's `=`, `=>`,
+// `return`, `throw`, `(`, `[`, `,` or `:`, or after `??` when it holds no `?`, `:`, `|`, `&` or `=` outside brackets,
+// and closed right before `;`, `,`, `)`, `]`, `}` or the end (Q-P, Q-Pq,
+// Q-Pc, R3s). Every other parenthesis counts (Z-F1, Z-F1b, G2, G2e, G5, B16b, PQ2, PQ3: must merge). A statement
+// moved within its file that git pairs with its own old text is measured as git measured it, so its re-formatting
+// counts and a test that runs it merges the PR (W1, W2: todos in -r13; measured); so is one moved over a stale
+// same-named one with the same first line, which git keeps, so it is never wholly added (N5u: a todo in -r13;
+// measured); one rewritten in place with every code line new, past that similarity or too large to align, to the text
+// of a copy the PR removes elsewhere is read as moved from there, so a test that runs only it holds the PR (a todo in
+// -r13; measured; main merges it). Still read as added code,
+// so a test that runs it merges the PR: one re-wrapped with parentheses anywhere else (`(a && b) || c`, `? (y) :`,
+// `}())`; measured in #1014's fifth review, and main merges these too); one renamed as it
+// moved, or moved inside a statement that stays (a method within its class, a statement into another function)
+// (inferred: the pairing's rules); one paired by name but rewritten too far to align with its source (FH1, FH2 in
+// -r13, which must merge; in a 150-line statement two replaced lines are enough: X1, a todo in -r13; measured); and,
+// in a file whose brackets no reading of the lexer balances, every statement not starting on an `export` or `import`
+// line (a todo in -r13; measured); and deleting an app file, or
 // renaming one out of app code (to a data file, a test path, or out of app_paths), leaves no app code to measure, so
 // it merges with no test and no run (measured for a deletion, a file renamed to .json and one renamed to a test path;
 // inferred for a move out of app_paths, which the same app-code filter drops).
