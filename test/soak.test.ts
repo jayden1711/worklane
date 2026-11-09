@@ -6,10 +6,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, rmSync, statSync, statfsSync, watch, writeFileSync, writeSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { EventLog } from '../src/events/log.js';
+import { EventSchemas } from '../src/events/types.js';
 import { FakeRunner, type RunRequest } from '../src/runner.js';
 import { slotStatus } from '../src/slots.js';
 import { worktreeDir } from '../src/worktrees.js';
@@ -407,9 +408,9 @@ export function childCount(mark?: string, seen?: Set<number>): number | null {
  * group; those in a group or session a descendant leads or led (`seen` keeps those across samples), and on Linux,
  * those whose environment carries `mark` (set before anything is spawned), so a setsid'd double fork still counts.
  */
-export function childPids(mark?: string, seen: Set<number> = new Set()): number[] | null {
+export function childPids(mark?: string, seen: Set<number> = new Set(), start: ProcessSnapshot | null = null): number[] | null {
   const linux = process.platform === 'linux';
-  const r = spawnSync('ps', ['-A', '-o', linux ? 'pid=,ppid=,pgid=,sid=' : 'pid=,ppid=,pgid='], { encoding: 'utf8' });
+  const r = spawnSync('ps', ['-A', '-o', linux ? 'pid=,ppid=,pgid=,sid=,uid=' : 'pid=,ppid=,pgid='], { encoding: 'utf8' });
   if (r.status !== 0 || typeof r.stdout !== 'string') return null;
   const rows = r.stdout.split('\n').map((l) => l.trim().split(/\s+/).map(Number)).filter((x) => x.length >= 3 && x.every(Number.isFinite));
   const own = rows.find(([pid]) => pid === process.pid)?.[2];
@@ -430,9 +431,26 @@ export function childPids(mark?: string, seen: Set<number> = new Set()): number[
       }
     }
   }
+  // R1181p D5: our group only when we lead it (under `node --test` every test file, and the runner, share its group).
+  const leader = own === process.pid;
+  // R1181p D1 (Linux): a process of this user that wasn't alive at the start, in a session that wasn't either: an
+  // orphan in a new session (setsid, a user-manager service) that dropped the mark. A desktop session's new terminal
+  // counts too, which is why the soak runs on a CI runner.
+  const uid = process.getuid?.();
+  const fresh = (pid: number, sid: number | undefined, u: number | undefined) => linux && start !== null && u === uid && sid !== undefined && !start.pids.has(pid) && !start.sids.has(sid);
   return rows
-    .filter(([pid, , pgid, sid]) => pid !== process.pid && pid !== r.pid && (desc.has(pid!) || pgid === own || seen.has(pgid!) || (sid !== undefined && seen.has(sid)) || marked.has(pid!)))
+    .filter(([pid, , pgid, sid, u]) => pid !== process.pid && pid !== process.ppid && pid !== r.pid && (desc.has(pid!) || (leader && pgid === own) || seen.has(pgid!) || (sid !== undefined && seen.has(sid)) || marked.has(pid!) || fresh(pid!, sid, u)))
     .map(([pid]) => pid!);
+}
+
+/** The processes and sessions alive at a moment (Linux): what a soak started later is told apart from (R1181p D1). */
+export type ProcessSnapshot = { pids: Set<number>; sids: Set<number> };
+export function processSnapshot(): ProcessSnapshot | null {
+  if (process.platform !== 'linux') return null;
+  const r = spawnSync('ps', ['-A', '-o', 'pid=,sid='], { encoding: 'utf8' });
+  if (r.status !== 0 || typeof r.stdout !== 'string') return null;
+  const rows = r.stdout.split('\n').map((l) => l.trim().split(/\s+/).map(Number)).filter((x) => x.length === 2 && x.every(Number.isFinite));
+  return { pids: new Set(rows.map(([p]) => p!)), sids: new Set(rows.map(([, sid]) => sid!)) };
 }
 
 /** Their resident memory, in bytes (R1181n: a child's memory weighed nothing). */
@@ -442,25 +460,113 @@ export function rssOf(pids: readonly number[]): number {
   return (r.stdout ?? '').split('\n').map((l) => Number(l.trim())).filter(Number.isFinite).reduce((a, b) => a + b, 0) * 1024;
 }
 
-/** inotify watches this process holds (Linux, /proc/self/fdinfo), else null (R1181n). */
-export function inotifyWatches(): number | null {
+/** inotify watches this process and `pids` hold (Linux, /proc/<pid>/fdinfo), else null (R1181n, R1181p D3). */
+export function inotifyWatches(pids: readonly number[] = []): number | null {
   try {
-    let n = 0;
-    for (const fd of readdirSync('/proc/self/fdinfo')) {
+    readdirSync('/proc/self/fdinfo');
+  } catch {
+    return null;
+  }
+  let n = 0;
+  for (const p of ['self', ...pids]) {
+    let fds: string[];
+    try {
+      fds = readdirSync(`/proc/${p}/fdinfo`);
+    } catch {
+      continue; // gone
+    }
+    for (const fd of fds) {
       try {
-        n += readFileSync(`/proc/self/fdinfo/${fd}`, 'utf8').split('\n').filter((l) => l.startsWith('inotify ')).length;
+        n += readFileSync(`/proc/${p}/fdinfo/${fd}`, 'utf8').split('\n').filter((l) => l.startsWith('inotify ')).length;
       } catch {
         // closed meanwhile
       }
     }
-    return n;
+  }
+  return n;
+}
+
+/** The paths this process and `pids` hold open or mapped (Linux, /proc/<pid>/fd and maps); empty elsewhere. */
+function heldPaths(pids: readonly number[]): Set<string> {
+  const held = new Set<string>();
+  for (const p of ['self', ...pids]) {
+    try {
+      for (const fd of readdirSync(`/proc/${p}/fd`)) {
+        try {
+          held.add(readlinkSync(`/proc/${p}/fd/${fd}`));
+        } catch {
+          // closed meanwhile
+        }
+      }
+      for (const l of readFileSync(`/proc/${p}/maps`, 'utf8').split('\n')) {
+        const at = l.indexOf('/');
+        if (at >= 0) held.add(l.slice(at));
+      }
+    } catch {
+      // gone, or not Linux
+    }
+  }
+  return held;
+}
+
+/**
+ * Bytes in files this process and `pids` hold open after they were unlinked (Linux): no folder walk finds them, and
+ * their blocks stay in use (R1181o D1: an 88 MB deleted, open file passed). Each file once.
+ */
+export function deletedOpenBytes(pids: readonly number[]): number {
+  const seen = new Set<string>();
+  let bytes = 0;
+  for (const p of ['self', ...pids]) {
+    let fds: string[];
+    try {
+      fds = readdirSync(`/proc/${p}/fd`);
+    } catch {
+      continue;
+    }
+    for (const fd of fds) {
+      try {
+        if (!readlinkSync(`/proc/${p}/fd/${fd}`).endsWith(' (deleted)')) continue;
+        const st = statSync(`/proc/${p}/fd/${fd}`);
+        if (!st.isFile() || seen.has(`${st.dev}:${st.ino}`)) continue;
+        seen.add(`${st.dev}:${st.ino}`);
+        bytes += st.size;
+      } catch {
+        // closed meanwhile
+      }
+    }
+  }
+  return bytes;
+}
+
+/**
+ * The used space of the filesystems under `paths` (each once, statfs) plus the kernel's Shmem (Linux): the levels no
+ * walk can name (R1181p D2). Null where it can't be read.
+ */
+export function fsLevels(paths: readonly (string | undefined)[]): number | null {
+  try {
+    const devs = new Set<number>();
+    let bytes = 0;
+    for (const p of paths) {
+      if (!p || !existsSync(p)) continue;
+      const dev = statSync(p).dev;
+      if (devs.has(dev)) continue;
+      devs.add(dev);
+      const f = statfsSync(p);
+      bytes += (f.blocks - f.bfree) * f.bsize;
+    }
+    const shmem = /^Shmem:\s+(\d+) kB$/m.exec(readFileSync('/proc/meminfo', 'utf8'));
+    if (!shmem) return null;
+    return bytes + Number(shmem[1]) * 1024;
   } catch {
     return null;
   }
 }
 
-/** The places a soak's files can land besides its folder (R1181n): the isolate's home, and our own /dev/shm files. */
-export function usageOutside(base: string): { bytes: number; files: number } {
+/**
+ * The places a soak's files can land besides its folder (R1181n): the isolate's home, and the /dev/shm entries this
+ * process or a counted one (`pids`) holds open or mapped (R1181p D4: any other program's there failed a healthy run).
+ */
+export function usageOutside(base: string, pids: readonly number[] = []): { bytes: number; files: number } {
   let bytes = 0;
   let files = 0;
   const xdg = process.env.XDG_CONFIG_HOME;
@@ -470,11 +576,13 @@ export function usageOutside(base: string): { bytes: number; files: number } {
     bytes += u.bytes;
     files += u.files;
   }
-  if (existsSync('/dev/shm') && typeof process.getuid === 'function') {
+  if (existsSync('/dev/shm')) {
+    const held = [...heldPaths(pids)].filter((x) => x.startsWith('/dev/shm/'));
     for (const n of readdirSync('/dev/shm')) {
+      const at = join('/dev/shm', n);
+      if (!held.some((x) => x === at || x.startsWith(`${at}/`))) continue;
       try {
-        const st = statSync(join('/dev/shm', n));
-        if (st.uid !== process.getuid()) continue;
+        const st = statSync(at);
         files += 1;
         if (st.isFile()) bytes += st.size;
         else if (st.isDirectory()) {
@@ -490,13 +598,15 @@ export function usageOutside(base: string): { bytes: number; files: number } {
   return { bytes, files };
 }
 
+/** Every event type that names a failure, read from the schema itself, so a new one is never missed (R1181p D6). */
+export const FAILURE_TYPES: readonly string[] = Object.freeze(Object.keys(EventSchemas).filter((t) => /[._]failed$/.test(t)).sort());
 /** coordinator.error events, agent runs that didn't succeed, and other failure events, in the log so far (R1181l 5). */
 export function failureCounts(log: { read: (afterId?: number, types?: never[]) => { type: string; payload: unknown }[] }): { errors: number; failedRuns: number; failureEvents: number } {
-  const ev = log.read(0, ['coordinator.error', 'run.finished', 'run.startup_failed', 'merge.failed', 'attempt.failed', 'testrun.wipe_failed'] as never[]);
+  const ev = log.read(0, ['coordinator.error', 'run.finished', ...FAILURE_TYPES] as never[]);
   return {
     errors: ev.filter((e) => e.type === 'coordinator.error').length,
     failedRuns: ev.filter((e) => (e.type === 'run.finished' && (e.payload as { reason?: string }).reason !== 'succeeded') || e.type === 'run.startup_failed').length,
-    failureEvents: ev.filter((e) => ['merge.failed', 'attempt.failed', 'testrun.wipe_failed'].includes(e.type)).length,
+    failureEvents: ev.filter((e) => e.type !== 'run.startup_failed' && FAILURE_TYPES.includes(e.type)).length,
   };
 }
 
@@ -533,6 +643,8 @@ test('soak: the real coordinator works for a while with stand-in agents; nothing
   const gc = (globalThis as { gc?: () => void }).gc;
   if (hours > 0 && typeof gc !== 'function') throw new Error('a soak needs node --expose-gc: its readings are taken after a forced GC');
   let tickCount = 0;
+  // What was alive before the soak (Linux): a new session of this user after it is the soak's (R1181p D1).
+  const startProcs = processSnapshot();
   const f = fixture();
   // Temp files count too (R1181l 3: os.tmpdir() leftovers were outside the measured folder): TMPDIR inside it.
   const tmp = join(f.base, 'tmp');
@@ -595,10 +707,10 @@ test('soak: the real coordinator works for a while with stand-in agents; nothing
         // The log's size is its file and its WAL: writes sit in the WAL until a checkpoint moves them over.
         const wal = existsSync(`${f.log.path}-wal`) ? statSync(`${f.log.path}-wal`).size : 0;
         ticks.sort((a, b) => a - b);
+        const kids = childPids(childMark, seenLeaders, startProcs);
         const inside = dirUsage(f.base);
-        const outside = usageOutside(f.base);
-        const usage = { bytes: inside.bytes + outside.bytes, files: inside.files + outside.files };
-        const kids = childPids(childMark, seenLeaders);
+        const outside = usageOutside(f.base, kids ?? []);
+        const usage = { bytes: inside.bytes + outside.bytes + deletedOpenBytes(kids ?? []), files: inside.files + outside.files };
         samples.push({
           at,
           rss: mem.rss,
@@ -622,8 +734,9 @@ test('soak: the real coordinator works for a while with stand-in agents; nothing
           files: usage.files,
           children: kids?.length ?? null,
           childRss: rssOf(kids ?? []),
-          watches: inotifyWatches(),
+          watches: inotifyWatches(kids ?? []),
           fullRunHeld: slotStatus(f.slotsDir).fullRun ? 1 : 0,
+          levelBytes: hours > 0 && process.platform === 'linux' ? fsLevels([f.base, '/var/tmp', '/dev/shm', process.env.XDG_RUNTIME_DIR]) : null,
         });
         // Each sample as it is taken (R1181j N1: a crash or an OOM left no report, in the runs that most need one).
         if (report) appendFileSync(join(report, 'soak-samples.jsonl'), `${JSON.stringify(samples.at(-1))}\n`);
@@ -644,7 +757,8 @@ test('soak: the real coordinator works for a while with stand-in agents; nothing
   const limits = hours > 0 ? SOAK_LIMITS : { ...SOAK_LIMITS, warmupMs: 0, heapGrowthBytes: 512 * MB, rssGrowthBytes: 1024 * MB, fdGrowth: 256, tickDrift: 20, tickMsPer100kEvents: 0, logBytesPerTask: 4 * MB };
   // A real soak is judged against the hours it was asked for (a run that stopped early fails).
   // `extended`: errors, worktrees and disk are recorded here, so a sample without them fails (R1181j 1, 2).
-  const v = soakVerdict(samples, limits, hours > 0 ? { expectedMs: ms - sampleMs, sampleMs, issueEveryMs, extended: true } : { extended: true });
+  const linux = process.platform === 'linux';
+  const v = soakVerdict(samples, limits, hours > 0 ? { expectedMs: ms - sampleMs, sampleMs, issueEveryMs, extended: true, linux } : { extended: true, linux });
   const out = process.env.SOAK_REPORT_DIR;
   if (out) {
     mkdirSync(out, { recursive: true });
@@ -782,13 +896,16 @@ test("the soak driver's counts read what they claim: failures in a log, worktree
     assert.equal(worktreeCount(repo), 1);
     git(repo, 'worktree', 'add', '-q', join(d, 'wt'));
     assert.equal(worktreeCount(repo), 2);
-    // A process double-forked away (its parent is then init) still counts: same process group.
+    // A process double-forked away (its parent is then init) still counts: on Linux by the mark; elsewhere by our group,
+    // only when we lead it (R1181p D5: under `node --test` the group is the runner's, every test file's).
     if (process.platform !== 'win32') {
       assert.notEqual(childCount(), null);
-      const pid = Number(spawnSync('sh', ['-c', 'sleep 30 >/dev/null 2>&1 & echo $!'], { encoding: 'utf8' }).stdout.trim());
+      const mark = `df-${process.pid}-${Date.now()}`;
+      const pid = Number(spawnSync('sh', ['-c', 'sleep 30 >/dev/null 2>&1 & echo $!'], { encoding: 'utf8', env: { ...process.env, SOAK_CHILD_MARK: mark } }).stdout.trim());
       try {
         // By its pid, not a total: other processes of the group (a test runner's) come and go meanwhile.
-        assert.ok(childPids()!.includes(pid), `${pid} in ${JSON.stringify(childPids())}`);
+        const leads = Number(spawnSync('ps', ['-o', 'pgid=', '-p', String(process.pid)], { encoding: 'utf8' }).stdout.trim()) === process.pid;
+        if (process.platform === 'linux' || leads) assert.ok(childPids(mark)!.includes(pid), `${pid} in ${JSON.stringify(childPids(mark))}`);
       } finally {
         if (pid > 0) process.kill(pid);
       }
@@ -800,8 +917,10 @@ test("the soak driver's counts read what they claim: failures in a log, worktree
 
 test('the soak driver takes each count from those helpers (#1181 review R1181k D2: a constant in their place passed every test)', () => {
   const src = readFileSync(join(repoRoot, 'test', 'soak.test.ts'), 'utf8');
-  for (const line of ['...failureCounts(f.log),', 'worktrees: worktreeCount(f.repo),', 'worktreeDirs: entriesIn(wtDir),', 'diskBytes: usage.bytes,', 'files: usage.files,', 'children: kids?.length ?? null,', 'childRss: rssOf(kids ?? []),', 'watches: inotifyWatches(),', 'fullRunHeld: slotStatus(f.slotsDir).fullRun ? 1 : 0,']) assert.ok(src.includes(`\n          ${line}\n`), line);
-  assert.match(src, /\n {8}const inside = dirUsage\(f\.base\);\n {8}const outside = usageOutside\(f\.base\);\n {8}const usage = \{ bytes: inside\.bytes \+ outside\.bytes, files: inside\.files \+ outside\.files \};\n {8}const kids = childPids\(childMark, seenLeaders\);\n/);
+  for (const line of ['...failureCounts(f.log),', 'worktrees: worktreeCount(f.repo),', 'worktreeDirs: entriesIn(wtDir),', 'diskBytes: usage.bytes,', 'files: usage.files,', 'children: kids?.length ?? null,', 'childRss: rssOf(kids ?? []),', 'watches: inotifyWatches(kids ?? []),', 'fullRunHeld: slotStatus(f.slotsDir).fullRun ? 1 : 0,', "levelBytes: hours > 0 && process.platform === 'linux' ? fsLevels([f.base, '/var/tmp', '/dev/shm', process.env.XDG_RUNTIME_DIR]) : null,"]) assert.ok(src.includes(`\n          ${line}\n`), line);
+  assert.match(src, /\n {8}const kids = childPids\(childMark, seenLeaders, startProcs\);\n {8}const inside = dirUsage\(f\.base\);\n {8}const outside = usageOutside\(f\.base, kids \?\? \[\]\);\n {8}const usage = \{ bytes: inside\.bytes \+ outside\.bytes \+ deletedOpenBytes\(kids \?\? \[\]\), files: inside\.files \+ outside\.files \};\n/);
+  assert.match(src, /\n {2}const startProcs = processSnapshot\(\);\n {2}const f = fixture\(\);\n/);
+  assert.match(src, /extended: true, linux \}/);
   assert.match(src, /\n {2}process\.env\.SOAK_CHILD_MARK = childMark;\n/);
   // R1181l 3: temp files are made inside the measured folder.
   assert.match(src, /\n {2}const tmp = join\(f\.base, 'tmp'\);\n {2}mkdirSync\(tmp\);\n {2}const oldTmp = process\.env\.TMPDIR;\n {2}process\.env\.TMPDIR = tmp;\n/);
@@ -867,4 +986,133 @@ test("the soak driver counts a detached child and, on Linux, a setsid'd double f
     if (old === undefined) delete process.env.SOAK_CHILD_MARK;
     else process.env.SOAK_CHILD_MARK = old;
   }
+});
+
+// --- R1181o, R1181p: what no walk names, orphans in a new session, children's watches, /dev/shm held, the runner's
+// group, every failure type ---
+const linuxOnly = { skip: process.platform !== 'linux' };
+const waitFor = async (ok: () => boolean, ms = 5000) => {
+  const end = Date.now() + ms;
+  while (!ok() && Date.now() < end) await new Promise((r) => setTimeout(r, 50));
+  return ok();
+};
+
+test('soak: every event type ending in .failed or _failed is counted, read from src/events/types.ts itself (#1181 review R1181p D6)', () => {
+  // Pinned against the schema's text, so a type added there is in the set (and so counted) without another edit.
+  const text = readFileSync(join(repoRoot, 'src', 'events', 'types.ts'), 'utf8');
+  const named = [...text.matchAll(/^ {2}'([a-z_]+(?:\.[a-z_]+)+)': /gm)].map((m) => m[1]!).filter((t) => /[._]failed$/.test(t)).sort();
+  assert.deepEqual([...FAILURE_TYPES], named);
+  for (const t of ['testrun.checks_failed', 'deploy.failed', 'fix_forward.attempt_failed', 'preview.failed', 'claude_auth.failed', 'merge.failed', 'attempt.failed', 'testrun.wipe_failed', 'run.startup_failed']) assert.ok(FAILURE_TYPES.includes(t), t);
+  // Every one of them counts (the stand-ins never fail, so each is the coordinator's); run.startup_failed as a run.
+  const rows = FAILURE_TYPES.map((type) => ({ type, payload: {} }));
+  assert.deepEqual(failureCounts({ read: () => rows }), { errors: 0, failedRuns: 1, failureEvents: FAILURE_TYPES.length - 1 });
+});
+
+test('soak verdict: the filesystems\' and the kernel\'s used space grown fails, as the disk; steady passes; mostly unread fails; on Linux the watches are required (#1181 reviews R1181o D1, R1181p D2)', () => {
+  const opts = { expectedMs: 5.5 * 3600_000 - 60_000 };
+  const v = (x: SoakSample[], o = {}) => soakVerdict(x, SOAK_LIMITS, { ...opts, ...o }).failures.join(' | ');
+  assert.match(v(series(330, (m) => ({ levelBytes: 10_000 * MB + m * 2 * MB }))), /leak: the used space of the soak's filesystems and the kernel's shared memory grew/);
+  assert.equal(v(series(330, () => ({ levelBytes: 10_000 * MB }))), '');
+  assert.match(v(series(330, (m) => ({ levelBytes: m % 3 === 0 ? 10_000 * MB : null }))), /the filesystems' used space not read in \d+ of/);
+  assert.equal(v(series(330, () => ({ levelBytes: null }))), '', 'not read at all (off Linux, or the smoke): not judged');
+  const full = (m: number) => ({ errors: 0, worktrees: 1, diskBytes: 30 * MB, children: 0, failedRuns: 0, failureEvents: 0, worktreeDirs: 1, files: 500 + m, fullRunHeld: 0, childRss: 0 });
+  assert.match(v(series(330, full), { extended: true, linux: true }), /^samples missing watches: nothing was judged/);
+  assert.equal(v(series(330, (m) => ({ ...full(m), watches: 3 })), { extended: true, linux: true }), '');
+  assert.equal(v(series(330, full), { extended: true }), '', 'off Linux the watches are not required');
+});
+
+test("soak driver: our group counts only when we lead it, and never the test runner (#1181 review R1181p D5: sibling test files' children counted as ours)", () => {
+  if (process.platform === 'win32') return;
+  assert.ok(!childPids()!.includes(process.ppid), 'the runner');
+  const leads = Number(spawnSync('ps', ['-o', 'pgid=', '-p', String(process.pid)], { encoding: 'utf8' }).stdout.trim()) === process.pid;
+  // An orphan in our group with no mark: the group rule alone would count it.
+  const pid = Number(spawnSync('sh', ['-c', 'sleep 30 >/dev/null 2>&1 & echo $!'], { encoding: 'utf8', env: { ...process.env, SOAK_CHILD_MARK: '' } }).stdout.trim());
+  try {
+    assert.equal(childPids(undefined, new Set(), null)!.includes(pid), leads, leads ? 'we lead our group: counted' : "the runner's group: not counted by it");
+  } finally {
+    if (pid > 0) process.kill(pid);
+  }
+});
+
+test("soak driver: a process that was seen leading its group or session counts its double fork after it is gone, its mark cleared (#1181 review R1181p D7 L2)", async () => {
+  if (process.platform === 'win32') return;
+  const c = spawn('sh', ['-c', 'read x; env -u SOAK_CHILD_MARK sleep 30 >/dev/null 2>&1 & echo $!'], { detached: true, stdio: ['pipe', 'pipe', 'ignore'] });
+  let out = '';
+  c.stdout!.on('data', (b) => (out += String(b)));
+  const seen = new Set<number>();
+  let pid = 0;
+  try {
+    assert.ok(await waitFor(() => childPids(undefined, seen)!.includes(c.pid!)), 'seen as a descendant');
+    assert.ok(seen.has(c.pid!));
+    c.stdin!.end('go\n');
+    assert.ok(await waitFor(() => out.includes('\n') && c.exitCode !== null));
+    pid = Number(out.trim());
+    assert.ok(childPids(undefined, seen, null)!.includes(pid), 'its double fork, by the leader it was seen as');
+    assert.ok(!childPids(undefined, new Set(), null)!.includes(pid), 'control: no leader seen, no mark, no snapshot: not counted');
+  } finally {
+    for (const p of [pid, c.pid ?? 0]) if (p > 0) try { process.kill(p); } catch { /* gone */ }
+  }
+});
+
+test('soak driver (Linux): an orphan in a new session that dropped the mark, started after the snapshot, counts (#1181 review R1181p D1)', linuxOnly, async () => {
+  const snap = processSnapshot()!;
+  assert.ok(snap.pids.has(process.pid));
+  const mark = `ns-${process.pid}-${Date.now()}`;
+  const r = spawnSync('sh', ['-c', 'setsid sh -c \'env -u SOAK_CHILD_MARK sleep 30 >/dev/null 2>&1 & echo $!\''], { encoding: 'utf8', env: { ...process.env, SOAK_CHILD_MARK: mark } });
+  const pid = Number(r.stdout.trim());
+  try {
+    assert.ok(pid > 0);
+    assert.ok(childPids(mark, new Set(), snap)!.includes(pid), 'a new session of this user since the snapshot');
+    assert.ok(!childPids(mark, new Set(), null)!.includes(pid), 'control: without the snapshot nothing else finds it');
+  } finally {
+    if (pid > 0) try { process.kill(pid); } catch { /* gone */ }
+  }
+});
+
+test("soak driver (Linux): inotify watches are read, this process's and a counted child's (#1181 review R1181p D3, D7 L3)", linuxOnly, async () => {
+  const d = mkdtempSync(join(tmpdir(), 'soak-inotify-'));
+  const file = join(d, 'f');
+  writeFileSync(file, 'x');
+  const before = inotifyWatches()!;
+  const w = watch(file);
+  let c: ReturnType<typeof spawn> | null = null;
+  try {
+    assert.ok(inotifyWatches()! >= before + 1, "this process's own");
+    c = spawn(process.execPath, ['-e', 'require("fs").watch(process.argv[1]); setInterval(() => {}, 1000)', file], { stdio: 'ignore' });
+    assert.ok(await waitFor(() => inotifyWatches([c!.pid!])! - inotifyWatches()! >= 1), "a child's, summed with ours");
+  } finally {
+    w.close();
+    c?.kill();
+    rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test('soak driver (Linux): a /dev/shm entry counts only while a counted process holds it; an unlinked open file is counted; the levels are read (#1181 reviews R1181p D4, D2, R1181o D1)', linuxOnly, () => {
+  const shm = join('/dev/shm', `soak-held-${process.pid}`);
+  writeFileSync(shm, 'x'.repeat(8192));
+  try {
+    const free = usageOutside('/nonexistent');
+    const fd = openSync(shm, 'r');
+    try {
+      assert.ok(usageOutside('/nonexistent').bytes >= free.bytes + 8192, 'held open: counted');
+    } finally {
+      closeSync(fd);
+    }
+    assert.equal(usageOutside('/nonexistent').bytes, free.bytes, "another program's (nobody counted holds it): not counted");
+  } finally {
+    rmSync(shm, { force: true });
+  }
+  const d = mkdtempSync(join(tmpdir(), 'soak-unlinked-'));
+  const file = join(d, 'gone');
+  const fd = openSync(file, 'w+');
+  try {
+    writeSync(fd, Buffer.alloc(1 << 20, 1));
+    const named = deletedOpenBytes([]);
+    rmSync(file);
+    assert.ok(deletedOpenBytes([]) >= named + (1 << 20), 'unlinked and still open: its bytes counted');
+  } finally {
+    closeSync(fd);
+    rmSync(d, { recursive: true, force: true });
+  }
+  assert.equal(typeof fsLevels([tmpdir(), '/dev/shm']), 'number');
 });

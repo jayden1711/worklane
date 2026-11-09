@@ -34,14 +34,15 @@ verdict). Workflow: `.github/workflows/soak.yml`.
 | RSS grew, the same way | 256 MB |
 | Open file handles grew, the same way | 32 |
 | Any one sample above the first quarter (memory held mid-run, then let go) | 4× the limit above |
-| `coordinator.error` events, agent runs that didn't succeed (or failed to start), and `merge.failed`, `attempt.failed` or `testrun.wipe_failed` events, in the whole run, the warm-up included (the stand-in agents never fail) | 0 |
+| `coordinator.error` events, agent runs that didn't succeed (or failed to start), and every other event type whose name ends in `.failed` or `_failed` (read from the event schema itself), in the whole run, the warm-up included (the stand-in agents never fail) | 0 |
 | The machine's full-run test lock, held at any sample | never |
 | The coordinator's git worktrees grew, and the entries in its worktree folder (a checkout git no longer lists is still there), as open file handles are judged | 2 |
-| The processes the soak started grew: its descendants, any in a group or session one of them leads or led, and (Linux) any carrying the soak's mark in its environment, so a detached child or a setsid'd double fork still counts; the same way | 4 |
+| The processes the soak started grew; the same way. Counted: its descendants; any in a group or session one of them leads or led; its own group only when it leads it (under `node --test` the group is the runner's and every test file's); and on Linux, any carrying the soak's mark in its environment, and any of this user's that started after the soak in a session that didn't exist then (an orphan in a new session that dropped the mark, or a user-manager service). So a detached child or a setsid'd double fork counts | 4 |
 | Those processes' resident memory grew, as RSS is judged | 256 MB |
-| inotify watches grew (Linux), as open file handles are judged | 32 |
-| Disk under the soak's folder, the test isolate's home and the soak's own files in `/dev/shm`, besides the event log (judged on its own above), per landed task after the warm-up | 64 KB |
+| inotify watches grew, this process's and those processes' (Linux, where they are required in every sample), as open file handles are judged | 32 |
+| Disk under the soak's folder, the test isolate's home, the `/dev/shm` entries the soak or one of its processes holds open or mapped, and (Linux) files they hold open after unlinking them, besides the event log (judged on its own above), per landed task after the warm-up | 64 KB |
 | The same disk, grown or held mid-run, as memory is judged (temp files are made inside the folder) | 256 MB, 4× held |
+| A real soak on Linux only: the used space of the filesystems of the soak's folder, `/var/tmp`, `/dev/shm` and `$XDG_RUNTIME_DIR` (statfs), plus the kernel's `Shmem`, grown or held, as the disk is judged. This is what no walk can name: an unlinked open file, a memfd, a file outside the walked folders. Not read in the smoke, which shares its machine with other test files, nor off Linux | 256 MB, 4× held |
 | Files and folders under the soak's folder, per landed task after the warm-up | 64 |
 | Agent runs open, at any sample | 0 |
 | Agent slots held, at any sample | 0 |
@@ -113,10 +114,16 @@ replaces main's pending scheduled run.
 - **It can't see leaks in what it doesn't run:** real agents' processes, the dashboard, the updater, the hub, or a
   real GitHub's answers. It soaks the coordinator's own loop.
 - **It can't stop code that runs before the soak step from changing what the soak runs, beyond what the step itself
-  holds:** the step calls its tools by absolute path and finds node in setup-node's tool cache, and the download
-  helper calls its tools by absolute path (so a PATH stand-in, or a function named `sha256sum`, can't stand in for
-  them; a BASH_ENV can still define a function by the absolute path's own name, so the step must clear it). The steps before it (`npm ci`, which runs package scripts, and the build)
-  are pinned as they are by the frozen acceptance file; tightening them is the owner's decision (#1181 R1181l 1, 2).
+  holds:**
+  - The step calls its tools by absolute path.
+  - It takes node to be any `node` under `$RUNNER_TOOL_CACHE`, which an earlier step can plant there and put first on
+    `GITHUB_PATH` (R1181l A3). Recording node's exact path right after setup-node waits on the owner (#1181,
+    QUESTIONS row 83).
+  - The download helper calls its tools by absolute path, so a PATH stand-in, or a function named `sha256sum`, can't
+    stand in for them. A BASH_ENV can still define a function by the absolute path's own name. The soak step already
+    clears BASH_ENV, but the step that runs the helper, **install gitleaks**, doesn't, and must (R1181m D2).
+  - The steps before it (`npm ci`, which runs package scripts, and the build) are pinned as they are by the frozen
+    acceptance file. Tightening them, and the two items above, is the owner's decision (#1181 R1181l 1, 2, R1181m D2).
 - **It can't show a leak slower than its hours.** Nor can it show a rise inside the first quarter of the run that then
   holds (about the first 80 minutes of a 5.5 h run, measured by R1181e) under 4× its limit: the first quarter is the
   baseline. The 4 GiB heap cap bounds that heap. A leak after a high first quarter is read from the run's low point.
@@ -125,6 +132,11 @@ replaces main's pending scheduled run.
 - **A sawtooth slower than the 10-sample block** is bounded only by the 4× peak rule (R1181g note 3).
 - **The workflow trusts what it pins:** every step through the soak is pinned as written; `npm ci`'s own package
   scripts, setup-node and the runner image aren't, so the soak step sets its knobs, clears NODE_OPTIONS and BASH_ENV
-  and runs only setup-node's node.
+  and runs a `node` from under `$RUNNER_TOOL_CACHE` (not necessarily setup-node's: see above).
+- **It can't see what it doesn't count off Linux, or below what it reads:** off Linux, an orphan that dropped the mark
+  and left every group it was seen in, a file held open after unlinking, and the filesystems' levels aren't read. A
+  process of another user, and a process of this user that kept a session alive since before the soak, aren't counted.
+  On a desktop, a new session of the same user during the soak (a new terminal) is counted as the soak's: it runs on a
+  CI runner.
 - **It is a heuristic over a sampled series.** Each review round found shapes it misjudged; issue #1231 proposes a
   written attack spec as its acceptance bar. A tick that grows with the log (issue #1234) is expected to fail it today.

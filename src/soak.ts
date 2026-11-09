@@ -53,7 +53,7 @@ export interface SoakSample {
   children?: number | null;
   /** Agent runs that didn't succeed (run.finished not succeeded, run.startup_failed) so far (R1181l 5). */
   failedRuns?: number;
-  /** Other failure events so far: merge.failed, attempt.failed, testrun.wipe_failed (R1181l 5). */
+  /** Other failure events so far: every event type ending in .failed or _failed, run.startup_failed aside (R1181l 5, R1181p D6). */
   failureEvents?: number;
   /** Entries in the coordinator's worktree folder: a checkout git no longer lists is still one (R1181k D1). */
   worktreeDirs?: number;
@@ -63,8 +63,14 @@ export interface SoakSample {
   fullRunHeld?: number;
   /** The resident memory of the counted child processes (R1181n: a child's memory weighed nothing). */
   childRss?: number;
-  /** inotify watches this process holds (null where it can't count them, R1181n). */
+  /** inotify watches this process and the counted children hold (null where they can't be counted: R1181n, R1181p D3). */
   watches?: number | null;
+  /**
+   * The used space of the filesystems the soak can write to, plus the kernel's shared memory (statfs, /proc/meminfo
+   * Shmem): what no folder walk can name, an unlinked open file or a memfd (R1181o D1, R1181p D2). Read only on a real
+   * soak on Linux, where nothing else writes; null elsewhere (not judged).
+   */
+  levelBytes?: number | null;
 }
 
 export interface SoakLimits {
@@ -237,13 +243,13 @@ function growth(samples: readonly SoakSample[], f: (s: SoakSample) => number): {
  * the gaps and the work are judged against (#1181 reviews R1181g, R1181h 2: against the run's own spacing, a
  * coordinator slow on every tick set its own limit). Given expectedMs, they default to the driver's own (60 s, 30 s).
  */
-export function soakVerdict(samples: readonly SoakSample[], limits: SoakLimits = SOAK_LIMITS, o: { expectedMs?: number; sampleMs?: number; issueEveryMs?: number; extended?: boolean } = {}): { failures: string[]; measured: Record<string, string | number> } {
+export function soakVerdict(samples: readonly SoakSample[], limits: SoakLimits = SOAK_LIMITS, o: { expectedMs?: number; sampleMs?: number; issueEveryMs?: number; extended?: boolean; linux?: boolean } = {}): { failures: string[]; measured: Record<string, string | number> } {
   const failures: string[] = [];
   if (samples.length < 4) return { failures: [`only ${samples.length} sample(s): a soak needs at least 4 to compare its start and end`], measured: {} };
   // Every field the verdict reads must be there: a sample missing one can't be judged, and that fails closed.
   // `extended`: the driver's own run, which records errors, worktrees and disk too (R1181j 1, 2); a driver that drops
-  // them fails closed. (Without it they are judged when there, so the frozen acceptance file's samples stay valid.)
-  const fields: (keyof SoakSample)[] = ['at', 'rss', 'heapUsed', 'eventsBytes', 'walBytes', 'events', 'tickMs', 'maxTickMs', 'tasksDone', 'filed', 'oldestUnlandedMs', 'openRuns', 'oldestOpenRunMs', 'slotsHeld', ...(o.extended ? (['errors', 'worktrees', 'diskBytes', 'children', 'failedRuns', 'failureEvents', 'worktreeDirs', 'files', 'fullRunHeld', 'childRss'] as const) : [])];
+  // them fails closed. `linux`: there the watches can always be counted, so they are required too (R1181o). (Without it they are judged when there, so the frozen acceptance file's samples stay valid.)
+  const fields: (keyof SoakSample)[] = ['at', 'rss', 'heapUsed', 'eventsBytes', 'walBytes', 'events', 'tickMs', 'maxTickMs', 'tasksDone', 'filed', 'oldestUnlandedMs', 'openRuns', 'oldestOpenRunMs', 'slotsHeld', ...(o.extended ? (['errors', 'worktrees', 'diskBytes', 'children', 'failedRuns', 'failureEvents', 'worktreeDirs', 'files', 'fullRunHeld', 'childRss'] as const) : []), ...(o.extended && o.linux ? (['watches'] as const) : [])];
   const missing = fields.filter((k) => samples.some((s) => typeof s[k] !== 'number' || !Number.isFinite(s[k])));
   if (missing.length) return { failures: [`samples missing ${missing.join(', ')}: nothing was judged`], measured: {} };
   // WHY (#1181 review): with too few samples past the warm-up, the warm-up's were judged instead, so a 4-minute run
@@ -312,7 +318,7 @@ export function soakVerdict(samples: readonly SoakSample[], limits: SoakLimits =
   }
   // R1181l 5: an agent run that didn't succeed, or another failure event, after the warm-up fails (the stand-in agents
   // never fail, so each is the coordinator's or the harness's).
-  for (const [k, what] of [['failedRuns', 'agent run(s) that did not succeed'], ['failureEvents', 'failure event(s) (merge, attempt or wipe failed)']] as const) {
+  for (const [k, what] of [['failedRuns', 'agent run(s) that did not succeed'], ['failureEvents', 'failure event(s) (a type ending in .failed or _failed)']] as const) {
     if (!has(k)) continue;
     const n = end[k]!;
     if (n > 0) failures.push(`errors: ${n} ${what} in the run (limit 0)`);
@@ -329,6 +335,12 @@ export function soakVerdict(samples: readonly SoakSample[], limits: SoakLimits =
       const g = growth(counted, (s) => s.watches!);
       leak('inotify watches', { growth: Math.round(g.growth * 10) / 10, peak: g.peak }, limits.fdGrowth, (n) => `by ${Math.round(n * 10) / 10}`);
     }
+  }
+  // R1181o D1, R1181p D2: the filesystems' and the kernel's levels, as the disk is held (growth with the 4x peak).
+  if (use.some((s) => typeof s.levelBytes === 'number')) {
+    const counted = use.filter((s) => typeof s.levelBytes === 'number');
+    if (counted.length * 2 < use.length) failures.push(`the filesystems' used space not read in ${use.length - counted.length} of ${use.length} sample(s): a leak of it can't be judged`);
+    else leak("the used space of the soak's filesystems and the kernel's shared memory", growth(counted, (s) => s.levelBytes!), limits.diskGrowthBytes, MB);
   }
   // The worktree folder's entries, as worktrees: a checkout copied aside and pruned from git is still here.
   if (has('worktreeDirs')) {
