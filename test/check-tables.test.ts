@@ -5,13 +5,13 @@
 // scripts/lib/) give the same answers on every tables file in the repo, and refuse the same bad files.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { cpSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { BRAND } from '../src/brand.js';
-import { frameFile, isCaller, parseTables, regExpOf, TABLES_FILE, tablesFrom, tablesOf, type Pattern } from '../src/check-tables.js';
+import { parseTables, regExpOf, TABLES_FILE, tablesFrom, tablesOf, type Pattern } from '../src/check-tables.js';
 import * as review from '../src/review.js';
 import { BUILTIN_PROTECTED } from '../src/guardrails/engine.js';
 import { GIT_GUARD_PAIRS } from '../src/os/git.js';
@@ -132,7 +132,8 @@ test('both loaders, and so the hold, refuse a file that is not a tables file (#9
 });
 
 test("a module reads only its own tables file, by its own URL: no path is written at the load site (#941)", async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'tables-own-'));
+  // In a directory whose name has a space and parentheses, as a second unzip's does (R1184t D2 b).
+  const dir = mkdtempSync(join(tmpdir(), 'tables own (1)-'));
   try {
     const loaders = [pathToFileURL(join(repoRoot, 'dist', 'src', 'check-tables.js')).href, pathToFileURL(join(repoRoot, 'scripts', 'lib', 'check-tables.mjs')).href];
     writeFileSync(join(dir, 'decoy.tables.json'), one(['weak']));
@@ -152,15 +153,34 @@ test("a module reads only its own tables file, by its own URL: no path is writte
         await assert.rejects(mod(name, write, one(['a', 'b'])), /is not the calling module/, `${k}: ${name}`);
       }
     }
-    // The stack's frame, in V8's two formats, and a source-mapped frame of the same module (src/x.ts for dist/src/x.js).
-    assert.deepEqual([frameFile('Error\n    at f (file:///a/dist/src/x.js:3:9)\n'), frameFile('Error\n    at file:///a/x.mjs:1:2'), frameFile('Error\n    at async file:///a/x.mjs:1:2'), frameFile('Error')], ['file:///a/dist/src/x.js', 'file:///a/x.mjs', 'file:///a/x.mjs', undefined]);
-    assert.deepEqual([isCaller('file:///a/src/x.ts', 'file:///a/dist/src/x.js'), isCaller('file:///a/src/y.ts', 'file:///a/dist/src/x.js'), isCaller('file:///a/src/x.ts', 'file:///a/src/x.ts.js'), isCaller(undefined, 'file:///a/x.js')], [true, false, false, false]);
+    // review.ts's own file, read by the loader's parser (the assertion this test made through tablesOf before R1184s).
+    const reviewTables = join(repoRoot, 'src', 'review.tables.json');
+    assert.equal(tablesFrom(readFileSync(reviewTables, 'utf8'), reviewTables).get<readonly string[]>('ALWAYS_L3').length, 2);
     // A call with another module's URL, from here, is refused too.
     assert.throws(() => tablesOf(pathToFileURL(join(repoRoot, 'dist', 'src', 'review.js')).href), /is not the calling module/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
   assert.throws(() => tablesFrom(one([]), 'x.tables.json').get('MISSING'), /has no table MISSING/);
+});
+
+test("R1184t D2: the engine's own loads work under --enable-source-maps, and from a path with a space and parentheses (#941)", () => {
+  // The built engine (dist/src, its source maps included) copied under a directory named like a second unzip, its
+  // dependencies linked; a child imports every module that loads tables, with source maps off and on.
+  const dir = mkdtempSync(join(tmpdir(), 'engine copy (1)-'));
+  try {
+    cpSync(join(repoRoot, 'dist', 'src'), join(dir, 'dist', 'src'), { recursive: true });
+    writeFileSync(join(dir, 'package.json'), '{ "type": "module" }\n');
+    symlinkSync(join(repoRoot, 'node_modules'), join(dir, 'node_modules'));
+    const loaders = ['review', 'delegation', 'merge-policy', 'merge-policy-vacuity', 'merge-policy-weakening', 'hook-imports', 'guardrails/engine', 'os/git', 'events/redact'];
+    const script = `for (const m of ${JSON.stringify(loaders)}) await import(new URL('./dist/src/' + m + '.js', ${JSON.stringify(pathToFileURL(join(dir, 'x')).href)}).href);\nconsole.log('loaded');\n`;
+    for (const flags of [[], ['--enable-source-maps']]) {
+      const r = spawnSync(process.execPath, [...flags, '--input-type=module', '-e', script], { cwd: dir, encoding: 'utf8', env: { ...process.env, NODE_OPTIONS: '' } });
+      assert.equal(r.stdout.trim(), 'loaded', `${flags.join(' ') || 'no flags'}: ${r.stderr.split('\n').find((l) => /Error/.test(l)) ?? r.stderr.slice(0, 300)}`);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("OPEN (R1184p P1, named by the owner; #1251): a built-in the loader calls, replaced before a load, changes what the load returns, frozen like any table", () => {

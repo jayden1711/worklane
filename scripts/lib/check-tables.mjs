@@ -5,6 +5,7 @@
 // and on the same bad files. Scripts fill in no placeholder: the product-rename tool rewrites their files.
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import * as util from 'node:util';
 
 export const TABLES_FILE = /(?:^|\/)[^/]+\.tables\.json$/;
 export const TABLE_NAME = /^[A-Z][A-Z0-9_]*$/;
@@ -125,36 +126,19 @@ export function tablesFrom(text, file, fill = (s) => s) {
 /** Where the script at `moduleUrl` keeps its tables: its path with the extension replaced by `.tables.json`. */
 export const tablesFileOf = (moduleUrl) => fileURLToPath(moduleUrl).replace(/\.[cm]?[jt]s$/, '') + '.tables.json';
 
-/** The file of the code that called `fn`, from the call stack's text (no write to `import.meta.url` changes it). */
-export function callerFile(fn) {
-  const limit = Error.stackTraceLimit;
-  const o = {};
-  try {
-    Error.stackTraceLimit = 1;
-    Error.captureStackTrace(o, fn);
-  } finally {
-    Error.stackTraceLimit = limit;
-  }
-  return typeof o.stack === 'string' ? frameFile(o.stack) : undefined;
+/** The script that called the function calling this one (src/check-tables.ts callerScript: the same read). */
+function callerScript() {
+  if (typeof util.getCallSites !== 'function') return undefined;
+  return util.getCallSites(3, { sourceMap: false })[2]?.scriptName;
 }
-
-/** The file of a stack text's first frame (`    at f (file:///x.js:1:2)` or `    at file:///x.js:1:2`). */
-export function frameFile(stack) {
-  const at = stack.split('\n').find((l) => /^ {4}at /.test(l));
-  const m = at === undefined ? null : (/\((\S[^()]*):\d+:\d+\)$/.exec(at) ?? /^ {4}at (?:async )?([^\s()]+):\d+:\d+$/.exec(at));
-  return m?.[1];
-}
-
-/** Whether the stack's `caller` is the script at `url`: the same URL (scripts run unbuilt, with no source map). */
-export const isCaller = (caller, url) => caller !== undefined && caller === url;
 
 /**
  * The tables of the script at `moduleUrl` (its `import.meta.url`), from its own tables file. Throws when it can't, or
  * when `moduleUrl` isn't the calling script's own file (R1184s D1).
  */
 export function tablesOf(moduleUrl) {
-  const caller = callerFile(tablesOf);
-  if (!isCaller(caller, moduleUrl)) throw new Error(`tablesOf: ${moduleUrl} is not the calling module (${caller ?? 'no stack frame'}); a module loads only its own tables, as tablesOf(import.meta.url)`);
+  const caller = callerScript();
+  if (caller === undefined || caller !== moduleUrl) throw new Error(`tablesOf: ${moduleUrl} is not the calling module (${caller ?? 'no stack frame'}); a module loads only its own tables, as tablesOf(import.meta.url)`);
   const file = tablesFileOf(moduleUrl);
   return tablesFrom(readFileSync(file, 'utf8'), file);
 }

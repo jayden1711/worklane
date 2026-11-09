@@ -1,7 +1,7 @@
 // The registered check tables of the engine's own code (#941): a module's tables live in a data-only file beside it,
 // `<module>.tables.json` (`src/review.ts` reads `src/review.tables.json`). The weakening hold reads that file as
 // parsed data, before and after a change, and never runs code (src/merge-policy-weakening.ts, jsonTableFindings). A
-// module loads its own file here, by its own URL (checked against the call stack: callerFile), and gets each table deep-frozen: no write to a table succeeds after
+// module loads its own file here, by its own URL (checked against its call sites: callerScript), and gets each table deep-frozen: no write to a table succeeds after
 // load. What the load returns can still be changed by code that runs before it and replaces a built-in it calls
 // (JSON.parse, Array.prototype.map, Object.freeze, readFileSync): open, named by the owner (R1184p P1; #1251). No path is
 // written at the load site. The load line and each `TABLES.get('NAME')` line can't be removed or
@@ -31,6 +31,7 @@
 // holds the two to the same answers on every tables file in the repo.
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import * as util from 'node:util';
 import { BRAND } from './brand.js';
 
 export type TableKind = 'never-shrink' | 'never-grow' | 'exact';
@@ -193,40 +194,17 @@ export function tablesFrom(text: string, file: string): Tables {
 export const tablesFileOf = (moduleUrl: string): string => fileURLToPath(moduleUrl).replace(/\.[cm]?[jt]s$/, '') + '.tables.json';
 
 /**
- * The file of the code that called `fn`, read from the call stack's text: the module V8 is running, which no write to
- * `import.meta.url` changes. Undefined when the stack has no frame for it, or a frame not in V8's own format (code
- * that replaced V8's stack hook: the built-in class, open, #1251). It never sets that hook itself (src/ may not:
- * test/slot-path.test.ts, #806).
+ * The script that called the function calling this one, from V8's structured call sites (node:util getCallSites,
+ * with source maps off, so `--enable-source-maps` changes nothing): the module V8 is running, which no write to
+ * `import.meta.url` changes. It sets no stack hook (src/ may not: test/slot-path.test.ts, #806), and it reads no stack
+ * text, so a path with parentheses or spaces is read as it is. Undefined when Node has no getCallSites (the engines
+ * floor, 22.13, has it with the sourceMap option), so the load is refused: fail closed.
  */
-export function callerFile(fn: (...a: never[]) => unknown): string | undefined {
-  const limit = Error.stackTraceLimit;
-  const o: { stack?: unknown } = {};
-  try {
-    Error.stackTraceLimit = 1;
-    Error.captureStackTrace(o, fn);
-  } finally {
-    Error.stackTraceLimit = limit;
-  }
-  return typeof o.stack === 'string' ? frameFile(o.stack) : undefined;
+function callerScript(): string | undefined {
+  if (typeof util.getCallSites !== 'function') return undefined;
+  // [0] is this function, [1] tablesOf, [2] its caller.
+  return util.getCallSites(3, { sourceMap: false })[2]?.scriptName;
 }
-
-/** The file of a stack text's first frame (`    at f (file:///x.js:1:2)` or `    at file:///x.js:1:2`). */
-export function frameFile(stack: string): string | undefined {
-  const at = stack.split('\n').find((l) => /^ {4}at /.test(l));
-  const m = at === undefined ? null : (/\((\S[^()]*):\d+:\d+\)$/.exec(at) ?? /^ {4}at (?:async )?([^\s()]+):\d+:\d+$/.exec(at));
-  return m?.[1];
-}
-
-/**
- * Whether the stack's `caller` is the module at `url`: the same URL, or, with source maps on, its source's name
- * (`dist/src/x.js` shown as `src/x.ts`, whose tables file is the same data at the same commit).
- */
-export const isCaller = (caller: string | undefined, url: string): boolean => {
-  if (caller === undefined) return false;
-  if (caller === url) return true;
-  const stem = (u: string) => u.replace(/\/dist\//, '/').replace(/\.[cm]?[jt]s$/, '');
-  return /\.[cm]?ts$/.test(caller) && /\.[cm]?js$/.test(url) && stem(caller) === stem(url);
-};
 
 /**
  * The tables of the module at `moduleUrl` (its `import.meta.url`), read from its own tables file. Throws when it can't,
@@ -235,8 +213,8 @@ export const isCaller = (caller: string | undefined, url: string): boolean => {
  * can't load another file's tables as its own.
  */
 export function tablesOf(moduleUrl: string): Tables {
-  const caller = callerFile(tablesOf);
-  if (!isCaller(caller, moduleUrl)) throw new Error(`tablesOf: ${moduleUrl} is not the calling module (${caller ?? 'no stack frame'}); a module loads only its own tables, as tablesOf(import.meta.url)`);
+  const caller = callerScript();
+  if (caller === undefined || caller !== moduleUrl) throw new Error(`tablesOf: ${moduleUrl} is not the calling module (${caller ?? 'no stack frame'}); a module loads only its own tables, as tablesOf(import.meta.url)`);
   const file = tablesFileOf(moduleUrl);
   return tablesFrom(readFileSync(file, 'utf8'), file);
 }
