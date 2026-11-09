@@ -464,11 +464,11 @@ test('the owner\'s option (b), zero subtests: a gate or a sign test whose functi
 });
 
 test('R1169o C4: a local the allowlist excuses is pinned by what makes it carry the sign, so an edit to it is a change', () => {
-  const text = `import { lingerEnabled } from '../src/os.js';\nconst SUDO = machineTool('sudo');\nconst canSwitch = spawnSync(SUDO, ['-n', 'true']).status === 0;\ntest('n', { skip: !canSwitch && 'x' }, () => {});\n`;
-  const texts = new Map([['test/isolate.ts', `export const machineTool = (t) => ['${sd.slice(0, 6)}ctl'].includes(t);\n`], ['src/os.ts', `export const lingerEnabled = () => run('loginctl');\n`], ['test/x.test.ts', `import { machineTool } from './isolate.js';\n${text}`]]);
+  const text = `import { lingerEnabled } from '../src/os.js';\nconst SUDO = hostTool('sudo');\nconst canSwitch = spawnSync(SUDO, ['-n', 'true']).status === 0;\ntest('n', { skip: !canSwitch && 'x' }, () => {});\n`;
+  const texts = new Map([['test/host.ts', `export const hostTool = (t) => ['${sd.slice(0, 6)}ctl'].includes(t);\n`], ['src/os.ts', `export const lingerEnabled = () => run('loginctl');\n`], ['test/x.test.ts', `import { hostTool } from './host.js';\n${text}`]]);
   const usesOf = (p: string) => sa.signUseList(ts, p, texts.get(p)!).map((u) => u.pin);
-  const allow = (pin: string[]) => ({ uses: { 'test/isolate.ts': { why: 'x', uses: usesOf('test/isolate.ts') }, 'src/os.ts': { why: 'x', uses: usesOf('src/os.ts') } }, skipImports: { 'test/x.test.ts: canSwitch': { why: 'sudo', pin } } as never });
-  const pin = ["const SUDO = machineTool('sudo');", "const canSwitch = spawnSync(SUDO, ['-n', 'true']).status === 0;", 'import test/isolate.ts: machineTool'];
+  const allow = (pin: string[]) => ({ uses: { 'test/host.ts': { why: 'x', uses: usesOf('test/host.ts') }, 'src/os.ts': { why: 'x', uses: usesOf('src/os.ts') } }, skipImports: { 'test/x.test.ts: canSwitch': { why: 'sudo', pin } } as never });
+  const pin = ["const SUDO = hostTool('sudo');", "const canSwitch = spawnSync(SUDO, ['-n', 'true']).status === 0;", 'import test/host.ts: hostTool'];
   assert.deepEqual(sa.signProblems(ts, texts, allow(pin)), []);
   const edited = new Map([...texts, ['test/x.test.ts', texts.get('test/x.test.ts')!.replace("status === 0;", "status === 0 && lingerEnabled() !== null;")]]);
   assert.match(sa.signProblems(ts, edited, allow(pin)).join('\n'), /test\/x\.test\.ts: a skip reads test\/x\.test\.ts: canSwitch, named in the allowlist's skipImports, but what makes it carry systemd's sign isn't its pin there/);
