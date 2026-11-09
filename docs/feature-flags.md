@@ -33,8 +33,13 @@ new behaviour can be tried on one repo before it reaches the rest. Code: `src/co
     timeout ends the tick and the process): before any later change, once, so a flag the default branch turns on
     again has both records. Each entry keeps the log's position when the flag went off, and leaves the file once the
     log has an off row of that flag stored after it, checked at every tick and at a process's start: so an entry left
-    behind (a stop, a flush outside a tick, a rewrite that failed) is dropped, never written again. A save that fails
-    (a full disk) is tried again at every tick.
+    behind (a stop, a flush outside a tick, a rewrite that failed) is dropped, never written again. The position is
+    the log's last row, by its id and its stamp, so an entry from another log is told apart: a log restored from a
+    backup (the updater's rollback restores migration backups), replaced, or a position past every row. Such an
+    entry, at a process's start, is written once to this log if it still reads the flag on, else dropped. An import
+    with `--force` removes the file with the log it replaces. If the log can't be read when the file is judged, its
+    flags stay off, with no record, until a later tick can. A save that fails (a full disk) is tried again at every
+    tick.
     The coordinator adopts flags even when refreshing its config failed.
   - It reads `flags:` in plain code, not through the zod schema.
   - A coordinator started on the checkout's config (main's invalid or missing) adopts nothing until main's config is

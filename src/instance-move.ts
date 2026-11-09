@@ -17,6 +17,7 @@ import { openWaiting } from './events/open.js';
 import { BRAND } from './brand.js';
 import { writeGroupOnly, writeOwnerOnly } from './os/index.js';
 import { isNativeGuardPath } from './slot-file.js';
+import { OFF_FILE } from './flags.js';
 
 export const BUNDLE_FORMAT = `${BRAND.cli}-bundle`;
 const EVENTS = 'events.db';
@@ -124,6 +125,9 @@ export function importBundle(o: { file: string; stateDir: string; root: string |
   const b = readBundle(o.file);
   if (existsSync(join(o.stateDir, EVENTS)) && !o.force) throw new Error(`${o.stateDir} already has history (${EVENTS}): nothing imported. Pass --force to replace it (export it first if it matters)`);
   const r: ImportResult = { state: [], config: [], configDiffers: [], skipped: [] };
+  // The flags' unrecorded offs are this log's (R1173x X2): a log imported over it never had them. Gone with it; the
+  // bundle's own, from the log it carries, comes in with that log.
+  if (o.force) rmSync(join(o.stateDir, OFF_FILE), { force: true });
   const cfgDir = o.root ? join(o.root, BRAND.configDir) : null;
   const hasConfig = cfgDir !== null && existsSync(cfgDir);
   for (const f of b.files) {
