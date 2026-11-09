@@ -444,9 +444,19 @@ test('R1231d T1 (healthy): a crash restart long before the flag went on, then a 
 
 test('R1231d T2 (healthy): a clean stop and start mid-soak (an engine update): promoted', () => {
   const stopped = ev('coordinator.stopped', { instance: 'i', clean: true, ms: 1, pending: [] }, hoursAgo(70));
-  const s = status({ e1: [started(101, 1), on(100), ...merges(2, 80), stopped, started(69.9, 2), ...merges(1, 50), tick()], p1: [], p2: [], p3: [] });
+  // The owner's decision (b), 2026-11-09: a start is life only once a tick follows it. A healthy coordinator ticks
+  // after its restart, as a live one does (here every 20 min, under live_minutes), so this log ticks after it.
+  const ticking = (from: number, to: number) => Array.from({ length: Math.floor((from - to) * 3 + 1e-9) + 1 }, (_, k) => tick(from - k / 3));
+  const s = status({ e1: [started(101, 1), on(100), ...merges(2, 80), stopped, started(69.9, 2), ...ticking(69.85, 50.05), ...merges(1, 50), ...ticking(49.95, 0.05)], p1: [], p2: [], p3: [] });
   assert.equal(s.rings[0]!.state, 'promoted', s.rings[0]!.why);
   assert.match(s.next, /^turn it on for ring first/);
+});
+
+test('R1231d T2b (the owner\'s decision (b)): the same engine update, but the restarted coordinator never ticks until now: its 70 h from the start to its first tick is no soak, so it is held', () => {
+  const stopped = ev('coordinator.stopped', { instance: 'i', clean: true, ms: 1, pending: [] }, hoursAgo(70));
+  const s = status({ e1: [started(101, 1), on(100), ...merges(2, 80), stopped, started(69.9, 2), ...merges(1, 50), tick()], p1: [], p2: [], p3: [] });
+  assert.equal(s.rings[0]!.state, 'soaking', s.rings[0]!.why);
+  assert.doesNotMatch(s.next, /^turn it on for ring first/);
 });
 
 // --- R1231f: the cases its review found missing (attacks-1231f/r1231f-cases.test.mjs, ported 1:1) ---
