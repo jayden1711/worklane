@@ -456,7 +456,7 @@ const ALWAYS_L3: readonly string[] = TABLES.get('ALWAYS_L3');
 
 // The lock data, checked against its sources at load (lockDataProblems): a drifted table stops the engine.
 const LOCK_DATA_PROBLEMS = lockDataProblems();
-if (LOCK_DATA_PROBLEMS.length) throw new Error(`src/review.tables.json: ${LOCK_DATA_PROBLEMS.join('; ')}`);
+if (LOCK_DATA_PROBLEMS.length) throw new Error(`src/review.ts's data: ${LOCK_DATA_PROBLEMS.join('; ')}`);
 
 /** What a change to this path changes, in plain words (the self-modification part it falls in, in this scope), or null. */
 export function selfModificationPart(path: string, scope?: LockScope): string | null {

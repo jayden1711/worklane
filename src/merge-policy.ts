@@ -181,7 +181,7 @@ const FLOOR: readonly string[] = tablesOf(import.meta.url).get('FLOOR');
 export const floorProblems = (floor: readonly string[] = FLOOR): string[] =>
   [...Object.keys(LOCKED_CATEGORIES), ...ODD_PATH_CATEGORIES, DIFF_HIDING_ATTRIBUTES].filter((c) => !floor.includes(c)).map((c) => `FLOOR doesn't hold ${c}`);
 // Checked at load: a drifted table stops the engine (test/check-tables-sync.test.ts tries it).
-if (floorProblems().length) throw new Error(`src/merge-policy.tables.json: ${floorProblems().join('; ')}`);
+if (floorProblems().length) throw new Error(`src/merge-policy.ts's data: ${floorProblems().join('; ')}`);
 
 /**
  * The categories that always wait for a human: review.yaml's L3, CI config, the agents' own instructions (built in;

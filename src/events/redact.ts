@@ -121,7 +121,7 @@ const REPLACERS: Readonly<Record<string, (match: string, ...groups: string[]) =>
 function replacementOf(rep: string | { replacer: string }): Replacement {
   if (typeof rep === 'string') return rep;
   const f = REPLACERS[rep.replacer];
-  if (!f) throw new Error(`redact.tables.json: no replacer ${rep.replacer}`);
+  if (!f) throw new Error(`src/events/redact.ts's data: no replacer ${rep.replacer}`);
   return f;
 }
 
@@ -431,7 +431,7 @@ export function redactTableProblems(
   if (glued.at(-1) !== DASHBOARD_KEY_PREFIX) out.push("GLUED_PREFIXES doesn't end with DASHBOARD_KEY_PREFIX");
   return out;
 }
-if (redactTableProblems().length) throw new Error(`src/events/redact.tables.json: ${redactTableProblems().join('; ')}`);
+if (redactTableProblems().length) throw new Error(`src/events/redact.ts's data: ${redactTableProblems().join('; ')}`);
 
 /** What every rule of `rules` finds in `s`: on the text as it was, and again with a boundary at each glue point. */
 function allSpans(s: string, rules: readonly (readonly [RegExp, Replacement])[]): Span[] {

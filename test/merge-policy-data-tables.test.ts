@@ -21,7 +21,7 @@ const REG = 'removes or changes the mark that registers a check, a check-table o
 const UNREADABLE = "can't read a change to check it, so it may weaken a check";
 
 /** The pure hold for a change given as each file's text before and after (null: not there), its lines as a diff gives them. */
-function weakens(before: Record<string, string | null>, after: Record<string, string | null>): string[] {
+function weakens(before: Record<string, string | null>, after: Record<string, string | null>, tablesFiles?: ReadonlySet<string>): string[] {
   const minus = (a: string[], b: string[]) => {
     const left = [...b];
     return a.filter((x) => {
@@ -39,7 +39,7 @@ function weakens(before: Record<string, string | null>, after: Record<string, st
     return { path, added: added.length, removed: removed.length, addedLines: added, removedLines: removed };
   });
   const deleted = new Set(paths.filter((p) => after[p] == null));
-  return kinds(weakening.weakeningReasons({ files, deleted, before: (p) => before[p] ?? null, after: (p) => after[p] ?? null, scope: undefined }));
+  return kinds(weakening.weakeningReasons({ files, deleted, before: (p) => before[p] ?? null, after: (p) => after[p] ?? null, scope: undefined, ...(tablesFiles ? { tablesFiles } : {}) }));
 }
 
 const F = 'src/x-rules.tables.json';
@@ -136,4 +136,26 @@ test("R1184i's false holds pass now: #1141 (a name added to an import from a tab
   // An import of a module with tables, widened.
   const live = "import { gitSpawnSync } from '../os/git.js';\nvoid gitSpawnSync;\n";
   assert.deepEqual(weakens({ 'src/config/live.ts': live }, { 'src/config/live.ts': live.replace('{ gitSpawnSync }', '{ gitExecFileSync, gitSpawnSync }') }), []);
+});
+
+test('a tables file under a guard path is judged by its parsed compare alone: an entry appended, a comment edited, a re-indent pass; an entry lost waits (#941, R1184l)', () => {
+  // src/merge-policy* is a guard path: every removed line of a guard file waits, and JSON has no trailing comma.
+  const G = 'src/merge-policy-x.tables.json';
+  const base = file({ FLOOR_RULES: ['never-shrink', ['a', 'b']] });
+  const at = (text: string) => weakens({ [G]: base }, { [G]: text });
+  assert.deepEqual(at(file({ FLOOR_RULES: ['never-shrink', ['a', 'b', 'c']] })), [], 'an entry appended');
+  assert.deepEqual(at(base.replace('FLOOR_RULES, a probe', 'reworded')), [], 'a comment edited');
+  assert.deepEqual(at(JSON.stringify(JSON.parse(base), null, 4)), [], 're-indented');
+  assert.deepEqual(at(file({ FLOOR_RULES: ['never-shrink', ['a']] })), [SHRUNK], 'an entry lost');
+});
+
+test("a new tables file whose name differs only in case from another's waits: one is written over the other where case folds (#941, R1184l)", () => {
+  const twin = 'src/X-rules.tables.json';
+  assert.deepEqual(weakens({ [F]: BASE }, { [F]: BASE, [twin]: file({ CHECKS: ['never-shrink', ['a']] }) }, new Set([F])), [GONE]);
+  assert.deepEqual(weakens({}, { 'src/y-rules.tables.json': BASE }, new Set([F])), [], 'a new tables file of its own name');
+});
+
+test('a number a table can\'t hold as itself (not finite, or -0) fails to parse, so it waits (#941, R1184l)', () => {
+  for (const n of ['1e400', '-1e400', '-0']) assert.deepEqual(held(`{"CHECKS": {"kind": "never-shrink", "value": [${n}]}}`), [UNREADABLE], n);
+  assert.deepEqual(held(change((t) => (t.CHECKS!.value as unknown[]).push(0, 1.5))), [], 'plain numbers added');
 });

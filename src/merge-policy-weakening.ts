@@ -13,7 +13,8 @@
 //     (never-grow); its name sets a floor its mark can only add to (ALLOW_NAMED, RULE_NAMED);
 //   - a data table (#941: `<module>.tables.json`, the engine's own tables), read as parsed data, never run: a table or
 //     the file gone, a table's kind changed, an entry lost or changed in a never-shrink table, or added or changed in a
-//     never-grow one; a file that doesn't parse;
+//     never-grow one; a file that doesn't parse; a new one whose name differs only in case from another's; and in any
+//     JS or TS file, a removed or changed line that loads one (TABLE_LOAD);
 //   - a registration mark the default branch has, gone or changed while what it registers is still there (#869);
 //   - in a registered table's file, an added line that could hide the table from the reader (an escaped name, a
 //     declaration with its name on the next line);
@@ -379,6 +380,11 @@ export interface WeakeningInput {
    * what it makes is never read. Absent: the change isn't a merge.
    */
   conflicts?: readonly string[];
+  /**
+   * Every tables file (`<module>.tables.json`) the change's base has, for the case-folded name check (#941). Absent:
+   * only the changed files are compared with each other.
+   */
+  tablesFiles?: ReadonlySet<string>;
 }
 
 /** Each kind of weakening, in the words a reason uses, in the order reasons are given. */
@@ -395,6 +401,7 @@ const KINDS = {
   'allow-file': "adds a line to an allowlist file or a package manager's settings file",
   'table-used': "changes a check's or guard's table outside its own list",
   'table-hidden': "adds a line that could hide a check's table from the line reader, an escaped name, a name on the next line or a global binding",
+  'table-load-gone': "removes or changes the line that loads a check's table from its data",
   'guard-lines': 'removes or changes a line of a guard or lint',
   marker: 'adds a line with a skip, only or lint or type-check suppression mark',
 } as const;
@@ -406,6 +413,12 @@ export const WEAKENING_REASON = 'design: may weaken a check: ';
 
 /** Whether a reason is the hold on a conflict with the tip in a check's file (GitHub's own conflict state may send it to the conflict fix first). */
 export const isTipConflict = (reason: string): boolean => reason.startsWith(`${WEAKENING_REASON}${KINDS['tip-conflict']} (`);
+
+/**
+ * A line that loads a table (#941): a module's own load, any `.tables.json` name, or a generated copy's marker line
+ * (scripts/lib/table-copies.mjs, scripts/lib/redact-vendor.mjs). A removed or changed one waits.
+ */
+export const TABLE_LOAD = /tablesOf\(\s*import\.meta\.url\s*\)|\.tables\.json\b|\/\/ (?:BEGIN|END) tables from |TABLES_DATA = /;
 
 /** A JSON value as text, its keys sorted at every depth: the same data gives the same text. */
 const canonical = (v: unknown): string => {
@@ -1056,7 +1069,9 @@ function findings(i: WeakeningInput): Found {
       hit('unreadable', f.path, `its diff has ${added.length} added and ${removed.length} removed lines, git counts ${f.added} and ${f.removed}`);
       continue;
     }
-    const [test, fixture, guard, bats] = [isTest(f.path), isFixture(f.path), isGuard(f.path), f.path.endsWith('.bats')];
+    // A tables file is judged by its parsed compare alone (#941, R1184l): an entry appended to a JSON list rewrites the
+    // old last line (no trailing comma), so the removed-line rule would hold an addition the compare lets pass.
+    const [test, fixture, guard, bats] = [isTest(f.path), isFixture(f.path), isGuard(f.path) && !dataTables(f.path), f.path.endsWith('.bats')];
     if (test && i.deleted.has(f.path)) hit('test-file-deleted', f.path);
     for (const l of removed) {
       const t = l.trim();
@@ -1070,6 +1085,25 @@ function findings(i: WeakeningInput): Found {
 
   // The data tables (#941), compared before and after as parsed data.
   for (const f of i.files) if (dataTables(f.path)) jsonTableFindings(f.path, i.before, i.after, hit);
+  // A tables file the change adds whose name differs only in case from another's (R1184l #4): on a checkout that folds
+  // case, one is written over the other, and the module reads data the compare never saw.
+  const fold = (p: string) => p.toLowerCase();
+  const tablesFiles = [...new Set([...(i.tablesFiles ?? []), ...i.files.map((f) => f.path).filter((p) => dataTables(p) && !i.deleted.has(p))])];
+  for (const f of i.files) {
+    if (!dataTables(f.path) || i.deleted.has(f.path) || i.tablesFiles?.has(f.path)) continue;
+    const twin = tablesFiles.find((p) => p !== f.path && fold(p) === fold(f.path));
+    if (twin) hit('table-gone', f.path, `its name differs only in case from ${twin}`);
+  }
+  // A line that loads a table, removed or changed (#941, the owner's rule of 2026-11-08): the module's load
+  // (`tablesOf(import.meta.url)`), any `.tables.json` name (an import, a require, a read), or a generated copy's marker.
+  // It waits whatever replaces it: what the code reads after may not be the table the compare reads.
+  // A comment that only names a tables file is no load (a generated copy's marker is); a test's lines are held by the
+  // test rules.
+  const commentOnly = (l: string) => /^\s*(?:\/\/|\/\*|\*)/.test(l) && !/\/\/ (?:BEGIN|END) tables from /.test(l);
+  for (const f of i.files) {
+    if (!MARKABLE.test(f.path) || !holds(f.path, i.scope) || isTest(f.path)) continue;
+    for (const l of f.removedLines ?? []) if (TABLE_LOAD.test(l) && !commentOnly(l)) hit('table-load-gone', f.path, l.trim());
+  }
 
   // The registered tables, compared before and after, line by line.
   for (const t of tables) {
@@ -1290,6 +1324,8 @@ function measured(cwd: string, from: string, to: string, files: ChangeFile[], sc
       return texts.get(p) ?? null;
     };
   };
-  const input: WeakeningInput = { files, deleted, moved, before: side(from), after: side(to), scope, marked, ...(conflicts ? { conflicts } : {}) };
+  // The base's tables files, for the case-folded name check: git grep for the key every tables file has.
+  const tablesFiles = new Set(filesWithText(cwd, from, ['"kind"']).filter((p) => TABLES_FILE.test(p)));
+  const input: WeakeningInput = { files, deleted, moved, before: side(from), after: side(to), scope, marked, tablesFiles, ...(conflicts ? { conflicts } : {}) };
   return at ? { ...input, tip: side(at.tip), tipMarked, meet: side(at.meet) } : input;
 }

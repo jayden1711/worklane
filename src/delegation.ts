@@ -23,7 +23,7 @@ export const NEVER_LOOSEN: readonly string[] = tablesOf(import.meta.url).get('NE
 export const neverLoosenProblems = (list: readonly string[] = NEVER_LOOSEN): string[] =>
   [...ODD_PATH_CATEGORIES, DIFF_HIDING_ATTRIBUTES].filter((c) => !list.includes(c)).map((c) => `NEVER_LOOSEN doesn't hold ${c}`);
 // Checked at load: a drifted table stops the engine (test/check-tables-sync.test.ts tries it).
-if (neverLoosenProblems().length) throw new Error(`src/delegation.tables.json: ${neverLoosenProblems().join('; ')}`);
+if (neverLoosenProblems().length) throw new Error(`src/delegation.ts's data: ${neverLoosenProblems().join('; ')}`);
 
 export function protectedCategories(review: { levels: { L3_human: { when: string[] } } }): Set<string> {
   return new Set<string>([...NEVER_LOOSEN, ...Object.keys(LOCKED_CATEGORIES), ...review.levels.L3_human.when]);

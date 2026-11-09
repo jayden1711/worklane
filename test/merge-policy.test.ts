@@ -1182,6 +1182,33 @@ test('weakening backstop (#941): src/ and scripts/ register no table by a mark (
   );
 });
 
+/**
+ * The loader, the parser, the copy generators and the hold's own rule: the only code that may name a tables file or call
+ * the loader other than a table's one load site.
+ */
+const TABLE_LOADER_CODE = ['src/check-tables.ts', 'src/merge-policy-weakening.ts', 'scripts/lib/check-tables.mjs', 'scripts/lib/table-copies.mjs', 'scripts/gen-table-copies.mjs', 'scripts/lib/redact-vendor.mjs'];
+
+test("weakening backstop (#941, the owner's rule of 2026-11-08): each tables file has exactly one load site, its module's, and nothing else in src/ or scripts/ loads a table", () => {
+  const code = (text: string) => text.split('\n').filter((l) => !/^\s*(?:\/\/|\/\*|\*)/.test(l) || /\/\/ (?:BEGIN|END) tables from /.test(l));
+  const sites = new Map<string, string[]>();
+  const stray: string[] = [];
+  for (const f of engineFiles.filter((x) => /^(?:src|scripts)\//.test(x) && markable(x) && !TABLE_LOADER_CODE.includes(x))) {
+    const lines = code(readFileSync(join(repoRoot, f), 'utf8'));
+    const own = f.replace(/\.[cm]?[jt]s$/, '') + '.tables.json';
+    const loads = lines.filter((l) => /tablesOf\(\s*import\.meta\.url\s*\)/.test(l)).length;
+    const begins = lines.filter((l) => l.startsWith('// BEGIN tables from ')).length;
+    // The root updater carries src/events/redact.ts's generated copy, whose one line holds its tables' data (held to it by test/redact-vendored.test.ts).
+    const vendored = lines.filter((l) => l.includes('const TABLES_DATA = ')).length;
+    if (loads + begins) sites.set(own, [...(sites.get(own) ?? []), ...Array<string>(loads + begins).fill(f)]);
+    if (vendored && !/^scripts\/machine\/[^/]+-update\.cjs$/.test(f)) stray.push(`${f}: a TABLES_DATA line outside the updater's redactor copy`);
+    for (const l of lines) if (/tablesFrom\(|\btablesOf\(|\.tables\.json\b/.test(l) && !/tablesOf\(\s*import\.meta\.url\s*\)/.test(l) && !l.startsWith('// ')) stray.push(`${f}: ${l.trim().slice(0, 120)}`);
+  }
+  const files = engineFiles.filter((f) => TABLES_FILE.test(f));
+  assert.deepEqual(files.filter((f) => sites.get(f)?.length !== 1).map((f) => `${f}: ${sites.get(f)?.length ?? 0} load sites ${JSON.stringify(sites.get(f) ?? [])}`), [], 'one load site each: its module\'s tablesOf(import.meta.url), or its generated copy');
+  assert.deepEqual([...sites.keys()].filter((f) => !files.includes(f)), [], 'a load site with no tables file');
+  assert.deepEqual(stray, [], 'only the loader, the parser and the copy generators name a tables file or load one some other way');
+});
+
 test('weakening backstop: every test that lists src/ or scripts/ files is a registered lint test or says why it is not', () => {
   const found = registryProblems(repoTexts());
   assert.ok(found.listing.length > 10, `${found.listing.length} tests list sources`);

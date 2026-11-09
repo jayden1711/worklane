@@ -214,7 +214,7 @@ function replacementOf(rep) {
         return rep;
     const f = REPLACERS[rep.replacer];
     if (!f)
-        throw new Error(`redact.tables.json: no replacer ${rep.replacer}`);
+        throw new Error(`src/events/redact.ts's data: no replacer ${rep.replacer}`);
     return f;
 }
 const PATTERNS = Object.freeze(TABLES.get('PATTERNS').map((e) => Object.freeze([regExpOf(e.re), replacementOf(e.rep), e.kind])));
@@ -379,7 +379,7 @@ function redactTableProblems(patterns = TABLES.get('PATTERNS'), broad = TABLES.g
     return out;
 }
 if (redactTableProblems().length)
-    throw new Error(`src/events/redact.tables.json: ${redactTableProblems().join('; ')}`);
+    throw new Error(`src/events/redact.ts's data: ${redactTableProblems().join('; ')}`);
 function allSpans(s, rules) {
     const spans = [];
     rules.forEach(([re, rep], i) => spansOf(s, re, rep, i, spans));
