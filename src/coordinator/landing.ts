@@ -49,7 +49,8 @@ export const QUESTION_CHARS_MAX = 24_000;
  * then how many more there are and `where` every one is named. The approval binds the full set (the print), not this.
  */
 export function questionLines(held: string[], listed: string[], where: string): string[] {
-  const cut = (l: string) => (l.length > QUESTION_LINE_MAX ? `${l.slice(0, QUESTION_LINE_MAX)}… (cut; in full in ${where})` : l);
+  // A cut line keeps a short hash of the whole line (R1182x): two lines that differ only past the cut never show alike.
+  const cut = (l: string) => (l.length > QUESTION_LINE_MAX ? `${l.slice(0, QUESTION_LINE_MAX)}… (cut; sha256 ${createHash('sha256').update(l).digest('hex').slice(0, 16)}; in full in ${where})` : l);
   const out = held.slice(0, QUESTION_LINES_MAX).map(cut);
   let chars = out.reduce((n, l) => n + l.length, 0);
   let shown = 0;

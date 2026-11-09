@@ -365,6 +365,9 @@ test('Q1 (end to end): the backlog refuses every comment: the land result is sti
   assert.equal(rejected.length, 1, `a final result is written: ${JSON.stringify(results(f))}`);
   assert.match(rejected[0]!.detail, /could not be posted on the issue/);
   assert.ok(f.log.read(0, ['coordinator.error']).some((e) => (e.payload as { kind: string }).kind === 'ask_failed'), 'the failure is recorded');
+  // R1182x: and it says how to answer without the comment (a reply naming the id, the dashboard, or decide).
+  const np = f.log.read(0, ['coordinator.error']).map((e) => e.payload as { kind: string; message: string }).find((e) => e.kind === 'question_not_posted');
+  assert.ok(np && np.message.includes(asked(f).at(-1)!.id) && np.message.includes('naming the id'), JSON.stringify(np));
   f.log.append('decision.answered', { id: asked(f).at(-1)!.id, by: 'example-owner', answer: 'approve' }, 'example-owner', 'human');
   for (let i = 0; i < 3 && !onMain(f).includes('d/CLAUDE.md'); i++) await cycle(f);
   assert.ok(onMain(f).includes('d/CLAUDE.md'), `never landed: ${JSON.stringify(results(f).map((r) => r.outcome))}, questions ${asked(f).length}`);
@@ -378,7 +381,7 @@ test('questionLines: 1500 judged files with 255-character names fit one issue co
   const out = questionLines(held, listed, 'review.level_set event 7');
   const chars = out.reduce((k, l) => k + l.length + 3, 0);
   assert.ok(chars < 40_000, `${chars} characters`);
-  assert.ok(out.slice(0, 3).every((l) => l.endsWith('… (cut; in full in review.level_set event 7)')), 'a long reason is cut and says where it is in full');
+  assert.ok(out.slice(0, 3).every((l) => /… \(cut; sha256 [0-9a-f]{16}; in full in review\.level_set event 7\)$/.test(l)), 'a long reason is cut and says where it is in full');
   assert.match(out.at(-1)!, /^and \d+ more judged files \(1500 in all\), every one named in review\.level_set event 7$/);
   assert.deepEqual(questionLines(['r'], ['a', 'b'], 'w'), ['r', 'a', 'b'], 'a short question is unchanged');
 });
