@@ -200,7 +200,10 @@ export function readInstance(events: readonly StoredEvent[], flag: string, maxEr
     if (!Number.isFinite(ts) || (after && ts < flipTs - 60_000)) skewed = true;
     // R1174j J3: a clean stop, then a start: the time between is no soak (a coordinator stopped 48 of 50 h promoted).
     if (after && e.type === 'coordinator.stopped' && (e.payload as { clean?: boolean }).clean === true) stoppedAt = ts;
-    // A stop or a start ends a run: its gap is the clean stop's (above), not counted twice.
+    // A stop ends a run: the silence from its last tick to the stop is no soak either (R1174m P1, R1174n N1: a host
+    // suspended for 46 h, then a clean stop and restart on resume, promoted); the stop's own time to the next start is
+    // the clean stop's (above). A start ends a run too, so nothing is counted twice.
+    if (after && e.type === 'coordinator.stopped' && prevTick !== null && Number.isFinite(ts) && ts - prevTick > liveMs) downMs += ts - prevTick;
     if (after && (e.type === 'coordinator.stopped' || e.type === 'coordinator.started')) prevTick = null;
     if (after && e.type === 'coordinator.tick' && Number.isFinite(ts)) {
       if (prevTick !== null && ts - prevTick > liveMs) downMs += ts - prevTick;

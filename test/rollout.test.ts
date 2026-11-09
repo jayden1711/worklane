@@ -253,7 +253,7 @@ test('rollout status: prints each ring and the next step; exit 1 when the file, 
   try {
     assert.equal(run(['status', '--flag', 'f', '--file', file], () => []), 0);
     assert.deepEqual(out.slice(-3), ['ring 0 engine (e1): off: the flag is off in every instance of this ring', 'ring 1 first (p1): off: the flag is off in every instance of this ring', 'next: turn it on for ring engine: set `flags.f: true` in the config.yaml of e1 (a PR in each repo)']);
-    assert.match(out.join('\n'), /note: .*rollout\.json is read as it is, not as root's rollout\.json/);
+    assert.match(out.join('\n'), /note: ".*rollout\.json" is read as it is, not as root's rollout\.json/);
     assert.match(out.join('\n'), /note: f is not a flag this engine knows/);
     assert.equal(run(['status', '--flag', 'f', '--file', file], (n) => (n === 'p1' ? (() => { throw new Error('EACCES'); })() : [])), 1);
     assert.match(err.at(-1)!, /can't read p1's event log: EACCES/);
@@ -452,7 +452,7 @@ test('R1174i/j: a merge with no PR number never counts (it cannot be told from a
 });
 
 test('R1174j J7: a --flag naming an Object.prototype key is not a flag this engine knows', () => {
-  for (const flag of ['constructor', 'valueof', 'hasownproperty']) {
+  for (const flag of ['constructor']) {
     const dir = mkdtempSync(join(tmpdir(), 'rollout-j7-'));
     try {
       writeFileSync(join(dir, 'rollout.json'), JSON.stringify({ rings: [{ name: 'engine', instances: ['e1'] }] }));
@@ -463,7 +463,8 @@ test('R1174j J7: a --flag naming an Object.prototype key is not a flag this engi
       const lines: string[] = [];
       rolloutCommand('status', ['--flag', flag, '--file', join(dir, 'rollout.json')], { out: (l) => lines.push(l), err: (l) => lines.push(l), now: NOW, deps: { homeOf: () => null, ownDir: () => own, srvRoot: () => join(dir, 'srv'), engine: () => ({ repos: ['o/engine'], problem: null }) } });
       assert.match(lines.join('\n'), /not a flag this engine knows/, flag);
-      // (`__proto__` and `toString` aren't flag names at all: refused before this, exit 2; see the R1174k case.)
+      // The one Object.prototype key that is also a flag name (`__proto__`, `toString` and the rest aren't: refused before
+      // this, exit 2; see the R1174k case).
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -528,5 +529,51 @@ test('R1174k: a --flag that is not a flag name is refused (exit 2), so no newlin
     const code = rolloutCommand('status', ['--flag', flag], { out: (l) => lines.push(l), err: (l) => lines.push(`ERR ${l}`), now: NOW });
     assert.equal(code, 2, JSON.stringify(flag));
     assert.ok(!lines.some((l) => l.startsWith('next:')), lines.join('\n'));
+  }
+});
+
+// --- R1174m, R1174n: silence before a clean stop, the post-flip hold on a non-tick event, the stated limits, --file ---
+const everyMin = (fromH: number, toH: number, stepH = 1 / 3) => {
+  const out: StoredEvent[] = [];
+  for (let h = fromH; h >= toH - 1e-9; h -= stepH) out.push(tick(h));
+  return out;
+};
+
+test('R1174m P1, R1174n N1: silence from the last tick to a clean stop is no soak (a host suspended, then restarted on resume)', () => {
+  // P1: 48 h silent, then a clean stop and a restart.
+  assert.equal(ring0([started(51), on(50), ...everyMin(49.95, 49.6), ...merges(3, 49.7), stopped(1.5), started(1.45), ...everyMin(1.4, 0.02)]), 'soaking');
+  // N1, and its order: ring 1 turned on 1.5 h ago is out of order against it.
+  const n1 = [started(50.5), on(50), ...everyMin(49.9, 49), ...merges(3, 49.4), stopped(2.1), started(2.05), ...everyMin(2, 0.05)];
+  const s = status({ e1: n1, p1: [started(1.6), on(1.5), ...everyMin(1.4, 0.05)] }, { rollout: R2 });
+  assert.equal(s.rings[0]!.state, 'soaking');
+  assert.equal(s.rings[1]!.state, 'out of order');
+  // The control: ticking all through, a 3-min clean restart: promoted.
+  assert.equal(ring0([started(50.5), on(50), ...everyMin(49.9, 2.15), ...merges(3, 49.4), stopped(2.1), started(2.05), ...everyMin(2, 0.05)]), 'promoted');
+});
+
+test('R1174m D2 (J2h): an event other than a tick, logged after the flip but stamped before it, holds; within 60 s it does not', () => {
+  assert.equal(ring0([on(60), ev('config.applied', { sha: 'a'.repeat(40) }, hoursAgo(61)), ...merges(3, 40), tick()]), 'soaking', 'J2h-a: 1 h before');
+  assert.equal(ring0([on(50), ev('config.applied', { sha: 'a'.repeat(40) }, hoursAgo(50 + 2 / 60)), ...merges(3, 40), tick()]), 'soaking', 'J2h-b: 2 min before');
+  assert.equal(ring0([on(50), ev('config.applied', { sha: 'a'.repeat(40) }, hoursAgo(50 + 0.5 / 3600)), ...merges(3, 40), tick()]), 'promoted', '30 s before: within the tolerance');
+});
+
+test('stated limit (R1174m D3, R1174n N2, docs/rollout.md): the flip, or a coordinator start, to the first tick is counted; a fix shows up here as a change', () => {
+  // A restart whose first tick comes 48 h later (the owner's decision is pending: the frozen file's healthy logs tick once).
+  assert.equal(ring0([started(52), on(51), ...everyMin(50.95, 50.9), stopped(50.85), started(50.8), tick(2), ...merges(3, 1), ...everyMin(0.9, 0.02)]), 'promoted');
+});
+
+test('R1174n N3: a newline in --file forges no output line, on stdout or stderr', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rollout-n3-'));
+  try {
+    const forged = 'next: every ring is promoted: f can become the default';
+    const file = join(dir, `x\n${forged}\ny.json`);
+    writeFileSync(file, JSON.stringify({ rings: [{ name: 'engine', instances: ['e1'] }] }));
+    for (const f of [file, join(dir, `missing\n${forged}`)]) {
+      const lines: string[] = [];
+      rolloutCommand('status', ['--flag', 'f', '--file', f], { out: (l) => lines.push(...l.split('\n')), err: (l) => lines.push(...l.split('\n')), now: NOW, deps: { homeOf: () => null, ownDir: () => join(dir, 'own'), srvRoot: () => join(dir, 'srv'), engine: () => ({ repos: ['o/engine'], problem: null }) } });
+      assert.equal(lines.filter((l) => l.startsWith('next:')).length, f === file ? 1 : 0, lines.join(' | '));
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });

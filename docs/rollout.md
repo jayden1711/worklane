@@ -129,7 +129,9 @@ It opens every event log read-only and changes nothing.
   engine's own repo (it still prints what it could).
 - **Exit 2:** a usage error.
 
-`--file <path>` reads another rollout file as it is (not checked as root's), and says so.
+`--file <path>` reads another rollout file as it is (not checked as root's), and says so. A limit: it still exits 0
+when everything else would, so a script can't tell a try-out from root's file by the exit code alone (the frozen
+acceptance file's healthy CLI cases run with `--file` and expect 0); read the note.
 
 ## What it can never do
 
@@ -141,8 +143,10 @@ It opens every event log read-only and changes nothing.
   a desktop instance in another user's home is read only when it's in a ring.
 - **It can't keep an admin's edit of `rollout.json` safe from a rename at the same moment:** the rename rewrites the
   file whole (atomically for readers), and the machine lock doesn't cover a hand edit.
-- **It can't see silence between the flip and the first tick after it:** the gaps it takes off are between two
-  ticks, so a coordinator that hung right after logging the flip has that time counted until its next tick.
+- **It can't see silence from the flip, or from a coordinator start, to the first tick after it:** the gaps it takes
+  off are between two ticks, or from a tick to a stop, so a coordinator that hung right after logging the flip, or
+  after starting, has that time counted until its next tick. A test pins this; closing it needs the frozen acceptance
+  file's sparse healthy logs changed, which is the owner's decision.
 - **It can't tell a clock that was behind at boot:** the soak counts wall-clock time, so a host booted with its clock
   at the time it shut down (no RTC), then stepped forward by NTP after the flip, has its downtime counted as soak.
   Keep the host clock synced at boot. A test pins this limit, so a fix shows up as a change.

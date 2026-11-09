@@ -119,9 +119,9 @@ export function rolloutCommand(sub: string | undefined, args: readonly string[],
   try {
     const r = readRollout(file);
     rollout = r.rollout;
-    if (!r.checked) out(`note: ${file} is read as it is, not as root's rollout.json (whose owner and mode are checked): try-out only`);
+    if (!r.checked) out(`note: ${JSON.stringify(file)} is read as it is, not as root's rollout.json (whose owner and mode are checked): try-out only`);
   } catch (e) {
-    err(`can't use ${file ?? 'rollout.json'}: ${(e as Error).message.split('\n')[0]}`);
+    err(`can't use ${file === undefined ? 'rollout.json' : JSON.stringify(file)}: ${(e as Error).message.split('\n')[0]}`);
     return 1;
   }
   const dirOf = (n: string) => instanceDirOf(n, d).dir;
