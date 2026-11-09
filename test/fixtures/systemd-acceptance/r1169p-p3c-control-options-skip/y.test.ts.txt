@@ -1,0 +1,8 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { existsSync, readdirSync } from 'node:fs';
+const UNITS = '/run/systemd/system';
+test('the stand-in reports the unit folder', () => assert.ok(UNITS.startsWith('/')));
+test('acceptance: units are installed in the system folder', { skip: !existsSync(UNITS) && 'no service manager here' }, () => {
+  assert.ok(readdirSync(UNITS).length > 0);
+});

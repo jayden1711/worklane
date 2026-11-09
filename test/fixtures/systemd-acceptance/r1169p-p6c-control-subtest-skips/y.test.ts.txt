@@ -1,0 +1,7 @@
+import { test } from 'node:test';
+import { spawnSync } from 'node:child_process';
+test('acceptance: every installed unit restarts', async (t) => {
+  for (const u of ['worklane.service']) await t.test(u, { skip: process.env.NEVER !== '1' && 'linux' }, () => {
+    if (spawnSync('systemctl', ['restart', u]).status !== 0) throw new Error(u);
+  });
+});

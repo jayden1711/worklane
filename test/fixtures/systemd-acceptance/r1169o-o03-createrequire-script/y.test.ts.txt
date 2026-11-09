@@ -1,0 +1,8 @@
+import { test } from 'node:test';
+import { createRequire } from 'node:module';
+import { join } from 'node:path';
+// As test/claude-accounts-retired.test.ts loads scripts/machine/worklane-machine.cjs.
+const probe = createRequire(import.meta.url)(join(process.cwd(), 'scripts', 'ci', 'host-probe.cjs'));
+test('acceptance: the engine unit restarts after a crash', { skip: !probe.booted() && 'needs the service manager' }, () => {
+  throw new Error('would really run here');
+});

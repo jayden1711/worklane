@@ -258,5 +258,98 @@
     0,
     "^$",
     "test/y\\.test\\.ts:\\d+: y: a unit restarts"
+  ],
+  "r1169o-o01-helper-registers": [
+    2,
+    "test/helpers/cases\\.ts: \\d+ use\\(s\\) of systemd's sign outside"
+  ],
+  "r1169o-o02-zero-subtests": [
+    1,
+    "acceptance: each engine unit restarts after a crash: ran no subtest"
+  ],
+  "r1169o-o03-createrequire-script": [
+    2,
+    "a skip reads \\?: \\*, which carries"
+  ],
+  "r1169p-p1-helper-registers": [
+    2,
+    "test/helpers/unit-cases\\.ts: \\d+ use\\(s\\) of systemd's sign outside"
+  ],
+  "r1169p-p1c-control-in-test-file": [
+    1,
+    "acceptance: the engine unit restarts after a crash: SKIP needs passwordless sudo"
+  ],
+  "r1169p-p2-src-holder-body-skip": [
+    1,
+    "acceptance: the engine keeps running after its user logs out \\(linger\\): (didn't run|SKIP)",
+    "test/y\\.test\\.ts:\\d+: acceptance: the engine keeps running after its user logs out"
+  ],
+  "r1169p-p2b-src-holder-early-return": [
+    1,
+    "acceptance: the engine keeps running after its user logs out \\(linger\\): (didn't run|failed)",
+    "test/y\\.test\\.ts:\\d+: acceptance: the engine keeps running after its user logs out"
+  ],
+  "r1169p-p2c-control-options-skip": [
+    2,
+    "a skip reads src/os/probe\\.ts: lingerEnabled, which carries"
+  ],
+  "r1169p-p3-allowlisted-local-body-skip": [
+    1,
+    "acceptance: units are installed in the system folder: SKIP no service manager here",
+    "test/y\\.test\\.ts:\\d+: acceptance: units are installed in the system folder"
+  ],
+  "r1169p-p3b-allowlisted-local-early-return": [
+    0,
+    "^$",
+    "test/y\\.test\\.ts:\\d+: acceptance: units are installed in the system folder"
+  ],
+  "r1169p-p3c-control-options-skip": [
+    2,
+    "a skip reads test/y\\.test\\.ts: UNITS, which carries"
+  ],
+  "r1169p-p4-nameless-test": [
+    2,
+    "test/y\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside"
+  ],
+  "r1169p-p4b-nameless-suite": [
+    2,
+    "test/y\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside"
+  ],
+  "r1169p-p4c-control-named": [
+    2,
+    "test/y\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside"
+  ],
+  "r1169p-p5-gate-namesake": [
+    1,
+    "acceptance: the engine unit restarts: (failed|TODO)",
+    "test/y\\.test\\.ts:6: acceptance: the engine unit restarts\\n"
+  ],
+  "r1169p-p5c-control-renamed": [
+    1,
+    "acceptance: the engine unit restarts \\(journal\\): (failed|TODO)"
+  ],
+  "r1169p-p6-zero-subtests": [
+    1,
+    "acceptance: every installed unit restarts: ran no subtest"
+  ],
+  "r1169p-p6c-control-subtest-skips": [
+    1,
+    "its subtest \"worklane\\.service\" SKIP linux"
+  ],
+  "r1169p-p7-journal-stream": [
+    2,
+    "test/y\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside"
+  ],
+  "r1169p-p7c-control-invocation-id": [
+    2,
+    "test/y\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside"
+  ],
+  "r1169p-p8-pin-multiline-line2": [
+    2,
+    "test/y\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside"
+  ],
+  "r1169p-p8c-control-line1": [
+    2,
+    "test/y\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside"
   ]
 }

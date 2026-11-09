@@ -1,0 +1,1 @@
+{ "uses": { "test/y.test.ts": { "why": "a stand-in systemctl's script (data)", "uses": ["systemctl: const STUB = `#!/bin/sh"] } }, "skipImports": {}, "runtime": {} }

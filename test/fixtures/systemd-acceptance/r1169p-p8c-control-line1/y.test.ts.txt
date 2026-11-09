@@ -1,0 +1,5 @@
+import { test } from 'node:test';
+const STUB = `#!/bin/bash
+echo "systemctl $*" >> "$T/calls"
+`;
+test('the stub is a script', () => { if (!STUB.startsWith('#!')) throw new Error('x'); });

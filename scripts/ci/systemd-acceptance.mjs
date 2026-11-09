@@ -152,11 +152,11 @@ export const gateLikeCount = (text) => skipExprs(text).filter((e) => /(?<![\w$])
  * systemd's sign (R1169k, R1169m): what code that asks "is systemd here?" has to read. The program and folder name
  * (`systemd` as a whole word: `/run/systemd`, `'systemd'`, `systemd-run`; and `systemd1`, its D-Bus name), a name
  * that starts `systemd_` or `SYSTEMD_`, `systemctl`, `journalctl`, `loginctl`, `/proc/1/` (process 1: comm, exe,
- * cmdline), `is-system-running`, `sd_booted`, and the variables systemd sets (INVOCATION_ID, NOTIFY_SOCKET). Read in
+ * cmdline), `is-system-running`, `sd_booted`, and the variables systemd sets (INVOCATION_ID, NOTIFY_SOCKET, JOURNAL_STREAM). Read in
  * every string, template, regex and identifier the parser sees, as written and as decoded (`'\x73ystemd'` too), so a
  * path built from parts (`'/run' + '/systemd'`) still holds one. Comments don't count.
  */
-const SIGN = /(?<![\w$])(?:systemd1?|systemctl|journalctl|loginctl|is-system-running|sd_booted|INVOCATION_ID|NOTIFY_SOCKET)(?![\w$])|(?<![\w$])(?:systemd|SYSTEMD)_|\/proc\/1\//;
+const SIGN = /(?<![\w$])(?:systemd1?|systemctl|journalctl|loginctl|is-system-running|sd_booted|INVOCATION_ID|NOTIFY_SOCKET|JOURNAL_STREAM)(?![\w$])|(?<![\w$])(?:systemd|SYSTEMD)_|\/proc\/1\//;
 
 /** Whether `text` may hold the sign: as written, or behind an escape the parser decodes (`\x73`, `\u0073`). */
 const maySign = (text) => new RegExp(SIGN.source).test(text) || /\\[xu]/.test(text);
@@ -198,10 +198,15 @@ function isSuiteCall(ts, n) {
   if (ts.isPropertyAccessExpression(c) && ts.isIdentifier(c.expression) && /^(?:only|skip|todo)$/.test(c.name.text)) c = c.expression;
   return ts.isIdentifier(c) && (c.text === 'describe' || c.text === 'suite');
 }
-/** A test call's own function: its last argument, when it has a name before it and is a function. */
+/** A test call's own function: its last argument, when it is a function (`test(name, fn)`, `test(options, fn)`, `test(fn)`). */
 const ownFunction = (ts, n) => {
   const fn = n.arguments[n.arguments.length - 1];
-  return n.arguments.length > 1 && fn && (ts.isArrowFunction(fn) || ts.isFunctionExpression(fn)) ? fn : null;
+  return fn && (ts.isArrowFunction(fn) || ts.isFunctionExpression(fn)) ? fn : null;
+};
+/** A test's or suite's name: its first argument when that is text (a string or a template), never an options object (R1169p D3). */
+const nameArg = (ts, n) => {
+  const a = n.arguments[0];
+  return a && (ts.isStringLiteralLike(a) || ts.isTemplateExpression(a)) ? a : null;
 };
 
 /**
@@ -213,8 +218,11 @@ function allowedSpans(ts, sf, testFile) {
   const spans = [];
   const visit = (n) => {
     if (testFile && ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.name.text === 'systemCi' && n.initializer) spans.push([n.initializer.getStart(sf), n.initializer.end]);
-    if ((isTestCall(ts, n) || isSuiteCall(ts, n)) && n.arguments.length) spans.push([n.arguments[0].getStart(sf), n.arguments[0].end]);
-    if (isTestCall(ts, n)) {
+    // Only in a *.test.ts file: the run picks tests from those alone, so a helper module's test() is never run on the
+    // VM, and its function may not hold the sign (R1169o C1, R1169p D1).
+    const name = testFile && (isTestCall(ts, n) || isSuiteCall(ts, n)) ? nameArg(ts, n) : null;
+    if (name) spans.push([name.getStart(sf), name.end]);
+    if (testFile && isTestCall(ts, n)) {
       const fn = ownFunction(ts, n);
       if (fn) spans.push([fn.getStart(sf), fn.end]);
       // A gate's reason: `{ skip: !systemCi && 'needs systemd' }`.
@@ -247,7 +255,9 @@ export function signUseList(ts, path, text) {
       const at = n.getStart(sf);
       if (!spans.some(([a, b]) => at >= a && n.end <= b)) {
         const line = sf.getLineAndCharacterOfPosition(at).line;
-        out.push({ at: `${line + 1}: ${token}`, pin: `${token}: ${lines[line].trim()}` });
+        const last = sf.getLineAndCharacterOfPosition(n.end).line;
+        // Every line the leaf spans (a template over several lines), so a change on any of them is a change (R1169o).
+        out.push({ at: `${line + 1}: ${token}`, pin: `${token}: ${lines.slice(line, last + 1).map((l) => l.trim()).join('\n')}` });
       }
     }
     ts.forEachChild(n, visit);
@@ -258,7 +268,10 @@ export function signUseList(ts, path, text) {
 /** signUseList's places, as `line: token`. */
 export const signUses = (ts, path, text) => signUseList(ts, path, text).map((u) => u.at);
 
-/** A relative specifier from `path`, resolved to a build-root path in `paths` (`./x.js` to `test/x.ts`); else as written. */
+/**
+ * A relative specifier from `path`, resolved to a build-root path in `paths` (`./x.js` to `test/x.ts`); `?` for one
+ * outside them; a package's name as written.
+ */
 function resolveFrom(path, spec, paths) {
   if (!spec.startsWith('.')) return spec;
   const parts = path.split('/').slice(0, -1);
@@ -268,7 +281,8 @@ function resolveFrom(path, spec, paths) {
   }
   const p = parts.join('/');
   for (const c of [p, p.replace(/\.([cm]?)js$/, '.$1ts'), `${p}.ts`, `${p}/index.ts`]) if (paths.has(c)) return c;
-  return p;
+  // A relative module outside what the build compiles (scripts/, a JSON file): not read here, so not known (R1169o C2).
+  return '?';
 }
 
 /**
@@ -302,7 +316,7 @@ export function fileFlow(ts, path, text, source) {
   /** Each declaration: { name, binding (`<module>: <name>` for an import, else null), nodes (what its value comes from) }. */
   const decls = [];
   const add = (scope, nameNode, binding, node) => {
-    const d = { name: nameNode.text, binding, nodes: node ? [node] : [] };
+    const d = { name: nameNode.text, binding, nodes: node ? [node] : [], texts: node ? [textOf(node)] : [] };
     decls.push(d);
     declare(scope, nameNode.text, d);
     return d;
@@ -315,12 +329,17 @@ export function fileFlow(ts, path, text, source) {
     if (ts.isIdentifier(name)) add(scope, name, null, node);
     else for (const e of name.elements ?? []) if (!ts.isOmittedExpression(e)) declAll(scope, e.name, node);
   };
-  /** The module a `require()` or `import()` in `n` loads: its specifier, '?' when it isn't a literal, or null. */
+  /** A statement's text, its whitespace runs made one space: what pins a local the allowlist names (R1169o C4). */
+  const textOf = (n) => statementOf(n).getText(sf).replace(/\s+/g, ' ').trim();
+  /** Names bound to a `createRequire(...)` result, which load a module as `require` does (R1169o C2). */
+  const requires = new Set(['require']);
+  const isCreateRequire = (x) => ts.isCallExpression(x) && ts.isIdentifier(x.expression) && x.expression.text === 'createRequire';
+  /** The module a `require()`, `import()` or createRequire'd call in `n` loads: its specifier, '?' when it isn't a literal, or null. */
   const loads = (n) => {
     let spec = null;
     const walk = (x) => {
       if (spec) return;
-      if (ts.isCallExpression(x) && (x.expression.kind === ts.SyntaxKind.ImportKeyword || (ts.isIdentifier(x.expression) && x.expression.text === 'require'))) spec = x.arguments[0] && ts.isStringLiteralLike(x.arguments[0]) ? x.arguments[0].text : '?';
+      if (ts.isCallExpression(x) && (x.expression.kind === ts.SyntaxKind.ImportKeyword || (ts.isIdentifier(x.expression) && requires.has(x.expression.text)) || isCreateRequire(x.expression))) spec = x.arguments[0] && ts.isStringLiteralLike(x.arguments[0]) ? x.arguments[0].text : '?';
       else ts.forEachChild(x, walk);
     };
     walk(n);
@@ -332,7 +351,33 @@ export function fileFlow(ts, path, text, source) {
     return s;
   };
   const assignments = [];
+  /** What the module exports: name to declaration, `*` re-exports' modules, and the default export's node. */
+  const exported = new Map();
+  const reexportAll = [];
+  let defaultNode = null;
+  const names = (b, out = []) => {
+    if (ts.isIdentifier(b)) out.push(b.text);
+    else for (const e of b.elements ?? []) if (!ts.isOmittedExpression(e)) names(e.name, out);
+    return out;
+  };
+  const exportedNow = (n) => !!(ts.getCombinedModifierFlags?.(n) & ts.ModifierFlags.Export);
   const visit = (n) => {
+    if (ts.isVariableStatement(n) && exportedNow(n)) for (const d of n.declarationList.declarations) for (const x of names(d.name)) exported.set(x, () => scopes.get(sf)?.get(x));
+    else if ((ts.isFunctionDeclaration(n) || ts.isClassDeclaration(n)) && n.name && exportedNow(n)) {
+      if (n.modifiers?.some((m) => m.kind === ts.SyntaxKind.DefaultKeyword)) defaultNode = n;
+      const x = n.name.text;
+      exported.set(x, () => scopes.get(sf)?.get(x));
+    } else if (ts.isExportAssignment(n)) defaultNode = n.expression;
+    else if (ts.isExportDeclaration(n) && !n.isTypeOnly) {
+      const m = n.moduleSpecifier && ts.isStringLiteral(n.moduleSpecifier) ? resolveFrom(path, n.moduleSpecifier.text, source.paths) : null;
+      if (!n.exportClause) reexportAll.push(m ?? '?');
+      else if (ts.isNamedExports(n.exportClause)) {
+        for (const e of n.exportClause.elements) {
+          const local = (e.propertyName ?? e.name).text;
+          exported.set(e.name.text, m ? () => ({ binding: `${m}: ${local}`, nodes: [], texts: [] }) : () => scopes.get(sf)?.get(local));
+        }
+      } else if (m) exported.set(n.exportClause.name.text, () => ({ binding: `${m}: *`, nodes: [], texts: [] }));
+    }
     if (ts.isImportDeclaration(n) && ts.isStringLiteral(n.moduleSpecifier) && n.importClause && !n.importClause.isTypeOnly) {
       const m = resolveFrom(path, n.moduleSpecifier.text, source.paths);
       const c = n.importClause;
@@ -344,6 +389,7 @@ export function fileFlow(ts, path, text, source) {
       add(sf, n.name, `${resolveFrom(path, n.moduleReference.expression.text, source.paths)}: *`, null);
     } else if (ts.isVariableDeclaration(n)) {
       const scope = scopeOf(n);
+      if (n.initializer && isCreateRequire(n.initializer) && ts.isIdentifier(n.name)) requires.add(n.name.text);
       const spec = n.initializer ? loads(n.initializer) : null;
       if (spec) bindAll(scope, n.name, spec === '?' ? '?' : resolveFrom(path, spec, source.paths), '*', n.initializer);
       // systemCi is the gate itself: its declaration is the one place the sign may feed a skip.
@@ -356,7 +402,13 @@ export function fileFlow(ts, path, text, source) {
   };
   visit(sf);
   // An assignment adds where its statement reads from to the declaration it assigns (`if (sign) booted = true`).
-  for (const [id, st] of assignments) resolve(id)?.nodes.push(st);
+  for (const [id, st] of assignments) {
+    const d = resolve(id);
+    if (d) {
+      d.nodes.push(st);
+      d.texts.push(textOf(st));
+    }
+  }
   const sourceOf = (b) => source.carries(b.slice(0, b.lastIndexOf(': ')), b);
   const tainted = new Set();
   /** Whether `node` reads the sign, a carrying binding, a file, or a name already tainted. */
@@ -368,7 +420,7 @@ export function fileFlow(ts, path, text, source) {
       else if (ts.isIdentifier(x) && !(x.parent && ts.isPropertyAccessExpression(x.parent) && x.parent.name === x) && !(x.parent && ts.isPropertyAssignment(x.parent) && x.parent.name === x)) {
         const d = resolve(x);
         if (d && (tainted.has(d) || (d.binding && sourceOf(d.binding)))) hit = true;
-      } else if (ts.isCallExpression(x) && /^(?:readFileSync|readFile)$/.test(ts.isIdentifier(x.expression) ? x.expression.text : ts.isPropertyAccessExpression(x.expression) ? x.expression.name.text : '')) hit = true;
+      } else if (source.fileReads !== false && ts.isCallExpression(x) && /^(?:readFileSync|readFile)$/.test(ts.isIdentifier(x.expression) ? x.expression.text : ts.isPropertyAccessExpression(x.expression) ? x.expression.name.text : '')) hit = true;
       if (!hit) ts.forEachChild(x, walk);
     };
     walk(node);
@@ -378,7 +430,39 @@ export function fileFlow(ts, path, text, source) {
     changed = false;
     for (const d of decls) if (!d.binding && !tainted.has(d) && d.nodes.some((x) => carries(x))) (tainted.add(d), (changed = true));
   }
-  return { sf, resolve, tainted, carries, sourceOf };
+  /**
+   * What makes `d` carry the sign, as text (R1169o C4): its own statements and those of every carrying local it reads,
+   * at any depth, and each carrying binding by name, sorted. A change to any of them changes this.
+   */
+  const chain = (d) => {
+    const seen = new Set();
+    const out = new Set();
+    const go = (x) => {
+      if (seen.has(x)) return;
+      seen.add(x);
+      if (x.binding) return void out.add(`import ${x.binding}`);
+      for (const t of x.texts) out.add(t);
+      const walk = (y) => {
+        if (ts.isIdentifier(y) && !(y.parent && ts.isPropertyAccessExpression(y.parent) && y.parent.name === y)) {
+          const e = resolve(y);
+          if (e && e !== x && (tainted.has(e) || (e.binding && sourceOf(e.binding)))) go(e);
+        }
+        ts.forEachChild(y, walk);
+      };
+      for (const n of x.nodes) walk(n);
+    };
+    go(d);
+    return [...out].sort();
+  };
+  /** Whether the export `name` (`*`: any; `default`) carries the sign; an export this can't find carries it (fail closed). */
+  const exportCarries = (name) => {
+    const one = (d) => !d || tainted.has(d) || (d.binding && sourceOf(d.binding)) || (!d.binding && d.nodes.some((x) => carries(x)));
+    if (name === '*') return [...exported.values()].some((f) => one(f())) || (defaultNode && carries(defaultNode)) || reexportAll.some((m) => source.carries(m, `${m}: *`));
+    if (name === 'default') return defaultNode ? carries(defaultNode) : true;
+    if (exported.has(name)) return one(exported.get(name)());
+    return reexportAll.length ? reexportAll.some((m) => source.carries(m, `${m}: ${name}`)) : true;
+  };
+  return { sf, resolve, tainted, carries, sourceOf, chain, exportCarries };
 }
 
 /**
@@ -389,21 +473,25 @@ export function fileFlow(ts, path, text, source) {
  */
 export function skipReads(ts, path, text, source) {
   if (!/\b(?:skip|todo)\b/.test(text)) return [];
-  const { sf, resolve, tainted, sourceOf } = fileFlow(ts, path, text, source);
+  const { sf, resolve, tainted, sourceOf, chain } = fileFlow(ts, path, text, source);
   const out = new Set();
+  const pins = new Map();
   const read = (n) => {
     if (ts.isIdentifier(n) && !(n.parent && ts.isPropertyAccessExpression(n.parent) && n.parent.name === n)) {
       const d = resolve(n);
       const b = d?.binding;
       if (b && (sourceOf(b) || source.direct?.(b.slice(0, b.lastIndexOf(': ')), b))) out.add(b);
-      else if (d && tainted.has(d)) out.add(`${path}: ${n.text}`);
+      else if (d && tainted.has(d)) {
+        out.add(`${path}: ${n.text}`);
+        pins.set(`${path}: ${n.text}`, chain(d));
+      }
     }
     ts.forEachChild(n, read);
   };
-  // A test's or suite's options (its argument between the name and the function), `t.test(...)`'s included: their
-  // `skip` and `todo`, or the whole argument when it isn't an object literal (`test(name, opts, fn)`).
+  // A test's or suite's options (any argument but a text name and its function, R1169p D3: `test(options, fn)` too),
+  // `t.test(...)`'s included: their `skip` and `todo`, or the whole argument when it isn't an object literal.
   const isCall = (n) => {
-    if (!ts.isCallExpression(n) || n.arguments.length < 3) return false;
+    if (!ts.isCallExpression(n) || n.arguments.length < 2) return false;
     const c = n.expression;
     const last = ts.isPropertyAccessExpression(c) ? c.name.text : ts.isIdentifier(c) ? c.text : '';
     const base = ts.isPropertyAccessExpression(c) && ts.isPropertyAccessExpression(c.expression) ? c.expression.name.text : ts.isPropertyAccessExpression(c) && ts.isIdentifier(c.expression) ? c.expression.text : '';
@@ -418,21 +506,46 @@ export function skipReads(ts, path, text, source) {
     }
   };
   const skips = (n) => {
-    if (isCall(n)) options(n.arguments[1]);
+    if (isCall(n)) {
+      const fn = ownFunction(ts, n);
+      n.arguments.forEach((a, k) => {
+        if (a !== fn && !(k === 0 && (ts.isStringLiteralLike(a) || ts.isTemplateExpression(a)))) options(a);
+      });
+    }
     ts.forEachChild(n, skips);
   };
   skips(sf);
-  return [...out];
+  // Each local's pin (chain): what the allowlist must name it by.
+  return Object.defineProperty([...out], 'pins', { value: pins, enumerable: false });
 }
 
 /** Every build-root file's sign uses, and what makes a binding carry the sign (src/, a holder, `?`, not a named import). */
-function signSource(ts, texts, allow, known = null) {
+export function signSource(ts, texts, allow, known = null) {
   const okImports = allow.skipImports ?? {};
   const uses = known ?? new Map([...texts].map(([p, t]) => [p, signUseList(ts, p, t)]));
   const holders = new Set([...uses].filter(([, u]) => u.length).map(([p]) => p));
   // A binding carries the sign, for a local derived from it, when its module holds the sign or can't be named; a skip
   // that reads a binding directly is refused for any src/ module too (product code is never a test's gate).
-  return { uses, holders, paths: new Set(texts.keys()), carries: (m, b) => !(b in okImports) && (m === '?' || holders.has(m)), direct: (m, b) => !(b in okImports) && m.startsWith('src/') };
+  const base = { uses, holders, paths: new Set(texts.keys()), carries: (m, b) => !(b in okImports) && (m === '?' || holders.has(m)), direct: (m, b) => !(b in okImports) && m.startsWith('src/') };
+  // For picking the VM's tests (signTests, R1169p D2), by name: an import carries the sign when the export it names
+  // reads it in its own module (its own sign, its own locals from it; a module named at run time carries). One module
+  // deep: what that module itself imports isn't followed (else nearly every test is picked: product code reaches the
+  // service layer everywhere). File reads aren't a source here either, or every test that reads a fixture would be.
+  const memo = new Map();
+  const own = { paths: base.paths, fileReads: false, carries: (m) => m === '?' };
+  const select = {
+    ...base,
+    fileReads: false,
+    carries: (m, b) => {
+      if (b in okImports) return false;
+      if (m === '?') return true;
+      const t = texts.get(m);
+      if (t === undefined || !holders.has(m)) return false;
+      if (!memo.has(m)) memo.set(m, fileFlow(ts, m, t, own));
+      return !!memo.get(m).exportCarries(b.slice(b.lastIndexOf(': ') + 2));
+    },
+  };
+  return { ...base, select };
 }
 
 /**
@@ -463,8 +576,15 @@ export function signProblems(ts, texts, allow = {}) {
   for (const p of Object.keys(pinned)) if (!texts.has(p)) out.push(`${p}: named in ${where}, but the build has no such file`);
   const read = new Set();
   for (const [p, t] of texts) {
-    for (const b of skipReads(ts, p, t, source)) {
+    const reads = skipReads(ts, p, t, source);
+    for (const b of reads) {
       read.add(b);
+      // A local is named by what makes it carry the sign (R1169o C4): its pin must be that text, all of it.
+      const pin = reads.pins.get(b);
+      if (pin && b in okImports) {
+        const want = okImports[b]?.pin;
+        if (JSON.stringify(want) !== JSON.stringify(pin)) out.push(`${p}: a skip reads ${b}, named in the allowlist's skipImports, but what makes it carry systemd's sign isn't its pin there (now: ${JSON.stringify(pin).slice(0, 400)}): check it reads no service manager, and pin it again`);
+      }
       if (!(b in okImports)) out.push(`${p}: a skip reads ${b}, which carries systemd's sign (${b.startsWith(`${p}: `) ? 'a local from the sign, an import that carries it, or a file read' : b.startsWith('?: ') ? 'from a module named at run time' : b.startsWith('src/') ? 'from src/' : "from a file that holds systemd's sign"}): gate a test that needs systemd on systemCi; another check goes in the allowlist's skipImports with why`);
     }
   }
@@ -477,14 +597,66 @@ export function signProblems(ts, texts, allow = {}) {
 
 /**
  * The tests in `text` (a built test file, read as `path`, its source's path) the acceptance job runs on the VM besides
- * the gates (R1169n, the owner's decision): each test() or it() call, not inside another test's function, whose own
- * function holds systemd's sign itself. Each as { name (a literal, else null), line, column } of its call, as node
- * reports a test's place. (A skip option reading a name that carries the sign is refused statically, skipReads.)
+ * the gates (R1169n, the owner's decision; R1169p D2): each test() or it() call, not inside another test's function,
+ * whose own function holds systemd's sign or reads a name that carries it (a local from the sign, from an import
+ * that carries it or from a file read, or such an import itself: the static pass's own data, fileFlow). With `all`,
+ * every such call, carrying or not (a gate's own, for its subtests). Each as { name (a text name, else null), line,
+ * column (of its call, as node reports a test's place), label, subtests (its function starts subtests, `x.test(`) }.
+ * `source` as for skipReads.
  */
-export function signTests(ts, path, text) {
-  if (!maySign(text)) return [];
-  const sf = parsed(ts, path, text);
-  const holds = (node) => {
+export function signTests(ts, path, text, source, all = false) {
+  if (!all && !maySign(text) && !/\b(?:import|require)\b/.test(text)) return [];
+  const { sf, resolve, tainted, sourceOf } = fileFlow(ts, path, text, source);
+  const carriesHere = (node) => {
+    let hit = false;
+    const walk = (x) => {
+      if (hit) return;
+      if (leafSign(ts, sf, x)) hit = true;
+      else if (ts.isIdentifier(x) && !(x.parent && ts.isPropertyAccessExpression(x.parent) && x.parent.name === x)) {
+        const d = resolve(x);
+        if (d && (tainted.has(d) || (d.binding && sourceOf(d.binding)))) hit = true;
+      }
+      if (!hit) ts.forEachChild(x, walk);
+    };
+    walk(node);
+    return hit;
+  };
+  const startsSubtests = (fn) => {
+    let hit = false;
+    const walk = (x) => {
+      if (hit) return;
+      if (ts.isCallExpression(x) && ts.isPropertyAccessExpression(x.expression) && x.expression.name.text === 'test') hit = true;
+      else ts.forEachChild(x, walk);
+    };
+    walk(fn);
+    return hit;
+  };
+  // A skip, a todo or an early return one name away from the sign (R1169p D2): an `if` whose condition reads what
+  // carries it and whose branch returns, skips or marks a todo; or `cond && t.skip()`, `cond ? t.skip() : ...`.
+  const stops = (node) => {
+    let hit = false;
+    const walk = (x) => {
+      if (hit || (x !== node && ts.isFunctionLike(x))) return;
+      if (ts.isReturnStatement(x)) hit = true;
+      else if (ts.isCallExpression(x) && ((ts.isPropertyAccessExpression(x.expression) && /^(?:skip|todo)$/.test(x.expression.name.text)) || (ts.isElementAccessExpression(x.expression) && ts.isStringLiteralLike(x.expression.argumentExpression) && /^(?:skip|todo)$/.test(x.expression.argumentExpression.text)))) hit = true;
+      else ts.forEachChild(x, walk);
+    };
+    walk(node);
+    return hit;
+  };
+  const guarded = (fn) => {
+    let hit = false;
+    const walk = (x) => {
+      if (hit) return;
+      if (ts.isIfStatement(x) && carriesHere(x.expression) && (stops(x.thenStatement) || (x.elseStatement && stops(x.elseStatement)))) hit = true;
+      else if (ts.isConditionalExpression(x) && carriesHere(x.condition) && (stops(x.whenTrue) || stops(x.whenFalse))) hit = true;
+      else if (ts.isBinaryExpression(x) && [ts.SyntaxKind.AmpersandAmpersandToken, ts.SyntaxKind.BarBarToken, ts.SyntaxKind.QuestionQuestionToken].includes(x.operatorToken.kind) && carriesHere(x.left) && stops(x.right)) hit = true;
+      else ts.forEachChild(x, walk);
+    };
+    walk(fn);
+    return hit;
+  };
+  const holdsSign = (node) => {
     let hit = false;
     const walk = (x) => {
       if (hit) return;
@@ -498,10 +670,10 @@ export function signTests(ts, path, text) {
   const visit = (n) => {
     if (isTestCall(ts, n)) {
       const fn = ownFunction(ts, n);
-      if (fn && holds(fn)) {
+      if (fn && (all || holdsSign(fn) || guarded(fn))) {
         const { line, character } = sf.getLineAndCharacterOfPosition(n.expression.getStart(sf));
-        const a = n.arguments[0];
-        out.push({ name: a && ts.isStringLiteralLike(a) ? a.text : null, line: line + 1, column: character + 1, label: a ? a.getText(sf).slice(0, 120) : '' });
+        const a = nameArg(ts, n);
+        out.push({ name: a && ts.isStringLiteralLike(a) ? a.text : null, line: line + 1, column: character + 1, label: (a ?? n.arguments[0])?.getText(sf).slice(0, 120) ?? '', subtests: startsSubtests(fn) });
       }
       return;
     }
@@ -562,6 +734,13 @@ export function problems(runs) {
     const inFile = (e) => typeof e.file === 'string' && (e.file.split(sep).join('/').endsWith(`/${built}`) || e.file === built);
     const out = [];
     const matched = new Set();
+    // How many results came just before event `k`, deeper than it: its subtests (the owner's option (b): a test that
+    // starts subtests and ran none, as a loop over nothing, passed having checked nothing, so it fails here).
+    const subtestsOf = (k) => {
+      let c = 0;
+      for (let j = k - 1; j >= 0 && events[j].nesting > events[k].nesting; j--) c++;
+      return c;
+    };
     for (const g of gates) {
       const at = `test/${file}: ${g.name}`;
       const ks = events.flatMap((e, k) => (inFile(e) && e.line === g.line && e.column === g.column && e.name === g.name ? [k] : []));
@@ -578,6 +757,7 @@ export function problems(runs) {
       if (r.type !== 'test:pass') out.push(`${at}: failed`);
       else if (r.skip !== null && r.skip !== false) out.push(`${at}: SKIP${typeof r.skip === 'string' ? ` ${r.skip}` : ''} (it must run here: this is the one place it does)`);
       else if (r.todo !== null && r.todo !== false) out.push(`${at}: TODO${typeof r.todo === 'string' ? ` ${r.todo}` : ''} (it must run here: this is the one place it does)`);
+      else if (g.subtests && !subtestsOf(ks[0])) out.push(`${at}: ran no subtest (its function starts subtests, and none ran: it checked nothing)`);
       else {
         // Its subtests: the events just before it, deeper than it, until one at its depth or shallower.
         for (let k = ks[0] - 1; k >= 0 && events[k].nesting > r.nesting; k--) {
@@ -607,6 +787,10 @@ export function problems(runs) {
         const bad = r.type !== 'test:pass' ? 'failed' : r.skip !== null && r.skip !== false ? `SKIP${typeof r.skip === 'string' ? ` ${r.skip}` : ''}` : r.todo !== null && r.todo !== false ? `TODO${typeof r.todo === 'string' ? ` ${r.todo}` : ''}` : null;
         if (bad && (bad === 'failed' || !why)) {
           out.push(`${at}: ${bad} (its own function holds systemd's sign: it must run here, where systemd is)`);
+          continue;
+        }
+        if (!bad && t.subtests && !subtestsOf(k) && !why) {
+          out.push(`${at}: ran no subtest (its function starts subtests, and none ran: it checked nothing)`);
           continue;
         }
         for (let j = k - 1; j >= 0 && events[j].nesting > r.nesting; j--) {
@@ -694,14 +878,21 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
     found = findAll(join(root, 'test'), 'test/');
     // The tests whose own function holds the sign (R1169n): read from the built files, as the gates are, by the
     // source's path. Each runs here too, its whole file at once, so a test registered only sometimes is seen.
+    // Picked from the static pass's own data (R1169p D2): a test whose function reads a local or an import that
+    // carries the sign is one too. Built text, read as its source's path, so imports resolve against the build roots.
     const excused = allow.runtime ?? {};
+    const source = signSource(ts, texts, allow);
     for (const [p] of texts) {
       if (!p.startsWith('test/') || !p.endsWith('.test.ts')) continue;
       const file = p.slice('test/'.length);
       const built = join(root, 'dist', 'test', file.replace(/\.ts$/, '.js'));
       if (!existsSync(built)) continue;
       const g = found.find((x) => x.file === file);
-      const st = signTests(ts, `dist/test/${file.replace(/\.ts$/, '.js')}`, readFileSync(built, 'utf8')).filter((t) => !g || !g.names.includes(t.name));
+      const builtText = readFileSync(built, 'utf8');
+      // A gate is excluded by its place, never by its name: a namesake elsewhere is its own test (R1169p D4).
+      const gatePlaces = g ? gatesOf(builtText).filter((x) => !x.member).map((x) => `${x.line}:${x.column}`) : [];
+      const st = signTests(ts, p, builtText, source.select).filter((t) => !gatePlaces.includes(`${t.line}:${t.column}`));
+      if (g) g.calls = signTests(ts, p, builtText, source.select, true);
       if (!st.length) continue;
       const f = g ?? (found.push({ file, names: [] }), found.at(-1));
       f.signTests = st;
@@ -717,7 +908,8 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
     // The built files are what runs: each gate's line is read there, and its names must be the source's.
     for (const f of found) {
       const built = readFileSync(join(root, 'dist', 'test', f.file.replace(/\.ts$/, '.js')), 'utf8');
-      f.gates = f.names.length ? gatesOf(built).filter((g) => !g.member) : [];
+      // Each gate with whether its function starts subtests (zero subtests run is a failure, the owner's option (b)).
+      f.gates = f.names.length ? gatesOf(built).filter((g) => !g.member).map((g) => ({ ...g, subtests: (f.calls ?? []).some((c) => c.line === g.line && c.column === g.column && c.subtests) })) : [];
       const a = [...f.names].sort();
       const b = f.gates.map((g) => g.name).sort();
       if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error(`test/${f.file}: its gates ${JSON.stringify(a)} aren't the built file's ${JSON.stringify(b)} (build again)`);

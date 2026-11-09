@@ -1,0 +1,10 @@
+import { test } from 'node:test';
+import { existsSync, readdirSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+const dir = '/etc/worklane/units'; // what the installer writes; not there on the VM either
+test('acceptance: every installed unit restarts', async (t) => {
+  const units = existsSync(dir) ? readdirSync(dir) : [];
+  for (const u of units) await t.test(u, () => {
+    if (spawnSync('systemctl', ['restart', u]).status !== 0) throw new Error(u);
+  });
+});

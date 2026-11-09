@@ -1,0 +1,7 @@
+import { test } from 'node:test';
+import { spawnSync } from 'node:child_process';
+// The units to check come from a list that is empty here (NEVER stands in for what the VM lacks).
+const units = process.env.NEVER === '1' ? ['worklane.service'] : [];
+test('acceptance: each engine unit restarts after a crash', async (t) => {
+  for (const u of units) await t.test(u, () => { spawnSync('systemctl', ['restart', u]); throw new Error('would really run here'); });
+});

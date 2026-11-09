@@ -24,7 +24,9 @@ type Script = {
   gateLikeCount: (text: string) => number;
   signUses: (ts: unknown, path: string, text: string) => string[];
   skipReads: (ts: unknown, path: string, text: string, source: { paths: Set<string>; carries: (m: string, b: string) => boolean; direct?: (m: string, b: string) => boolean }) => string[];
-  signTests: (ts: unknown, path: string, text: string) => { name: string | null; line: number; column: number; label: string }[];
+  signTests: (ts: unknown, path: string, text: string, source: unknown, all?: boolean) => { name: string | null; line: number; column: number; label: string; subtests: boolean }[];
+  signSource: (ts: unknown, texts: Map<string, string>, allow: Allow) => { select: unknown };
+  signUseList: (ts: unknown, path: string, text: string) => { at: string; pin: string }[];
   signProblems: (ts: unknown, texts: Map<string, string>, allow?: Allow) => string[];
 };
 type Allow = { uses?: Record<string, { why: string; uses: string[] }>; skipImports?: Record<string, string>; runtime?: Record<string, string> };
@@ -353,7 +355,8 @@ test("systemd's sign may be only in the flag's declaration, a gate's reason, a t
   assert.deepEqual(uses(`const ${sd}Tests = 1;`), []);
   assert.deepEqual(uses(`export const ${flag} = existsSync('/run/${sd}');`, 'test/helpers.ts'), ['1: systemd']);
   // The tests whose own function holds the sign: the ones the job runs on the VM, a gate's or not, at their call.
-  assert.deepEqual(sa.signTests(ts, 'test/x.test.ts', `test('a', () => {});\n  test('b', async (t) => { await t.test('c', () => { run('${sd}-run'); }); });\ndescribe('d', () => { it(\`e \${1}\`, () => { readlinkSync('/proc/1/exe'); }); });\n`).map((t) => [t.name, t.line, t.column]), [['b', 2, 3], [null, 3, 23]]);
+  const none = { paths: new Set<string>(), carries: () => false };
+  assert.deepEqual(sa.signTests(ts, 'test/x.test.ts', `test('a', () => {});\n  test('b', async (t) => { await t.test('c', () => { run('${sd}-run'); }); });\ndescribe('d', () => { it(\`e \${1}\`, () => { readlinkSync('/proc/1/exe'); }); });\n`, none).map((t) => [t.name, t.line, t.column, t.subtests]), [['b', 2, 3, true], [null, 3, 23, false]]);
 });
 
 test('a skip may not read what carries systemd\'s sign: an import from src/, from a file that holds it or named at run time, or a local from any of those, from the sign or from a file read, through any steps in its file (R1169k, R1169m, R1169n)', () => {
@@ -410,4 +413,63 @@ test("this repo's build roots hold systemd's sign only where the rule or its all
   const allow = JSON.parse(readFileSync(join(repoRoot, 'scripts', 'ci', 'systemd-acceptance-allow.json'), 'utf8')) as Required<Allow>;
   for (const [p, e] of Object.entries(allow.uses)) assert.ok(e.why.trim(), `${p}: named with why`);
   assert.deepEqual(sa.signProblems(ts, texts, allow), []);
+});
+
+test('R1169o/p: the sign is allowed in a test function only in a *.test.ts file; a nameless test reads its options; createRequire and modules outside the build are named at run time; JOURNAL_STREAM is the sign; a pin is every line of its use', () => {
+  const uses = (text: string, path = 'test/x.test.ts') => sa.signUses(ts, path, text);
+  // C1/D1: a helper module's test() is never picked for the VM, so its function may not hold the sign.
+  assert.deepEqual(uses(`export function cases() { test('a unit restarts', () => { run('${sd}-run'); }); }`, 'test/helpers/cases.ts'), ['1: systemd']);
+  assert.deepEqual(uses(`test('a unit restarts', () => { run('${sd}-run'); });`), [], 'in a *.test.ts file it is');
+  // D3: a nameless test's options are options, never a name.
+  assert.deepEqual(uses(`test({ skip: !existsSync('/run/${sd}') && 'x' }, function unitRestarts() {});`), ['1: systemd']);
+  assert.deepEqual(uses(`describe({ skip: !existsSync('/run/${sd}') && 'x' }, () => {});`), ['1: systemd']);
+  const paths = new Set(['test/x.test.ts', 'src/os.ts']);
+  const source = { paths, carries: (m: string) => m === '?' || m === 'src/os.ts', direct: (m: string) => m.startsWith('src/') };
+  const reads = (text: string) => sa.skipReads(ts, 'test/x.test.ts', text, source);
+  assert.deepEqual(reads(`import { up } from '../src/os.js';\ntest({ skip: !up }, () => {});`), ['src/os.ts: up'], 'test(options, fn)');
+  // C2: createRequire, called at once or kept, and a relative module outside the build roots.
+  assert.deepEqual(reads(`const probe = createRequire(import.meta.url)(join(dir, 'host-probe.cjs'));\ntest('n', { skip: !probe.booted() }, () => {});`), ['?: *']);
+  assert.deepEqual(reads(`const req = createRequire(import.meta.url);\nconst probe = req(path);\ntest('n', { skip: !probe.booted() }, () => {});`), ['?: *']);
+  assert.deepEqual(reads(`import probe from '../scripts/ci/host-probe.mjs';\ntest('n', { skip: !probe() }, () => {});`), ['?: default']);
+  // Minor: JOURNAL_STREAM, set by systemd for a unit's output.
+  assert.deepEqual(uses(`const j = process.env.JOURNAL_STREAM;`), ['1: JOURNAL_STREAM']);
+  // A use over several lines is pinned by all of them (R1169o: a change on its second line was missed).
+  assert.deepEqual(sa.signUseList(ts, 'test/x.test.ts', 'const STUB = `#!/bin/sh\nsystemctl is-system-running || exit 77\n`;').map((u) => u.pin), ['systemctl: const STUB = `#!/bin/sh\nsystemctl is-system-running || exit 77\n`;']);
+});
+
+test('R1169p D2: a test whose skip, todo or early return turns on what carries the sign, one name away, is picked for the VM; one that only uses such a name is not', () => {
+  const texts = new Map([
+    ['src/os.ts', `export function lingerEnabled() { return run('loginctl'); }\nexport function plain() { return 1; }\n`],
+    ['test/x.test.ts', ''],
+  ]);
+  const select = sa.signSource(ts, texts, { uses: { 'src/os.ts': { why: 'x', uses: [] } } }).select;
+  const picked = (text: string) => sa.signTests(ts, 'test/x.test.ts', text, select).map((t) => t.name);
+  const head = `import { lingerEnabled, plain } from '../src/os.js';\n`;
+  assert.deepEqual(picked(`${head}test('a', (t) => { const l = lingerEnabled(); if (l === null) { t.skip('x'); return; } });`), ['a'], 'a body skip on a local from it');
+  assert.deepEqual(picked(`${head}test('b', () => { if (lingerEnabled() === null) return; });`), ['b'], 'an early return');
+  assert.deepEqual(picked(`${head}test('c', (t) => lingerEnabled() === null && t.todo('x'));`), ['c'], 'cond && t.todo()');
+  assert.deepEqual(picked(`${head}test('d', () => { assert.equal(lingerEnabled(), true); });`), [], 'used, never a skip or a return on it');
+  assert.deepEqual(picked(`${head}test('e', (t) => { if (plain() === 1) return t.skip(); });`), [], "an export that doesn't carry it");
+  const local = `const UNITS = '/run/${sd}/system';\ntest('f', (t) => { if (!existsSync(UNITS)) return t['skip']('x'); });`;
+  assert.deepEqual(picked(local), ['f'], 'an allowlisted local, and a bracket skip');
+});
+
+test('the owner\'s option (b), zero subtests: a gate or a sign test whose function starts subtests and ran none fails (R1169o C3, R1169p D5)', () => {
+  const t = { name: 'every unit restarts', line: 5, column: 1, label: '', subtests: true };
+  const run = (events: Ev[]) => sa.problems([{ file: 'f.test.ts', gates: [], events, signTests: [t], excused: new Set() } as never]);
+  assert.deepEqual(run([ev('every unit restarts', 5)]), ['test/f.test.ts: every unit restarts: ran no subtest (its function starts subtests, and none ran: it checked nothing)']);
+  assert.deepEqual(run([ev('u1', 6, { nesting: 1 }), ev('every unit restarts', 5)]), []);
+  const gates = [{ name: 'acceptance: g', line: 7, column: 1, subtests: true }];
+  assert.deepEqual(sa.problems([{ file: 'f.test.ts', gates, events: [ev('acceptance: g', 7)] } as never]), ['test/f.test.ts: acceptance: g: ran no subtest (its function starts subtests, and none ran: it checked nothing)']);
+});
+
+test('R1169o C4: a local the allowlist excuses is pinned by what makes it carry the sign, so an edit to it is a change', () => {
+  const text = `import { lingerEnabled } from '../src/os.js';\nconst SUDO = machineTool('sudo');\nconst canSwitch = spawnSync(SUDO, ['-n', 'true']).status === 0;\ntest('n', { skip: !canSwitch && 'x' }, () => {});\n`;
+  const texts = new Map([['test/isolate.ts', `export const machineTool = (t) => ['${sd.slice(0, 6)}ctl'].includes(t);\n`], ['src/os.ts', `export const lingerEnabled = () => run('loginctl');\n`], ['test/x.test.ts', `import { machineTool } from './isolate.js';\n${text}`]]);
+  const usesOf = (p: string) => sa.signUseList(ts, p, texts.get(p)!).map((u) => u.pin);
+  const allow = (pin: string[]) => ({ uses: { 'test/isolate.ts': { why: 'x', uses: usesOf('test/isolate.ts') }, 'src/os.ts': { why: 'x', uses: usesOf('src/os.ts') } }, skipImports: { 'test/x.test.ts: canSwitch': { why: 'sudo', pin } } as never });
+  const pin = ["const SUDO = machineTool('sudo');", "const canSwitch = spawnSync(SUDO, ['-n', 'true']).status === 0;", 'import test/isolate.ts: machineTool'];
+  assert.deepEqual(sa.signProblems(ts, texts, allow(pin)), []);
+  const edited = new Map([...texts, ['test/x.test.ts', texts.get('test/x.test.ts')!.replace("status === 0;", "status === 0 && lingerEnabled() !== null;")]]);
+  assert.match(sa.signProblems(ts, edited, allow(pin)).join('\n'), /test\/x\.test\.ts: a skip reads test\/x\.test\.ts: canSwitch, named in the allowlist's skipImports, but what makes it carry systemd's sign isn't its pin there/);
 });
