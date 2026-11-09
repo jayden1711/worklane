@@ -978,14 +978,17 @@ test("the soak driver counts a detached child and, on Linux, a setsid'd double f
         rmSync(f, { force: true });
       }
     }
-    // Our own files in /dev/shm count toward the disk (Linux).
+    // Our own files in /dev/shm count toward the disk while we hold them (Linux; R1181p D4: only a held one counts, so
+    // this test holds it open: written and closed, it read as another program's, and this assertion failed on CI).
     if (existsSync('/dev/shm')) {
       const shm = join('/dev/shm', `soak-test-${process.pid}`);
       const before = usageOutside('/nonexistent').bytes;
       writeFileSync(shm, 'x'.repeat(4096));
+      const fd = openSync(shm, 'r');
       try {
         assert.ok(usageOutside('/nonexistent').bytes >= before + 4096);
       } finally {
+        closeSync(fd);
         rmSync(shm, { force: true });
       }
     }
