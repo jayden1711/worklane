@@ -4,9 +4,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { delimiter, join } from 'node:path';
+import { chmodSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { devNull, tmpdir } from 'node:os';
+import { delimiter, dirname, join } from 'node:path';
 import { BRAND } from '../src/brand.js';
 import { GuardrailsConfig, TestsConfig } from '../src/config/schema.js';
 import { exampleContext } from '../src/guardrails/check.js';
@@ -14,9 +14,9 @@ import { liveContext } from '../src/guardrails/context.js';
 import { evaluate } from '../src/guardrails/engine.js';
 import { PUSH_GATE_HATCH_ENV, withoutPushGateHatch } from '../src/guardrails/push-hook.js';
 import { runHook } from '../src/hook.js';
-import { childEnv, projectCommand } from '../src/os/index.js';
+import { childEnv, projectCommand, which } from '../src/os/index.js';
 import { projectEnvProblem, safeProjectEnv } from '../src/project-env.js';
-import { agentEnv, runAsEnv } from '../src/runner.js';
+import { agentEnv, agentGitConfig, agentGitConfigText, runAsEnv } from '../src/runner.js';
 import { exampleProject, repoRoot } from './helpers.js';
 
 const cfg = GuardrailsConfig.parse({ version: 1 });
@@ -29,6 +29,52 @@ test('the hatch has the name the push gate hook reads, and the hook knows the ag
   assert.match(hook, new RegExp(`^const HATCH = '${H}';$`, 'm'));
   assert.match(hook, new RegExp(`^const AGENT_MARKER = '${BRAND.envPrefix}_AGENT';$`, 'm'));
   assert.equal(agentEnv({}, 'cli')[`${BRAND.envPrefix}_AGENT`], '1');
+});
+
+test("#983 (the owner's 6c): every agent run's git reads no user config: GIT_CONFIG_GLOBAL is the harness's own read-only file, whatever the base or extra says", { skip: process.platform === 'win32' && 'POSIX modes' }, () => {
+  const harness = agentEnv({}, 'cli').GIT_CONFIG_GLOBAL!;
+  assert.equal(harness, agentGitConfig(''), 'one file per text');
+  assert.equal(readFileSync(harness, 'utf8'), agentGitConfigText(false));
+  assert.equal(statSync(harness).mode & 0o777, 0o444, 'read-only');
+  assert.equal(statSync(dirname(harness)).mode & 0o777, 0o555, 'in a directory nobody adds to');
+  assert.equal(agentEnv({ GIT_CONFIG_GLOBAL: '/tmp/mine' }, 'cli').GIT_CONFIG_GLOBAL, harness, 'from the base environment');
+  assert.equal(agentEnv({}, 'cli', { GIT_CONFIG_GLOBAL: '/tmp/mine' }).GIT_CONFIG_GLOBAL, harness, 'from extra');
+  assert.equal(runAsEnv(agentEnv({}, 'cli'), { user: 'agent1', home: '/home/example' }).GIT_CONFIG_GLOBAL, harness, 'as the agent user');
+  // Measured with git itself: a ~/.gitconfig an agent wrote sets nothing for a git started with that environment.
+  const home = mkdtempSync(join(tmpdir(), 'agent-home-'));
+  writeFileSync(join(home, '.gitconfig'), '[core]\n\thooksPath = /tmp/nohooks\n');
+  const env = { ...agentEnv({ PATH: process.env.PATH ?? '' }, 'cli'), HOME: home, XDG_CONFIG_HOME: join(home, '.config') };
+  const r = spawnSync('git', ['config', '--global', '--get', 'core.hooksPath'], { env, encoding: 'utf8' });
+  assert.equal(r.stdout.trim(), '', "the agent's own ~/.gitconfig is not read");
+  const w = spawnSync('git', ['config', '--global', 'core.hooksPath', '/tmp/x'], { env, encoding: 'utf8' });
+  assert.notEqual(w.status, 0, 'and git config --global can\'t write one');
+  assert.equal(readFileSync(agentGitConfig(process.env.PATH ?? ''), 'utf8'), agentGitConfigText(which('git-lfs') !== null), 'nor change the harness file');
+});
+
+test('#983 R1124p F3: with git-lfs installed, the harness file has the standard large-file filter, so an agent commit stores an LFS-tracked file as a pointer', { skip: process.platform === 'win32' && 'POSIX modes' }, () => {
+  // The text: exactly the four standard keys (the ones the commit scan allows), or nothing.
+  const fake = mkdtempSync(join(tmpdir(), 'fake-lfs-'));
+  writeFileSync(join(fake, 'git-lfs'), '#!/bin/sh\nexit 0\n');
+  chmodSync(join(fake, 'git-lfs'), 0o755);
+  const withLfs = agentEnv({ PATH: fake }, 'cli').GIT_CONFIG_GLOBAL!;
+  assert.equal(readFileSync(withLfs, 'utf8'), agentGitConfigText(true));
+  const read = (k: string) => spawnSync('git', ['config', '--global', '--get', k], { env: { PATH: process.env.PATH ?? '', GIT_CONFIG_GLOBAL: withLfs, GIT_CONFIG_NOSYSTEM: '1' }, encoding: 'utf8' }).stdout.trim();
+  assert.equal(read('filter.lfs.clean'), 'git-lfs clean -- %f');
+  assert.equal(read('filter.lfs.smudge'), 'git-lfs smudge -- %f');
+  assert.equal(read('filter.lfs.process'), 'git-lfs filter-process');
+  assert.equal(read('filter.lfs.required'), 'true');
+  assert.doesNotMatch(readFileSync(agentEnv({ PATH: mkdtempSync(join(tmpdir(), 'no-lfs-')) }, 'cli').GIT_CONFIG_GLOBAL!, 'utf8'), /lfs/, 'no git-lfs: no filter');
+  // End to end with the real git-lfs, when it is installed (R1124p measured a raw 200-byte blob under the null device).
+  if (!which('git-lfs')) return;
+  const d = mkdtempSync(join(tmpdir(), 'lfs-repo-'));
+  const env = { ...agentEnv({ PATH: process.env.PATH ?? '' }, 'cli'), HOME: mkdtempSync(join(tmpdir(), 'home-')), GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 'a', GIT_AUTHOR_EMAIL: 'a@example.com', GIT_COMMITTER_NAME: 'a', GIT_COMMITTER_EMAIL: 'a@example.com' };
+  const g = (...a: string[]) => execFileSync('git', ['-C', d, ...a], { env, encoding: 'utf8' });
+  g('init', '-q', '-b', 'main');
+  writeFileSync(join(d, '.gitattributes'), '*.bin filter=lfs diff=lfs merge=lfs -text\n');
+  writeFileSync(join(d, 'a.bin'), 'x'.repeat(200));
+  g('add', '.gitattributes', 'a.bin');
+  g('commit', '-q', '-m', 'lfs');
+  assert.match(g('cat-file', '-p', 'HEAD:a.bin'), /^version https:\/\/git-lfs\.github\.com\/spec\/v1/, 'stored as a pointer');
 });
 
 test('an agent may not set, export or pass the hatch, in any wrapper', () => {

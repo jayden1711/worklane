@@ -168,6 +168,20 @@ test('checkedPush: a refused range is never pushed; a clean one is', () => {
   assert.equal(git(r.work, 'ls-remote', 'origin', 'refs/heads/task').split('\t')[0], bad);
 });
 
+test("checkedPush's hold (R1183f): asked last, after the limits' git runs, right before the push; a reason pushes nothing", () => {
+  const r = repo();
+  const head = r.commit({ 'a.txt': 'x\n' });
+  const order: string[] = [];
+  const held = checkedPush({ cwd: r.work, remote: 'origin', base: r.baseSha, head, ref: 'refs/heads/task', limits: limits(), guard: guard(), force: true, hold: () => (order.push('hold'), 'auto-merge is stopped: main went red') });
+  assert.deepEqual(held, { ok: false, error: 'auto-merge is stopped: main went red', held: true });
+  assert.equal(git(r.work, 'ls-remote', 'origin', 'refs/heads/task'), '', 'nothing pushed');
+  // Asked only once the limits passed: a refused range never reaches it.
+  const refused = checkedPush({ cwd: r.work, remote: 'origin', base: r.baseSha, head, ref: 'refs/heads/task', limits: limits({ refuse_paths: ['a.txt'] }), guard: guard(), force: true, hold: () => (order.push('hold-2'), null) });
+  assert.ok(!refused.ok && 'refused' in refused);
+  assert.deepEqual(order, ['hold']);
+  assert.deepEqual(checkedPush({ cwd: r.work, remote: 'origin', base: r.baseSha, head, ref: 'refs/heads/task', limits: limits(), guard: guard(), force: true, hold: () => null }), { ok: true });
+});
+
 test('checkedPush without force is compare-and-swap: a moved remote branch is an error, not overwritten', () => {
   const r = repo();
   const a = r.commit({ 'a': '1\n' });
