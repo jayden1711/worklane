@@ -1,0 +1,6 @@
+// as src/runner.ts
+import { launchClaude } from './claude-launch.js';
+export class R {
+  constructor(private bin = 'claude') {}
+  go() { return launchClaude({ bin: this.bin, cwd: '/x' } as never); }
+}

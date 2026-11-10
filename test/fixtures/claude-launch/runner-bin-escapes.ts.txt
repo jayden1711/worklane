@@ -1,0 +1,5 @@
+// as src/runner.ts
+export class R {
+  constructor(private bin = 'claude') {}
+  go() { const b = this.bin; return b; }
+}

@@ -29,6 +29,7 @@ import { mcpRunArgs, type McpRun } from './mcp/client.js';
 import { limitHit, USAGE_LIMIT_TEXT, type LimitHit, type RateLimitInfo } from './usage-limit.js';
 import { authFailedDetail, isAuthFailure } from './claude-auth-failure.js';
 import { EFFORTS, type Effort } from './roles.js';
+import { claudeArgv, launchClaude } from './claude-launch.js';
 import { redactCut, redactString } from './events/redact.js';
 
 export type TerminalReason = 'succeeded' | 'failed' | 'timed_out' | 'stalled' | 'rate_limited' | 'canceled_by_reconciliation' | 'budget_exhausted' | 'auth_mismatch' | 'auth_failed' | 'stopped' | 'stuck';
@@ -464,32 +465,34 @@ const EFFORT_FLAGS = new Set<string>(EFFORTS);
  * stdin and the role's system prompt in a file (`systemPromptFile`).
  */
 /**
- * Roles that load no setting source at all (#973): no project instructions (CLAUDE.md), settings or hooks from the
- * checkout, only the engine's role prompt and its --settings. WHY: a planner's or plan reviewer's checkout is one
- * setup steps have run in, and its instruction files need one review, not two: text there reached every planner.
+ * The argv a run gives claude, built by the one launch function (src/claude-launch.ts, the owner's decision,
+ * 2026-11-09): every run loads no setting source (`--setting-sources ''`: no project settings, hooks or CLAUDE.md from
+ * the checkout, #958 and #973), whatever its role or lane, and takes its settings from `--settings` alone. CI proves it
+ * on the pinned Claude Code (scripts/bootstrap.sh's CLAUDE_VERSION): scripts/ci/setting-sources-probe.mjs.
  */
-export const NO_PROJECT_SOURCE_ROLES: readonly string[] = ['planner', 'plan-reviewer'];
+export function cliArgs(req: RunRequest, settings?: object, systemPromptFile?: string, pluginDirs: readonly string[] = [], mcpConfigFile?: string): string[] {
+  return claudeArgv(launchFields(req, settings, systemPromptFile, pluginDirs, mcpConfigFile));
+}
 
-export function cliArgs(req: RunRequest, settings?: object, systemPromptFile?: string, pluginDirs: readonly string[] = [], mcpConfigFile?: string, o: { guarded?: boolean } = {}): string[] {
-  // A guarded run (the instance's agent settings, #958; the owner's decision, 2026-11-08) and a planner (#973) load no
-  // setting source at all: no project settings, hooks or CLAUDE.md from the checkout. CI proves it on the pinned
-  // Claude Code (scripts/bootstrap.sh's CLAUDE_VERSION) through this runner: scripts/ci/setting-sources-probe.mjs.
-  // Its settings are the instance's own, through --settings.
-  const sources = o.guarded || NO_PROJECT_SOURCE_ROLES.includes(req.role) ? '' : 'project';
-  const args = [...(settings ? ['--settings', JSON.stringify(settings)] : []), '-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--model', req.model, '--setting-sources', sources, '--strict-mcp-config', '--permission-mode', 'dontAsk', '--max-turns', String(req.maxTurns), '--max-budget-usd', String(req.maxBudgetUsd)];
-  // WHY: not on a provider run: whether an open model's endpoint takes the effort parameter is unknown (#579).
-  if (req.effort && EFFORT_FLAGS.has(req.effort) && !req.provider) args.push('--effort', req.effort);
-  if (req.allowedTools.length) args.push('--allowedTools', ...req.allowedTools);
-  if (req.disallowedTools?.length) args.push('--disallowedTools', ...req.disallowedTools);
-  if (systemPromptFile) args.push('--append-system-prompt-file', systemPromptFile);
-  // One flag per approved plugin directory (root's store), never a folder of them: exactly what was checked.
-  for (const d of pluginDirs) args.push('--plugin-dir', d);
-  // The broker's connector, once per approved server (--strict-mcp-config stays: nothing else is read).
-  if (mcpConfigFile) args.push('--mcp-config', mcpConfigFile);
-  if (req.jsonSchema) args.push('--json-schema', JSON.stringify(req.jsonSchema));
-  // claude --help: "-r, --resume [value]  Resume a conversation by session ID". runOnce refuses an id that isn't one.
-  if (req.resume && SESSION_ID.test(req.resume)) args.push('--resume', req.resume);
-  return args;
+/** What a run asks claude for, as launchClaude takes it. */
+function launchFields(req: RunRequest, settings: object | undefined, systemPromptFile: string | undefined, pluginDirs: readonly string[], mcpConfigFile: string | undefined) {
+  return {
+    settings: settings ?? {},
+    mode: 'stream' as const,
+    model: req.model,
+    maxTurns: req.maxTurns,
+    maxBudgetUsd: req.maxBudgetUsd,
+    allowedTools: req.allowedTools,
+    ...(req.disallowedTools ? { disallowedTools: req.disallowedTools } : {}),
+    // WHY: not on a provider run: whether an open model's endpoint takes the effort parameter is unknown (#579).
+    ...(req.effort && EFFORT_FLAGS.has(req.effort) && !req.provider ? { effort: req.effort } : {}),
+    ...(systemPromptFile ? { appendSystemPromptFile: systemPromptFile } : {}),
+    pluginDirs,
+    ...(mcpConfigFile ? { mcpConfigFile } : {}),
+    ...(req.jsonSchema ? { jsonSchema: req.jsonSchema } : {}),
+    // claude --help: "-r, --resume [value]  Resume a conversation by session ID". runOnce refuses an id that isn't one.
+    ...(req.resume && SESSION_ID.test(req.resume) ? { resume: req.resume } : {}),
+  };
 }
 
 /**
@@ -823,10 +826,13 @@ export class CliRunner implements AgentRunner {
     // The stuck-run guard reads the same stream; a stop verdict ends the run only in mode 'on'.
     const stuck = req.stuck && req.stuck.mode !== 'off' ? { mode: req.stuck.mode, detector: new StuckDetector(), stopped: null as StuckVerdict | null } : null;
     return new Promise((resolve) => {
-      const argv = cliArgs(mcpArgs ? { ...req, allowedTools: [...req.allowedTools, ...mcpArgs.allowedTools] } : req, settings, systemPromptFile, plugins?.dirs ?? [], mcpConfigFile, { guarded: guard !== null });
-      const [file, args] = runAs ? asUser(runAs.user, this.bin, argv, runEnv) : [this.bin, argv];
+      const fields = launchFields(mcpArgs ? { ...req, allowedTools: [...req.allowedTools, ...mcpArgs.allowedTools] } : req, settings, systemPromptFile, plugins?.dirs ?? [], mcpConfigFile);
       // As another user, sudo gets only PATH; the agent's environment is passed explicitly through env -i.
-      const child = spawn(file, args, { cwd: req.cwd, env: runAs ? { PATH: ownEnv(env).get('PATH') ?? '' } : runEnv, stdio: ['pipe', 'pipe', 'pipe'], detached: spawnDetached });
+      const viaUser = runAs ? (bin: string, argv: string[], e: NodeJS.ProcessEnv) => {
+        const [file, args] = asUser(runAs.user, bin, argv, e);
+        return { file, args, env: { PATH: ownEnv(env).get('PATH') ?? '' } };
+      } : undefined;
+      const child = launchClaude({ bin: this.bin, cwd: req.cwd, env: runEnv, detached: spawnDetached, ...fields, ...(viaUser ? { asUser: viaUser } : {}) });
       child.stdin.on('error', () => {}); // a run that exits before reading its prompt reports that itself
       child.on('error', cleanup);
       // The prompt is the first user message; the input stays open for console messages until a turn

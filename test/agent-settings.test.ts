@@ -177,7 +177,7 @@ test("acceptance: an instance's agent run gets the hooks with --settings; withou
   c = fakeClaude();
   r = await runner(c.bin).run(req(dir, 'research'));
   assert.equal(r.reason, 'succeeded', r.detail);
-  assert.equal(c.seen()!.settings, null);
+  assert.deepEqual(c.seen()!.settings, {}, 'an empty --settings: every launch carries one, nothing in it');
 
   mkdirSync(join(dir, '.claude'), { recursive: true });
   writeFileSync(join(dir, '.claude', 'settings.json'), JSON.stringify({ env: { [`${BRAND.envPrefix}_AGENT`]: '0' } }));
@@ -199,7 +199,7 @@ test('a run without instance guardrails still gets attribution off in any --sett
   }
   const c = fakeClaude();
   assert.equal((await new CliRunner('cli', childEnv(), c.bin, undefined, lanes).run(req(dir, 'bare'))).reason, 'succeeded');
-  assert.equal(c.seen()!.settings, null, 'no --settings is invented for a run that had none');
+  assert.deepEqual(c.seen()!.settings, {}, 'an empty --settings (every launch carries one, the owner\'s decision of 2026-11-09): nothing is invented in it');
 });
 
 test("the attribution pin can never replace the run's --settings check value: the check key is spread last (#576, #626)", { skip: isWindows && 'POSIX stand-in claude' }, async (t) => {
@@ -364,11 +364,12 @@ test('install --instance points the hooks at the engine as invoked, not the vers
   assert.equal(invokedEngine(join(base, 'release-1', 'cli.js')), join(base, 'release-1', 'cli.js'), 'not a link: itself');
 });
 
-test("#958: an unguarded run loads project settings only (so settings.local.json and CLAUDE.local.md aren't its); a guarded run loads no source at all", () => {
+test("#958 (the owner's decision, 2026-11-09): every run loads no setting source, guarded or not, and always gets --settings and --strict-mcp-config", () => {
   const r = { prompt: 'p', model: 'm', cwd: '/x', allowedTools: [], maxTurns: 1, maxBudgetUsd: 1, stallMs: 1, timeoutMs: 1, role: 'worker' } as Parameters<typeof cliArgs>[0];
   const sources = (args: string[]) => args[args.indexOf('--setting-sources') + 1];
-  assert.equal(sources(cliArgs(r)), 'project');
-  assert.equal(sources(cliArgs(r, undefined, undefined, [], undefined, { guarded: true })), '', 'guarded: no setting source');
+  assert.equal(sources(cliArgs(r)), '', 'no settings given: still no setting source');
+  assert.equal(sources(cliArgs(r, { hooks: {} })), '', 'with settings');
+  assert.ok(cliArgs(r).includes('--strict-mcp-config') && cliArgs(r)[cliArgs(r).indexOf('--settings') + 1] === '{}', 'strict MCP, and --settings even when empty');
 });
 
 test("#958 (the owner's decision, 2026-11-08), acceptance: a guarded run starts claude with --setting-sources '', so nothing in the checkout (settings, hooks, CLAUDE.md) is loaded", { skip: isWindows && 'POSIX stand-in claude' }, async (t) => {

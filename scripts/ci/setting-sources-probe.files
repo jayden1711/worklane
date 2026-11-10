@@ -12,6 +12,7 @@ src/check-source.ts
 src/checkout.ts
 src/ci-none.ts
 src/claude-auth-failure.ts
+src/claude-launch.ts
 src/comment-policy.ts
 src/config/load.ts
 src/config/schema.ts

@@ -43,7 +43,7 @@ test("#958: ci-slow.yml's add-project job runs the setting-sources probe on the 
   assert.match(step.run ?? '', /npm install -g --prefix "\$cc" .*"@anthropic-ai\/claude-code@\$v"/);
   assert.match(step.run ?? '', /node scripts\/ci\/setting-sources-probe\.mjs "\$cc\/bin\/claude"/);
   // The must-fail wrappers around the real claude (R1185n): the probe must exit 1 on each, naming its leak.
-  for (const [w, says] of [['env', 'guarded run'], ['resume', 'guarded resumed run'], ['perm', 'a guarded run ran Write'], ['tool-env', 'guarded worker run'], ['role-prompt', 'guarded worker run'], ['resume-worker', 'guarded resumed run'], ['second-turn', "a guarded run's request"], ['helper', "a guarded run ran the local settings' apiKeyHelper"], ['lane-sandbox', "a guarded run's request carries homeClaudeMd"], ['plugin-locks', "a guarded run's request carries memory"], ['task-file', "a guarded run's request carries rules"], ['no-sandbox', "the guarded run without the sandbox's request carries dotClaudeMd"], ['bash-allow', 'the guarded run without the sandbox ran Bash'], ['nosandbox-worker', "the guarded worker run without the sandbox's request"], ['nosandbox-resume', "the guarded resumed run without the sandbox's request"], ['nosandbox-second-turn', "the guarded run without the sandbox's request carries projectClaudeMd"], ['worktree', "the guarded worker run's request carries localClaudeMd"]]) {
+  for (const [w, says] of [['env', 'guarded run'], ['resume', 'guarded resumed run'], ['perm', 'a guarded run ran Write'], ['tool-env', 'guarded worker run'], ['role-prompt', 'guarded worker run'], ['resume-worker', 'guarded resumed run'], ['second-turn', "a guarded run's request"], ['helper', "a guarded run ran the local settings' apiKeyHelper"], ['lane-sandbox', "a guarded run's request carries homeClaudeMd"], ['plugin-locks', "a guarded run's request carries memory"], ['task-file', "a guarded run's request carries rules"], ['no-sandbox', "the guarded run without the sandbox's request carries dotClaudeMd"], ['bash-allow', 'the guarded run without the sandbox ran Bash'], ['nosandbox-worker', "the guarded worker run without the sandbox's request"], ['nosandbox-resume', "the guarded resumed run without the sandbox's request"], ['nosandbox-second-turn', "the guarded run without the sandbox's request carries projectClaudeMd"], ['worktree', "the guarded worker run's request carries localClaudeMd"], ['checkout-roleprompt', "the guarded automation-shaped run's request carries projectClaudeMd"], ['checkout-role-prompt', "the guarded automation-shaped run's request carries dotClaudeMd"], ['disallowed-tools', "the guarded automation-shaped run's request carries localClaudeMd"], ['no-tools', "the guarded login-check-shaped run's request carries projectClaudeMd"], ['no-task-file', "the guarded login-check-shaped run's request carries dotClaudeMd"], ['effort', "the guarded worker run's request carries rules"], ['plugin-cache', "a guarded run's request carries agent"], ['role-prompt-second-turn', "the guarded worker run with a second turn's request carries projectClaudeMd"], ['json-mode', "the skill-eval launch's request carries projectClaudeMd"]]) {
     assert.match(step.run ?? '', new RegExp(`(^|\\s)${w}:"[^"]*${says}`), `wrap-${w}-leak.cjs runs, and must fail naming its leak`);
     assert.ok(existsSync(join(repoRoot, 'test', 'fixtures', 'setting-sources', `wrap-${w}-leak.cjs`)), `wrap-${w}-leak.cjs is there`);
   }
@@ -51,7 +51,7 @@ test("#958: ci-slow.yml's add-project job runs the setting-sources probe on the 
   const loop = [...(step.run ?? '').matchAll(/(?:^|\s)([\w-]+):"([^"]+)"/g)].map((m) => [m[1]!, m[2]!] as const);
   const fixtures = readdirSync(join(repoRoot, 'test', 'fixtures', 'setting-sources')).filter((f) => /^wrap-.*-leak\.cjs$/.test(f)).map((f) => f.slice(5, -9));
   assert.deepEqual(loop.map(([w]) => w).sort(), fixtures.sort(), 'every wrap-*-leak.cjs runs in the must-fail loop');
-  const shapeKeyed = loop.filter(([w]) => ['second-turn', 'lane-sandbox', 'plugin-locks', 'task-file', 'no-sandbox', 'nosandbox-worker', 'nosandbox-resume', 'nosandbox-second-turn', 'worktree'].includes(w)).map(([, l]) => l);
+  const shapeKeyed = loop.filter(([w]) => ['second-turn', 'lane-sandbox', 'plugin-locks', 'task-file', 'no-sandbox', 'nosandbox-worker', 'nosandbox-resume', 'nosandbox-second-turn', 'worktree', 'checkout-roleprompt', 'checkout-role-prompt', 'disallowed-tools', 'no-tools', 'no-task-file', 'effort', 'plugin-cache', 'role-prompt-second-turn', 'json-mode'].includes(w)).map(([, l]) => l);
   assert.equal(new Set(shapeKeyed).size, shapeKeyed.length, `each shape-keyed wrapper's line is its own: ${shapeKeyed.join(' | ')}`);
   assert.match(step.run ?? '', /SETTING_SOURCES_REAL_CLAUDE="\$cc\/bin\/claude" node scripts\/ci\/setting-sources-probe\.mjs "\$f"/);
   assert.match(step.run ?? '', /then cat [^;]+; echo "the probe passed \$f, which leaks" >&2; exit 1; fi/);
@@ -140,4 +140,17 @@ test("#958 (R1185s S1): the probe loads src/ only through dist(), only what LOAD
   assert.equal((code.match(/\bdist\(/g) ?? []).length, calls.length, 'every dist() call names a literal');
   const entry = /export const HOOK_ENTRY = '([\w/-]+)\.js'/.exec(readFileSync(join(repoRoot, 'src', 'install.ts'), 'utf8'))?.[1];
   assert.ok(entry && readFileSync(join(repoRoot, 'scripts', 'ci', 'setting-sources-probe.files'), 'utf8').split('\n').includes(`src/${entry}.ts`), 'the hook entry is in the closure');
+});
+
+test("#958 (the owner's decision, 2026-11-09): the probe drives every field of the one launch, or names it a limit", () => {
+  const launch = readFileSync(join(repoRoot, 'src', 'claude-launch.ts'), 'utf8');
+  const fields = JSON.parse((/export const LAUNCH_FIELDS = (\[[^\]]*\])/.exec(launch)?.[1] ?? '[]').replace(/'/g, '"')) as string[];
+  const type = /export type ClaudeLaunch = \{([\s\S]*?)\n\};/.exec(launch)?.[1] ?? '';
+  const declared = [...type.matchAll(/^ {2}(\w+)\??:/gm)].map((m) => m[1]);
+  assert.deepEqual([...fields].sort(), [...declared].sort(), 'LAUNCH_FIELDS is every field ClaudeLaunch declares');
+  const probeText = readFileSync(probe, 'utf8');
+  const axes = /const AXES = \{([\s\S]*?)\n\};/.exec(probeText)?.[1] ?? '';
+  const named = [...axes.matchAll(/^ {2}(\w+):/gm)].map((m) => m[1]);
+  assert.deepEqual([...named].sort(), [...fields].sort(), 'the probe names each field: how it drives it, or why not');
+  assert.match(probeText, /for \(const f of LAUNCH_FIELDS\) if \(!\(f in AXES\)\)/, 'and refuses to run without one');
 });

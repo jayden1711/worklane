@@ -13,7 +13,7 @@ test('regression: the prompt never goes on the claude command line (sudo logs co
   assert.ok(!args.some((a) => a.includes('secret plan')), args.join(' '));
   assert.ok(!args.includes('--append-system-prompt'));
   assert.deepEqual(args.slice(args.indexOf('--append-system-prompt-file'), args.indexOf('--append-system-prompt-file') + 2), ['--append-system-prompt-file', '/tmp/x/system-prompt.md']);
-  assert.equal(args[0], '-p');
+  assert.deepEqual([args[0], args[2]], ['--settings', '-p'], 'the settings, then the prompt mode: no prompt text before them');
 });
 
 type Seen = { args: string[]; stdin: string; file: string; system: string; mode: string; identity: string[] };

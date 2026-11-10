@@ -1,0 +1,4 @@
+// as src/x.ts
+import { spawnSync } from './os/child-process.js';
+const bin = 'claude';
+spawnSync(bin, ['-p']);

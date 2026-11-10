@@ -62,7 +62,7 @@ const repoRoot = join(import.meta.dirname, '..', '..');
  * (spawned, so no import reaches it, R1185r D1). Not cli.js, which the runner names by URL only for MCP runs: the
  * probe starts none, and it imports nearly all of src/.
  */
-const LOADS = ['runner', 'install', 'agent-settings', 'brand', 'roles', 'sandbox'];
+const LOADS = ['runner', 'install', 'agent-settings', 'brand', 'roles', 'sandbox', 'claude-launch'];
 const ROOTS = [...LOADS, /\bexport const HOOK_ENTRY = '([\w/-]+)\.js'/.exec(readFileSync(join(repoRoot, 'src', 'install.ts'), 'utf8'))?.[1] ?? 'hook-main'];
 /**
  * The probe's import closure (R1185p D3): ROOTS and every src/ module they import, statically or by a literal
@@ -112,6 +112,40 @@ const { guardrailSettings } = await dist('agent-settings.js');
 const { BRAND } = await dist('brand.js');
 const { rolePrompt, WORKER_SCHEMA } = await dist('roles.js');
 const { sandboxSettings } = await dist('sandbox.js');
+const { launchClaude, LAUNCH_FIELDS, LAUNCH_ENV } = await dist('claude-launch.js');
+
+/**
+ * Every field of src/claude-launch.ts's ClaudeLaunch, the one launch every session goes through (the owner's decision,
+ * 2026-11-09), and how this probe drives it: each guarded run below reaches launchClaude through the runner, in the
+ * combinations production's call sites make (the triples below), and one launches it directly as skill-eval does. A
+ * field named a limit isn't driven. test/setting-sources-probe.test.ts fails if ClaudeLaunch gains a field this doesn't
+ * name.
+ */
+const AXES = {
+  bin: 'the real claude behind the shim (and each must-fail wrapper)',
+  cwd: 'the checkout (Read-only, automation, login check) and a git worktree (worker, fix run)',
+  env: "a task run's (a task file) and a run outside a task's (none); the shim's ANTHROPIC_BASE_URL",
+  asUser: 'limit: another OS user (a lane run as the agent user) needs sudo to one, which CI has but this probe does not make',
+  detached: "as the runner sets it on this OS",
+  settings: 'the instance agent settings with the lane sandbox on, and off (policy.sandbox: false); empty for skill-eval',
+  mode: 'stream (every runner session) and json (skill-eval, launched directly)',
+  model: 'one model',
+  maxTurns: 'the runner\'s',
+  maxBudgetUsd: 'the runner\'s',
+  allowedTools: "Read only, a worker's tools, Read Glob Grep, none (login check, skill-eval)",
+  disallowedTools: "an automation's, and skill-eval's every tool",
+  appendSystemPromptFile: "a role prompt (worker, fix run, automation)",
+  appendSystemPrompt: "skill-eval's system text",
+  jsonSchema: "a worker's and an automation's schema, and skill-eval's",
+  effort: "a role's effort, on the worker runs",
+  resume: 'the fix run resumed, with every source (a control) and guarded, both lane shapes',
+  pluginDirs: 'limit: an approved plugin needs a reviewed store; every guarded run gets the plugin locks and the plugin cache folder instead',
+  mcpConfigFile: 'limit: an approved MCP server needs the broker; every run gets --strict-mcp-config, and the planted .mcp.json is refused',
+};
+for (const f of LAUNCH_FIELDS) if (!(f in AXES)) {
+  console.error(`the launch's field ${f} isn't one this probe names (AXES): drive it, or name it a limit`);
+  process.exit(2);
+}
 /** A coordinator worker run's tools (src/coordinator/fix-runs.ts), for the worker-shaped run (R1185p D2). */
 const WORKER_TOOLS = ['Read', 'Edit', 'Write', 'Glob', 'Grep', 'Bash'];
 
@@ -184,6 +218,9 @@ function plant() {
   git('update-ref', 'refs/remotes/origin/main', 'HEAD');
   mkdirSync(join(root, 'state'), { recursive: true });
   mkdirSync(join(root, 'places'), { recursive: true });
+  // An instance's plugin root, empty, as every instance has once set up: the runner then sets CLAUDE_CODE_PLUGIN_CACHE_DIR
+  // on every guarded run (R1185y N1).
+  mkdirSync(join(root, 'plugins'), { recursive: true });
   writeFileSync(join(root, 'task.json'), JSON.stringify({ id: 'task-7', done_when: [{ manual: 'probe' }], frozen: [], hidden: ['secret/'] }));
   mkdirSync(instanceHome, { recursive: true, mode: 0o700 });
   writeFileSync(join(instanceHome, 'instance.yaml'), `version: 1\nname: probe\nrepos:\n  - path: ${JSON.stringify(repo)}\n    repo: example-org/example-probe\n`);
@@ -373,13 +410,24 @@ async function run(control = null, o = {}) {
     const lanes = o.noSandbox ? { default: {} } : { default: { settings: sandboxSettings({ lane: { allowedDomains: [] }, denyRead: [p.instanceHome] }) } };
     // The plugins function on guarded runs only: with it the runner locks MCP servers (allowedMcpServers) and stops a
     // session that loads one it didn't pass, so a control with it could never show the planted server starting.
-    const plugins = control ? undefined : () => ({ dirs: [], ids: [], pluginRoot: null });
+    const plugins = control ? undefined : () => ({ dirs: [], ids: [], pluginRoot: join(p.root, 'plugins') });
     const runner = new CliRunner('api_key', base, shim(p.root, api.url, control), undefined, lanes, undefined, {}, () => guardrailSettings(p.instanceHome, 'probe', p.repo), o.worker ? keyFile : undefined, undefined, plugins, undefined, p.repo, 'main', undefined, [join(p.root, 'places')]);
-    const task = { lane: 'default', taskFile: join(p.root, 'task.json'), stateDir: join(p.root, 'state'), issue: 7 };
-    const shape = o.worker ? { appendSystemPrompt: rolePrompt(p.repo, 'worker'), jsonSchema: WORKER_SCHEMA, allowedTools: WORKER_TOOLS } : { allowedTools: ['Read'] };
+    // A task run's fields; a run outside a task (an automation, the gardener, corrections, a login check, chat: R1185y
+    // D1) has none, so no task file in its env.
+    const task = o.task === false ? {} : { lane: 'default', taskFile: join(p.root, 'task.json'), stateDir: join(p.root, 'state'), issue: 7 };
+    // The run's own shape: a worker's (its role prompt, schema, tools; `o.effort` as a role's effort, R1185y N1); an
+    // automation's in the checkout (a role prompt, Read Glob Grep, disallowed tools, a schema: automations.ts, the
+    // gardener and corrections are the same shape); a login check's (no tools, interactive: base.ts); else Read only.
+    const shape = o.worker
+      ? { appendSystemPrompt: rolePrompt(p.repo, 'worker'), jsonSchema: WORKER_SCHEMA, allowedTools: WORKER_TOOLS, ...(o.effort ? { effort: o.effort } : {}) }
+      : o.automation
+        ? { appendSystemPrompt: rolePrompt(p.repo, 'worker'), jsonSchema: WORKER_SCHEMA, allowedTools: ['Read', 'Glob', 'Grep'], disallowedTools: ['Bash', 'Write', 'Edit', 'WebFetch'] }
+        : o.login
+          ? { allowedTools: [], interactive: true }
+          : { allowedTools: ['Read'] };
     // A second turn, as the runner delivers a held message once the first ends (onControl's send, R1185r D2).
     const second = o.second ? { onControl: (c) => c.send('probe-2', `${SECOND_TURN}: nothing more to do.`) } : {};
-    r = await runner.run({ ...second, ...task, prompt: 'Do the task.', model: 'claude-sonnet-4-5', cwd, maxTurns: 6, maxBudgetUsd: 1, stallMs: 120_000, timeoutMs: 180_000, role: 'worker', ...shape, ...(o.resume ? { resume: o.resume } : {}) });
+    r = await runner.run({ ...second, ...task, prompt: 'Do the task.', model: 'claude-sonnet-4-5', cwd, maxTurns: 6, maxBudgetUsd: 1, stallMs: 120_000, timeoutMs: 180_000, role: o.automation ? 'automation' : o.login ? 'login-check' : 'worker', ...shape, ...(o.resume ? { resume: o.resume } : {}) });
   } finally {
     if (before === undefined) delete process.env[varName];
     else process.env[varName] = before;
@@ -425,10 +473,23 @@ const leaks = (what, r, readOnly, bash = false) => {
   if (readOnly && bash && r.ran.includes('tool-bash')) problems.push(`${what} ran Bash, which it doesn't allow: a settings file's allow rule was loaded`);
 };
 /** Production's shape (R1185t D1, R1185u N1): the plugin locks in --settings, a task file in the env, and the lane sandbox on, or (`noSandbox`) no sandbox at all. */
-const shaped = (what, r, noSandbox = false) => {
+/**
+ * The run came through the one launch (src/claude-launch.ts): `--settings` first, `--setting-sources ''`,
+ * `--strict-mcp-config`, and the launch's own environment (CLAUDE_CODE_DISABLE_AUTO_MEMORY=1).
+ */
+const launched = (what, r) => {
+  const a = r.given.args;
+  const ok = a[0] === '--settings' && a[a.indexOf('--setting-sources') + 1] === '' && a.includes('--strict-mcp-config') && Object.entries(LAUNCH_ENV).every(([k, v]) => r.given.env[k] === v);
+  if (!ok) problems.push(`${what} didn't come through launchClaude's guards: its argv lacks --settings first, --setting-sources '' or --strict-mcp-config, or its env the launch's own`);
+};
+const shaped = (what, r, noSandbox = false, task = true) => {
+  launched(what, r);
   const settings = JSON.parse(r.given.args[r.given.args.indexOf('--settings') + 1] ?? '{}');
   const sandbox = noSandbox ? !('sandbox' in settings) : settings.sandbox?.enabled === true;
-  if (!sandbox || settings.disableSkillShellExecution !== true || !Object.keys(r.given.env).some((k) => k.endsWith('_TASK_FILE'))) problems.push(`${what} isn't production-shaped: its --settings lacks the plugin locks or ${noSandbox ? 'carries a sandbox' : 'the lane sandbox'}, or its env a task file`);
+  // A task run's env names its task file; a run outside a task's names none (R1185y D1). Every guarded run has the
+  // instance's plugin cache folder (R1185y N1).
+  const taskFile = Object.keys(r.given.env).some((k) => k.endsWith('_TASK_FILE'));
+  if (!sandbox || settings.disableSkillShellExecution !== true || taskFile !== task || !r.given.env.CLAUDE_CODE_PLUGIN_CACHE_DIR) problems.push(`${what} isn't production-shaped: its --settings lacks the plugin locks or ${noSandbox ? 'carries a sandbox' : 'the lane sandbox'}, its env ${task ? 'lacks a task file' : 'names a task file'}, or it has no plugin cache folder`);
 };
 
 const project = await run({ sources: 'project' });
@@ -501,14 +562,50 @@ const LANES = [['', false], [' without the sandbox', true]];
 // its own here, so the stand-in's Bash shows what the tools' environment holds.
 for (const [lane, noSandbox] of LANES) {
   const what = `the guarded worker run${lane}`;
-  const worker = await run(null, { worker: true, noSandbox, work: true });
+  const worker = await run(null, { worker: true, noSandbox, work: true, effort: 'high' });
   say(`guarded, as a worker runs${lane} (--append-system-prompt-file, --json-schema, its tools, apiKeyHelper)`, worker);
   measured(what, worker);
   const arg = (k) => worker.given.args[worker.given.args.indexOf(k) + 1] ?? '';
   if (!worker.given.args.includes('--append-system-prompt-file') || !worker.given.args.includes('--json-schema') || !/"apiKeyHelper"/.test(arg('--settings'))) problems.push(`${what} isn't shaped as a worker's: its argv lacks --append-system-prompt-file, --json-schema or apiKeyHelper in --settings`);
   if (!worker.ran.includes('tool-bash')) problems.push(`${what}'s Bash didn't run, so what its tools see is unmeasured`);
+  // A role's effort reaches the argv (R1185y N1).
+  if (!worker.given.args.includes('--effort')) problems.push(`${what}'s argv has no --effort: a role's effort isn't measured`);
   shaped(what, worker, noSandbox);
   leaks(what, worker, false);
+}
+
+// A worker run's second turn (R1185y N2): production sends a console message to any live run, a worker's included.
+{
+  const what = 'the guarded worker run with a second turn';
+  const r = await run(null, { worker: true, work: true, second: true });
+  say('guarded, as a worker runs, with a second turn', r);
+  measured(what, r);
+  if (!r.secondTurn) problems.push(`${what}: its second turn never reached the stand-in`);
+  shaped(what, r);
+  leaks(what, r, false);
+}
+
+// Guarded runs outside a task (R1185x X1, R1185y D1), in the checkout, with no task file: an automation's (a role
+// prompt, Read Glob Grep, disallowed tools, a schema; the gardener and corrections are the same shape), in both lane
+// shapes, with a second turn; and a login check's (no tools, interactive).
+for (const [lane, noSandbox] of LANES) {
+  const what = `the guarded automation-shaped run${lane}`;
+  const r = await run(null, { automation: true, task: false, noSandbox, second: true });
+  say(`guarded, as an automation runs${lane} (in the checkout, a role prompt, --disallowedTools, no task file)`, r);
+  measured(what, r);
+  if (!r.given.args.includes('--append-system-prompt-file') || !r.given.args.includes('--disallowedTools')) problems.push(`${what} isn't shaped as an automation's: its argv lacks --append-system-prompt-file or --disallowedTools`);
+  if (!r.secondTurn) problems.push(`${what}: its second turn never reached the stand-in`);
+  shaped(what, r, noSandbox, false);
+  leaks(what, r, true, noSandbox);
+}
+{
+  const what = 'the guarded login-check-shaped run';
+  const r = await run(null, { login: true, task: false });
+  say('guarded, as a login check runs (in the checkout, no tools, no task file)', r);
+  measured(what, r);
+  if (r.given.args.includes('--allowedTools') && r.given.args[r.given.args.indexOf('--allowedTools') + 1]) problems.push(`${what} isn't shaped as a login check's: it allows tools`);
+  shaped(what, r, false, false);
+  leaks(what, r, true);
 }
 
 // Resumed (R1185n C3): the only runs that resume are fix runs (src/coordinator/fix-runs.ts), which are worker-shaped,
@@ -533,6 +630,30 @@ for (const [what, control, noSandbox] of [['control', { sources: 'user,project,l
     shaped(`the guarded resumed run${lane}`, r, noSandbox);
     leaks(`the guarded resumed run${lane}`, r, false);
   }
+}
+
+// Skill-eval's launch (src/skilleval.ts cliAsk), straight through launchClaude: one `-p` answer as JSON, in the
+// checkout, no settings of its own (an empty --settings), every tool disallowed, a schema and system text.
+{
+  const what = 'the skill-eval launch';
+  const p = plant();
+  const api = await standIn(p.repo, p.ran);
+  const ranBefore = new Set(readdirSync(p.ran));
+  const child = launchClaude({ bin: shim(p.root, api.url, null), cwd: p.repo, env: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: p.home, CLAUDE_CONFIG_DIR: p.cfg, ANTHROPIC_API_KEY: 'sk-ant-not-a-key' }, settings: {}, mode: 'json', model: 'claude-sonnet-4-5', maxTurns: 3, maxBudgetUsd: 1, allowedTools: [], disallowedTools: ['Bash', 'Edit', 'Write', 'MultiEdit', 'Read', 'Glob', 'Grep', 'WebFetch', 'WebSearch', 'NotebookEdit', 'Task'], jsonSchema: { type: 'object', properties: { ok: { type: 'boolean' } } }, appendSystemPrompt: 'Answer with the schema.' });
+  child.stdout.resume();
+  child.stderr.resume();
+  // A line, as a pipe hands it on (a wrapper that reads its input by line forwards it).
+  child.stdin.end('Is this a skill?\n');
+  await new Promise((res) => child.on('close', res));
+  api.close();
+  const given = JSON.parse(readFileSync(join(p.root, 'given.json'), 'utf8'));
+  const text = api.seen.map((x) => `${JSON.stringify(x.headers)}\n${x.body}`).join('\n');
+  const r = { given, model: api.seen.filter((x) => x.url.startsWith('/v1/messages') && !x.url.includes('count_tokens')), toolRan: false, reached: Object.entries(MARKS).filter(([, m]) => text.includes(m)).map(([k]) => k), ran: readdirSync(p.ran).filter((f) => !ranBefore.has(f)) };
+  say(`${what} (launchClaude directly: -p, --output-format json, every tool disallowed)`, r);
+  if (!r.model.length) problems.push(`${what}: no model call reached the stand-in, so nothing is measured`);
+  if (!given.args.includes('--output-format') || given.args[given.args.indexOf('--output-format') + 1] !== 'json') problems.push(`${what} isn't skill-eval's shape: its argv lacks --output-format json`);
+  launched(what, r);
+  leaks(what, r, true, true);
 }
 
 if (problems.length) {
