@@ -176,16 +176,55 @@ function messageShape(sha) {
   return why.length ? [`${sha.slice(0, 8)}: ${why.join('; and ')}\n    line 1: ${message.split(/\r?\n/)[0]}`] : [];
 }
 
+/** A git config value in the repo the hook runs in, or null when it isn't set. */
+function gitConfig(key) {
+  try {
+    return execFileSync('git', [...GIT_FIXED_ARGS, 'config', '--get', key], { encoding: 'utf8', env: GIT_ENV, stdio: ['ignore', 'pipe', 'ignore'] }).replace(/\n$/, '') || null;
+  } catch {
+    return null;
+  }
+}
+
 /**
- * The message as git will commit it, from the file the commit-msg hook is given: git strips comment lines, what
- * follows a scissors line, and leading blank lines after the hook runs (its default cleanup), so the hook judges that.
+ * The cleanup git applies after the commit-msg hook, as far as a hook can tell (R1260a/b D1): `commit.cleanup` when
+ * set (`default` as unset); otherwise `strip` when the message is edited and `whitespace` when it isn't (-m, -F, -C),
+ * which git tells the hook by running it with GIT_EDITOR=':'. `scissors` cuts only an edited message, as `whitespace`
+ * otherwise. A `--cleanup=` given on the command line isn't visible to a hook: the hook then judges by this mode.
  */
-function asCommitted(text) {
-  const lines = text.split(/\r?\n/);
-  const cut = lines.indexOf('# ------------------------ >8 ------------------------');
-  const kept = (cut === -1 ? lines : lines.slice(0, cut)).filter((l) => !l.startsWith('#'));
-  while (kept.length && kept[0].trim() === '') kept.shift();
-  return kept.join('\n');
+function cleanupMode(env = process.env) {
+  const edited = env.GIT_EDITOR !== ':';
+  const set = gitConfig('commit.cleanup');
+  if (set && set !== 'default') return set === 'scissors' && !edited ? 'whitespace' : set;
+  return edited ? 'strip' : 'whitespace';
+}
+
+/** The comment prefix git uses: core.commentString, else core.commentChar, else `#` (`auto` read as `#`). */
+function commentPrefix() {
+  const c = gitConfig('core.commentString') ?? gitConfig('core.commentChar');
+  return !c || c === 'auto' ? '#' : c;
+}
+
+/**
+ * The message as git will commit it, from the file the commit-msg hook is given, by git's cleanup `mode`: verbatim
+ * changes nothing; strip and scissors cut at the scissors line; strip leaves out comment lines; all but verbatim then
+ * take trailing whitespace off each line, fold runs of blank lines to one, and drop blank lines at the start and the
+ * end. Blank and whitespace are ASCII, as git's isspace (a BOM or NBSP line is not blank: R1260b).
+ */
+function asCommitted(text, mode = 'strip', comment = '#') {
+  if (mode === 'verbatim') return text;
+  let lines = text.split('\n');
+  if (mode === 'strip' || mode === 'scissors') {
+    const cut = lines.indexOf(`${comment} ------------------------ >8 ------------------------`);
+    if (cut !== -1) lines = lines.slice(0, cut);
+  }
+  if (mode === 'strip') lines = lines.filter((l) => !l.startsWith(comment));
+  const out = [];
+  for (const l of lines.map((x) => x.replace(/[ \t\n\v\f\r]+$/, ''))) {
+    if (l !== '') out.push(l);
+    else if (out.length && out.at(-1) !== '') out.push('');
+  }
+  while (out.at(-1) === '') out.pop();
+  return out.join('\n');
 }
 
 // A blob holding a NUL byte is still scanned for the hashed terms, never skipped (#989).
@@ -252,11 +291,13 @@ function gitleaks(commits) {
 
 // The commit-msg hook (#1259; installed by setup-hooks): the message rule alone, before the commit is made, so none is
 // made that the gate would refuse and that would then have to be rewritten. No rules or git are read.
-if (process.argv[2] === '--commit-msg') {
+// R1260a D2: only when the installed stub runs it, which names the message file in PUSH_GATE_COMMIT_MSG too. A pre-push
+// hook's first argument is the remote's name, and a remote may be named `--commit-msg`: that push is judged below.
+if (process.argv[2] === '--commit-msg' && process.argv.length === 4 && process.env.PUSH_GATE_COMMIT_MSG === process.argv[3]) {
   try {
-    const why = messageShapeProblems(asCommitted(readFileSync(process.argv[3], 'utf8')));
+    const why = messageShapeProblems(asCommitted(readFileSync(process.argv[3], 'utf8'), cleanupMode(), commentPrefix()));
     if (why.length) {
-      console.error(`commit refused (the push gate refuses it too): ${why.join('; and ')}`);
+      console.error(`commit refused, by the push gate's message-shape rule: ${why.join('; and ')}`);
       console.error(`Nothing was committed; the message is kept in ${process.argv[3]}. Put the subject alone on line 1 (at most ${SUBJECT_MAX} characters), then a blank line, then the body, and commit again.`);
       process.exit(1);
     }

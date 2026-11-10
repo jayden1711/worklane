@@ -46,7 +46,7 @@ const hooks = join(resolve(git('rev-parse', '--git-common-dir')), 'hooks');
 const hook = join(hooks, 'pre-push');
 const msgHook = join(hooks, 'commit-msg');
 // WHY: checked before anything is written, so a refusal leaves both hooks as they were.
-if (existsSync(msgHook) && !readFileSync(msgHook, 'utf8').includes(MSG_MARKER)) fail(`${msgHook} is another commit-msg hook. Move it aside (or chain the gate's \`node <hooks>/${MSG_GATE}/scripts/push-gate.mjs --commit-msg "$1"\` into it by hand), then run this again.`);
+if (existsSync(msgHook) && !readFileSync(msgHook, 'utf8').includes(MSG_MARKER)) fail(`${msgHook} is another commit-msg hook. Move it aside (or chain the gate's \`PUSH_GATE_COMMIT_MSG="$1" node <hooks>/${MSG_GATE}/scripts/push-gate.mjs --commit-msg "$1"\` into it by hand), then run this again.`);
 mkdirSync(hooks, { recursive: true });
 if (existsSync(hook)) {
   const old = readFileSync(hook, 'utf8');
@@ -73,6 +73,6 @@ for (const f of code) {
   mkdirSync(dirname(join(gateDir, f)), { recursive: true });
   copyFileSync(join(top, f), join(gateDir, f));
 }
-writeFileSync(msgHook, `#!/bin/sh\n${MSG_MARKER} (the push gate's message rule, as installed). Reinstall: npm run setup:hooks\nexec node "$(dirname "$0")/${MSG_GATE}/${code[0]}" --commit-msg "$1"\n`);
+writeFileSync(msgHook, `#!/bin/sh\n${MSG_MARKER} (the push gate's message rule, as installed). Reinstall: npm run setup:hooks\nPUSH_GATE_COMMIT_MSG="$1" exec node "$(dirname "$0")/${MSG_GATE}/${code[0]}" --commit-msg "$1"\n`);
 chmodSync(msgHook, 0o755);
 console.log(`commit-msg hook installed: ${msgHook}`);
