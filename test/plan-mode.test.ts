@@ -4,6 +4,7 @@ import { BRAND } from '../src/brand.js';
 import { loadConfig } from '../src/config/load.js';
 import { gateReasons, needsPlan, objection, PLAN_DISALLOWED, PLAN_GATE_REASON, PLAN_SCHEMA, PLAN_TOOLS, planAnswer, planBrief, planComment, planDecision, planHoldReasons, readPlan } from '../src/plan-mode.js';
 import { ProjectConfig } from '../src/config/schema.js';
+import { readReply } from '../src/decision-reply.js';
 import { exampleProject } from './helpers.js';
 
 const plan = { approach: 'Add an orders table and route totals through it.', steps: ['Add the migration', 'Use it in totals'], files: ['migrations/002_orders.sql', 'src/price.js'], risks: ['Old rows without an order id'], questions: ['Keep the old totals path for a release?'], decisions: { nothing: true as const } };
@@ -81,10 +82,14 @@ test("a held plan's decision: approve builds, revise plans again with the note, 
   assert.deepEqual(d.options, ['approve', 'revise', 'reject']);
   assert.match(d.receipts[0]!, /^holds because high-risk: migration/);
   assert.deepEqual(planAnswer('approve'), { act: 'build' });
-  assert.deepEqual(planAnswer('revise', `Close, but:\n/${BRAND.cli} revise make the migration reversible\nand keep old rows`), { act: 'replan', note: 'make the migration reversible\nand keep old rows' });
-  assert.deepEqual(planAnswer('revise', `/${BRAND.cli} revise`), { act: 'replan', note: 'no note given; plan it again with the risks in mind' });
-  assert.deepEqual(planAnswer('revise', `/${BRAND.cli} revise d-12-a3f9c1 make it reversible`), { act: 'replan', note: 'make it reversible' }, 'the decision id a reply names is not part of the note');
-  assert.deepEqual(planAnswer('revise', `/${BRAND.cli} revise d-12-a3f9c1`), { act: 'replan', note: 'no note given; plan it again with the risks in mind' });
+  // R1182af: planAnswer takes the answering line's note (decision-reply.ts readReply), never the whole comment. The same
+  // comments as before, read through readReply, give the same notes; the parsing cases are in test/decision-reply.test.ts.
+  const noteOf = (body: string) => readReply(body).lines.filter((l) => l.option === 'revise').at(-1)?.note ?? '';
+  assert.deepEqual(planAnswer('revise', noteOf(`Close, but:\n/${BRAND.cli} revise make the migration reversible\nand keep old rows`)), { act: 'replan', note: 'make the migration reversible\nand keep old rows' });
+  assert.deepEqual(planAnswer('revise', noteOf(`/${BRAND.cli} revise`)), { act: 'replan', note: 'no note given; plan it again with the risks in mind' });
+  assert.deepEqual(planAnswer('revise', noteOf(`/${BRAND.cli} revise d-12-a3f9c1 make it reversible`)), { act: 'replan', note: 'make it reversible' }, 'the decision id a reply names is not part of the note');
+  assert.deepEqual(planAnswer('revise', noteOf(`/${BRAND.cli} revise d-12-a3f9c1`)), { act: 'replan', note: 'no note given; plan it again with the risks in mind' });
+  assert.deepEqual(planAnswer('revise', 'keep it smaller'), { act: 'replan', note: 'keep it smaller' }, 'the note as given');
   assert.deepEqual(planAnswer('reject'), { act: 'stop' });
 });
 
