@@ -90,7 +90,9 @@ const INLINE_CHECK = new RegExp(String.raw`^\s*echo "(?:${VAR}|[0-9a-f]{64})  ($
  * The helper named as a path (R1228z/aa D2: the bare stem in a step id or an input's description is no call): the stem
  * after a `/`, or with `.sh` after it.
  */
-const HELPER_PATH = /\/\s*["']?fetch-pinned|fetch-pinned["']?\.sh\b/;
+const HELPER_PATH = /\/\s*fetch-pinned|fetch-pinned\.sh\b/;
+/** Whether a line names the helper as a path, read with its quotes and backslashes taken out (R1228ac D2: `"…/ci/""fetch-pinned"".sh"`, `\fetch-pinned\.sh`). */
+const namesHelperPath = (l: string) => HELPER_PATH.test(l.replace(/["'\\]/g, ''));
 /** `bash` made to name something else: a function (`bash()`, `function bash`), an alias, or `hash -p <path> bash`. */
 // R1228p D1: any function name that ends in `bash` (`/usr/bin/bash() {…}`, `function /usr/bin/bash {…}`); `bashful()` is kept.
 const BASH_REDEFINED = /(?:^|[\s;&|(`{])(?:function\s+\S*\bbash(?![\w-])|\S*\bbash\s*\(\s*\))|\balias\s+(?:-[A-Za-z]+\s+)*bash=|\bhash\s+(?:-[A-Za-z]+\s+)*-[A-Za-z]*p/;
@@ -273,7 +275,7 @@ export function runProblems(run: string, rootStep = false): string[] {
   // R1228p D3: the checkout's helper only as HELPER_LINE: a call in any other form (another `bash`, its URL built from
   // pieces) would run outside both structural rules (the step's shell and the line's /usr/bin/bash -p).
   // R1228r D1, R1228s: by the helper's file stem, any path to it (`scripts/ci/./`, `scripts//ci/`, a quote split).
-  for (const l of lines) if (!/^\s*#/.test(l) && HELPER_PATH.test(l) && !HELPER_LINE.test(l)) out.push(`${HELPER} named other than on a helper line (\`/usr/bin/bash -p "$GITHUB_WORKSPACE/${HELPER}" <url> <pin> <out>\`): ${l.trim()}`);
+  for (const l of lines) if (!/^\s*#/.test(l) && namesHelperPath(l) && !HELPER_LINE.test(l)) out.push(`${HELPER} named other than on a helper line (\`/usr/bin/bash -p "$GITHUB_WORKSPACE/${HELPER}" <url> <pin> <out>\`): ${l.trim()}`);
   for (const [i, l] of lines.entries()) {
     if (HELPER_LINE.test(l) && rootStep) out.push(`${HELPER} from the checkout in a step that runs as root in the self-hosted container: ${l.trim()}`);
     const m = INLINE_CURL.exec(l);
@@ -429,7 +431,7 @@ function workflowFiles(files: readonly { name: string; text: string }[], report:
     // exact places that never reach a shell (SKIPPED_PATHS, by structural path): anything else is read, so it fails closed.
     // A step's run is read below, with its own message. A hashFiles(...) of it reads the file, never runs it.
     for (const [where, v] of valuesToCheck(doc)) {
-      for (const l of logicalLines(v.replace(/\bhashFiles\([^)]*\)/g, ''))) if (!/^\s*#/.test(l) && HELPER_PATH.test(l) && !HELPER_LINE.test(l)) report(name, `${HELPER} named in ${where} off a helper line: ${l.trim()}`);
+      for (const l of logicalLines(v.replace(/\bhashFiles\([^)]*\)/g, ''))) if (!/^\s*#/.test(l) && namesHelperPath(l) && !HELPER_LINE.test(l)) report(name, `${HELPER} named in ${where} off a helper line: ${l.trim()}`);
     }
     // R1228f D4: only the actions used today, each pinned by commit (a new downloader action needs a lint edit).
     for (const u of usesOf(doc)) if (!USES_ALLOWED.test(u)) report(name, `an action this lint doesn't allow (pinned: ${USES_ALLOWED.source}): ${u}`);
@@ -500,16 +502,23 @@ function scalars(v: unknown): string[] {
  * The exact places whose values never reach a shell, by structural path (R1228z/aa D1: a bare key name matched at any
  * depth, so an env var, matrix key, input or output named `name`, `run`, `uses`, `if` or `runs-on` was skipped). `*` is one
  * path segment. Anything not here is read (R1228x/y D1: fails closed), keys of those names inside env, matrix, with,
- * inputs or outputs included. A step's run has its own check.
+ * inputs or outputs included. A step's run has its own check. Nothing GitHub hands a step is skipped (R1228ab D1,
+ * R1228ac D3): the workflow's `name` is every step's $GITHUB_WORKFLOW and `github.workflow`, a reusable workflow's path
+ * (a job's `uses`) is `job.workflow_file_path`, and a local action's path (a step's `uses`) is a composite action's
+ * $GITHUB_ACTION_PATH, so those are read. GitHub's contexts and default variables expose no run-name, job or step
+ * name, condition, runner label, timeout, concurrency group or permissions (its docs, read 2026-11-10).
  */
 // check-table: never-grow
 const SKIPPED_PATHS = [
   'on.*.paths', 'on.*.paths-ignore', 'on.*.branches', 'on.*.branches-ignore', 'on.*.tags', 'on.*.tags-ignore', 'on.*.types',
-  'name', 'run-name', 'concurrency', 'permissions',
-  'jobs.*.name', 'jobs.*.if', 'jobs.*.runs-on', 'jobs.*.uses', 'jobs.*.timeout-minutes', 'jobs.*.concurrency', 'jobs.*.permissions',
-  'jobs.*.steps.*.name', 'jobs.*.steps.*.if', 'jobs.*.steps.*.uses', 'jobs.*.steps.*.timeout-minutes', 'jobs.*.steps.*.run',
+  'run-name', 'concurrency', 'permissions',
+  'jobs.*.name', 'jobs.*.if', 'jobs.*.runs-on', 'jobs.*.timeout-minutes', 'jobs.*.concurrency', 'jobs.*.permissions',
+  'jobs.*.steps.*.name', 'jobs.*.steps.*.if', 'jobs.*.steps.*.timeout-minutes', 'jobs.*.steps.*.run',
   'jobs.*.services.*.env',
-  'runs.steps.*.name', 'runs.steps.*.if', 'runs.steps.*.uses', 'runs.steps.*.run',
+  'runs.steps.*.name', 'runs.steps.*.if', 'runs.steps.*.run',
+  // R1228ab D2, R1228ac D4: a description is shown, never handed to a step.
+  'on.*.inputs.*.description', 'on.*.outputs.*.description', 'on.*.secrets.*.description',
+  'description', 'inputs.*.description', 'outputs.*.description',
 ];
 /** Whether a value's path is one of SKIPPED_PATHS (each segment equal, or `*`). */
 const skippedPath = (path: string[]) => SKIPPED_PATHS.some((p) => {
@@ -1105,10 +1114,15 @@ test("R1228r, R1228s: the helper named by its file stem in any other spelling is
     `bash "$GITHUB_WORKSPACE/scripts/ci/"fetch-pinned.sh "$u" ${PIN} gl.tgz`,
     `bash "$ws/scripts/ci/"fetch-pinned.sh "$u" "$sum" /tmp/node2.tar.xz`,
     `cp scripts/ci/fetch-pinned.sh /tmp/x.sh`,
+    // R1228ac D2: read with quotes and backslashes taken out, so a quote split or an escape around the stem is the path
+    // (C12, C13), and so is X4's quote split inside the stem (a stated limit until now).
+    `bash "$GITHUB_WORKSPACE/scripts/ci/""fetch-pinned"".sh" "$u" ${PIN} gl.tgz`,
+    `bash $GITHUB_WORKSPACE/scripts/ci/\\fetch-pinned\\.sh "$u" ${PIN} gl.tgz`,
+    `f="scripts/ci/fetch-pin""ned.sh"; bash "$f" "$u" ${PIN} gl.tgz`,
   ]) assert.match(runProblems(pre + call).join(), /named other than on a helper line/, `refused: ${call}`);
-  // A name built at run time (S1 a glob, S6 a bracket class, S7 a variable, X4 a quote split of the stem): not seen. A
+  // A name built at run time (S1 a glob, S6 a bracket class, S7 a variable): not seen. A
   // stated limit (code in the job, out of scope; the digest still checks): a fix shows up here as a change.
-  for (const call of [`bash scripts/ci/fetch-pinne?.sh "$u" ${PIN} gl.tgz`, `bash scripts/ci/fetch-pinne[d].sh "$u" ${PIN} gl.tgz`, `h=fetch-; bash "$GITHUB_WORKSPACE/scripts/ci/\${h}pinned.sh" "$u" ${PIN} gl.tgz`, `f="scripts/ci/fetch-pin""ned.sh"; bash "$f" "$u" ${PIN} gl.tgz`]) {
+  for (const call of [`bash scripts/ci/fetch-pinne?.sh "$u" ${PIN} gl.tgz`, `bash scripts/ci/fetch-pinne[d].sh "$u" ${PIN} gl.tgz`, `h=fetch-; bash "$GITHUB_WORKSPACE/scripts/ci/\${h}pinned.sh" "$u" ${PIN} gl.tgz`]) {
     assert.deepEqual(runProblems(pre + call).filter((p) => /named other than/.test(p)), [], `not seen (a stated limit): ${call}`);
   }
   const scan = (f: { name: string; text: string }) => {
@@ -1227,6 +1241,30 @@ test("R1228z/aa D1, D2: skipped by structural path only (an env, matrix, input o
   assert.match(runProblems(`bash "$GITHUB_WORKSPACE/scripts/ci/"fetch-pinned.sh "$u" ${PIN} gl.tgz`).join(), /named other than on a helper line/);
 });
 
+test("R1228ab, R1228ac: what GitHub hands a step is read (the workflow's name, a job's or step's uses); a description naming the helper's path is kept; the bare stem in a value is a stated limit", () => {
+  const scan = (text: string, file = '.github/workflows/zz.yml') => {
+    const out: string[] = [];
+    workflowFiles([{ name: file, text }], (_n, p) => out.push(p));
+    return out.filter((p) => /named in|named other than/.test(p));
+  };
+  const H = 'scripts/ci/fetch-pinned.sh';
+  const job = '    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi\n';
+  // D1/D3: $GITHUB_WORKFLOW and github.workflow; job.workflow_file_path; a composite action's $GITHUB_ACTION_PATH.
+  assert.match(scan(`name: check ${H}\non: push\njobs:\n  a:\n${job}`).join(), /named in name off a helper line/, "the workflow's name");
+  assert.match(scan(`on: push\njobs:\n  a:\n    uses: ./.github/workflows/fetch-pinned.sh\n`).join(), /named in jobs\.a\.uses off a helper line/, "a job's uses");
+  assert.match(scan(`on: push\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./scripts/ci/fetch-pinned\n`).join(), /named in jobs\.a\.steps\.0\.uses off a helper line/, "a step's uses");
+  assert.match(scan(`name: x\nruns:\n  using: composite\n  steps:\n    - uses: ./scripts/ci/fetch-pinned\n`, '.github/actions/zz/action.yml').join(), /named in runs\.steps\.0\.uses off a helper line/, "a composite step's uses");
+  // D2/D4: a description is shown, never handed to a step (R1228aa FR-b as F1, and FA1).
+  assert.deepEqual(scan(`on:\n  workflow_dispatch:\n    inputs:\n      ver:\n        description: gitleaks version (downloaded through ${H})\n  workflow_call:\n    inputs:\n      a:\n        description: see ${H}\n        type: string\n    outputs:\n      o:\n        description: from ${H}\n        value: x\n    secrets:\n      s:\n        description: for ${H}\njobs:\n  a:\n${job}`), [], 'F1: input, output and secret descriptions');
+  assert.deepEqual(scan(`name: x\ndescription: Downloads pinned gitleaks through ${H}\ninputs:\n  out:\n    description: where ${H} writes the tarball\noutputs:\n  o:\n    description: what ${H} wrote\n    value: x\nruns:\n  using: composite\n  steps:\n    - run: echo hi\n      shell: bash\n`, '.github/actions/zz/action.yml'), [], "FA1: an action's description and its inputs' and outputs'");
+  // Kept as before: run-name (FR5), a step's name (FR2), if: hashFiles (FR4).
+  assert.deepEqual(scan(`run-name: check ${H}\non: push\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - name: run ${H}\n        if: hashFiles('${H}') != ''\n        run: echo hi\n`), []);
+  // A description's value under another key is still read: an input's default.
+  assert.match(scan(`on:\n  workflow_dispatch:\n    inputs:\n      description:\n        default: ${H}\njobs:\n  a:\n${job}`).join(), /named in on\.workflow_dispatch\.inputs\.description\.default/, 'an input named description');
+  // C1, C2: the bare stem in a value, the folder and .sh added in the run: a stated limit (a fix shows up here).
+  assert.deepEqual(scan(`on: push\njobs:\n  a:\n    runs-on: ubuntu-latest\n    env:\n      H: fetch-pinned\n    strategy:\n      matrix:\n        tool: [fetch-pinned]\n    steps:\n      - run: echo hi\n`), [], 'C1, C2: not seen (a stated limit)');
+});
+
 // Limits (owner decision (c): stated, not closed; the helper's digest check holds for each download it handles):
 // - A download that never names a URL the lint knows (DOWNLOAD), through a tool it doesn't know (python, node, perl, a
 //   compiled binary, an action not in USES_ALLOWED once allowed), or built from pieces at run time, isn't seen.
@@ -1234,18 +1272,23 @@ test("R1228z/aa D1, D2: skipped by structural path only (an env, matrix, input o
 //   earlier steps, and whose own run, can change what they run, and the lint doesn't model that. Structurally, a helper
 //   step's shell is HELPER_SHELL (privileged: no imported function, no BASH_ENV) and its line names /usr/bin/bash -p (no
 //   PATH or hash table); the rules on PATH, `bash` redefinition (any function name ending in `bash`, R1228p D1) and
-//   BASH_ENV in its run catch the plain accidents. The structural rules recognise the helper named as a path (its stem
-//   after a `/` or with `.sh`: R1228p D3, R1228r D1, R1228s, R1228z/aa D2) in a run and in every other value of a
-//   workflow or action but those at the exact places that never reach a shell (SKIPPED_PATHS, by structural path:
-//   on.<event>'s filters, names, conditions, runner labels, a step's uses, a services container's env): anything not
-//   there is read by default, a key named `name`, `run` or `if` inside env, matrix, with, inputs or outputs included
-//   (R1228x/y D1, R1228z/aa D1). The one WSL step runs one helper line.
+//   BASH_ENV in its run catch the plain accidents. The structural rules recognise the helper named as a path: its stem
+//   after a `/` or with `.sh`, read with quotes and backslashes taken out (R1228p D3, R1228r D1, R1228s, R1228z/aa D2,
+//   R1228ac D2). The bare stem alone (`fetch-pinned`, an id, `needs:`, a word in a name) is not a call. They look in a
+//   run and in every other value of a workflow or action but those at the exact places that never reach a step
+//   (SKIPPED_PATHS, by structural path: on.<event>'s filters, run-name, job and step names, conditions, runner labels,
+//   timeouts, concurrency, permissions, descriptions, a services container's env): anything not there is read by
+//   default, a key named `name`, `run` or `if` inside env, matrix, with, inputs or outputs included, and so are the
+//   workflow's `name` and a job's or step's `uses`, which GitHub hands every step (R1228x/y D1, R1228z/aa D1,
+//   R1228ab D1). The one WSL step runs one helper line.
 //   Not seen, and not claimed:
 //   - a pin read at run time is no pin: one read from the release itself (`gh release view … assets`, GitHub's asset
 //     digest) is refused (R1228u N1), any other way of computing it isn't seen;
 //   - the helper's name or path built from pieces at run time: a glob (`fetch-pinne?.sh`, `fetch-pinne[d].sh`), a
-//     variable (`${h}pinned.sh`) or a quote split of the stem (R1228s S1, S5-S7; R1228r X4). That is code in the job,
-//     out of scope; the digest still checks;
+//     variable (`${h}pinned.sh`) (R1228s S1, S5-S7), or the bare stem in a value with the folder or `.sh` added in the
+//     run (`env: H: fetch-pinned` and `scripts/ci/$H.sh`; a matrix value and `scripts/ci/${{ matrix.tool }}.sh`:
+//     R1228ac C1, C2, refused before R1228z/aa D2 narrowed the stem to a path). That is code in the job, out of scope;
+//     the digest still checks;
 //   - LD_PRELOAD or LD_LIBRARY_PATH, from GITHUB_ENV or the same run, reach curl, sha256sum and mv by their absolute
 //     paths (R1228n D1: L1, L2);
 //   - every hosted runner has passwordless sudo, so an earlier step or the same run can replace /usr/bin/sha256sum,
