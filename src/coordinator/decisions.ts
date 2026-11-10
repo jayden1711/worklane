@@ -247,7 +247,8 @@ export abstract class Decisions extends Recovery {
    * - A comment answers only when its first non-blank line is `/<cli> <option> <id> [note]` (at most 3 spaces before it),
    *   compared after NFKC, folding every Unicode dash to `-` and lower case (so a look-alike id can only equal the decision
    *   it spells). Its note is the rest of that line.
-   * - That line answers nothing if it holds any of `` ` < > [ ] ( ) " ' \ & ! ``, if it names no id or two or more, or if
+   * - That line answers nothing if it holds any of `` ` < > [ ] ( ) " ' \ & ! ~ `` or, as typed, a character that prints
+   *   nothing or reorders text (R1182aj), if it names no id or two or more, or if
    *   the comment has another `/<cli> <word>` anywhere (a reply is one command). The latest reply that answers wins.
    * - A comment starting with `[<cli>]` is the coordinator's own and is never a reply.
    * A writer's comment that looks like a reply here but answers nothing says why once (one note per comment), with the
@@ -298,8 +299,8 @@ export abstract class Decisions extends Recovery {
       if (said.has(key)) continue;
       said.add(key);
       const why = {
-        reply_not_first_line: "has its command after the comment's first line, where it is not read",
-        reply_unsafe_text: 'has a character a reply can\'t hold on its first line (` < > [ ] ( ) " \' \\ & !)',
+        reply_not_first_line: "has its command somewhere other than the start of the comment's first line, where it is not read",
+        reply_unsafe_text: 'has a character a reply can\'t hold on its first line (` < > [ ] ( ) " \' \\ & ! ~, or one that prints nothing or reorders text)',
         reply_more_than_one: `has more than one \`/${BRAND.cli}\` command (a reply is one command, on its first line)`,
         reply_several_ids: `names ${several?.ids.length} decisions (${several?.ids.slice(0, 5).join(', ')})`,
         reply_unknown_id: `names ${unknown?.ids[0]}, which isn't a decision on this issue`,
