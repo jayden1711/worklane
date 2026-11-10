@@ -29,7 +29,19 @@ import { join, sep } from 'node:path';
 import { repoRoot } from './helpers.js';
 
 const WRAPPERS = new Set(['command', 'exec', 'nohup', 'time', 'nice']);
-const KEYWORDS = new Set(['then', 'do', 'else', 'if', 'elif', 'while', 'until', '!', '{', '(']);
+// check-table: never-shrink
+const KEYWORDS = new Set([
+  'then',
+  'do',
+  'else',
+  'if',
+  'elif',
+  'while',
+  'until',
+  '!',
+  '{',
+  '(',
+]);
 
 /**
  * A line split into its commands: at `;`, `&&`, `||`, `|`, `(`, `{` outside quotes, and at `$(` or a backtick outside
