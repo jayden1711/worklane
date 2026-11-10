@@ -692,3 +692,35 @@ test('R1174r D1 (R6c): one 25-min start-to-stop with no tick adds its 25 min and
   near(downOf(mk(false)), 2 / 60 + 25 / 60, 'no tick');
   near(downOf(mk(true)), 2 / 60, 'a tick in the run');
 });
+
+test('R1174s L1: a stop stamped before its start, with no tick between, takes nothing off the soak (Math.max(0, …))', () => {
+  const l = [started(61), on(60), ...minTicks(59.9, 30), stopped(30), started(30 - 1 / 60), stopped(30 + 10 / 60), started(30 - 3 / 60), ...minTicks(29.95, 0.02)];
+  // The first stop-to-start gap (1 min), the run's start-to-stop (stamped 11 min back: 0, not -11 min), and the second
+  // stop-to-start gap (13 min): 14 min. Without Math.max(0, …) it reads 3.
+  assert.ok(Math.abs(downOf(l) - 14 / 60) < 1e-6, `downMs ${downOf(l) * 60} min, expected 14`);
+});
+
+// --- R1174t D1: an update or a rollback starts the soak again (ported from attacks-1174t D1) ---
+const startedV = (h: number, version: string) => ev('coordinator.started', { instance: 'i', pid: 1, version }, hoursAgo(h));
+/** On v1 from 52 h, ticking, 3 merges at 30 h (when `merged`), a clean stop at `switchH`, then v2 a minute later. */
+const build = (switchH: number, merged = true) => [startedV(52, 'v1'), on(51), ...minTicks(50.95, switchH + 0.02), ...(merged ? merges3(30) : []), stopped(switchH), startedV(switchH - 1 / 60, 'v2'), ...minTicks(switchH - 2 / 60, 0.02)];
+
+test('R1174t D1: 49 h on v1 and an update to v2 1 h ago is not promoted, nor with every merge made by v1; the controls: 50 h on one build, and a flag on 1 h on v2', () => {
+  assert.equal(ring0([startedV(52, 'v2'), on(51), ...minTicks(50.95, 0.02), ...merges3(30)]), 'promoted', 'control: 50 h on one build');
+  assert.equal(ring0([startedV(2, 'v2'), on(1), ...minTicks(0.95, 0.02), ...merges3(0.5)]), 'soaking', 'control: on 1 h ago');
+  assert.notEqual(ring0(build(1)), 'promoted', 'an update to v2 1 h ago');
+  assert.ok(build(1).filter((e) => e.type === 'merge.done').every((e) => Date.parse(e.ts) < Date.parse(hoursAgo(1))));
+  const s = status({ e1: build(1), p1: [] }, { rollout: R2 }).rings[0]!;
+  assert.match(s.why, /e1: the soak started again at .* on build v2 \(an update or a rollback\)/, s.why);
+  // Its merges start again too: 3 merges on v2 and 50 h later it is promoted.
+  assert.equal(ring0([startedV(102, 'v1'), on(101), ...minTicks(100.95, 52.02), stopped(52), startedV(52 - 1 / 60, 'v2'), ...minTicks(52 - 2 / 60, 0.02), ...merges3(30)]), 'promoted', 'control: 52 h and 3 merges on v2');
+});
+
+test('R1174t D1 (rollback): 49 h on v2, then the updater rolls back to v1 1 h ago: not promoted', () => {
+  assert.notEqual(ring0([startedV(52, 'v2'), on(51), ...minTicks(50.95, 1.02), ...merges3(30), stopped(1), startedV(1 - 1 / 60, 'v1'), ...minTicks(1 - 2 / 60, 0.02)]), 'promoted');
+});
+
+test('R1174t D1 (order): ring 1 turned on 0.5 h ago, after ring 0 ran v2 for 0.5 h: out of order', () => {
+  const s = status({ e1: build(1), p1: [startedV(0.7, 'v2'), on(0.5), ...minTicks(0.45, 0.02)] }, { rollout: R2 });
+  assert.equal(s.rings[1]!.state, 'out of order', `ring 0 ${s.rings[0]!.state}; ring 1: ${s.rings[1]!.why}`);
+});

@@ -116,6 +116,8 @@ export interface InstanceRead {
   skewed: boolean;
   /** When the stretch of config-on time began, at the earliest (for judging order against the ring before), or null. */
   stretchSince: string | null;
+  /** R1174t D1: the build whose start began the soak again (an update or a rollback after the flip), or null. */
+  rebuilt: { version: string; at: string } | null;
   /** Time since the flip the coordinator was stopped cleanly (a stop to the next start): no soak (R1174j J3). */
   downMs: number;
 }
@@ -183,6 +185,12 @@ export function readInstance(events: readonly StoredEvent[], flag: string, maxEr
   let runTicked = true;
   // A coordinator.started with no clean stop since the one before it: the process died (a crash loop shows as several).
   let running = false;
+  // R1174t D1: the build each start ran (`version`, src/service.ts). A start after the flip on a build other than the
+  // run before it (an update, or a rollback) begins the soak again, like a new flip: the code behind the flag changed,
+  // and the canary runs with every flag off, so the soak is the only test the new flagged code gets.
+  let runVersion: unknown = null;
+  let newBuild = false;
+  let rebuilt: { version: string; at: string } | null = null;
   for (const [i, e] of events.entries()) {
     // Merges and the soak count from the last on (the engine ran with the flag off before it); bad signs from the
     // stretch's start (an engine off and on again forgives nothing).
@@ -196,11 +204,25 @@ export function readInstance(events: readonly StoredEvent[], flag: string, maxEr
     if (e.type === 'coordinator.started') {
       if (inStretch && running) bad ??= 'the coordinator restarted without a clean stop';
       running = true;
+      const v = (e.payload as { version?: unknown }).version;
+      newBuild = after && runVersion !== null && v !== runVersion;
+      runVersion = v ?? null;
     }
     if (e.type === 'coordinator.stopped' && (e.payload as { clean?: boolean }).clean === true) running = false;
     if (!inStretch) continue;
     const ts = Date.parse(e.ts);
     if (!Number.isFinite(ts) || (after && ts < flipTs - 60_000)) skewed = true;
+    // R1174t D1: a new build's start: the soak, its stopped time and its merges start again here. Bad signs still count
+    // from the stretch's start (a new build forgives nothing).
+    if (newBuild) {
+      since = e.ts;
+      downMs = 0;
+      merges.length = 0;
+      mergedPrs.clear();
+      stoppedAt = null;
+      newBuild = false;
+      rebuilt = { version: String(runVersion), at: e.ts };
+    }
     // R1174j J3: a clean stop, then a start: the time between is no soak (a coordinator stopped 48 of 50 h promoted).
     if (after && e.type === 'coordinator.stopped' && (e.payload as { clean?: boolean }).clean === true) stoppedAt = ts;
     // A stop ends a run: the silence from its last tick to the stop is no soak either (R1174m P1, R1174n N1: a host
@@ -252,7 +274,7 @@ export function readInstance(events: readonly StoredEvent[], flag: string, maxEr
       if (Number.isFinite(t)) stretchTs = Math.min(stretchTs, t);
     }
   }
-  return { on, since: on ? since : null, merges, bad, lastTick: stoppedAfterTick ? null : lastTick, badBefore, engineOff: !on && engineOff, skewed, stretchSince: Number.isFinite(stretchTs) ? new Date(stretchTs).toISOString() : null, downMs };
+  return { on, since: on ? since : null, merges, bad, lastTick: stoppedAfterTick ? null : lastTick, badBefore, engineOff: !on && engineOff, skewed, stretchSince: Number.isFinite(stretchTs) ? new Date(stretchTs).toISOString() : null, downMs, rebuilt: on ? rebuilt : null };
 }
 
 /** Each instance's last recorded state of `flag` (flag.flipped), in log order. */
@@ -335,7 +357,8 @@ export function rolloutStatus(o: {
       // min_merges in EACH instance (R1174f 3: one that did no work was promoted on the others' merges).
       const short = onReads.filter((s) => s.merges.length < min_merges).map((s) => `${s.n}: ${s.merges.length} of ${min_merges} merges`);
       const before = onReads.map((s) => s.badBefore).find((x) => x) ?? null;
-      const earlier = before ? `; rolled back before: ${before}` : '';
+      const rebuiltNote = onReads.filter((s) => s.rebuilt).map((s) => `${s.n}: the soak started again at ${s.rebuilt!.at} on build ${s.rebuilt!.version} (an update or a rollback)`);
+      const earlier = `${before ? `; rolled back before: ${before}` : ''}${rebuiltNote.length ? `; ${rebuiltNote.join('; ')}` : ''}`;
       const skewed = onReads.filter((s) => s.skewed).map((s) => s.n);
       if (stale.length) st = { ...base, state: 'soaking', why: `no coordinator tick in the last ${live_minutes} min from ${stale.join(', ')} (or it stopped since): a coordinator that isn't running isn't soaking${earlier}` };
       else if (skewed.length) st = { ...base, state: 'soaking', why: `${skewed.join(', ')}: the flip is stamped before events logged ahead of it (a clock behind), so the soak can't be timed: turn it off and on again${earlier}` };
