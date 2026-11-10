@@ -826,7 +826,7 @@ export const EventSchemas = {
   // guardrails and system
   'guardrail.decision': z.strictObject({ decision: z.enum(['deny', 'ask']), rule: z.string(), agent: z.boolean() }),
   'secret.detected': z.strictObject({ source: z.string(), findings: z.number().int().nonnegative() }),
-  'coordinator.started': z.strictObject({ instance: z.string(), pid: z.number().int(), version: z.string() }),
+  'coordinator.started': z.strictObject({ instance: z.string(), pid: z.number().int(), version: z.string(), commit: z.string().nullable().optional() }),
   /** A task started in a worktree from the pool (worktree-pool.ts), not a fresh one: this claim's worktree is `name`. */
   'worktree.pooled': z.strictObject({ issue, name: z.string() }),
   /** The worktree pool brought to main's tip: what was made, moved to it with its install kept (setup_key), removed, and setups that failed. */
