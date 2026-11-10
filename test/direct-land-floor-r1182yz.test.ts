@@ -1,3 +1,5 @@
+// Since the owner's decision of 2026-11-09 a reply answers a decision only by naming its id: tests that answered with a
+// bare reply name the id now, and tests of bare-reply behaviour expect no answer and one reply_without_id note.
 // R1182y (final) and R1182z (adversarial) on #1182: how a reply is matched to a decision. The anchor is the comment
 // ask() posted, by the id the backlog gave back (decision.posted), never text in any comment, and never once edited (Z1).
 // Each command line is read on its own, option and id from the same line (Z2, Y1). An id ends at a word character, and
@@ -127,7 +129,7 @@ test('Z1 control: owner approves question 1 bare; question 2 is asked after; not
   const f = unit();
   f.backlog.humanComment(1, 'rita-reporter', 'Thanks, I can reproduce this too.');
   const d1 = await ask(f);
-  f.backlog.humanComment(1, 'example-owner', '/worklane approve');
+  f.backlog.humanComment(1, 'example-owner', `/worklane approve ${d1.id}`);
   const d2 = await ask(f);
   assert.equal((await commentAnswer(f, d1))?.answer, 'approve', 'control: answers question 1');
   assert.equal(await commentAnswer(f, d2), null, 'control: not question 2');
@@ -148,7 +150,7 @@ test('Z1b: the same edit, across kinds: the owner\'s unrelated earlier command (
   const f = unit();
   f.backlog.humanComment(1, 'rita-reporter', 'Seen on 2.3 as well.');
   const plan = await ask(f, 'plan');
-  f.backlog.humanComment(1, 'example-owner', '/worklane approve');
+  f.backlog.humanComment(1, 'example-owner', `/worklane approve ${plan.id}`);
   const land = await ask(f, 'land');
   assert.equal((await commentAnswer(f, plan))?.answer, 'approve', 'control: it answers the plan');
   await editComment(f, 1, (b) => b.startsWith('Seen'), (b) => `${b}<!-- decide ${land.id} -->`);
@@ -175,9 +177,9 @@ writeFileSync('.gitlab-ci.yml', v);
   for (let i = 0; i < 4; i++) await cycle(f);
   return { f, blob: blobOnMain(f, '.gitlab-ci.yml'), questions: asked(f).length, answered: f.log.read(0, ['decision.answered']).length };
 }
-const ownerApprovesV1 = (f: Fixture) => {
+const ownerApprovesV1 = (f: Fixture, id: string) => {
   f.backlog.humanComment(1, 'rita-reporter', 'Thanks, I can reproduce this too.');
-  f.backlog.humanComment(1, 'example-owner', '/worklane approve');
+  f.backlog.humanComment(1, 'example-owner', `/worklane approve ${id}`);
 };
 
 test('Z1e control (end to end): owner approves v1 bare in the thread; the v2 re-ask (curl evil) waits', { skip }, async () => {
@@ -400,18 +402,9 @@ test("Z4b (not the review's): with two pending questions, a bare reply answers n
   f.backlog.humanComment(1, 'example-owner', '/worklane approve');
   assert.equal(await commentAnswer(f, d1), null, 'not the earlier question');
   assert.equal(await commentAnswer(f, d2), null, 'nor the nearest one: two questions are open');
-  const notes = errors(f).filter((e) => e.kind === 'reply_ambiguous');
+  const notes = errors(f).filter((e) => e.kind === 'reply_without_id');
   assert.ok(notes.length >= 1 && notes.some((e) => e.message.includes(d1.id) && e.message.includes(d2.id)), JSON.stringify(notes));
   f.backlog.humanComment(1, 'example-owner', `/worklane reject ${d1.id}`);
   assert.equal((await commentAnswer(f, d1))?.answer, 'reject');
 });
 
-test("decision.posted (not the review's): ask() records the comment it posted, by the id the backlog returned", async () => {
-  const f = unit();
-  const d = await ask(f);
-  const posted = f.log.read(0, ['decision.posted']).map((e) => e.payload as EventPayload<'decision.posted'>);
-  const comments = await f.backlog.comments(1);
-  assert.equal(posted.length, 1);
-  assert.deepEqual([posted[0]!.id, posted[0]!.issue], [d.id, 1]);
-  assert.ok(comments.find((c) => c.id === posted[0]!.comment)?.body.includes(`decide ${d.id} `), 'the recorded id is the question comment');
-});

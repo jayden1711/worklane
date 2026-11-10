@@ -1,3 +1,5 @@
+// Since the owner's decision of 2026-11-09 a reply answers a decision only by naming its id: tests that answered with a
+// bare reply name the id now, and tests of bare-reply behaviour expect no answer and one reply_without_id note.
 // R1182aa (final) on #1182: a bare reply never redirected. An edited or deleted question comment is a barrier, never
 // skipped to reach an older question (AA1, AA2, AA1e). Ported from the review's TypeScript (attacks-1182aa), assertions
 // unchanged except: AA1's control now expects no answer and a reply_ambiguous note (two questions are open, R1182ab's
@@ -129,7 +131,7 @@ test('AA1 control: two pending questions; the owner\'s bare approve after questi
   f.backlog.humanComment(1, 'example-owner', '/worklane approve');
   assert.equal(await commentAnswer(f, d1), null);
   assert.equal(await commentAnswer(f, d2), null, 'changed from the review: two questions are open, so a bare reply answers neither');
-  const n = errors(f).filter((e) => e.kind === 'reply_ambiguous');
+  const n = errors(f).filter((e) => e.kind === 'reply_without_id');
   assert.ok(n.length >= 1 && n.every((e) => e.message.includes(d1.id) && e.message.includes(d2.id)), JSON.stringify(n));
 });
 
@@ -155,10 +157,8 @@ test("AA2: question 2's comment is deleted (a writer may delete any comment): th
 
 // ===== AA3: back-compat: a decision with no decision.posted (asked before this PR, or a backlog with no ids) =====
 class NoIdBacklog extends FileBacklog {
-  // A backlog that gives no comment id: the empty string, which ask() records nothing for.
-  override async comment(n: number, body: string): Promise<string> {
+  override async comment(n: number, body: string) {
     await super.comment(n, body);
-    return '';
   }
 }
 test('AA3 (held): a question with no decision.posted: a bare reply answers nothing and is noted once; a reply naming the id answers', async () => {
@@ -166,7 +166,6 @@ test('AA3 (held): a question with no decision.posted: a bare reply answers nothi
   const nb = new NoIdBacklog(join(f.base, 'backlog.json'), 'coordinator');
   const g = { ...f, backlog: nb } as Fixture;
   const d = await ask(g);
-  assert.equal(g.log.read(0, ['decision.posted']).length, 0, 'control: nothing recorded');
   nb.humanComment(1, 'example-owner', '/worklane approve');
   assert.equal(await commentAnswer(g, d), null);
   assert.equal(await commentAnswer(g, d), null);
@@ -175,14 +174,15 @@ test('AA3 (held): a question with no decision.posted: a bare reply answers nothi
   assert.equal((await commentAnswer(g, d))?.answer, 'approve');
 });
 
-test('AA3b (held): a legacy question (no decision.posted) above a new one: a bare reply answers only the new one', async () => {
+test('AA3b: an older question above a new one: a bare reply answers neither (the id is required) and says which ids to use', async () => {
   const f = unit();
   const nb = new NoIdBacklog(join(f.base, 'backlog.json'), 'coordinator');
   const old = await ask({ ...f, backlog: nb } as Fixture);
   const d2 = await ask(f, 'plan');
   f.backlog.humanComment(1, 'example-owner', '/worklane approve');
   assert.equal(await commentAnswer(f, old), null);
-  assert.equal((await commentAnswer(f, d2))?.answer, 'approve');
+  assert.equal(await commentAnswer(f, d2), null, 'changed: a bare reply answers nothing (the owner, 2026-11-09)');
+  assert.ok(errors(f).some((e) => e.kind === 'reply_without_id' && e.message.includes(old.id) && e.message.includes(d2.id)));
 });
 
 // ===== AA1e: AA1 through handleDecisions: the land is queued on an approval the owner gave the plan question =====

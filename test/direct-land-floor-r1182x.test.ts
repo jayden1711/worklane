@@ -1,3 +1,5 @@
+// Since the owner's decision of 2026-11-09 a reply answers a decision only by naming its id: tests that answered with a
+// bare reply name the id now, and tests of bare-reply behaviour expect no answer and one reply_without_id note.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -150,9 +152,8 @@ const commentAnswer = (f: Fixture, q: EventPayload<'decision.asked'>): Promise<A
 const askLand = (f: Fixture, id: string) => {
   const q = { id, kind: 'land' as const, issue: 1, owner: 'example-owner', question: 'Approve landing #1 (L3)?', options: OPTS, recommendation: 'reject', receipts: [] };
   const e = f.log.append('decision.asked', q, 'coordinator');
-  // As ask() posts and records it (R1182z: the anchor is this comment, by its id).
-  const comment = f.backlog.humanComment(1, 'coordinator', `[worklane] @example-owner decision needed: **${q.question}**\n\nReply \`/worklane approve ${id}\` or \`/worklane reject ${id}\`, or run \`worklane decide ${id} <option>\`.`);
-  f.log.append('decision.posted', { id, issue: 1, comment }, 'coordinator');
+  // As ask() posts it.
+  f.backlog.humanComment(1, 'coordinator', `[worklane] @example-owner decision needed: **${q.question}**\n\nReply \`/worklane approve ${id}\` or \`/worklane reject ${id}\`, or run \`worklane decide ${id} <option>\`.`);
   return { q, ts: (f.log.read(0, ['decision.asked']).find((x) => (x.payload as { id: string }).id === id)!).ts, e };
 };
 const blobOnMain = (f: Fixture, p: string) => {
@@ -173,12 +174,12 @@ async function x1(stamp: (d2ts: number) => number) {
   const d1 = askLand(f, 'd-1-aaaaaa');
   await sleep(1100);
   // The reply to question 1 goes in now, before question 2; its stamp is set once question 2's time is known.
-  f.backlog.humanComment(1, 'example-owner', '/worklane approve');
+  f.backlog.humanComment(1, 'example-owner', '/worklane approve d-1-aaaaaa');
   const d2 = askLand(f, 'd-1-bbbbbb');
   const at = stamp(Date.parse(d2.ts));
   const p = join(f.base, 'backlog.json');
   const j = JSON.parse(readFileSync(p, 'utf8'));
-  for (const i of j.issues) for (const c of i.comments ?? []) if (c.body === '/worklane approve') c.at = new Date(at).toISOString();
+  for (const i of j.issues) for (const c of i.comments ?? []) if (c.body === '/worklane approve d-1-aaaaaa') c.at = new Date(at).toISOString();
   writeFileSync(p, JSON.stringify(j));
   return { f, d1, d2, at };
 }
@@ -220,13 +221,13 @@ writeFileSync('.gitlab-ci.yml', v);
 `;
 
 test('X2 control: clocks agree: the owner approves v1 by comment; the v2 re-ask waits (R1182v V4, fixed)', { skip }, async () => {
-  const r = await reask((f) => f.backlog.humanComment(1, 'example-owner', '/worklane approve'));
+  const r = await reask((f, id) => f.backlog.humanComment(1, 'example-owner', `/worklane approve ${id}`));
   assert.ok(r.questions >= 2, 'asked again for v2');
   assert.ok(r.blob === null || !r.blob.includes('evil'), `control: v2 not on main (${JSON.stringify(r.blob)})`);
 });
 
 test("X2: the tracker's clock is 90 s ahead of the instance's (its comment stamps): the owner's one approve of v1 also answers the v2 re-ask, and v2 lands", { skip }, async () => {
-  const r = await reask((f) => f.backlog.humanComment(1, 'example-owner', '/worklane approve', new Date(Date.now() + 90_000).toISOString()));
+  const r = await reask((f, id) => f.backlog.humanComment(1, 'example-owner', `/worklane approve ${id}`, new Date(Date.now() + 90_000).toISOString()));
   assert.ok(r.questions >= 2, `control: asked again for v2 (${r.questions})`);
   assert.ok(r.blob === null || !r.blob.includes('evil'), `STALE APPROVAL (clock skew): one owner comment answered ${r.answered.length} landing questions; main has .gitlab-ci.yml = ${JSON.stringify(r.blob)}`);
 });
@@ -249,9 +250,11 @@ test("X2b control: the instance's clock is 90 s ahead of the tracker's; a reply 
   assert.ok(r.blob !== null, 'control: landed');
 });
 
-test("X2b (liveness): the instance's clock is 90 s ahead of the tracker's: the owner's reply, exactly as the question says (`/worklane approve`), never answers it", { skip }, async () => {
+test("X2b: a bare `/worklane approve` (no id), whatever its stamp, answers nothing and says to name the id; the reply the question asks for (with the id) lands (X2b control)", { skip }, async () => {
   const r = await once((f) => f.backlog.humanComment(1, 'example-owner', '/worklane approve', new Date(Date.now() - 90_000).toISOString()));
-  assert.ok(r.blob !== null, `STALL: the owner answered as told and nothing happens (${r.questions} question(s), no answer recorded, nothing landed); the question's own text never mentions the id`);
+  // Changed (the owner, 2026-11-09): the id is required, and the question says so.
+  assert.equal(r.blob, null, 'a bare reply lands nothing');
+  assert.ok(r.f.log.read(0, ['coordinator.error']).some((e) => (e.payload as { kind: string }).kind === 'reply_without_id'), 'and says why');
 });
 
 // ---- X3: a reply that names another decision's id answers this one ----

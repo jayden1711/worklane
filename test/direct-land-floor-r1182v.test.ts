@@ -1,3 +1,5 @@
+// Since the owner's decision of 2026-11-09 a reply answers a decision only by naming its id: tests that answered with a
+// bare reply name the id now, and tests of bare-reply behaviour expect no answer and one reply_without_id note.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -370,7 +372,7 @@ test('V4 control: the owner answers the first landing question on the dashboard;
 });
 
 test('V4: the owner answers the first landing question by comment; that one comment also answers the re-ask for v2, and v2 lands', { skip }, async () => {
-  const r = await v4((f) => f.backlog.humanComment(1, 'example-owner', '/worklane approve'));
+  const r = await v4((f, id) => f.backlog.humanComment(1, 'example-owner', `/worklane approve ${id}`));
   assert.ok(r.questions >= 2, `control: asked again for v2 (${r.questions} questions)`);
   assert.ok(r.blob === null || !r.blob.includes('evil'), `STALE APPROVAL: one owner comment answered ${r.answered.length} landing questions (${JSON.stringify(r.answered.map((a) => a.by))}); main now has .gitlab-ci.yml = ${JSON.stringify(r.blob)}`);
 });
@@ -384,7 +386,7 @@ test('V4b: an L3 change the owner approved at review by comment; the landing flo
   for (let i = 0; i < 3 && !asked(f).length; i++) await cycle(f);
   assert.equal(asked(f).length, 1, 'control: asked at review (L3)');
   assert.ok(!(f.log.read(0, ['review.level_set']).map((e) => e.payload as EventPayload<'review.level_set'>).at(-1)!.reasons.some((r) => r.startsWith(PRINT))), 'control: a review-time question, no landing print');
-  f.backlog.humanComment(1, 'example-owner', 'looks right\n/worklane approve');
+  f.backlog.humanComment(1, 'example-owner', `looks right\n/worklane approve ${asked(f)[0]!.id}`);
   for (let i = 0; i < 6; i++) await cycle(f);
   const q = asked(f);
   const answered = f.log.read(0, ['decision.answered']).map((e) => e.payload as EventPayload<'decision.answered'>);
