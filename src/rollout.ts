@@ -117,7 +117,7 @@ export interface InstanceRead {
   /** When the stretch of config-on time began, at the earliest (for judging order against the ring before), or null. */
   stretchSince: string | null;
   /** R1174t D1: the build whose start began the soak again (an update or a rollback after the flip), or null. */
-  rebuilt: { version: string; at: string } | null;
+  rebuilt: { version: string; commit: string | null; at: string } | null;
   /** Time since the flip the coordinator was stopped cleanly (a stop to the next start): no soak (R1174j J3). */
   downMs: number;
 }
@@ -185,12 +185,14 @@ export function readInstance(events: readonly StoredEvent[], flag: string, maxEr
   let runTicked = true;
   // A coordinator.started with no clean stop since the one before it: the process died (a crash loop shows as several).
   let running = false;
-  // R1174t D1: the build each start ran (`version`, src/service.ts). A start after the flip on a build other than the
-  // run before it (an update, or a rollback) begins the soak again, like a new flip: the code behind the flag changed,
-  // and the canary runs with every flag off, so the soak is the only test the new flagged code gets.
-  let runVersion: unknown = null;
+  // R1174t D1: the build each start ran (`version`, and R1174u U1 its `commit`, src/service.ts). A start after the flip
+  // on a build other than the run before it (an update, or a rollback) begins the soak again, like a new flip: the code
+  // behind the flag changed, and the canary runs with every flag off, so the soak is the only test the new flagged code
+  // gets. A main-channel update keeps the version and changes the commit. A start with neither is a build of its own
+  // (R1174u L2: it cleared the reference, and the next change went unseen).
+  let runBuild: { version: unknown; commit: unknown } | null = null;
   let newBuild = false;
-  let rebuilt: { version: string; at: string } | null = null;
+  let rebuilt: { version: string; commit: string | null; at: string } | null = null;
   for (const [i, e] of events.entries()) {
     // Merges and the soak count from the last on (the engine ran with the flag off before it); bad signs from the
     // stretch's start (an engine off and on again forgives nothing).
@@ -204,9 +206,10 @@ export function readInstance(events: readonly StoredEvent[], flag: string, maxEr
     if (e.type === 'coordinator.started') {
       if (inStretch && running) bad ??= 'the coordinator restarted without a clean stop';
       running = true;
-      const v = (e.payload as { version?: unknown }).version;
-      newBuild = after && runVersion !== null && v !== runVersion;
-      runVersion = v ?? null;
+      const p = e.payload as { version?: unknown; commit?: unknown };
+      const b = { version: p.version ?? null, commit: p.commit ?? null };
+      newBuild = after && runBuild !== null && (b.version !== runBuild.version || b.commit !== runBuild.commit);
+      runBuild = b;
     }
     if (e.type === 'coordinator.stopped' && (e.payload as { clean?: boolean }).clean === true) running = false;
     if (!inStretch) continue;
@@ -217,11 +220,11 @@ export function readInstance(events: readonly StoredEvent[], flag: string, maxEr
     if (newBuild) {
       since = e.ts;
       downMs = 0;
+      // Its merges start again; a PR the old build merged is still known (R1174v D2b: one logged twice counted again).
       merges.length = 0;
-      mergedPrs.clear();
       stoppedAt = null;
       newBuild = false;
-      rebuilt = { version: String(runVersion), at: e.ts };
+      rebuilt = { version: String(runBuild!.version), commit: typeof runBuild!.commit === 'string' ? runBuild!.commit : null, at: e.ts };
     }
     // R1174j J3: a clean stop, then a start: the time between is no soak (a coordinator stopped 48 of 50 h promoted).
     if (after && e.type === 'coordinator.stopped' && (e.payload as { clean?: boolean }).clean === true) stoppedAt = ts;
@@ -255,7 +258,10 @@ export function readInstance(events: readonly StoredEvent[], flag: string, maxEr
       // Merged after the flip, by its own merged_at when it has one (R1174h H2: a merge made before the flip and
       // recorded after it counted).
       const at = (e.payload as { merged_at?: unknown }).merged_at;
-      const before = typeof at === 'string' && Number.isFinite(Date.parse(at)) && Date.parse(at) < flipTs;
+      // R1174v D2: and after the soak's own start, when a new build began it again (a merge the old build made,
+      // recorded by the new one's reconcile pass, counted for it).
+      const soakFrom = since !== null && Number.isFinite(Date.parse(since)) ? Math.max(flipTs, Date.parse(since)) : flipTs;
+      const before = typeof at === 'string' && Number.isFinite(Date.parse(at)) && Date.parse(at) < soakFrom;
       // By its PR number, once each; a merge with no number can't be told from a repeat, so it never counts (R1174i/j).
       if (!before && n !== undefined && n !== null && !mergedPrs.has(n)) merges.push(e.ts);
       if (n !== undefined && n !== null) mergedPrs.add(n);
@@ -357,7 +363,7 @@ export function rolloutStatus(o: {
       // min_merges in EACH instance (R1174f 3: one that did no work was promoted on the others' merges).
       const short = onReads.filter((s) => s.merges.length < min_merges).map((s) => `${s.n}: ${s.merges.length} of ${min_merges} merges`);
       const before = onReads.map((s) => s.badBefore).find((x) => x) ?? null;
-      const rebuiltNote = onReads.filter((s) => s.rebuilt).map((s) => `${s.n}: the soak started again at ${s.rebuilt!.at} on build ${s.rebuilt!.version} (an update or a rollback)`);
+      const rebuiltNote = onReads.filter((s) => s.rebuilt).map((s) => `${s.n}: the soak started again at ${s.rebuilt!.at} on build ${s.rebuilt!.version}${s.rebuilt!.commit ? ` at ${s.rebuilt!.commit.slice(0, 7)}` : ''} (an update or a rollback)`);
       const earlier = `${before ? `; rolled back before: ${before}` : ''}${rebuiltNote.length ? `; ${rebuiltNote.join('; ')}` : ''}`;
       const skewed = onReads.filter((s) => s.skewed).map((s) => s.n);
       if (stale.length) st = { ...base, state: 'soaking', why: `no coordinator tick in the last ${live_minutes} min from ${stale.join(', ')} (or it stopped since): a coordinator that isn't running isn't soaking${earlier}` };

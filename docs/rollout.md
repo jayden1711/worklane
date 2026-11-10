@@ -53,9 +53,11 @@ A ring is **promoted** when all of these hold:
   host, a paused VM, a frozen or hung coordinator, a clock stepped forward). A start stopped before any tick is
   counted whatever its length: a run that never ticked soaked nothing. Each gap is from the tick before, as stamped:
   a tick stamped ahead hides nothing after it, and one stamped back can only hold the ring longer. **An update or a
-  rollback starts the soak again** (a start on a build other than the run before it, by `coordinator.started`'s
-  `version`): the code behind the flag changed, and the canary runs with every flag off. Its hours and its merges
-  count from that start; bad signs still count from the flip;
+  rollback starts the soak again** (a start on a build other than the run before it: `coordinator.started`'s
+  `version` or `commit` differs, the commit being the install folder's name, so a main-channel update, which keeps
+  the version, counts too; a start with neither is a build of its own): the code behind the flag changed, and the
+  canary runs with every flag off. Its hours and its merges count from that start, a merge the old build made among
+  them never (by its `merged_at`); bad signs still count from the flip;
 - **each** of the ring's instances merged at least `min_merges` PRs since then (`merge.done`, one per PR number; a
   merge with no number never counts), so an instance that does no work isn't promoted on the others'. `min_merges: 0`
   is allowed: an explicit opt-out by whoever writes root's `rollout.json`;

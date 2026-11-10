@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { BRAND } from '../src/brand.js';
@@ -10,6 +10,7 @@ import { ROLLOUT_FILE, RolloutFile, readInstance, readRollout, ringZeroProblem, 
 import { rolloutCommand, type RolloutDeps } from '../src/rollout-cli.js';
 import { EventLog } from '../src/events/log.js';
 import { onRealMachine } from './isolate.js';
+import { engineCommit } from '../src/engine-commit.js';
 
 const NOW = new Date('2026-11-10T12:00:00.000Z');
 const hoursAgo = (h: number) => new Date(NOW.getTime() - h * 3_600_000).toISOString();
@@ -723,4 +724,60 @@ test('R1174t D1 (rollback): 49 h on v2, then the updater rolls back to v1 1 h ag
 test('R1174t D1 (order): ring 1 turned on 0.5 h ago, after ring 0 ran v2 for 0.5 h: out of order', () => {
   const s = status({ e1: build(1), p1: [startedV(0.7, 'v2'), on(0.5), ...minTicks(0.45, 0.02)] }, { rollout: R2 });
   assert.equal(s.rings[1]!.state, 'out of order', `ring 0 ${s.rings[0]!.state}; ring 1: ${s.rings[1]!.why}`);
+});
+
+// --- R1174u U1 / R1174v D1: a main-channel update keeps the version and changes the commit; R1174v D2; R1174u L1, L2 ---
+const A = 'a'.repeat(40);
+const B = 'b'.repeat(40);
+const startedC = (h: number, commit: string | null, version = '0.5.3') => ev('coordinator.started', { instance: 'i', pid: 1, version, commit }, hoursAgo(h));
+/** On commit `from` from 52 h, ticking, 3 merges at 30 h, a clean stop 1 h ago, then `to` a minute later (same version). */
+const mainUpdate = (from: string, to: string) => [startedC(52, from), on(51), ...minTicks(50.95, 1.02), ...merges3(30), stopped(1), startedC(1 - 1 / 60, to), ...minTicks(1 - 2 / 60, 0.02)];
+
+test('R1174u U1: a main-channel update (same version, another commit) 1 h ago is not promoted, and the why names the commit; a rollback too; the control: a restart on the same commit', () => {
+  assert.notEqual(ring0(mainUpdate(A, B)), 'promoted', 'commit A to B, both 0.5.3');
+  assert.notEqual(ring0(mainUpdate(B, A)), 'promoted', 'a rollback, B to A');
+  assert.match(status({ e1: mainUpdate(A, B), p1: [] }, { rollout: R2 }).rings[0]!.why, /e1: the soak started again at .* on build 0\.5\.3 at bbbbbbb \(an update or a rollback\)/);
+  assert.equal(ring0(mainUpdate(A, A)), 'promoted', 'control: a restart on the same commit');
+});
+
+test('R1174u U1 (order): ring 1 turned on 0.5 h ago, after ring 0 ran commit B for 0.5 h: out of order', () => {
+  const s = status({ e1: mainUpdate(A, B), p1: [startedC(0.7, B), on(0.5), ...minTicks(0.45, 0.02)] }, { rollout: R2 });
+  assert.equal(s.rings[1]!.state, 'out of order', `ring 0 ${s.rings[0]!.state}; ring 1: ${s.rings[1]!.why}`);
+});
+
+test("R1174v D2: a merge the old build made, recorded by the new build's reconcile pass, doesn't count for it; the control: one merged after the new build's start does", () => {
+  const reconciled = (mergedH: number) => ev('merge.done', { number: ++pr, reconciled: true, merged_at: hoursAgo(mergedH) }, hoursAgo(49.9));
+  const log = (mergedH: number) => [startedV(52, 'v1'), on(51), ...minTicks(50.95, 50.02), stopped(50), startedV(50 - 1 / 60, 'v2'), ...minTicks(50 - 2 / 60, 49.92), reconciled(mergedH), ...minTicks(49.9, 0.02), ...merges(2, 30)];
+  assert.equal(ring0(log(50.49)), 'soaking', 'merged by v1 at 50.49 h: 2 of 3 merges');
+  assert.equal(ring0(log(49.95)), 'promoted', 'control: merged at 49.95 h, after v2 started: 3 merges');
+});
+
+test('R1174u L1 (U4a, U4b): each half of the reset holds on its own: merges made by v1, then 50.5 h on v2 with none; 49 h on v1, then 1 h on v2 with 3 merges', () => {
+  assert.equal(ring0([startedV(53, 'v1'), on(52.9), ...minTicks(52.85, 50.52), ...merges3(51), stopped(50.5), startedV(50.5 - 1 / 60, 'v2'), ...minTicks(50.5 - 2 / 60, 0.02)]), 'soaking', 'U4a: the merges start again');
+  assert.equal(ring0([startedV(52, 'v1'), on(51), ...minTicks(50.95, 1.02), stopped(1), startedV(1 - 1 / 60, 'v2'), ...minTicks(1 - 2 / 60, 0.02), ...merges3(0.5)]), 'soaking', 'U4b: the hours start again');
+});
+
+test('R1174u L2: a start with no version is a build of its own, and the next change after it is still seen', () => {
+  const unversioned = (h: number) => ev('coordinator.started', { instance: 'i', pid: 1 }, hoursAgo(h));
+  assert.equal(ring0([startedV(52, 'v1'), on(51), ...minTicks(50.95, 50.02), stopped(50), unversioned(50 - 1 / 60), ...minTicks(50 - 2 / 60, 1.02), stopped(1), startedV(1 - 1 / 60, 'v2'), ...minTicks(1 - 2 / 60, 0.02), ...merges3(0.5)]), 'soaking');
+});
+
+test("R1174u U1: engineCommit is the install folder's name when it is a commit (followed through a link), else null", () => {
+  const d = mkdtempSync(join(tmpdir(), 'engine-commit-'));
+  try {
+    const sha = 'c'.repeat(40);
+    mkdirSync(join(d, sha));
+    symlinkSync(join(d, sha), join(d, 'current'));
+    assert.equal(engineCommit(join(d, sha)), sha);
+    assert.equal(engineCommit(join(d, 'current')), sha, 'the real folder, through the link');
+    mkdirSync(join(d, 'checkout'));
+    assert.equal(engineCommit(join(d, 'checkout')), null, 'a checkout');
+    assert.equal(engineCommit(join(d, 'missing')), null);
+    assert.equal(engineCommit(join(d, `${sha.slice(1)}g`)), null);
+    // And every coordinator.started carries it (src/service.ts writes the one row).
+    const repoRoot = join(dirname(new URL(import.meta.url).pathname), '..', '..');
+    assert.match(readFileSync(join(repoRoot, 'src', 'service.ts'), 'utf8'), /log\.append\('coordinator\.started', \{ instance: instanceId\(\), pid: process\.pid, version, commit: engineCommit\(\) \}, instanceId\(\)\);/);
+  } finally {
+    rmSync(d, { recursive: true, force: true });
+  }
 });
