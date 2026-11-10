@@ -270,12 +270,12 @@ test('AD6 (flood): one writer comment (< 65536 chars) of unknown-id lines: notes
   const body = Array.from({ length: N }, (_, i) => `/worklane x d-9-${i.toString(16).padStart(6, '0')}`).join('\n');
   assert.ok(body.length < 65536, String(body.length));
   f.backlog.humanComment(1, 'example-collaborator', body);
-  const t0 = Date.now();
+  const t0 = performance.now();
   await commentAnswer(f, d1);
-  const first = Date.now() - t0;
-  const t1 = Date.now();
+  const first = Math.round(performance.now() - t0);
+  const t1 = performance.now();
   await commentAnswer(f, d1);
-  const second = Date.now() - t1;
+  const second = Math.round(performance.now() - t1);
   const n = notes(f).filter((x) => x.kind === 'reply_unknown_id').length;
   console.log(`# AD6: ${N} lines -> ${n} notes; first pass ${first} ms, second pass ${second} ms`);
   assert.ok(n <= 10, `FLOOD: ${n} reply_unknown_id notes from one writer comment (first pass ${first} ms, second ${second} ms)`);
