@@ -5,13 +5,15 @@ import assert from 'node:assert/strict';
 import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
+import { gunzipSync, gzipSync } from 'node:zlib';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { EventPayload } from '../src/events/types.js';
 import { EventLog } from '../src/events/log.js';
 import { withKnownFlags } from '../src/config/schema.js';
 import { FlagState, OFF_FILE, adoptFlags } from '../src/flags.js';
-import { exportBundle } from '../src/instance-move.js';
+import { exportBundle, importBundle, type Bundle } from '../src/instance-move.js';
+import { Coordinator } from '../src/coordinator.js';
 import { FakeRunner } from '../src/runner.js';
 import { runSuite } from '../src/harness-evals/replay.js';
 import { HarnessTask, type LoadedTask } from '../src/harness-evals/tasks.js';
@@ -315,6 +317,185 @@ for (const attack of [false, true]) {
       g.log.close();
       rmSync(f.base, { recursive: true, force: true });
       rmSync(g.base, { recursive: true, force: true });
+    }
+  });
+}
+
+// --- R1173aj AJ1-AJ4 (ported from attacks-1173aj/aj-attacks.test.ts; each attack with its control) ---
+const aRunner = () => new FakeRunner(() => ({ structured: { summary: 's' } }));
+
+for (const attack of [false, true]) {
+  test(`R1173aj AJ1 (${attack ? 'attack' : 'control'}): two Coordinators; ${attack ? "Coordinator's parent swapped at run time for one returning a Proxy" : 'untouched'}: b never holds a's FlagState`, { skip }, async () => {
+    const f = fixture();
+    const g = fixture();
+    const Base = Object.getPrototypeOf(Coordinator) as new (...a: unknown[]) => object;
+    try {
+      await withKnownFlags([T], async () => {
+        mainTurnsOn(f);
+        const a = coordinator(f, aRunner());
+        if (attack) {
+          const Evil = function (this: unknown, ...args: unknown[]) {
+            const o = Reflect.construct(Base, args, new.target);
+            return new Proxy(o, {
+              defineProperty(t, k, d) {
+                if (k === 'flags' && d.configurable === false) return Reflect.defineProperty(t, 'flags', { value: a.flags, writable: false, configurable: false, enumerable: true });
+                return Reflect.defineProperty(t, k, d);
+              },
+            });
+          };
+          Object.setPrototypeOf(Evil, Base);
+          Object.setPrototypeOf(Coordinator, Evil);
+        }
+        let b: Coordinator;
+        try {
+          b = coordinator(g, aRunner());
+        } catch (e) {
+          assert.ok(attack, `the control is refused: ${(e as Error).message}`);
+          assert.match((e as Error).message, /never a Proxy/);
+          return;
+        } finally {
+          Object.setPrototypeOf(Coordinator, Base);
+        }
+        assert.ok(!attack, 'the Proxy Coordinator was made');
+        await a.tick();
+        assert.notEqual(b.flags, a.flags);
+        assert.equal(b.flags.on(T), false);
+      });
+    } finally {
+      Object.setPrototypeOf(Coordinator, Base);
+      f.log.close();
+      g.log.close();
+      rmSync(f.base, { recursive: true, force: true });
+      rmSync(g.base, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const attack of [false, true]) {
+  test(`R1173aj AJ2 (${attack ? 'attack' : 'control'}): adoptFlags called from outside the Coordinator with ${attack ? 'c.flags' : 'a fresh FlagState'}, another repo (main on) and a scratch log: c's flag stays off`, { skip }, async () => {
+    const f = fixture();
+    const g = fixture();
+    const scratch = new EventLog(':memory:');
+    try {
+      await withKnownFlags([T], async () => {
+        mainTurnsOn(g);
+        const c = coordinator(f, aRunner());
+        await c.tick();
+        const target = attack ? c.flags : new FlagState();
+        const adopt = () => adoptFlags({ flags: target, log: scratch, repo: g.repo, actor: 'x', branch: 'main', check: () => [] });
+        if (attack) assert.throws(adopt, /adopts only for its own log and repo/);
+        else assert.deepEqual(adopt().map((p) => [p.flag, p.from, p.to]), [[T, false, true]], 'control: a state of its own adopts from anywhere');
+        assert.equal(c.flags.on(T), false, "c's flag read on from another repo, recorded only in a scratch log");
+      });
+    } finally {
+      scratch.close();
+      f.log.close();
+      g.log.close();
+      rmSync(f.base, { recursive: true, force: true });
+      rmSync(g.base, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const attack of [false, true]) {
+  test(`R1173aj AJ3 (${attack ? 'attack' : 'control'}): main's valid config turns nothing on; ${attack ? 'Array.prototype.includes replaced' : 'built-ins untouched'}: the flag stays off`, { skip }, async () => {
+    const f = fixture();
+    const realIncludes = Array.prototype.includes;
+    try {
+      await withKnownFlags([T], async () => {
+        const c = coordinator(f, aRunner());
+        await c.tick();
+        let on: boolean;
+        try {
+          if (attack) Array.prototype.includes = () => true;
+          on = c.flags.on(T);
+        } finally {
+          Array.prototype.includes = realIncludes;
+        }
+        assert.equal(on, false, 'a flag reads on that no commit turned on and the log never recorded');
+      });
+    } finally {
+      Array.prototype.includes = realIncludes;
+      f.log.close();
+      rmSync(f.base, { recursive: true, force: true });
+    }
+  });
+}
+
+/** A source instance whose log reads T on, with T's off pending (saved in its file, not yet a row); its bundle. */
+function sourceBundle(f: Fixture, dir: string, big = false): string {
+  const sd = join(dir, 'state');
+  mkdirSync(sd, { recursive: true });
+  const log = new EventLog(join(sd, 'events.db'));
+  adoptFlags({ flags: new FlagState(), log, repo: f.repo, actor: 'i', branch: 'main', check: () => [] });
+  assert.deepEqual(flipsOf(log), [[T, false, true]]);
+  for (let i = 0; i < (big ? 4000 : 5); i++) log.append('coordinator.error', { instance: 'i', where: 'w', kind: 'k', message: big ? 'm'.repeat(400) : 'm' }, 'i');
+  const after = log.lastId();
+  const at = (log.db.prepare('SELECT ts FROM events WHERE id = ?').get(after) as { ts: string }).ts;
+  writeFileSync(join(sd, OFF_FILE), `${JSON.stringify({ [T]: { sha: null, after, at } })}\n`);
+  log.close();
+  return exportBundle({ stateDir: sd, root: null, repo: null, host: 'h', out: join(dir, 'b.wlb') }).file;
+}
+/** The same bundle with `first` listed first (a bundle is JSON, carried however you like; nothing checks its order). */
+function reorder(file: string, out: string, first: string): string {
+  const b = JSON.parse(gunzipSync(Buffer.from(readFileSync(file, 'utf8'), 'base64')).toString('utf8')) as Bundle;
+  b.files.sort((x, y) => (x.path === first ? -1 : y.path === first ? 1 : 0));
+  writeFileSync(out, gzipSync(JSON.stringify(b)).toString('base64'));
+  return out;
+}
+/** A fresh process on `sd`'s log with main still turning T on: the flips before and after its first adopt. */
+function restartOn(f: Fixture, sd: string) {
+  const log = new EventLog(join(sd, 'events.db'));
+  try {
+    const before = flipsOf(log);
+    adoptFlags({ flags: new FlagState(), log, repo: f.repo, actor: 'i', branch: 'main', check: () => [] });
+    return { before, after: flipsOf(log) };
+  } finally {
+    log.close();
+  }
+}
+
+for (const order of ['export', 'off file first', 'log first'] as const) {
+  test(`R1173aj AJ4a (${order}): a bundle with a pending off, imported into a fresh folder: the off is recorded at the next start`, { skip }, async () => {
+    const f = fixture();
+    const src = mkdtempSync(join(tmpdir(), 'aj4-src-'));
+    const sd = mkdtempSync(join(tmpdir(), 'aj4-sd-'));
+    try {
+      await withKnownFlags([T], async () => {
+        mainTurnsOn(f);
+        let b = sourceBundle(f, src);
+        if (order !== 'export') b = reorder(b, join(src, 'r.wlb'), order === 'off file first' ? `state/${OFF_FILE}` : 'state/events.db');
+        importBundle({ file: b, stateDir: sd, root: null, instance: true });
+        assert.ok(existsSync(join(sd, OFF_FILE)), "the bundle's pending offs were dropped by the import that carried them");
+        assert.deepEqual(restartOn(f, sd).after, [[T, false, true], [T, true, false], [T, false, true]], 'the pending off is recorded');
+      });
+    } finally {
+      f.log.close();
+      for (const d of [f.base, src, sd]) rmSync(d, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const order of ['export', 'off file first', 'log first'] as const) {
+  test(`R1173aj AJ4b (${order}): an import --force onto a log of its own that fails (disk full): the target's log gets no flip that never ran`, { skip: skip || process.platform === 'win32' }, async () => {
+    const f = fixture();
+    const src = mkdtempSync(join(tmpdir(), 'aj4b-src-'));
+    const sd = mkdtempSync(join(tmpdir(), 'aj4b-sd-'));
+    try {
+      await withKnownFlags([T], async () => {
+        mainTurnsOn(f);
+        const own = new EventLog(join(sd, 'events.db'));
+        adoptFlags({ flags: new FlagState(), log: own, repo: f.repo, actor: 'i', branch: 'main', check: () => [] });
+        own.close();
+        let b = sourceBundle(f, src, true);
+        if (order !== 'export') b = reorder(b, join(src, 'r.wlb'), order === 'off file first' ? `state/${OFF_FILE}` : 'state/events.db');
+        assert.match(importChild(b, sd, { full: true }).stdout, /THREW/);
+        const fl = restartOn(f, sd);
+        assert.deepEqual(fl.after, fl.before, "no off/on pair the target's log never had");
+      });
+    } finally {
+      f.log.close();
+      for (const d of [f.base, src, sd]) rmSync(d, { recursive: true, force: true });
     }
   });
 }

@@ -4,7 +4,9 @@
 //     the flags the default branch's committed config turns on, at a recorded commit; no config object carries flags
 //     (every parsed `flags:` is a frozen {}). Per coordinator, never per process (R1173af AF1: a harness-eval replay
 //     runs its own Coordinator in the instance's process, and a shared state let a task repo's config flip the
-//     instance's flags unrecorded).
+//     instance's flags unrecorded). The claim (R1173aj): no code path in src shares or changes another Coordinator's
+//     flag state. Code running in the same process that sets out to tamper with it (a swapped prototype, a Proxy, a
+//     replaced built-in) is out of scope; the cheap guards against the shapes the reviews found are kept below.
 //     WHY (#1173 reviews R1173g, R1173h): with flags on the config, every path that built one (the checkout's start,
 //     the tool guard, the CLI, the dashboard, loadConfigAt on a branch) was another way to read a flag on, a mutable
 //     object a write could turn one on in, and an inherited property a polluted prototype could.
@@ -35,20 +37,27 @@ export { FLAG_NAME, FLAGS, RETIRED_FLAGS, flagsSchema, type FlagInfo } from './c
  * One coordinator's flags: what it adopted, and its offs not recorded yet. R1173af AF1: these were module globals, one
  * set per process, and a harness-eval replay's own Coordinator in the instance's process (src/harness-evals/replay.ts)
  * turned the instance's flags on and off from a task repo's config, with no record in the instance's log. Each
- * Coordinator owns one now (`coordinator.flags`), and only this module can read or change what is inside: a FlagState
- * is a handle, its state kept here (below), so nothing outside can write a flag on.
+ * Coordinator owns one now (`coordinator.flags`), bound at creation to its own log and repo (R1173aj AJ2: adoptFlags
+ * refuses any other pair), and only this module reads or changes what is inside: a FlagState is a handle, its state
+ * kept here (below). In scope: no path in src shares or changes another Coordinator's state (the module header).
  */
 export class FlagState {
   /** Whether a flag is on: only when the default branch's committed config, at the adopted commit, says `true` for it. */
   readonly on: (name: string) => boolean;
   /** What is on, and from which commit (a copy): for the audit and the dashboard. */
   readonly state: () => { sha: string | null; on: string[] };
-  constructor() {
-    const i: Inner = { snapshot: null, offUnrecorded: new Map(), offFile: null };
+  constructor(own?: { log: EventLog; repo: string }) {
+    const i: Inner = { snapshot: null, offUnrecorded: new Map(), offFile: null, own: own ?? null };
     inner.set(this, i);
-    // R1173ah AH2: the readers are this instance's own, and it is frozen, so no code outside this module can make `on`
-    // say true: a method put on the class's prototype is shadowed by them, and they can't be replaced.
-    this.on = (name) => i.snapshot !== null && i.snapshot.on.includes(name);
+    // R1173ah AH2: the readers are this instance's own, and it is frozen: a method put on the class's prototype is
+    // shadowed by them, and they can't be replaced.
+    // R1173aj AJ3: own properties of the frozen snapshot only, no built-in a polluted prototype could replace.
+    this.on = (name) => {
+      const on = i.snapshot?.on;
+      if (!on) return false;
+      for (let k = 0; k < on.length; k++) if (on[k] === name) return true;
+      return false;
+    };
     this.state = () => ({ sha: i.snapshot?.sha ?? null, on: [...(i.snapshot?.on ?? [])] });
     Object.freeze(this);
   }
@@ -60,6 +69,8 @@ type Inner = {
   /** Flags this coordinator turned off whose off record isn't durable yet, each with the commit that turned it off. */
   offUnrecorded: Map<string, string | null>;
   offFile: OffFile | null;
+  /** R1173aj AJ2: the log and repo this state adopts for (a Coordinator's own); null: any (tests). */
+  own: { log: EventLog; repo: string } | null;
 };
 const inner = new WeakMap<FlagState, Inner>();
 function of(s: FlagState): Inner {
@@ -280,6 +291,7 @@ export function recordedFlags(log: EventLog): Map<string, boolean> {
  */
 export function adoptFlags(o: { flags: FlagState; log: EventLog; repo: string; actor: string; branch: string; check: (cfg: Config) => ConfigError[] }): EventPayload<'flag.flipped'>[] {
   const st = of(o.flags);
+  if (st.own && (st.own.log !== o.log || st.own.repo !== o.repo)) throw new Error('a FlagState adopts only for its own log and repo');
   const known = knownFlags();
   // origin's HEAD must be the default branch this instance is configured for (R1173n M3: an origin HEAD moved to an
   // unprotected branch turned flags on from it). A mismatch reads nothing: every flag off. So does a read or a check

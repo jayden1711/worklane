@@ -53,6 +53,12 @@ new behaviour can be tried on one repo before it reaches the rest. Code: `src/co
       the log write ended, the target's log is still its own: move it back by hand before the next start; if after,
       the log is the bundle's and the file belongs to none, so delete it. Nothing else takes it up: a later import
       puts back only a file it moved itself, and an export leaves `.import-old` out.
+    - A bundle's own file of unrecorded offs is written right after its log, whatever order the bundle lists them in
+      (R1173aj AJ4). An import killed after the log write and before that file loses the bundle's pending offs
+      (AJ5): the imported log starts with them unrecorded, so a flag the source had turned off and not yet recorded
+      reads as on until main changes.
+    - Two imports into one folder at once aren't supported: there is no lock between them (AJ6). Stop the
+      coordinator and run one import at a time, as export says.
     - A restored or replaced log whose row at an entry's position was written again with the very same millisecond
       stamp reads as the entry's own log: if main turns the flag on, the next start writes that off and the on once
       more.
@@ -65,9 +71,12 @@ new behaviour can be tried on one repo before it reaches the rest. Code: `src/co
   - A coordinator started on the checkout's config (main's invalid or missing) adopts nothing until main's config is
     valid: **every flag is off**. A branch, a hand edit, a written-to config object or a polluted prototype never
     turns one on.
-  - The snapshot is each coordinator's own (`coordinator.flags`), never the process's. A harness-eval replay builds a
-    second coordinator in the instance's process and ticks it with a task repo's config: it has its own flags, and
-    can't turn the instance's on or off.
+  - The snapshot is each coordinator's own (`coordinator.flags`), never the process's, bound to its own log and repo.
+    A harness-eval replay builds a second coordinator in the instance's process and ticks it with a task repo's
+    config: it has its own flags, and can't turn the instance's on or off. What this holds: no code path in the
+    engine shares or changes another coordinator's flag state. Code running in the same process that sets out to
+    tamper with it (a swapped prototype, a Proxy, a replaced built-in) is out of scope, though the shapes the reviews
+    found are refused.
 - **Only flags the engine knows.** The engine lists its flags in `FLAGS` (`src/config/schema.ts`).
   - **A name it doesn't know makes the config invalid.** The coordinator keeps running on the last good config and
     raises `config_invalid`, naming the flag and the ones it knows. A typo never turns something on, and never quietly
