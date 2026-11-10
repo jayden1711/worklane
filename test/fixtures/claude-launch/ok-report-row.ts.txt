@@ -1,0 +1,5 @@
+// as src/x.ts
+declare function add(name: string, level: string, detail: string): void;
+declare function which(cmd: string): string | null;
+add('claude', 'warn', 'not on PATH');
+add('claude', which('claude') ? 'ok' : 'warn', 'version');

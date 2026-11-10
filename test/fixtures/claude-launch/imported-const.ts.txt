@@ -1,0 +1,4 @@
+// as src/x.ts
+import { spawn } from 'node:child_process';
+import { CLAUDE_BIN } from './names.js';
+spawn(CLAUDE_BIN, ['-p']);
