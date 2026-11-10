@@ -54,6 +54,9 @@ export class FlagState {
     return { sha: s?.sha ?? null, on: [...(s?.on ?? [])] };
   }
 }
+// R1173ah AH2: the instance is frozen; so are its methods, so no code outside this module can make `on` say true.
+Object.freeze(FlagState.prototype);
+Object.freeze(FlagState);
 type Inner = {
   /** The flags on, at the commit they were read from; null: none adopted (every flag off). Never handed out. */
   snapshot: Readonly<{ sha: string; on: readonly string[] }> | null;

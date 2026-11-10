@@ -105,6 +105,12 @@ export class Coordinator extends AutomationRuns {
   /** This coordinator's feature flags (src/flags.ts): its own, never another Coordinator's in the process (R1173af AF1). */
   readonly flags = new FlagState();
 
+  constructor(...a: ConstructorParameters<typeof AutomationRuns>) {
+    super(...a);
+    // R1173ah AH2b: `readonly` is compile-time only; never another Coordinator's state at run time either.
+    Object.defineProperty(this, 'flags', { writable: false, configurable: false });
+  }
+
   // ---------------------------------------------------------------- tick
 
   /** One deterministic pass: reconcile, handle approvals, land, dispatch. */
