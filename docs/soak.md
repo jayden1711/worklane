@@ -24,7 +24,13 @@ verdict). Workflow: `.github/workflows/soak.yml`.
   - the median and the slowest tick since the last sample;
   - distinct tasks landed, tasks filed, and the oldest unlanded task's age;
   - agent runs open, and the oldest one's age;
-  - agent slots held.
+  - agent slots held;
+  - on Linux, the open file handles the processes it started hold (each one's `/proc/<pid>/fd`);
+  - on a real soak on Linux, the job's cgroup (named by `/proc/self/cgroup`): the processes in it and its sub-groups
+    (`cgroup.procs`), and its unreclaimable kernel memory (`memory.stat` `slab_unreclaimable` + `sock`).
+
+  After the last tick the driver stops the coordinator, waits for its `idle()` and 2 s more, and takes **one more
+  sample**, the stop sample, judged on its own (below): what the shutdown leaves is read too.
 
 ## What fails it (`src/soak.ts`)
 
@@ -39,6 +45,10 @@ verdict). Workflow: `.github/workflows/soak.yml`.
 | The coordinator's git worktrees grew, and the entries in its worktree folder (a checkout git no longer lists is still there), as open file handles are judged | 2 |
 | The processes the soak started grew; the same way. Counted: its descendants; any of this user's in a group or session one of them leads or led (that same leader, by its start time); and on Linux, any carrying the soak's mark in its environment. The smoke counts its own group only when it leads it (under `node --test` the group is the runner's and every test file's). A real soak, which has its machine to itself, also counts its own group whether it leads it or not (never the test runner, its parent), and on Linux any of this user's that started after the soak (by pid and start time) in its own session or in a session that didn't exist then: an orphan that dropped the mark and left the group, one in a new session, or a user-manager service. So a detached child or a setsid'd double fork counts in both; a plain double fork that dropped the mark counts in a real soak, and in the smoke only by the mark | 4 |
 | Those processes' resident memory grew, as RSS is judged | 256 MB |
+| Those processes' open file handles grew (Linux, where they are required in every sample), as this process's are judged | 32 |
+| A real soak on Linux only (required in every sample there): the processes in the job's cgroup grew, as child processes are judged. They are counted whatever their uid, session or pid history (`sudo` doesn't move a process out of the cgroup). Processes, not tasks: `pids.current` counts threads, which the runner's own .NET processes add and drop | 4 |
+| A real soak on Linux only: the job cgroup's unreclaimable kernel memory grew, as memory is judged. It bounds what no fd table names: an inotify instance, a pipe or a socket buffer held only in flight (sent over a unix socket and never received) | 64 MB, 4× held |
+| The stop sample (read after `stop()`, `idle()` and 2 s): processes the soak started, processes in the job's cgroup, worktrees or the worktree folder's entries above the first quarter's median; an agent run open, a slot or the full-run lock held; open file handles (its own, the children's), watches, the children's RSS, the cgroup's kernel memory or the filesystems' level above the first quarter's median by more than its growth limit | any one, or the limit above |
 | inotify watches and fanotify marks grew, this process's and those processes' (Linux, where they are required in every sample), as open file handles are judged | 32 |
 | Disk under the soak's folder, the test isolate's home, the `/dev/shm` entries the soak or one of its processes holds open or mapped, and (Linux) files they hold open or mapped after unlinking them, besides the event log (judged on its own above), per landed task after the warm-up | 64 KB |
 | The same disk, grown or held mid-run, as memory is judged (temp files are made inside the folder) | 256 MB, 4× held |
@@ -132,9 +142,22 @@ replaces main's pending scheduled run.
   scripts don't run, setup-node and the runner image aren't pinned beyond their versions, so the soak step sets its
   knobs, clears NODE_OPTIONS and BASH_ENV, and runs the node recorded right after setup-node.
 - **It can't see what it doesn't count off Linux, or below what it reads:** off Linux, an orphan that dropped the mark
-  and left every group it was seen in, a file held open after unlinking, and the filesystems' levels aren't read. A
-  process of another user, and a new process in a session of this user's that was alive before the soak and isn't
-  the soak's own (a daemon started earlier), aren't counted.
+  and left every group it was seen in, a file held open after unlinking, a child's open file handles, the job's
+  cgroup and the filesystems' levels aren't read.
+  - A process of another user (a `run_as` command through `sudo -n -u`), and a new process in a session of this
+    user's that was alive before the soak and isn't the soak's own (a worker a daemon started earlier starts on the
+    soak's request), aren't counted by process, nor are their file handles. A real soak on Linux counts them through
+    the job's cgroup while they stay in it (R1181t). A process that moves to another cgroup (a user-manager service) is
+    counted only as a new session of this user's; the smoke counts none of them.
+  - A session is the soak's when it is new since the snapshot: its id unknown then, or now led by another process
+    than the one that led it then (R1181t D4: a pid reused as a session id). A session whose leader has gone keeps its
+    id, so the kernel won't reuse it.
+  - What no process holds in its fd table (an inotify instance, a pipe or a socket's buffers held only in flight,
+    sent over a unix socket and never received) is read only through the job cgroup's unreclaimable kernel memory, on a
+    real soak on Linux: a hoard under its 64 MB limit isn't seen, and in the smoke none is (R1181t D1).
+  - The stop sample is read 2 s after `stop()` and `idle()`: what the shutdown starts later, or ends later, isn't seen
+    as left. A process the coordinator's git starts in the background (`git gc --auto` detaches) that is still running
+    then would read as left behind.
 - **The smoke counts less than a real soak:** it shares its machine with other test files and the user's programs, so
   it counts by descent, a seen leader and the mark only. In the smoke, an orphan that dropped the mark and left the
   groups it was seen in (a plain double fork from a clean environment, or a new session) isn't counted, nor are the

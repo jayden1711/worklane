@@ -5,6 +5,9 @@
 //     read from the samples and from their upper envelope (each block's highest), by the highest of the last END_PEAK,
 //     the last quarter's median, or the robust slope over the run (capped at the rise seen); or any one sample more than
 //     PEAK_FACTOR times the limit above it (memory held mid-run and let go before the end);
+//   - what the coordinator's stop() leaves (R1181t D3): with `stopped`, the last sample is read after stop() and idle(),
+//     and processes or worktrees above the first quarter's, a run or a slot still open, or another count past its
+//     growth limit fail;
 //   - work in flight at a sample: the driver samples after the coordinator's idle(), so an open agent run or a held
 //     slot then is one that never finished or leaked, however young it reads;
 //   - log growth: the event log growing more per landed task than log_bytes_per_task over the run or over ANY 30-minute
@@ -71,6 +74,15 @@ export interface SoakSample {
    * soak on Linux, where nothing else writes; null elsewhere (not judged).
    */
   levelBytes?: number | null;
+  /** Open file handles the counted children hold (Linux, /proc/<pid>/fd; null elsewhere): R1181t D2, a child's leak of them weighed nothing. */
+  childFds?: number | null;
+  /**
+   * The job's cgroup (a real soak on Linux, R1181t D1, D4): its processes, every one whatever its uid, session or pid
+   * history (cgroup.procs, its sub-groups included), and its unreclaimable kernel memory (memory.stat
+   * slab_unreclaimable + sock), which bounds what no fd table names (an object held only in flight). Null elsewhere.
+   */
+  cgroupProcs?: number | null;
+  cgroupKernelBytes?: number | null;
 }
 
 export interface SoakLimits {
@@ -99,6 +111,8 @@ export interface SoakLimits {
   diskGrowthBytes: number;
   /** Files and folders under the soak's folder, per landed task after the warm-up. */
   filesPerTask: number;
+  /** The job cgroup's unreclaimable kernel memory (R1181t D1): growth, with the 4x peak, as memory is judged. */
+  kernelGrowthBytes: number;
 }
 
 export const SOAK_LIMITS: SoakLimits = {
@@ -119,6 +133,7 @@ export const SOAK_LIMITS: SoakLimits = {
   diskBytesPerTask: 64 * 2 ** 10,
   diskGrowthBytes: 256 * 2 ** 20,
   filesPerTask: 64,
+  kernelGrowthBytes: 64 * 2 ** 20,
 };
 
 /**
@@ -243,15 +258,18 @@ function growth(samples: readonly SoakSample[], f: (s: SoakSample) => number): {
  * the gaps and the work are judged against (#1181 reviews R1181g, R1181h 2: against the run's own spacing, a
  * coordinator slow on every tick set its own limit). Given expectedMs, they default to the driver's own (60 s, 30 s).
  */
-export function soakVerdict(samples: readonly SoakSample[], limits: SoakLimits = SOAK_LIMITS, o: { expectedMs?: number; sampleMs?: number; issueEveryMs?: number; extended?: boolean; linux?: boolean } = {}): { failures: string[]; measured: Record<string, string | number> } {
+export function soakVerdict(input: readonly SoakSample[], limits: SoakLimits = SOAK_LIMITS, o: { expectedMs?: number; sampleMs?: number; issueEveryMs?: number; extended?: boolean; linux?: boolean; stopped?: boolean } = {}): { failures: string[]; measured: Record<string, string | number> } {
   const failures: string[] = [];
+  // `stopped` (R1181t D3): the last sample was read after the coordinator's stop() and idle(), so what its shutdown
+  // leaves is seen. It is judged on its own below, against the run's first quarter, not as one more sample of the run.
+  const samples = o.stopped ? input.slice(0, -1) : input;
   if (samples.length < 4) return { failures: [`only ${samples.length} sample(s): a soak needs at least 4 to compare its start and end`], measured: {} };
   // Every field the verdict reads must be there: a sample missing one can't be judged, and that fails closed.
   // `extended`: the driver's own run, which records errors, worktrees and disk too (R1181j 1, 2); a driver that drops
   // them fails closed. `linux`: there the watches can always be counted, so they are required too (R1181o), and on a
   // real soak (`expectedMs`) the filesystems' level as well (R1181q N2: a level that read null went unjudged, unnamed). (Without it they are judged when there, so the frozen acceptance file's samples stay valid.)
-  const fields: (keyof SoakSample)[] = ['at', 'rss', 'heapUsed', 'eventsBytes', 'walBytes', 'events', 'tickMs', 'maxTickMs', 'tasksDone', 'filed', 'oldestUnlandedMs', 'openRuns', 'oldestOpenRunMs', 'slotsHeld', ...(o.extended ? (['errors', 'worktrees', 'diskBytes', 'children', 'failedRuns', 'failureEvents', 'worktreeDirs', 'files', 'fullRunHeld', 'childRss'] as const) : []), ...(o.extended && o.linux ? (['watches'] as const) : []), ...(o.extended && o.linux && o.expectedMs !== undefined ? (['levelBytes'] as const) : [])];
-  const missing = fields.filter((k) => samples.some((s) => typeof s[k] !== 'number' || !Number.isFinite(s[k])));
+  const fields: (keyof SoakSample)[] = ['at', 'rss', 'heapUsed', 'eventsBytes', 'walBytes', 'events', 'tickMs', 'maxTickMs', 'tasksDone', 'filed', 'oldestUnlandedMs', 'openRuns', 'oldestOpenRunMs', 'slotsHeld', ...(o.extended ? (['errors', 'worktrees', 'diskBytes', 'children', 'failedRuns', 'failureEvents', 'worktreeDirs', 'files', 'fullRunHeld', 'childRss'] as const) : []), ...(o.extended && o.linux ? (['watches', 'childFds'] as const) : []), ...(o.extended && o.linux && o.expectedMs !== undefined ? (['levelBytes', 'cgroupProcs', 'cgroupKernelBytes'] as const) : [])];
+  const missing = fields.filter((k) => input.some((s) => typeof s[k] !== 'number' || !Number.isFinite(s[k])));
   if (missing.length) return { failures: [`samples missing ${missing.join(', ')}: nothing was judged`], measured: {} };
   // WHY (#1181 review): with too few samples past the warm-up, the warm-up's were judged instead, so a 4-minute run
   // passed as a soak. Too short is a failure; and a run must last (nearly) as long as it was asked to.
@@ -270,6 +288,7 @@ export function soakVerdict(samples: readonly SoakSample[], limits: SoakLimits =
   const first = use.slice(0, q);
   const last = use.slice(-q);
   const end = samples.at(-1)!;
+  const stop = o.stopped ? input.at(-1) : undefined;
 
   // Leaks.
   const leak = (what: string, g: { growth: number; peak: number }, limit: number, fmt: (n: number) => string) => {
@@ -337,6 +356,29 @@ export function soakVerdict(samples: readonly SoakSample[], limits: SoakLimits =
       leak('inotify watches', { growth: Math.round(g.growth * 10) / 10, peak: g.peak }, limits.fdGrowth, (n) => `by ${Math.round(n * 10) / 10}`);
     }
   }
+  // R1181t D2: the counted children's open file handles, as this process's.
+  if (use.some((s) => typeof s.childFds === 'number')) {
+    const counted = use.filter((s) => typeof s.childFds === 'number');
+    if (counted.length * 2 < use.length) failures.push(`the child processes' open file handles not counted in ${use.length - counted.length} of ${use.length} sample(s): a leak of them can't be judged`);
+    else {
+      const g = growth(counted, (s) => s.childFds!);
+      leak("the child processes' open file handles", { growth: Math.round(g.growth * 10) / 10, peak: g.peak }, limits.fdGrowth, (n) => `by ${Math.round(n * 10) / 10}`);
+    }
+  }
+  // R1181t D1, D4: the job's cgroup, as levels: its processes as child processes are judged, whatever their uid,
+  // session or pid history; its unreclaimable kernel memory as memory is.
+  for (const [k, what, limit, fmt] of [
+    ['cgroupProcs', "the job cgroup's processes", limits.childGrowth, (n: number) => `by ${Math.round(n * 10) / 10}`],
+    ['cgroupKernelBytes', "the job cgroup's unreclaimable kernel memory", limits.kernelGrowthBytes, MB],
+  ] as const) {
+    if (!use.some((s) => typeof s[k] === 'number')) continue;
+    const counted = use.filter((s) => typeof s[k] === 'number');
+    if (counted.length * 2 < use.length) failures.push(`${what} not read in ${use.length - counted.length} of ${use.length} sample(s): a leak of them can't be judged`);
+    else {
+      const g = growth(counted, (s) => s[k] as number);
+      leak(what, k === 'cgroupProcs' ? { growth: Math.round(g.growth * 10) / 10, peak: g.peak } : g, limit, fmt);
+    }
+  }
   // R1181o D1, R1181p D2: the filesystems' and the kernel's levels, as the disk is held (growth with the 4x peak). The
   // driver takes the event log out of it (R1181q D2: the log is judged on its own above, by its own limits).
   if (use.some((s) => typeof s.levelBytes === 'number')) {
@@ -365,6 +407,35 @@ export function soakVerdict(samples: readonly SoakSample[], limits: SoakLimits =
     const n = (end.files! - use[0]!.files!) / landedSince;
     if (n > limits.filesPerTask) failures.push(`file growth: ${end.files! - use[0]!.files!} files under the soak's folder after the warm-up, ${Math.round(n)} per landed task (limit ${limits.filesPerTask})`);
     filesPerTask = Math.round(n * 10) / 10;
+  }
+
+  // R1181t D3: what the coordinator's stop() and idle() leave, read 2 s after them. Processes, worktrees and the
+  // worktree folder's entries above the first quarter's median are left behind (any one); a run open or a slot held
+  // then never finished; the rest above that median by more than its growth limit.
+  let leftAtStop: string | number = 'not read';
+  if (stop) {
+    const before = failures.length;
+    const base = (k: keyof SoakSample) => median(first.map((s) => s[k]).filter((x): x is number => typeof x === 'number'));
+    const at = (k: keyof SoakSample) => (typeof stop[k] === 'number' && first.some((s) => typeof s[k] === 'number') ? (stop[k] as number) : null);
+    for (const [k, what] of [['children', 'child process(es)'], ['cgroupProcs', "process(es) in the job's cgroup"], ['worktrees', 'worktree(s)'], ['worktreeDirs', "entr(ies) in the worktree folder"]] as const) {
+      const n = at(k);
+      if (n !== null && n > base(k)) failures.push(`left at stop: ${n} ${what} after stop() and idle(), above the first quarter's ${base(k)}`);
+    }
+    for (const [k, what, limit, fmt] of [
+      ['fds', 'open file handles', limits.fdGrowth, String],
+      ['childFds', "the child processes' open file handles", limits.fdGrowth, String],
+      ['watches', 'inotify watches', limits.fdGrowth, String],
+      ['childRss', "the child processes' RSS", limits.rssGrowthBytes, MB],
+      ['cgroupKernelBytes', "the job cgroup's unreclaimable kernel memory", limits.kernelGrowthBytes, MB],
+      ['levelBytes', "the used space of the soak's filesystems and the kernel's shared memory", limits.diskGrowthBytes, MB],
+    ] as const) {
+      const n = at(k);
+      if (n !== null && n - base(k) > limit) failures.push(`left at stop: ${what} ${fmt(n - base(k))} above the first quarter's after stop() and idle() (limit ${fmt(limit)})`);
+    }
+    if (stop.openRuns > 0) failures.push(`left at stop: ${stop.openRuns} agent run(s) open after stop() and idle()`);
+    if (stop.slotsHeld > 0) failures.push(`left at stop: ${stop.slotsHeld} agent slot(s) held after stop() and idle()`);
+    if ((stop.fullRunHeld ?? 0) > 0) failures.push('left at stop: the full-run lock held after stop() and idle()');
+    leftAtStop = failures.length - before;
   }
 
   // Work in flight at a sample: none, ever (#1181 review R1181f SL1-SL3). The driver samples after the coordinator's
@@ -463,6 +534,6 @@ export function soakVerdict(samples: readonly SoakSample[], limits: SoakLimits =
   if (filedSince > 0 && sinceMin > stallLimit) failures.push(`stalled: no task landed in the last ${Math.round(sinceMin)} min (${filedSince} filed since; limit ${Math.round(stallLimit)} min; ${end.tasksDone} landed in all)`);
   return {
     failures,
-    measured: { hours: +(end.at / 3_600_000).toFixed(2), samples: samples.length, tasks_done: end.tasksDone, tasks_filed: end.filed, heap_growth: MB(heap.growth), heap_peak: MB(heap.peak), rss_growth: MB(rss.growth), fd_growth: fds ?? 'not counted', log_per_task: `${Math.round(perTask / 1024)} KB`, wal_max: MB(wal), tick_ms_first: Math.round(t0), tick_ms_last: Math.round(t1), tick_ms_slowest_first: Math.round(m0), tick_ms_slowest_last: Math.round(m1), tick_ms_per_100k_events: perEvents, oldest_unlanded_min: Math.round(Math.max(...use.map((s) => s.oldestUnlandedMs)) / 60_000), max_gap_min: +(Math.max(...samples.slice(1).map((s, i) => s.at - samples[i]!.at)) / 60_000).toFixed(1), open_runs_end: end.openRuns, slots_held_end: end.slotsHeld, errors_after_warmup: errors, worktree_growth: worktrees, child_growth: children, disk_per_task: diskPerTask, files_per_task: filesPerTask, not_judged: notJudged.join(', ') || 'none' },
+    measured: { hours: +(end.at / 3_600_000).toFixed(2), samples: samples.length, tasks_done: end.tasksDone, tasks_filed: end.filed, heap_growth: MB(heap.growth), heap_peak: MB(heap.peak), rss_growth: MB(rss.growth), fd_growth: fds ?? 'not counted', log_per_task: `${Math.round(perTask / 1024)} KB`, wal_max: MB(wal), tick_ms_first: Math.round(t0), tick_ms_last: Math.round(t1), tick_ms_slowest_first: Math.round(m0), tick_ms_slowest_last: Math.round(m1), tick_ms_per_100k_events: perEvents, oldest_unlanded_min: Math.round(Math.max(...use.map((s) => s.oldestUnlandedMs)) / 60_000), max_gap_min: +(Math.max(...samples.slice(1).map((s, i) => s.at - samples[i]!.at)) / 60_000).toFixed(1), open_runs_end: end.openRuns, slots_held_end: end.slotsHeld, errors_after_warmup: errors, worktree_growth: worktrees, child_growth: children, disk_per_task: diskPerTask, files_per_task: filesPerTask, left_at_stop: leftAtStop, not_judged: notJudged.join(', ') || 'none' },
   };
 }

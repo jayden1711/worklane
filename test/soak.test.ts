@@ -467,8 +467,11 @@ export function childPids(mark?: string, seen: Set<number> = new Set(), start: P
   //   in a new session (setsid, a user-manager service) that dropped the mark;
   // - R1181r R2: a process of this user, new since the snapshot, in our own session: an orphan that dropped the mark
   //   and left our group (the step's session holds nothing else).
+  // R1181t D4: a session alive at the snapshot is one whose leader then is still its leader (its start time unchanged)
+  // or gone (the session lives on, so the kernel won't reuse its id); a new leader on that id leads a new session.
+  const oldSession = (sid: number) => start !== null && start.sids.has(sid) && [null, start.sids.get(sid)].includes(startTime(sid));
   const fresh = (pid: number, sid: number | undefined, u: number | undefined) =>
-    real && linux && start !== null && u === uid && sid !== undefined && isNew(pid) && (!start.sids.has(sid) || sid === ownSid);
+    real && linux && start !== null && u === uid && sid !== undefined && isNew(pid) && (!oldSession(sid) || sid === ownSid);
   // R1181r R5: a match through a seen leader's group or session is this user's only.
   const mine = (u: number | undefined) => !linux || u === uid;
   return rows
@@ -493,13 +496,14 @@ export function startTime(pid: number): string | null {
  * The processes and sessions alive at a moment (Linux): what a soak started later is told apart from (R1181p D1).
  * Each process by its pid and start time (R1181r R5: a pid can be reused within a soak's hours).
  */
-export type ProcessSnapshot = { keys: Set<string>; sids: Set<number> };
+export type ProcessSnapshot = { keys: Set<string>; sids: Map<number, string | null> };
 export function processSnapshot(): ProcessSnapshot | null {
   if (process.platform !== 'linux') return null;
   const r = spawnSync('ps', ['-A', '-o', 'pid=,sid='], { encoding: 'utf8' });
   if (r.status !== 0 || typeof r.stdout !== 'string') return null;
   const rows = r.stdout.split('\n').map((l) => l.trim().split(/\s+/).map(Number)).filter((x) => x.length === 2 && x.every(Number.isFinite));
-  return { keys: new Set(rows.map(([p]) => `${p}:${startTime(p!) ?? '?'}`)), sids: new Set(rows.map(([, sid]) => sid!)) };
+  // R1181t D4: each session with its leader's start time (null: the leader gone), as each process is kept.
+  return { keys: new Set(rows.map(([p]) => `${p}:${startTime(p!) ?? '?'}`)), sids: new Map(rows.map(([, sid]) => [sid!, startTime(sid!)])) };
 }
 
 /** Their resident memory, in bytes (R1181n: a child's memory weighed nothing). */
@@ -534,6 +538,63 @@ export function inotifyWatches(pids: readonly number[] = []): number | null {
     }
   }
   return n;
+}
+
+/** Open file handles `pids` hold (Linux, /proc/<pid>/fd; one gone or not ours reads none), else null (R1181t D2). */
+export function childFds(pids: readonly number[]): number | null {
+  try {
+    readdirSync('/proc/self/fd');
+  } catch {
+    return null;
+  }
+  let n = 0;
+  for (const p of pids) {
+    try {
+      n += readdirSync(`/proc/${p}/fd`).length;
+    } catch {
+      // gone, or another user's (the job's cgroup counts it)
+    }
+  }
+  return n;
+}
+
+/**
+ * The job's cgroup (cgroup v2, named by /proc/self/cgroup's `0::` line; R1181t D1, D4): the processes in it and its
+ * sub-groups, whatever their uid, session or pid history (sudo doesn't move a process out of it), and its
+ * unreclaimable kernel memory (memory.stat slab_unreclaimable + sock), which bounds what no fd table names: an inotify
+ * instance or a socket buffer held only in flight. Each null where it can't be read.
+ */
+export function cgroupLevels(root = '/sys/fs/cgroup'): { procs: number | null; kernelBytes: number | null } {
+  let dir: string;
+  try {
+    const line = readFileSync('/proc/self/cgroup', 'utf8').split('\n').find((l) => l.startsWith('0::'));
+    if (!line) return { procs: null, kernelBytes: null };
+    dir = join(root, line.slice(3));
+  } catch {
+    return { procs: null, kernelBytes: null };
+  }
+  let count = 0;
+  const walk = (d: string) => {
+    count += readFileSync(join(d, 'cgroup.procs'), 'utf8').split('\n').filter(Boolean).length;
+    for (const e of readdirSync(d, { withFileTypes: true })) if (e.isDirectory()) walk(join(d, e.name));
+  };
+  let procs: number | null = null;
+  try {
+    walk(dir);
+    procs = count;
+  } catch {
+    // not readable here
+  }
+  let kernelBytes: number | null = null;
+  try {
+    const stat = readFileSync(join(dir, 'memory.stat'), 'utf8');
+    const get = (k: string) => Number(new RegExp(`^${k} (\\d+)$`, 'm').exec(stat)?.[1]);
+    const n = get('slab_unreclaimable') + get('sock');
+    if (Number.isFinite(n)) kernelBytes = n;
+  } catch {
+    // no memory controller here
+  }
+  return { procs, kernelBytes };
 }
 
 /** The paths this process and `pids` hold open or mapped (Linux, /proc/<pid>/fd and maps); empty elsewhere. */
@@ -692,6 +753,16 @@ export const entriesIn = (dir: string) => (existsSync(dir) ? readdirSync(dir).le
 /** The repo's git worktrees, the main one included (R1181j 2). */
 const worktreeCount = (repo: string) => git(repo, 'worktree', 'list', '--porcelain').split('\n').filter((l) => l.startsWith('worktree ')).length;
 
+/** How long what the coordinator's stop() ends is given to go before the stop sample (R1181t D3). */
+export const STOP_GRACE_MS = 2000;
+/** Stop the coordinator, wait for it to go idle, give what it ended STOP_GRACE_MS, then read once more (R1181t D3). */
+export async function readAfterStop<T>(c: { stop(): void; idle(): Promise<unknown> }, read: () => T, graceMs = STOP_GRACE_MS): Promise<T> {
+  c.stop();
+  await c.idle();
+  await new Promise((r) => setTimeout(r, graceMs));
+  return read();
+}
+
 function openFds(): number | null {
   for (const d of ['/proc/self/fd', '/dev/fd']) {
     try {
@@ -759,6 +830,61 @@ test('soak: the real coordinator works for a while with stand-in agents; nothing
   const landed = new Set<string>();
   /** Each task filed, by its issue number: when (R1181h V3: the oldest one not landed is judged by its age). */
   const filedAt = new Map<string, number>();
+  /** One sample, read after the coordinator's idle() (and, at the end, after its stop(): R1181t D3). */
+  const read = (at: number): SoakSample => {
+    const events = f.log.read(0, ['run.started', 'run.finished', 'land.result']);
+    const runs = openRunsOf(events, Date.now());
+    // A forced GC before each reading (soak.yml runs node --expose-gc), so a peak is held memory, not garbage.
+    gc?.();
+    // Distinct issues landed: a task landed twice counts once (R1181f W1).
+    for (const e of events) if (e.type === 'land.result' && (e.payload as { outcome: string }).outcome === 'landed') landed.add(String((e.payload as { issue: unknown }).issue));
+    const mem = process.memoryUsage();
+    // The log's size is its file and its WAL: writes sit in the WAL until a checkpoint moves them over.
+    const wal = existsSync(`${f.log.path}-wal`) ? statSync(`${f.log.path}-wal`).size : 0;
+    ticks.sort((a, b) => a - b);
+    // The real soak has the machine to itself (soak.yml), so its own session and group count too (R1181q D1,
+    // R1181r R1, R2); the smoke runs beside other test files and the user's own programs, so it doesn't.
+    const kids = childPids(childMark, seenLeaders, startProcs, hours > 0);
+    const logBytes = statSync(f.log.path).size + wal;
+    const inside = dirUsage(f.base);
+    const outside = usageOutside(f.base, kids ?? []);
+    const usage = { bytes: inside.bytes + outside.bytes + deletedOpenBytes(kids ?? []), files: inside.files + outside.files };
+    // R1181t D1, D4: the job's cgroup, a real soak's on Linux only (the smoke shares its cgroup with other test files).
+    const cg = hours > 0 && process.platform === 'linux' ? cgroupLevels() : { procs: null, kernelBytes: null };
+    return {
+      at,
+      rss: mem.rss,
+      heapUsed: mem.heapUsed,
+      fds: openFds(),
+      eventsBytes: logBytes,
+      walBytes: wal,
+      events: f.log.lastId(),
+      tickMs: ticks[ticks.length >> 1] ?? 0,
+      maxTickMs: ticks.at(-1) ?? 0,
+      tasksDone: landed.size,
+      filed: n,
+      oldestUnlandedMs: Math.max(0, ...[...filedAt].filter(([k]) => !landed.has(k)).map(([, t]) => at - t)),
+      openRuns: runs.open,
+      oldestOpenRunMs: runs.oldestMs,
+      slotsHeld: slotStatus(f.slotsDir).agents.length,
+      ...failureCounts(f.log),
+      worktrees: worktreeCount(f.repo),
+      worktreeDirs: entriesIn(wtDir),
+      diskBytes: usage.bytes,
+      files: usage.files,
+      children: kids?.length ?? null,
+      childRss: rssOf(kids ?? []),
+      watches: inotifyWatches(kids ?? []),
+      childFds: childFds(kids ?? []),
+      cgroupProcs: cg.procs,
+      cgroupKernelBytes: cg.kernelBytes,
+      fullRunHeld: slotStatus(f.slotsDir).fullRun ? 1 : 0,
+      // R1181q D2: less the event log, judged on its own above (it is on f.base's filesystem); /dev/shm and
+      // $XDG_RUNTIME_DIR are tmpfs, which the kernel's Shmem already holds, so they aren't read twice.
+      levelBytes: hours > 0 && process.platform === 'linux' ? levelLessLog(fsLevels([f.base, '/var/tmp']), logBytes) : null,
+    };
+  };
+  let threw = true;
   try {
     while (performance.now() - start < ms && tickCount++ < smokeTicks) {
       const at = performance.now() - start;
@@ -773,61 +899,24 @@ test('soak: the real coordinator works for a while with stand-in agents; nothing
       const wait = tickPeriodMs - (performance.now() - t0);
       if (wait > 0) await new Promise((r) => setTimeout(r, wait));
       if (at - lastSample >= sampleMs) {
-        const events = f.log.read(0, ['run.started', 'run.finished', 'land.result']);
-        const runs = openRunsOf(events, Date.now());
-        // A forced GC before each reading (soak.yml runs node --expose-gc), so a peak is held memory, not garbage.
-        gc?.();
-        // Distinct issues landed: a task landed twice counts once (R1181f W1).
-        for (const e of events) if (e.type === 'land.result' && (e.payload as { outcome: string }).outcome === 'landed') landed.add(String((e.payload as { issue: unknown }).issue));
-        const mem = process.memoryUsage();
-        // The log's size is its file and its WAL: writes sit in the WAL until a checkpoint moves them over.
-        const wal = existsSync(`${f.log.path}-wal`) ? statSync(`${f.log.path}-wal`).size : 0;
-        ticks.sort((a, b) => a - b);
-        // The real soak has the machine to itself (soak.yml), so its own session and group count too (R1181q D1,
-        // R1181r R1, R2); the smoke runs beside other test files and the user's own programs, so it doesn't.
-        const kids = childPids(childMark, seenLeaders, startProcs, hours > 0);
-        const logBytes = statSync(f.log.path).size + wal;
-        const inside = dirUsage(f.base);
-        const outside = usageOutside(f.base, kids ?? []);
-        const usage = { bytes: inside.bytes + outside.bytes + deletedOpenBytes(kids ?? []), files: inside.files + outside.files };
-        samples.push({
-          at,
-          rss: mem.rss,
-          heapUsed: mem.heapUsed,
-          fds: openFds(),
-          eventsBytes: logBytes,
-          walBytes: wal,
-          events: f.log.lastId(),
-          tickMs: ticks[ticks.length >> 1] ?? 0,
-          maxTickMs: ticks.at(-1) ?? 0,
-          tasksDone: landed.size,
-          filed: n,
-          oldestUnlandedMs: Math.max(0, ...[...filedAt].filter(([k]) => !landed.has(k)).map(([, t]) => at - t)),
-          openRuns: runs.open,
-          oldestOpenRunMs: runs.oldestMs,
-          slotsHeld: slotStatus(f.slotsDir).agents.length,
-          ...failureCounts(f.log),
-          worktrees: worktreeCount(f.repo),
-          worktreeDirs: entriesIn(wtDir),
-          diskBytes: usage.bytes,
-          files: usage.files,
-          children: kids?.length ?? null,
-          childRss: rssOf(kids ?? []),
-          watches: inotifyWatches(kids ?? []),
-          fullRunHeld: slotStatus(f.slotsDir).fullRun ? 1 : 0,
-          // R1181q D2: less the event log, judged on its own above (it is on f.base's filesystem); /dev/shm and
-          // $XDG_RUNTIME_DIR are tmpfs, which the kernel's Shmem already holds, so they aren't read twice.
-          levelBytes: hours > 0 && process.platform === 'linux' ? levelLessLog(fsLevels([f.base, '/var/tmp']), logBytes) : null,
-        });
+        samples.push(read(at));
         // Each sample as it is taken (R1181j N1: a crash or an OOM left no report, in the runs that most need one).
         if (report) appendFileSync(join(report, 'soak-samples.jsonl'), `${JSON.stringify(samples.at(-1))}\n`);
         ticks = [];
         lastSample = at;
       }
     }
+    threw = false;
   } finally {
-    c.stop();
-    await c.idle();
+    // R1181t D3: what the shutdown leaves (processes, a slot, a run, worktrees), read once more after stop(), idle()
+    // and a grace, and judged as the stop sample (`stopped` below).
+    if (threw) {
+      c.stop();
+      await c.idle();
+    } else {
+      samples.push(await readAfterStop(c, () => read(performance.now() - start)));
+      if (report) appendFileSync(join(report, 'soak-samples.jsonl'), `${JSON.stringify(samples.at(-1))}\n`);
+    }
     if (oldTmp === undefined) delete process.env.TMPDIR;
     else process.env.TMPDIR = oldTmp;
     if (oldMark === undefined) delete process.env.SOAK_CHILD_MARK;
@@ -839,7 +928,7 @@ test('soak: the real coordinator works for a while with stand-in agents; nothing
   // A real soak is judged against the hours it was asked for (a run that stopped early fails).
   // `extended`: errors, worktrees and disk are recorded here, so a sample without them fails (R1181j 1, 2).
   const linux = process.platform === 'linux';
-  const v = soakVerdict(samples, limits, hours > 0 ? { expectedMs: ms - sampleMs, sampleMs, issueEveryMs, extended: true, linux } : { extended: true, linux });
+  const v = soakVerdict(samples, limits, hours > 0 ? { expectedMs: ms - sampleMs, sampleMs, issueEveryMs, extended: true, linux, stopped: true } : { extended: true, linux, stopped: true });
   const out = process.env.SOAK_REPORT_DIR;
   if (out) {
     mkdirSync(out, { recursive: true });
@@ -998,11 +1087,15 @@ test("the soak driver's counts read what they claim: failures in a log, worktree
 
 test('the soak driver takes each count from those helpers (#1181 review R1181k D2: a constant in their place passed every test)', () => {
   const src = readFileSync(join(repoRoot, 'test', 'soak.test.ts'), 'utf8');
-  for (const line of ['...failureCounts(f.log),', 'worktrees: worktreeCount(f.repo),', 'worktreeDirs: entriesIn(wtDir),', 'diskBytes: usage.bytes,', 'files: usage.files,', 'children: kids?.length ?? null,', 'childRss: rssOf(kids ?? []),', 'watches: inotifyWatches(kids ?? []),', 'fullRunHeld: slotStatus(f.slotsDir).fullRun ? 1 : 0,', "levelBytes: hours > 0 && process.platform === 'linux' ? levelLessLog(fsLevels([f.base, '/var/tmp']), logBytes) : null,", 'eventsBytes: logBytes,']) assert.ok(src.includes(`\n          ${line}\n`), line);
-  assert.match(src, /\n {8}const kids = childPids\(childMark, seenLeaders, startProcs, hours > 0\);\n {8}const logBytes = statSync\(f\.log\.path\)\.size \+ wal;\n {8}const inside = dirUsage\(f\.base\);\n {8}const outside = usageOutside\(f\.base, kids \?\? \[\]\);\n {8}const usage = \{ bytes: inside\.bytes \+ outside\.bytes \+ deletedOpenBytes\(kids \?\? \[\]\), files: inside\.files \+ outside\.files \};\n/);
+  for (const line of ['...failureCounts(f.log),', 'worktrees: worktreeCount(f.repo),', 'worktreeDirs: entriesIn(wtDir),', 'diskBytes: usage.bytes,', 'files: usage.files,', 'children: kids?.length ?? null,', 'childRss: rssOf(kids ?? []),', 'watches: inotifyWatches(kids ?? []),', 'fullRunHeld: slotStatus(f.slotsDir).fullRun ? 1 : 0,', "levelBytes: hours > 0 && process.platform === 'linux' ? levelLessLog(fsLevels([f.base, '/var/tmp']), logBytes) : null,", 'eventsBytes: logBytes,', 'childFds: childFds(kids ?? []),', 'cgroupProcs: cg.procs,', 'cgroupKernelBytes: cg.kernelBytes,']) assert.ok(src.includes(`\n      ${line}\n`), line);
+  assert.match(src, /\n {4}const kids = childPids\(childMark, seenLeaders, startProcs, hours > 0\);\n {4}const logBytes = statSync\(f\.log\.path\)\.size \+ wal;\n {4}const inside = dirUsage\(f\.base\);\n {4}const outside = usageOutside\(f\.base, kids \?\? \[\]\);\n {4}const usage = \{ bytes: inside\.bytes \+ outside\.bytes \+ deletedOpenBytes\(kids \?\? \[\]\), files: inside\.files \+ outside\.files \};\n/);
+  // R1181t D1, D4: the cgroup on a real Linux soak; D3: each sample from the one reader, the last after stop().
+  assert.ok(src.includes("\n    const cg = hours > 0 && process.platform === 'linux' ? cgroupLevels() : { procs: null, kernelBytes: null };\n"), 'the cgroup read');
+  assert.ok(src.includes('\n        samples.push(read(at));\n'), 'a sample in the loop');
+  assert.ok(src.includes('\n      samples.push(await readAfterStop(c, () => read(performance.now() - start)));\n'), 'the stop sample');
   assert.match(src, /\n {2}const startProcs = processSnapshot\(\);\n {2}const f = fixture\(\);\n/);
   // R1181q D3: the whole call, the real soak's branch with its `linux` too (the smoke's alone satisfied a shorter pin).
-  assert.ok(src.includes('\n  const v = soakVerdict(samples, limits, hours > 0 ? { expectedMs: ms - sampleMs, sampleMs, issueEveryMs, extended: true, linux } : { extended: true, linux });\n'), 'the verdict call');
+  assert.ok(src.includes('\n  const v = soakVerdict(samples, limits, hours > 0 ? { expectedMs: ms - sampleMs, sampleMs, issueEveryMs, extended: true, linux, stopped: true } : { extended: true, linux, stopped: true });\n'), 'the verdict call');
   assert.match(src, /\n {2}process\.env\.SOAK_CHILD_MARK = childMark;\n/);
   // R1181l 3: temp files are made inside the measured folder.
   assert.match(src, /\n {2}const tmp = join\(f\.base, 'tmp'\);\n {2}mkdirSync\(tmp\);\n {2}const oldTmp = process\.env\.TMPDIR;\n {2}process\.env\.TMPDIR = tmp;\n/);
@@ -1101,14 +1194,16 @@ test('soak verdict: the filesystems\' and the kernel\'s used space grown fails, 
   assert.match(v(series(330, (m) => ({ levelBytes: m % 3 === 0 ? 10_000 * MB : null }))), /the filesystems' used space not read in \d+ of/);
   assert.equal(v(series(330, () => ({ levelBytes: null }))), '', 'not read at all (off Linux, or the smoke): not judged');
   const full = (m: number) => ({ errors: 0, worktrees: 1, diskBytes: 30 * MB, children: 0, failedRuns: 0, failureEvents: 0, worktreeDirs: 1, files: 500 + m, fullRunHeld: 0, childRss: 0 });
-  assert.match(v(series(330, full), { extended: true, linux: true }), /^samples missing watches, levelBytes: nothing was judged/, 'a real soak on Linux: the watches and (R1181q N2) the level');
-  assert.equal(v(series(330, (m) => ({ ...full(m), watches: 3, levelBytes: 10_000 * MB })), { extended: true, linux: true }), '');
+  // R1181t D2, D1/D4: on Linux the children's open file handles too, and on a real soak the job's cgroup.
+  assert.match(v(series(330, full), { extended: true, linux: true }), /^samples missing watches, childFds, levelBytes, cgroupProcs, cgroupKernelBytes: nothing was judged/, 'a real soak on Linux: the watches and (R1181q N2) the level');
+  const cg = { childFds: 12, cgroupProcs: 9, cgroupKernelBytes: 40 * MB };
+  assert.equal(v(series(330, (m) => ({ ...full(m), ...cg, watches: 3, levelBytes: 10_000 * MB })), { extended: true, linux: true }), '');
   assert.equal(v(series(330, full), { extended: true }), '', 'off Linux the watches are not required');
   // R1181q N2: on a real Linux soak the level is required too (one that read null went unjudged and unnamed).
   const real = { extended: true, linux: true, expectedMs: 329 * 60_000 };
-  assert.match(soakVerdict(series(330, (m) => ({ ...full(m), watches: 3 })), SOAK_LIMITS, real).failures.join(' | '), /^samples missing levelBytes: nothing was judged/);
-  assert.doesNotMatch(soakVerdict(series(330, (m) => ({ ...full(m), watches: 3, levelBytes: 10_000 * MB })), SOAK_LIMITS, real).failures.join(' | '), /samples missing/);
-  assert.doesNotMatch(soakVerdict(series(330, (m) => ({ ...full(m), watches: 3 })), SOAK_LIMITS, { extended: true, linux: true }).failures.join(' | '), /samples missing/, 'the smoke: not required');
+  assert.match(soakVerdict(series(330, (m) => ({ ...full(m), watches: 3, childFds: 12 })), SOAK_LIMITS, real).failures.join(' | '), /^samples missing levelBytes, cgroupProcs, cgroupKernelBytes: nothing was judged/);
+  assert.doesNotMatch(soakVerdict(series(330, (m) => ({ ...full(m), ...cg, watches: 3, levelBytes: 10_000 * MB })), SOAK_LIMITS, real).failures.join(' | '), /samples missing/);
+  assert.doesNotMatch(soakVerdict(series(330, (m) => ({ ...full(m), watches: 3, childFds: 12 })), SOAK_LIMITS, { extended: true, linux: true }).failures.join(' | '), /samples missing/, 'the smoke: not required');
 });
 
 test("soak driver: in a real soak our group counts whether we lead it or not, never the test runner (#1181 review R1181q D1: R1181l's orphan passed the smoke)", () => {
@@ -1321,15 +1416,21 @@ test('soak driver (Linux, R1181r R3 L5a-d): the level rises with what is written
   const paths = ['/proc', tmpdir()];
   const d = mkdtempSync(join(tmpdir(), 'soak-level-'));
   try {
-    const before = fsLevels(paths)!;
-    const fd = openSync(join(d, 'f'), 'w');
-    try {
-      writeSync(fd, Buffer.alloc(MBs, 1));
-      spawnSync('sync');
-    } finally {
-      closeSync(fd);
+    // R1181t L1: other jobs on a shared machine move the level too, so up to 3 tries, the largest rise read.
+    let rise = -Infinity;
+    for (let i = 0; i < 3 && rise < MBs / 2; i++) {
+      const before = fsLevels(paths)!;
+      const fd = openSync(join(d, `f${i}`), 'w');
+      try {
+        writeSync(fd, Buffer.alloc(MBs, 1));
+        spawnSync('sync');
+      } finally {
+        closeSync(fd);
+      }
+      rise = Math.max(rise, fsLevels(paths)! - before);
+      rmSync(join(d, `f${i}`), { force: true });
     }
-    assert.ok(fsLevels(paths)! - before >= MBs / 2, `the filesystem's used space: ${(fsLevels(paths)! - before) / 2 ** 20} MB of 16`);
+    assert.ok(rise >= MBs / 2, `the filesystem's used space: ${rise / 2 ** 20} MB of 16 (the largest of up to 3 tries)`);
   } finally {
     rmSync(d, { recursive: true, force: true });
   }
@@ -1434,5 +1535,145 @@ test("soak driver (Linux, R1181r R3 L1b, R5): another user's process counts by n
   } finally {
     process.env.PATH = oldPath;
     rmSync(d, { recursive: true, force: true });
+  }
+});
+
+// --- R1181t: a counted child's fds, what stop() leaves, the job's cgroup, a session id reused ---
+test("soak verdict: the child processes' open file handles grown fail, as this process's; steady passes; mostly uncounted fails (#1181 review R1181t D2)", () => {
+  const opts = { expectedMs: 5.5 * 3600_000 - 60_000 };
+  const v = (x: SoakSample[]) => soakVerdict(x, SOAK_LIMITS, opts).failures.join(' | ');
+  // R1181t's child-fds attack: 20 a batch, to 543.
+  assert.match(v(series(330, (m) => ({ childFds: 3 + Math.floor((m * 540) / 330) }))), /leak: the child processes' open file handles grew by \d+/);
+  assert.match(v(series(330, (m) => ({ childFds: m < 200 ? 3 : 43 }))), /leak: the child processes' open file handles grew by 40/, '40 more, held');
+  assert.equal(v(series(330, () => ({ childFds: 3 }))), '');
+  assert.match(v(series(330, (m) => ({ childFds: m % 3 ? null : 3 }))), /the child processes' open file handles not counted in \d+ of 320/);
+});
+
+test("soak verdict: the job cgroup's processes and unreclaimable kernel memory, grown, fail; steady passes (#1181 review R1181t D1, D4)", () => {
+  const opts = { expectedMs: 5.5 * 3600_000 - 60_000 };
+  const v = (x: SoakSample[]) => soakVerdict(x, SOAK_LIMITS, opts).failures.join(' | ');
+  // D4's 8 leaders on reused session ids, one a batch: whatever their session, they are in the job's cgroup.
+  assert.match(v(series(330, (m) => ({ cgroupProcs: 9 + Math.min(8, Math.max(0, Math.floor((m - 20) / 30))) }))), /leak: the job cgroup's processes grew by 8/);
+  assert.equal(v(series(330, (m) => ({ cgroupProcs: m % 5 ? 9 : 10 }))), '', 'a step in flight at some samples');
+  // A hoard no fd table names (in-flight objects), past the limit; and below it, bounded but not seen.
+  assert.match(v(series(330, (m) => ({ cgroupKernelBytes: 40 * MB + m * MB }))), /leak: the job cgroup's unreclaimable kernel memory grew/);
+  assert.equal(v(series(330, (m) => ({ cgroupKernelBytes: 40 * MB + (m % 7) * MB }))), '');
+  assert.match(v(series(330, (m) => ({ cgroupProcs: m % 3 ? null : 9 }))), /the job cgroup's processes not read in \d+ of 320/);
+});
+
+test('soak verdict: the sample read after stop() fails on what the shutdown left: processes, worktrees, an open run or slot, other counts past their limit (#1181 review R1181t D3)', () => {
+  const opts = { expectedMs: 5.5 * 3600_000 - 60_000, stopped: true };
+  const run = (stop: Partial<SoakSample>) => {
+    const s = series(331, () => ({ children: 1, worktrees: 1, worktreeDirs: 0, childFds: 3, cgroupProcs: 9, watches: 0, childRss: 20 * MB }));
+    s[330] = { ...s[329]!, at: s[329]!.at + 3000, ...stop };
+    return soakVerdict(s, SOAK_LIMITS, opts).failures.join(' | ');
+  };
+  assert.equal(run({}), '', 'nothing left: passes');
+  assert.equal(run({ children: 0, cgroupProcs: 8, fds: 30 }), '', 'less than the run held: passes');
+  // R1181t's stop-leak: 12 setsid'd orphans started at stop().
+  assert.match(run({ children: 13 }), /^left at stop: 13 child process\(es\) after stop\(\) and idle\(\), above the first quarter's 1$/);
+  assert.match(run({ children: 2 }), /^left at stop: 2 child process/, 'one is enough');
+  assert.match(run({ cgroupProcs: 21 }), /^left at stop: 21 process\(es\) in the job's cgroup/);
+  assert.match(run({ worktrees: 2 }), /^left at stop: 2 worktree\(s\)/);
+  assert.match(run({ worktreeDirs: 1 }), /^left at stop: 1 entr\(ies\) in the worktree folder/);
+  assert.match(run({ openRuns: 1 }), /left at stop: 1 agent run\(s\) open/);
+  assert.match(run({ slotsHeld: 1 }), /left at stop: 1 agent slot\(s\) held/);
+  assert.match(run({ fullRunHeld: 1 }), /left at stop: the full-run lock held/);
+  assert.match(run({ childFds: 43 }), /^left at stop: the child processes' open file handles 40 above the first quarter's/);
+  assert.equal(run({ childFds: 30 }), '', 'within the limit');
+  assert.match(run({ childRss: 300 * MB }), /^left at stop: the child processes' RSS/);
+  // The stop sample is the last one only with `stopped`: without it, one sample's rise at the end is the run's to judge.
+  const s = series(331, () => ({ children: 1 }));
+  s[330] = { ...s[329]!, children: 2 };
+  assert.equal(soakVerdict(s, SOAK_LIMITS, { expectedMs: opts.expectedMs }).failures.join(' | '), '');
+  // A stop sample missing a field fails closed, as any sample.
+  const m = series(331, () => ({ children: 1 }));
+  m[330] = { ...m[329]!, rss: undefined as unknown as number };
+  assert.match(soakVerdict(m, SOAK_LIMITS, opts).failures.join(' | '), /^samples missing rss/);
+});
+
+test('soak driver: the stop sample is read after stop() and idle(), so a child a stand-in leaves at stop is counted (#1181 review R1181t D3)', async () => {
+  const mark = `stop-${process.pid}-${Date.now()}`;
+  const left: number[] = [];
+  const order: string[] = [];
+  const standIn = (leave: boolean) => ({
+    stop() {
+      order.push('stop');
+      if (leave) left.push(spawn('sleep', ['30'], { detached: true, stdio: 'ignore', env: { ...process.env, SOAK_CHILD_MARK: mark } }).pid!);
+    },
+    async idle() {
+      order.push('idle');
+    },
+  });
+  try {
+    const n = await readAfterStop(standIn(true), () => (order.push('read'), childPids(mark, new Set())!.filter((p) => left.includes(p)).length), 50);
+    assert.deepEqual(order, ['stop', 'idle', 'read']);
+    assert.equal(n, 1, 'the child left at stop');
+    const before = series(13, () => ({ children: 0 }));
+    before[12] = { ...before[11]!, at: before[11]!.at + 2000, children: n };
+    assert.match(soakVerdict(before, { ...SOAK_LIMITS, warmupMs: 0 }, { stopped: true }).failures.join(' | '), /^left at stop: 1 child process/);
+    order.length = 0;
+    assert.equal(await readAfterStop(standIn(false), () => childPids(mark, new Set())!.filter((p) => left.includes(p)).length, 50), 1, 'control: a stand-in that leaves nothing adds none');
+    assert.equal(left.length, 1);
+  } finally {
+    for (const p of left) try { process.kill(p); } catch { /* gone */ }
+  }
+});
+
+/** A child that opens `n` file handles, then says so and waits. */
+async function fdChild(n: number): Promise<ReturnType<typeof spawn>> {
+  const c = spawn(process.execPath, ['-e', `const fs = require('fs'); for (let i = 0; i < ${n}; i++) fs.openSync('/dev/null', 'r'); console.log('ready'); setInterval(() => {}, 1000)`], { stdio: ['ignore', 'pipe', 'ignore'] });
+  await new Promise<void>((ok) => c.stdout!.on('data', (d: Buffer) => String(d).includes('ready') && ok()));
+  return c;
+}
+
+test('soak driver (Linux, R1181t D2): a counted child holding 40 more open file handles is read, and fails the run', linuxOnly, async () => {
+  const ctl = await fdChild(0);
+  const leak = await fdChild(40);
+  try {
+    const base = childFds([ctl.pid!])!;
+    const held = childFds([leak.pid!])!;
+    assert.ok(held - base >= 40, `40 more: ${held - base}`);
+    assert.equal(childFds([ctl.pid!, leak.pid!]), base + held, 'summed over the counted children');
+    const v = soakVerdict(series(330, (m) => ({ childFds: m < 200 ? base : held })), SOAK_LIMITS, { expectedMs: 5.5 * 3600_000 - 60_000 }).failures.join(' | ');
+    assert.match(v, /leak: the child processes' open file handles grew by 4\d/);
+  } finally {
+    ctl.kill();
+    leak.kill();
+  }
+});
+
+test("soak driver (Linux, R1181t D4): a new leader on a session id alive at the snapshot leads a new session: counted in a real soak; the same leader isn't", linuxOnly, async () => {
+  const snap = processSnapshot()!;
+  // setsid without a fork: the background job isn't a group leader, so the sleep leads a session on its own pid.
+  const pid = Number(spawnSync('sh', ['-c', 'env -u SOAK_CHILD_MARK setsid sleep 30 >/dev/null 2>&1 </dev/null & echo $!'], { encoding: 'utf8' }).stdout.trim());
+  try {
+    assert.ok(pid > 0);
+    assert.ok(await waitFor(() => spawnSync('ps', ['-o', 'sid=', '-p', String(pid)], { encoding: 'utf8' }).stdout.trim() === String(pid)), 'it leads its session');
+    const t = startTime(pid);
+    // The snapshot held a session on this id whose leader started at another time: that one ended, this one is new.
+    const reused: ProcessSnapshot = { keys: snap.keys, sids: new Map([...snap.sids, [pid, `not-${t}`]]) };
+    assert.ok(childPids(undefined, new Set(), reused, true)!.includes(pid), 'a session id reused by a new leader: counted');
+    const same: ProcessSnapshot = { keys: snap.keys, sids: new Map([...snap.sids, [pid, t]]) };
+    assert.ok(!childPids(undefined, new Set(), same, true)!.includes(pid), 'control: the same leader at the snapshot: an old session, not counted');
+    const own = Number(spawnSync('ps', ['-o', 'sid=', '-p', String(process.pid)], { encoding: 'utf8' }).stdout.trim());
+    assert.ok(snap.sids.has(own), 'the snapshot keeps our session');
+  } finally {
+    if (pid > 0) try { process.kill(pid); } catch { /* gone */ }
+  }
+});
+
+test("soak driver (Linux, R1181t D1, D4): the job's cgroup is read: a process started in it raises its count, whatever its session", linuxOnly, async (t) => {
+  const line = readFileSync('/proc/self/cgroup', 'utf8').split('\n').find((l) => l.startsWith('0::'));
+  if (!line || !existsSync(join('/sys/fs/cgroup', line.slice(3), 'cgroup.procs'))) return t.skip('no cgroup v2 here');
+  const before = cgroupLevels();
+  assert.equal(typeof before.procs, 'number', 'its processes are read');
+  const pid = Number(spawnSync('sh', ['-c', 'env -u SOAK_CHILD_MARK setsid sleep 30 >/dev/null 2>&1 </dev/null & echo $!'], { encoding: 'utf8' }).stdout.trim());
+  try {
+    assert.ok(cgroupLevels().procs! >= before.procs! + 1, `a new session in our cgroup: ${before.procs} -> ${cgroupLevels().procs}`);
+    if (before.kernelBytes === null) t.diagnostic('no memory controller on this cgroup: the kernel level reads null here');
+    else assert.ok(before.kernelBytes > 0, 'its unreclaimable kernel memory is read');
+  } finally {
+    if (pid > 0) try { process.kill(pid); } catch { /* gone */ }
   }
 });
