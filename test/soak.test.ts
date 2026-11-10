@@ -210,7 +210,7 @@ test('the soak workflow: schedule and dispatch only, read-only, on GitHub-hosted
   for (const word of step.run!.split(/[\s;|&()$"`]+/)) assert.ok(!['rm', 'awk', 'timeout', 'env', 'mkdir', 'cat', 'sh', 'bash'].includes(word), `a bare ${word}`);
   // The gitleaks download goes through the pinned-download helper (#1201): retried, and checked against its sha256.
   const gitleaks = job.steps.find((s) => s.name === 'install gitleaks')!.run!;
-  assert.match(gitleaks, /^ {0}bash "\$GITHUB_WORKSPACE\/scripts\/ci\/fetch-pinned\.sh" "https:\/\/github\.com\/gitleaks\/gitleaks\/releases\/download\/v\$\{GITLEAKS_VERSION\}\/\$\{f\}" [0-9a-f]{64} "\$f"$/m);
+  assert.match(gitleaks, /^ {0}bash -p "\$GITHUB_WORKSPACE\/scripts\/ci\/fetch-pinned\.sh" "https:\/\/github\.com\/gitleaks\/gitleaks\/releases\/download\/v\$\{GITLEAKS_VERSION\}\/\$\{f\}" [0-9a-f]{64} "\$f"$/m);
   assert.doesNotMatch(gitleaks, /\bcurl\b/);
 });
 
