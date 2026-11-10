@@ -57,7 +57,9 @@ A ring is **promoted** when all of these hold:
   `version` or `commit` differs, the commit being the install folder's name, so a main-channel update, which keeps
   the version, counts too; a start with neither is a build of its own): the code behind the flag changed, and the
   canary runs with every flag off. Its hours and its merges count from that start, a merge the old build made among
-  them never (by its `merged_at`); bad signs still count from the flip;
+  them never: not one GitHub merged before that start (its `merged_at`), and, by the log's order rather than two
+  clocks, not one whose `merge.attempted` was still open when that start (or the flip) was logged and which the new
+  build only reconciled; bad signs still count from the flip;
 - **each** of the ring's instances merged at least `min_merges` PRs since then (`merge.done`, one per PR number; a
   merge with no number never counts), so an instance that does no work isn't promoted on the others'. `min_merges: 0`
   is allowed: an explicit opt-out by whoever writes root's `rollout.json`;

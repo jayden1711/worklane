@@ -193,6 +193,11 @@ export function readInstance(events: readonly StoredEvent[], flag: string, maxEr
   let runBuild: { version: unknown; commit: unknown } | null = null;
   let newBuild = false;
   let rebuilt: { version: string; commit: string | null; at: string } | null = null;
+  // R1174x M1: a merge is the old build's by the log's order, not by two clocks (GitHub's merged_at against the host's
+  // start stamp): the PRs with a merge.attempted still open when the soak began (at the flip, or at a new build's
+  // start) were the old run's; their reconciled merge.done never counts for this soak.
+  const openAttempts = new Set<unknown>();
+  let oldAttempts = new Set<unknown>();
   for (const [i, e] of events.entries()) {
     // Merges and the soak count from the last on (the engine ran with the flag off before it); bad signs from the
     // stretch's start (an engine off and on again forgives nothing).
@@ -212,6 +217,9 @@ export function readInstance(events: readonly StoredEvent[], flag: string, maxEr
       runBuild = b;
     }
     if (e.type === 'coordinator.stopped' && (e.payload as { clean?: boolean }).clean === true) running = false;
+    if (on && i === flipAt) oldAttempts = new Set(openAttempts);
+    if (e.type === 'merge.attempted') openAttempts.add((e.payload as { number?: unknown }).number);
+    else if (e.type === 'merge.done' || e.type === 'merge.failed' || e.type === 'merge.deferred') openAttempts.delete((e.payload as { number?: unknown }).number);
     if (!inStretch) continue;
     const ts = Date.parse(e.ts);
     if (!Number.isFinite(ts) || (after && ts < flipTs - 60_000)) skewed = true;
@@ -224,6 +232,7 @@ export function readInstance(events: readonly StoredEvent[], flag: string, maxEr
       merges.length = 0;
       stoppedAt = null;
       newBuild = false;
+      oldAttempts = new Set([...oldAttempts, ...openAttempts]);
       rebuilt = { version: String(runBuild!.version), commit: typeof runBuild!.commit === 'string' ? runBuild!.commit : null, at: e.ts };
     }
     // R1174j J3: a clean stop, then a start: the time between is no soak (a coordinator stopped 48 of 50 h promoted).
@@ -261,7 +270,7 @@ export function readInstance(events: readonly StoredEvent[], flag: string, maxEr
       // R1174v D2: and after the soak's own start, when a new build began it again (a merge the old build made,
       // recorded by the new one's reconcile pass, counted for it).
       const soakFrom = since !== null && Number.isFinite(Date.parse(since)) ? Math.max(flipTs, Date.parse(since)) : flipTs;
-      const before = typeof at === 'string' && Number.isFinite(Date.parse(at)) && Date.parse(at) < soakFrom;
+      const before = (typeof at === 'string' && Number.isFinite(Date.parse(at)) && Date.parse(at) < soakFrom) || ((e.payload as { reconciled?: unknown }).reconciled === true && oldAttempts.has(n));
       // By its PR number, once each; a merge with no number can't be told from a repeat, so it never counts (R1174i/j).
       if (!before && n !== undefined && n !== null && !mergedPrs.has(n)) merges.push(e.ts);
       if (n !== undefined && n !== null) mergedPrs.add(n);

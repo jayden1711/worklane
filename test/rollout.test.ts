@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -781,3 +782,47 @@ test("R1174u U1: engineCommit is the install folder's name when it is a commit (
     rmSync(d, { recursive: true, force: true });
   }
 });
+
+// --- R1174x M1: an in-flight merge of the old build is the old build's by the log's order; T1: engineCommit's default ---
+const attemptedPr = (n: number, h: number) => ev('merge.attempted', { issue: 1, number: n, head: 'd'.repeat(40) }, hoursAgo(h));
+const reconciledPr = (n: number, h: number, mergedH: number) => ev('merge.done', { number: n, reconciled: true, merged_at: hoursAgo(mergedH) }, hoursAgo(h));
+/** A from 100 h, on at 99 h, 3 merges at 60 h; A's merge of PR 900 in flight as it stops for an update at 49.002 h; B from 49 h, ticking, 2 merges of its own. */
+const soakB = (extra: StoredEvent[], startH = 49) => [startedC(100, A), on(99), ...minTicks(98.95, 49.02), ...merges(3, 60), attemptedPr(900, 49.003), stopped(49.002), startedC(startH, B), ...minTicks(49 - 1 / 60, 0.02), ...extra, ...merges(2, 20)];
+
+test("R1174x M1: A's in-flight merge, finished on GitHub just after B's start and reconciled by B, never counts for B; B's own reconciled merge does", () => {
+  assert.equal(ring0(soakB([])), 'soaking', 'control: 2 of 3');
+  assert.equal(ring0(soakB([reconciledPr(900, 48.9, 49.0025)])), 'soaking', "R1174v D2: merged before B's start");
+  assert.equal(ring0(soakB([reconciledPr(900, 48.9, 49 - 4 / 3600)])), 'soaking', "M1: merged 4 s after B's start, still A's by the log");
+  assert.equal(ring0(soakB([attemptedPr(901, 48.95), reconciledPr(901, 48.9, 48.949)])), 'promoted', "control: B's own attempt, reconciled, counts");
+});
+
+test("R1174x M1b: B's start stamped 30 s behind GitHub, A's merge reconciled with merged_at at A's stop: never counts for B", () => {
+  assert.equal(ring0(soakB([reconciledPr(900, 48.9, 49.002)], 49.0105)), 'soaking');
+});
+
+test('R1174x M1c: a merge attempted before the flip and finished on GitHub just after it is not counted (by the log, as at a new build)', () => {
+  assert.equal(ring0([startedC(100, A), ...minTicks(99.9, 99.02), attemptedPr(961, 99.003), on(99), ...minTicks(98.95, 0.02), reconciledPr(961, 98, 99 - 4 / 3600), ...merges(2, 20)]), 'soaking');
+  assert.equal(ring0([startedC(100, A), ...minTicks(99.9, 99.02), on(99), ...minTicks(98.95, 0.02), attemptedPr(962, 98.5), reconciledPr(962, 98, 98.49), ...merges(2, 20)]), 'promoted', 'control: attempted after the flip');
+});
+
+test("R1174x T1: engineCommit() with no argument, as src/service.ts calls it, reads the sha of an install run through bin -> current -> <sha>", () => {
+  const sha = 'b'.repeat(40);
+  const d = mkdtempSync(join(tmpdir(), 'engine-commit-default-'));
+  try {
+    const real = join(d, sha);
+    mkdirSync(join(real, 'dist', 'src'), { recursive: true });
+    writeFileSync(join(real, 'package.json'), JSON.stringify({ type: 'module', version: '0.5.3' }));
+    const built = join(dirname(new URL(import.meta.url).pathname), '..', 'src', 'engine-commit.js');
+    writeFileSync(join(real, 'dist', 'src', 'engine-commit.js'), readFileSync(built));
+    writeFileSync(join(real, 'dist', 'src', 'cli.js'), "import { engineCommit } from './engine-commit.js';\nconsole.log(JSON.stringify(engineCommit()));\n");
+    symlinkSync(real, join(d, 'current'));
+    mkdirSync(join(d, 'bin'));
+    symlinkSync(join(d, 'current', 'dist', 'src', 'cli.js'), join(d, 'bin', 'cli'));
+    const run = (args: string[]) => JSON.parse(execFileSync(process.execPath, args, { encoding: 'utf8' }).trim());
+    assert.equal(run([join(d, 'bin', 'cli')]), sha, 'through the links');
+    assert.equal(run(['--preserve-symlinks', '--preserve-symlinks-main', join(d, 'current', 'dist', 'src', 'cli.js')]), sha, 'with node keeping the link path');
+  } finally {
+    rmSync(d, { recursive: true, force: true });
+  }
+});
+
