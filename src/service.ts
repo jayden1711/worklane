@@ -67,6 +67,7 @@ import type { IntakeConfig } from './intake/report.js';
 import { pluginsForRun } from './plugins/run.js';
 import { readLockScope } from './managed-apps.js';
 import { endRun, registerRun } from './mcp/client.js';
+import { engineCommit } from './engine-commit.js';
 
 /** The coordinator's umask when agents run as their own user: group read/write (agents share the group), nothing for others. */
 export const INSTANCE_UMASK = 0o007;
@@ -467,7 +468,8 @@ export async function runSite(site: Site, opts: { /** The instance's name (its i
   const coordinator = new Coordinator({ disk, cfg, log, backlog, runner: runner ?? new CliRunner(cfg.project.agent_runtime.kind), repo: root, instance: instanceId(), stateDir: state, ...(agentTasks ? { agentTasks } : {}), ...(depCacheRoot ? { depCacheRoot } : {}), ...(tokenExpiresAt !== undefined ? { tokenExpiresAt } : {}), ...(commandsAs ? { commandsAs } : {}), ...(appKeyPath ? { appKeyPath } : {}), ...(commitIdentity ? { commitIdentity } : {}), ...(autoMerge ? { autoMerge } : {}), ...(settings ? { settings } : {}), ...(opts.providerKeys ? { providerKeys: opts.providerKeys } : {}), ...(testRuns ? { prTestRuns: testRuns, testRuns: batchTestRuns(cfg.tests.test_run!, testRuns.stopped.signal) } : {}), ...(deployGate ? { deployGate } : {}), ...(previews ? { previews } : {}), ...(intake ? { intake: { config: intake.config, sources: intake.sources, name: intake.name, ...(intake.roleOf ? { roleOf: intake.roleOf } : {}) } } : {}), ...(opts.roleOf ? { roleOf: opts.roleOf } : {}), ...(opts.mainWatch ? { mainWatch: opts.mainWatch } : {}), ...(opts.mergePosts ? { mergePosts: opts.mergePosts } : {}), ...(opts.ciMetrics ? { ciMetrics: opts.ciMetrics } : {}),...(opts.protection ? { protection: opts.protection } : {}), ...(opts.incidents ? { incidents: opts.incidents } : {}), ...(opts.accountSwitched ? { accountSwitched: opts.accountSwitched } : {}), ...(opts.liveConfig ? { liveConfig: opts.liveConfig } : {}), ...(opts.superfan ? { superfan: opts.superfan } : {}), ...(opts.experiments ? { experiments: opts.experiments } : {}), ...(opts.lockScope ? { lockScope: opts.lockScope } : {}), writersApproveLand: site.policyFile ? () => readPolicy(site.policyFile!).policy?.writers_approve_land === true : () => true, ...(opts.automations ? { automations: { ...opts.automations, ...(tokens && !localRemote(root, 'origin') ? { github: githubGet({ api: githubApi(), token: tokens }) } : {}) } } : {}) });
   inFlight = () => coordinator.pending().filter((p) => !p.startsWith('tick step')).length;
   const version = (JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as { version: string }).version;
-  log.append('coordinator.started', { instance: instanceId(), pid: process.pid, version }, instanceId());
+  // R1174u U1: the commit too, so a main-channel update or rollback (same version) reads as another build (src/rollout.ts).
+  log.append('coordinator.started', { instance: instanceId(), pid: process.pid, version, commit: engineCommit() }, instanceId());
   if (tidied.tightened.length || tidied.removedTasks.length) log.append('state.tidied', { tightened: tidied.tightened.length, paths: tidied.tightened.slice(0, 20), removed_tasks: tidied.removedTasks.length }, instanceId());
   const requeued = await coordinator.recover();
   if (requeued.length) console.log(`recovered: requeued ${requeued.map((n) => `#${n}`).join(', ')}`);
