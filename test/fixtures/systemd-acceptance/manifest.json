@@ -1065,7 +1065,7 @@
   ],
   "r1169ac-named-function": [
     1,
-    "test/y\\.test\\.ts: unit states, by name: its function's last statement \\(line \\d+\\) never ran"
+    "test/y\\.test\\.ts: the systemctl unit, by name: its function's last statement \\(line \\d+\\) never ran"
   ],
   "r1169ac-named-function-control": [
     0,
@@ -1073,7 +1073,7 @@
   ],
   "r1169ac-named-function-elsewhere": [
     2,
-    "test/y\\.test\\.ts: the systemctl unit restarts: its function is given by a name this file doesn't declare"
+    "test/y\\.test\\.ts:\\d+: `test\\('the systemctl unit restarts', body\\)` registers a test whose function isn't one this file defines"
   ],
   "r1169ad-gate-catch": [
     2,
