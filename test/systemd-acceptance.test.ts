@@ -799,3 +799,15 @@ test('R1169z D1/D2: every write to a name, from its references; where a \'node:t
   for (const code of [`const o = { includes: process.getBuiltinModule };\nconst { test: c } = o.includes('node:test');`, `const load = (s) => process.getBuiltinModule(String(s));\nconst { test: c } = load\`node:test\`;`, `const { test: c } = Reflect.apply(process.getBuiltinModule, process, ['node:test']);`, `const spec = 'node:test';`, `const m = new Map([['node:test', 1]]);\nuse(m);`]) assert.match(refused(code), /has 'node:test' where this can't read what it does/, code);
   assert.equal(refused(`const MAY = new Set(['node:test', 'yaml']);\nconst ok = (s) => MAY.has(s);\nconst from = list();\nfrom.includes('node:test');\n['node:test'].includes(x);\nif (x === 'node:test') y();\nconst { test } = await import('node:test');`), '', 'imports, lookups, a lookup-only set, a comparison');
 });
+
+test("the owner's option (b): a runtime excuse is pinned by its test's whole text, so a test edited after it was excused isn't excused", () => {
+  const file = 'test/w.test.ts';
+  const text = `import { test } from 'node:test';\ntest('w', { skip: process.env.NONE ? 'x' : false }, () => { run('${sd}ctl'); });\n`;
+  const item = sa.signTests(ts, file, text, { paths: new Set<string>(), carries: () => false }, true, { text: true } as never).find((t) => t.name === 'w') as { text?: string } | undefined;
+  assert.ok(item?.text, 'the script gives the test its text');
+  const allow = (pin: string) => ({ uses: {}, skipImports: {}, runtime: { [`${file}: w`]: { why: 'x', runsIn: 'web', pin } } }) as never;
+  const problems = (t: string, pin: string) => sa.signProblems(ts, new Map([[file, t]]), allow(pin)).filter((p) => p.startsWith(`${file}: w`));
+  assert.deepEqual(problems(text, item!.text!), [], 'pinned to its text');
+  assert.match(problems(text.replace("run('", "if (process.env.X) return;\n  run('"), item!.text!).join('\n'), /its pin isn't the test's text/, 'the test edited');
+  assert.match(problems(text.replace("test('w'", "test('v'"), item!.text!).join('\n'), /no such test is in the build/, 'the test gone');
+});

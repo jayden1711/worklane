@@ -25,6 +25,11 @@
 // todo, returns early, is registered only sometimes or sits in a suite that skips, fails here, where systemd is. One
 // that legitimately skips here is named in the allowlist's `runtime`, with why.
 //
+// The guarantee is that run on the VM (the owner's option (b), 2026-11-09): every picked test runs there whole, and
+// any skip, todo or zero-subtest result fails the job unless the allowlist's `runtime` excuses that test, pinned by
+// its whole text (an edit voids the excuse) and naming where it runs for real. The static rule below is a first-pass
+// hint that refuses what it can read early, on every PR; a shape it doesn't read is a named limit, not a defect.
+//
 // Before that, statically (R1169k, R1169m, R1169n, R1169o, signProblems), on every PR in the normal suite too: in every
 // file the build compiles (tsconfig.json's include), the sign (`systemd` or `systemd1` as a word, a name starting
 // `systemd_`/`SYSTEMD_`, `systemctl`, `journalctl`, `loginctl`, `/proc/1/`, `is-system-running`, `sd_booted`,
@@ -1168,6 +1173,15 @@ export function signProblems(ts, texts, allow = {}) {
   const raw = signSource(ts, texts, {}, source.uses);
   const rawReads = new Set([...texts].flatMap(([p, t]) => skipReads(ts, p, t, raw)));
   for (const b of Object.keys(okImports)) if (!rawReads.has(b)) out.push(`${b}: named in the allowlist's skipImports, but no skip reads it`);
+  // A runtime excuse is pinned by its test's whole text (the owner's option (b), R1169z): a test edited after it was
+  // excused isn't excused any more until someone reads it again and re-pins it.
+  for (const [key, entry] of Object.entries(allow.runtime ?? {})) {
+    const file = key.slice(0, key.indexOf(': '));
+    const text = texts.get(file);
+    const item = text === undefined ? null : signTests(ts, file, text, source.select, true, { text: true }).find((t) => `${file}: ${t.name ?? t.label}` === key);
+    if (!item) out.push(`${key}: named in the allowlist's runtime, but no such test is in the build`);
+    else if (entry?.pin !== item.text) out.push(`${key}: the allowlist's runtime excuses it, but its pin isn't the test's text (now: ${JSON.stringify(item.text).slice(0, 300)}): read the test again, and pin it again`);
+  }
   return out;
 }
 
@@ -1385,6 +1399,8 @@ export function signTests(ts, path, text, source, all = false, o = {}) {
         // picking reads it (its function, the same-file functions it names, the hooks around it), each with its
         // statement and, for a name, its declaration; and its options' `skip`, with where that is declared.
         if (o.stops) Object.assign(item, stopsOf(n, fn));
+        // `o.text`: the whole call's text, its whitespace runs made one space: what a runtime excuse is pinned by.
+        if (o.text) item.text = flat(n);
         out.push(item);
       }
       return;
