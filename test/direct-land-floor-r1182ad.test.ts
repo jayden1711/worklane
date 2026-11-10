@@ -311,16 +311,20 @@ test('AD6b (flood hides the notice): a writer comment of 60 unknown-id lines pus
 });
 
 // ===== Not the reviews': the owner's rule end to end (2026-11-09: a reply answers only by naming the decision's id) =====
-test("IDS1: the decision's own id in capitals, with a Unicode dash or in full-width forms answers it; never another decision", async () => {
+test("IDS1: the decision's own id in capitals answers it; with a Unicode dash or in full-width forms nothing, with a note (changed by the ASCII rule); never another decision", async () => {
   const f = fixture();
   const d1 = await ask(f, 'land', LAND);
   const d2 = await ask(f, 'land', LAND, 'Land the other?');
   const fullWidth = (s: string) => [...s].map((ch) => (/[a-z0-9]/.test(ch) ? String.fromCodePoint(ch.codePointAt(0)! + 0xfee0) : ch)).join('');
   f.backlog.humanComment(1, 'example-owner', `/worklane approve ${d1.id.toUpperCase().replace(/-/g, '\u2011')}`);
   f.backlog.humanComment(1, 'example-owner', `/worklane reject ${fullWidth(d2.id)}`);
-  assert.equal((await commentAnswer(f, d1))?.answer, 'approve', 'capitals and no-break hyphens');
-  assert.equal((await commentAnswer(f, d2))?.answer, 'reject', 'full-width letters and digits');
-  assert.deepEqual(notes(f).filter((n) => n.kind.startsWith('reply_')), [], 'no note for replies that answered');
+  // changed by the ASCII rule (the owner, 2026-11-10: a reply is plain ASCII; curly quotes and en or em dashes read as ' " -): both answered before (approve, reject); now neither, one note each naming the character.
+  assert.equal(await commentAnswer(f, d1), null, 'capitals and no-break hyphens');
+  assert.equal(await commentAnswer(f, d2), null, 'full-width letters and digits');
+  assert.deepEqual(notes(f).filter((n) => n.kind.startsWith('reply_')).map((n) => n.kind), ['reply_not_ascii', 'reply_not_ascii']);
+  assert.match(notes(f)[0]!.message, /U\+2011 on line 1/);
+  f.backlog.humanComment(1, 'example-owner', `/worklane approve ${d1.id.toUpperCase()}`);
+  assert.equal((await commentAnswer(f, d1))?.answer, 'approve', 'capitals alone');
 });
 
 test("IDS2: a line naming a decision with an option it doesn't offer answers nothing and says so once", async () => {

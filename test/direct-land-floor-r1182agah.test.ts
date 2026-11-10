@@ -158,7 +158,8 @@ for (const [name, body] of IDHIDDEN) {
 // ================= R1182ah AH4 and AH5: visible replies, and a collapsed <details> =================
 const VISIBLE: [string, (id: string, other: string) => string, string | null][] = [
   ['AH4a 1-3 spaces before the command', (id) => `  /worklane approve ${id}`, null],
-  ['AH4e a no-break space before the command', (id) => `\u00A0/worklane approve ${id}`, null],
+  // changed by the ASCII rule (the owner, 2026-11-10: a reply is plain ASCII; curly quotes and en or em dashes read as ' " -): AH4e answered approve before.
+  ['AH4e a no-break space before the command', (id) => `\u00A0/worklane approve ${id}`, 'reply_not_ascii'],
   ['AH4b a list-item command after another decision\'s line', (id, other) => `/worklane approve ${other}\n\n- /worklane reject ${id}`, 'reply_more_than_one'],
   ['AH4c inside a <div> block', (id) => `<div>\n/worklane approve ${id}\n</div>`, 'reply_not_first_line'],
   ['AH4d a lone <br> line between two commands', (id, other) => `/worklane approve ${other}\n<br>\n/worklane approve ${id}`, 'reply_more_than_one'],

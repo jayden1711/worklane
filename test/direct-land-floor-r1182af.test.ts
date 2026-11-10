@@ -278,11 +278,14 @@ for (const [name, mk] of heldNull) {
     assert.equal(await commentAnswer(f, q), null);
   });
 }
-test('HELD: full-width id answers (spells the id: by design); approve then reject in one comment answers nothing (changed by (b); was reject)', async () => {
+test('HELD: a full-width id answers nothing (changed by the ASCII rule; was approve); approve then reject in one comment answers nothing (changed by (b); was reject)', async () => {
   const f = fixture();
   const q = await ask(f, 'land', LAND);
   const fw = q.id.replace(/[!-~]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) + 0xfee0));
   f.backlog.humanComment(1, OWNER, `/worklane approve ${fw}`);
+  // changed by the ASCII rule (the owner, 2026-11-10): a full-width id is not plain ASCII, so nothing (was approve).
+  assert.equal(await commentAnswer(f, q), null);
+  f.backlog.humanComment(1, OWNER, `/worklane approve ${q.id}`);
   assert.equal((await commentAnswer(f, q))?.answer, 'approve');
   f.backlog.humanComment(1, OWNER, `/worklane approve ${q.id}\n/worklane reject ${q.id}`);
   // changed by (b) (the owner, 2026-11-10): the two-command comment is void, so the earlier approve stands (was reject).

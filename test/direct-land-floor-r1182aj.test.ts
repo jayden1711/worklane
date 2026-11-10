@@ -140,13 +140,16 @@ test('AJ2 control: a plain revise note is decided with that note', async () => {
 });
 
 // ======== AJ3 (minor, fail-closed): a correct-looking first line is ignored ========
+// changed by the ASCII rule (the owner, 2026-11-10: a reply is plain ASCII; curly quotes and en or em dashes read as ' " -): AJ3a and AJ3b answered approve (R1182aj fix); the BOM and the zero-width space now void, with a note naming them.
 for (const [name, body] of [
   ['AJ3a a leading BOM (CommonMark strips it)', (id: string) => `\uFEFF/worklane approve ${id}`],
   ['AJ3b a first line of only ZWSP (shows nothing)', (id: string) => `\u200B\n/worklane approve ${id}`],
 ] as [string, (id: string) => string][]) {
-  test(`${name}: should answer approve (it reads as nothing, and the note says "after the first line")`, async () => {
+  test(`${name}: answers nothing, with a reply_not_ascii note naming the character (not "after the first line")`, async () => {
     const { f } = await land(body);
-    assert.equal(answered(f)[0]?.answer, 'approve', `notes: ${JSON.stringify(notes(f).map((n) => n.kind))}`);
+    assert.equal(answered(f).length, 0);
+    assert.deepEqual(notes(f).map((n) => n.kind), ['reply_not_ascii']);
+    assert.match(notes(f)[0]!.message, /U\+(FEFF|200B) on line 1/);
   });
 }
 
@@ -184,13 +187,24 @@ for (const [name, body] of HELD_NONE) {
     assert.equal(answered(f).length, 0, JSON.stringify(answered(f)));
   });
 }
+// changed by the ASCII rule (the owner, 2026-11-10: a reply is plain ASCII; curly quotes and en or em dashes read as ' " -): these four answered approve before; they now answer nothing.
+for (const [name, body] of [
+  ['3 em spaces', (id: string) => `\u2003\u2003\u2003/worklane approve ${id}`],
+  ['NBSP line, tab line, then the command', (id: string) => `\u00A0\n\t\n/worklane approve ${id}`],
+  ['4 spaces + NBSP line, then the command', (id: string) => `    \u00A0\n/worklane approve ${id}`],
+  ['upper case, full-width id', (id: string) => `/WORKLANE APPROVE ${id.toUpperCase().replace(/[!-~]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) + 0xfee0))}`],
+] as [string, (id: string) => string][]) {
+  test(`HELD ${name}: answers nothing, reply_not_ascii (changed by the ASCII rule; was approve)`, async () => {
+    const { f } = await land(body);
+    assert.equal(answered(f).length, 0);
+    assert.deepEqual(notes(f).map((n) => n.kind), ['reply_not_ascii']);
+  });
+}
 const HELD_YES: [string, (id: string) => string][] = [
   ['3 spaces', (id) => `   /worklane approve ${id}`],
-  ['3 em spaces (NFKC spaces; CommonMark paragraph)', (id) => `\u2003\u2003\u2003/worklane approve ${id}`],
-  ['NBSP line, tab line, then the command', (id) => `\u00A0\n\t\n/worklane approve ${id}`],
-  ['4 spaces + NBSP line (an indented code block of NBSP), then the command', (id) => `    \u00A0\n/worklane approve ${id}`],
+  ['a tab line, then the command', (id) => `\t\n/worklane approve ${id}`],
   ['setext --- under the command', (id) => `/worklane approve ${id}\n---`],
-  ['upper case, full-width id', (id) => `/WORKLANE APPROVE ${id.toUpperCase().replace(/[!-~]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) + 0xfee0))}`],
+  ['upper case, ASCII id', (id) => `/WORKLANE APPROVE ${id.toUpperCase()}`],
   ['CRLF then a plain later line', (id) => `/worklane approve ${id}\r\nlooks right`],
 ];
 for (const [name, body] of HELD_YES) {
