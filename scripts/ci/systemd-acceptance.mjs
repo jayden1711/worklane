@@ -90,10 +90,15 @@
 // A test that passes having checked less, on what only this VM answers (an early return, or a subtest started only
 // sometimes, on GITHUB_ACTIONS, the uid or PROJECT_SANDBOX_REQUIRED; R1169ab D2), fails here (the owner's decision of
 // 2026-11-10, option (2)). Each gate opens with `t.plan(<n>)` (planProblems: refused statically without it), so node
-// fails it when it made fewer `t.assert` calls and subtests. Each sign test's file runs with node's line coverage of
-// itself (mustRun): the test's own function must have reached its last statement and started every subtest it names.
-// What that can't see: a check skipped inside one statement (a ternary, `&&`), a branch of a helper the test calls, or
-// assertions a gate's count still matches by another path; an excused test (it skips here) isn't judged on it.
+// fails it when it made fewer `t.assert` calls and subtests; no t.assert sits in a try with a catch, and each subtest
+// opens with its own count. Each sign test's file runs with node's line coverage of itself (mustRun, the owner's
+// option (b) of 2026-11-10): in the test's own function and, recursively, each subtest's (`t.test`, `t['test']`, an
+// alias; a function given by name is read when this file declares it, else refused), every line that holds the sign
+// must have run, each function must have reached its last statement, and each subtest must have started.
+// Named limits of that check (R1169ac, R1169ad): a branch, loop or catch around assertions alone (no sign in it); a
+// line that runs while part of it doesn't (a same-line `return`, a ternary, `&&`, a one-line test or loop body, a
+// callback on the line it's passed on); code in a helper the test calls in another function; and an excused test
+// (it skips here) isn't judged on it.
 //
 // Results come from node's test events (systemd-acceptance-reporter.mjs, R1169f), not from TAP text: each gate is
 // matched by its built file, the line and column its test() call is on, and its name, and the reporter writes to a
