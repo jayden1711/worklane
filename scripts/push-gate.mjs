@@ -179,7 +179,7 @@ function messageShape(sha) {
 /** A git config value in the repo the hook runs in, or null when it isn't set. */
 function gitConfig(key) {
   try {
-    return execFileSync('git', [...GIT_FIXED_ARGS, 'config', '--get', key], { encoding: 'utf8', env: GIT_ENV, stdio: ['ignore', 'pipe', 'ignore'] }).replace(/\n$/, '') || null;
+    return runGit(['config', '--get', key], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).replace(/\n$/, '') || null;
   } catch {
     return null;
   }
