@@ -1776,13 +1776,13 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
       // A file with a sign test runs whole (R1169n): no name filter, so a test registered only sometimes, or under a
       // suite that skips, shows as not run. A file of gates alone runs only its gates, by name, as before.
       const whole = !!f.signTests?.length;
-      const args = [...PRELOAD, '--test', '--test-reporter=tap', '--test-reporter-destination=stdout', `--test-reporter=${REPORTER}`, '--test-reporter-destination=stdout', ...(whole ? [] : f.names.map((n) => `--test-name-pattern=^${escapeRe(n)}$`)), `dist/test/${f.file.replace(/\.ts$/, '.js')}`];
+      // A file with sign tests runs with node's line coverage of that file alone (R1169ab D2): what of each test's
+      // own function ran. Test files are left out of coverage by default; this names the one built file.
+      const coverage = whole ? ['--experimental-test-coverage', `--test-coverage-include=dist/test/${f.file.replace(/\.ts$/, '.js')}`, '--test-coverage-exclude=/dev/null/*'] : [];
+      const args = [...PRELOAD, '--test', ...coverage, '--test-reporter=tap', '--test-reporter-destination=stdout', `--test-reporter=${REPORTER}`, '--test-reporter-destination=stdout', ...(whole ? [] : f.names.map((n) => `--test-name-pattern=^${escapeRe(n)}$`)), `dist/test/${f.file.replace(/\.ts$/, '.js')}`];
       // Never a child of another test run (NODE_TEST_CONTEXT), and no NODE_OPTIONS (an --enable-source-maps there would
       // report TS lines, so every gate would read as not run).
       const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'NODE_TEST_CONTEXT' && k !== 'NODE_OPTIONS'));
-      // A file with sign tests runs with node's line coverage of that file alone (R1169ab D2): what of each test's
-      // own function ran. Test files are left out of coverage by default; this names the one built file.
-      if (whole) args.splice(args.indexOf('--test') + 1, 0, '--experimental-test-coverage', `--test-coverage-include=dist/test/${f.file.replace(/\.ts$/, '.js')}`, '--test-coverage-exclude=/dev/null/*');
       const r = spawnSync(process.execPath, args, { cwd: root, env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'inherit', 'pipe'] });
       process.stdout.write(r.stdout ?? '');
       let events;
