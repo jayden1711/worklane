@@ -386,8 +386,10 @@ test('unit states parse from systemctl show; an unknown restart count is null, n
 });
 
 // A disposable Linux CI runner with a booted systemd (scripts/ci/systemd-acceptance.mjs runs this file's gated test
-// there, on GitHub's VM, on each push to main): a container's systemctl has no systemd to ask.
-const systemCi = process.platform === 'linux' && process.env.GITHUB_ACTIONS === 'true' && existsSync('/run/systemd/system') && spawnSync('sudo', ['-n', 'systemctl', '--version']).status === 0;
+// there, on GitHub's VM, on each push to main): a container's systemctl has no systemd to ask. The machine's own
+// systemctl, the one tool this file is pinned to (#991): through sudo, the test's stand-in sudo answered, so the gate
+// skipped on the VM (the manual run of 2026-11-10, run 42922126057).
+const systemCi = process.platform === 'linux' && process.env.GITHUB_ACTIONS === 'true' && existsSync('/run/systemd/system') && machineTool('systemctl', () => spawnSync('systemctl', ['--version']).status === 0);
 
 test('unit states from the real systemctl (Linux CI): a running unit is active, one not installed is not-found, so it is never reported down', { skip: !systemCi && 'needs a disposable Linux CI runner with systemd' }, (t: TestContext) => {
   t.plan(6);
