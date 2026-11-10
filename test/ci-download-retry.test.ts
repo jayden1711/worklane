@@ -420,12 +420,11 @@ function workflowFiles(files: readonly { name: string; text: string }[], report:
     // R1228f D3: every string the file holds, as YAML decodes it (an escape like \x67 or \x2F hides nothing), with its
     // continuations joined: the pinned-URL and downloader rules are read over these, not over the raw text.
     for (const v of scalars(doc)) for (const p of decodedProblems(v)) report(name, p);
-    // R1228u D1: the helper's file stem anywhere off a helper line, in any value, not only a run's lines (the whole path in
-    // an env:, matrix or with: value ran it outside the step-shell rule). A step's run is read below, with its own message.
-    const runs = new Set<string>([...Object.values(doc?.jobs ?? {}).flatMap((j) => (j?.steps ?? []).map((s) => s?.run)), ...(doc?.runs?.steps ?? []).map((s) => s?.run)].filter((r): r is string => typeof r === 'string'));
-    for (const v of scalars(doc)) {
-      if (runs.has(v)) continue;
-      for (const l of logicalLines(v)) if (!/^\s*#/.test(l) && /fetch-pinned/.test(l) && !HELPER_LINE.test(l)) report(name, `${HELPER} named in a value off a helper line (an env:, matrix or with: value): ${l.trim()}`);
+    // R1228u D1, narrowed by R1228v D1: the helper's file stem off a helper line in a value a shell can receive (an env:
+    // at any level, the matrix and its include, a with:, an input's default); not on: paths, a step's name, an if: or a
+    // run (read below, with its own message). A hashFiles(...) of it reads the file, never runs it.
+    for (const [where, v] of shellValues(doc)) {
+      for (const l of logicalLines(v.replace(/\bhashFiles\([^)]*\)/g, ''))) if (!/^\s*#/.test(l) && /fetch-pinned/.test(l) && !HELPER_LINE.test(l)) report(name, `${HELPER} named in ${where} off a helper line: ${l.trim()}`);
     }
     // R1228f D4: only the actions used today, each pinned by commit (a new downloader action needs a lint edit).
     for (const u of usesOf(doc)) if (!USES_ALLOWED.test(u)) report(name, `an action this lint doesn't allow (pinned: ${USES_ALLOWED.source}): ${u}`);
@@ -490,6 +489,35 @@ function scalars(v: unknown): string[] {
   if (Array.isArray(v)) return v.flatMap(scalars);
   if (v && typeof v === 'object') return Object.values(v as Record<string, unknown>).flatMap(scalars);
   return [];
+}
+
+/**
+ * The values a step's shell can receive (R1228v D1), each with where it is: env at the workflow, job and step levels;
+ * jobs.*.strategy.matrix (its include too); a step's with:; an input's default (on.workflow_call, a composite action).
+ */
+function shellValues(doc: Doc): [string, string][] {
+  const out: [string, string][] = [];
+  const add = (where: string, v: unknown) => {
+    for (const x of scalars(v)) out.push([where, x]);
+  };
+  const d = doc as { env?: unknown; on?: { workflow_call?: { inputs?: Record<string, { default?: unknown }> } }; inputs?: Record<string, { default?: unknown }> } | null;
+  add('an env: value', d?.env);
+  for (const [k, i] of Object.entries(d?.on?.workflow_call?.inputs ?? {})) add(`input ${k}'s default`, i?.default);
+  for (const [k, i] of Object.entries(d?.inputs ?? {})) add(`input ${k}'s default`, i?.default);
+  const steps = (ss: Step[] | undefined) => {
+    for (const st of ss ?? []) {
+      add('an env: value', (st as { env?: unknown }).env);
+      add('a with: value', (st as { with?: unknown }).with);
+    }
+  };
+  for (const j of Object.values(doc?.jobs ?? {})) {
+    add('an env: value', (j as { env?: unknown }).env);
+    add('a matrix value', (j as { strategy?: { matrix?: unknown } }).strategy?.matrix);
+    add('a with: value', (j as { with?: unknown }).with);
+    steps(j?.steps);
+  }
+  steps(doc?.runs?.steps);
+  return out;
 }
 
 /** Every `uses:` in a workflow's jobs and steps, and a composite action's steps. */
@@ -1090,15 +1118,39 @@ test("R1228u D1, N1: the helper's path in an env:, matrix or with: value is refu
   };
   const wf = (job: string) => `on: push\njobs:\n  a:\n    runs-on: ubuntu-latest\n${job}`;
   // E1: env, E2: matrix, and a with: value: the whole literal path, off a helper line.
-  assert.match(scan(wf(`    steps:\n      - shell: bash\n        env:\n          FETCH: scripts/ci/fetch-pinned.sh\n          U: \${{ vars.GITLEAKS_URL }}\n        run: bash "$FETCH" "$U" ${PIN} gl.tgz\n`)).join(), /named in a value off a helper line/, 'E1: an env: value');
-  assert.match(scan(wf(`    strategy:\n      matrix:\n        helper: [scripts/ci/fetch-pinned.sh]\n    steps:\n      - shell: bash\n        run: bash "\${{ matrix.helper }}" "\${{ vars.GITLEAKS_URL }}" ${PIN} gl.tgz\n`)).join(), /named in a value off a helper line/, 'E2: a matrix value');
-  assert.match(scan(wf(`    env:\n      H: ./scripts/ci/./fetch-pinned.sh\n    steps:\n      - shell: bash\n        run: bash "$H" "$U" ${PIN} gl.tgz\n`)).join(), /named in a value off a helper line/, 'a job-level env value, another spelling');
+  assert.match(scan(wf(`    steps:\n      - shell: bash\n        env:\n          FETCH: scripts/ci/fetch-pinned.sh\n          U: \${{ vars.GITLEAKS_URL }}\n        run: bash "$FETCH" "$U" ${PIN} gl.tgz\n`)).join(), /named in (?:an env: value|a matrix value|a with: value|input \S+'s default) off a helper line/, 'E1: an env: value');
+  assert.match(scan(wf(`    strategy:\n      matrix:\n        helper: [scripts/ci/fetch-pinned.sh]\n    steps:\n      - shell: bash\n        run: bash "\${{ matrix.helper }}" "\${{ vars.GITLEAKS_URL }}" ${PIN} gl.tgz\n`)).join(), /named in (?:an env: value|a matrix value|a with: value|input \S+'s default) off a helper line/, 'E2: a matrix value');
+  assert.match(scan(wf(`    env:\n      H: ./scripts/ci/./fetch-pinned.sh\n    steps:\n      - shell: bash\n        run: bash "$H" "$U" ${PIN} gl.tgz\n`)).join(), /named in (?:an env: value|a matrix value|a with: value|input \S+'s default) off a helper line/, 'a job-level env value, another spelling');
   // The helper step as CI writes it: no report from the value check (its run is a helper line).
   const GL = 'https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz';
   assert.deepEqual(scan(wf(`    steps:\n      - name: get\n        shell: ${HELPER_SHELL}\n        env:\n          BASH_ENV: ''\n        run: |\n          /usr/bin/bash -p "$GITHUB_WORKSPACE/${HELPER}" "${GL}" ${PIN} gl.tgz\n`)), [], 'control: the helper step');
   // N1: the pin read at run time from the release itself (GitHub's asset digest): no pin. Refused as a fetch.
   assert.match(decodedProblems(`sum="$(gh release view v8.30.1 -R gitleaks/gitleaks --json assets --jq '.assets[0].digest')"`).join(), /./, 'gh release view … assets');
   assert.deepEqual(decodedProblems('gh release view v1 --json tagName'), [], 'control: a release view that reads no asset');
+});
+
+test("R1228v D1: the value check reads only values a shell can receive; on: paths, a step's name and a hashFiles() key are kept", () => {
+  const scan = (name: string, text: string) => {
+    const out: string[] = [];
+    workflowFiles([{ name, text }], (_n, p) => out.push(p));
+    return out;
+  };
+  const GL = 'https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz';
+  const helperStep = `      - name: get\n        shell: ${HELPER_SHELL}\n        env:\n          BASH_ENV: ''\n        run: |\n          /usr/bin/bash -p "$GITHUB_WORKSPACE/${HELPER}" "${GL}" ${PIN} gl.tgz\n`;
+  // Must pass: FR1 the repo's own convention, a script listed in on.<event>.paths; FR2 a step named for it; FR3 a cache key hashing it.
+  const fr1 = `on:\n  pull_request:\n    paths:\n      - scripts/ci/fetch-pinned.sh\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n${helperStep}`;
+  const fr2 = `on: push\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n${helperStep.replace('- name: get', '- name: gitleaks via fetch-pinned')}`;
+  const fr3 = `on: push\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809\n        with:\n          path: x\n          key: x-\${{ hashFiles('scripts/ci/fetch-pinned.sh') }}\n${helperStep}`;
+  for (const [what, text] of [['FR1 on.pull_request.paths', fr1], ['FR2 a step name', fr2], ['FR3 a hashFiles() key', fr3]] as const) {
+    assert.deepEqual(scan('.github/workflows/zz.yml', text).filter((p) => /named in/.test(p)), [], `kept: ${what}`);
+  }
+  // Must refuse: a matrix include, a composite step's with:, and an input's default (workflow_call, composite).
+  const off = /named in (?:an env: value|a matrix value|a with: value|input \S+'s default) off a helper line/;
+  assert.match(scan('.github/workflows/zz.yml', `on: push\njobs:\n  a:\n    runs-on: ubuntu-latest\n    strategy:\n      matrix:\n        include:\n          - helper: scripts/ci/fetch-pinned.sh\n    steps:\n      - run: echo hi\n`).join(), off, 'a matrix include');
+  assert.match(scan('.github/workflows/zz.yml', `on: push\nenv:\n  F: scripts/ci/fetch-pinned.sh\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi\n`).join(), off, 'a workflow-level env');
+  assert.match(scan('.github/workflows/zz.yml', `on:\n  workflow_call:\n    inputs:\n      h:\n        type: string\n        default: scripts/ci/fetch-pinned.sh\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi\n`).join(), /input h's default off a helper line/, 'a workflow_call input default');
+  assert.match(scan('.github/actions/zz/action.yml', `inputs:\n  h:\n    default: scripts/ci/fetch-pinned.sh\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      run: echo hi\n`).join(), /input h's default off a helper line/, "a composite action's input default");
+  assert.match(scan('.github/actions/zz/action.yml', `runs:\n  using: composite\n  steps:\n    - uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809\n      with:\n        path: scripts/ci/fetch-pinned.sh\n`).join(), off, "a composite step's with:");
 });
 
 // Limits (owner decision (c): stated, not closed; the helper's digest check holds for each download it handles):
