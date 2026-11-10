@@ -15,6 +15,7 @@
 // planner gives none. Every plan has a Decisions section (src/plan-decisions.ts): refused without it
 // or with a citation that isn't recorded, and reviewed against what it cites before it is posted.
 import { BRAND } from './brand.js';
+import { DECISION_ID } from './decision-reply.js';
 import type { DoneWhenList } from './backlog/types.js';
 import type { ReviewConfig } from './config/schema.js';
 import { riskAndDesignReasons, waitCategoriesOf } from './merge-policy.js';
@@ -234,20 +235,21 @@ export function planDecision(reasons: string[], acceptance: string[] = []) {
       ...reasons.map((r) => `holds because ${r}`),
       ...acceptance.map((a) => `${ACCEPTANCE_RECEIPT}${a}`),
       'approve: the build starts with this plan',
-      `revise: the plan is written again with your note (reply \`/${BRAND.cli} revise <note>\`)`,
+      `revise: the plan is written again with your note (reply \`/${BRAND.cli} revise ${DECISION_ID} <note>\`)`,
       'reject: the task stops; nothing is built',
     ],
   };
 }
 
 /** What an answer to a held plan does: build with it, plan again with a note, or stop. */
-export function planAnswer(answer: string, comment = ''): { act: 'build' } | { act: 'replan'; note: string } | { act: 'stop' } {
+/**
+ * What the owner's answer to a held plan does. `note`: what they wrote with a `revise` (the answering line's own note,
+ * src/decision-reply.ts: the rest of that line without its id, and the plain lines of its paragraph after it; R1182af:
+ * never re-read from the whole comment, so text in a comment, a fence, a quote or another decision's line is never it).
+ */
+export function planAnswer(answer: string, note = ''): { act: 'build' } | { act: 'replan'; note: string } | { act: 'stop' } {
   if (answer === 'approve') return { act: 'build' };
-  if (answer === 'revise') {
-    // The decision's id follows the option (a reply names it: decisions.ts commentAnswer); it isn't part of the note.
-    const m = new RegExp(`/${BRAND.cli}\\s+revise\\b\\s*(?:d-[\\w-]*\\w(?![\\w-])\\s*)?([\\s\\S]*)$`, 'im').exec(comment);
-    return { act: 'replan', note: (m?.[1] ?? '').trim() || 'no note given; plan it again with the risks in mind' };
-  }
+  if (answer === 'revise') return { act: 'replan', note: note.trim() || 'no note given; plan it again with the risks in mind' };
   return { act: 'stop' };
 }
 

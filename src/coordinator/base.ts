@@ -42,6 +42,7 @@ import { cappedModel } from './model-routing.js';
 import { resolveProvider } from './providers.js';
 import { providerCost, providerOf } from '../providers.js';
 import { gitRemote } from '../git-remote.js';
+import { DECISION_ID } from '../decision-reply.js';
 
 export abstract class CoordinatorBase {
   /** Defined in a later part (or in Coordinator); declared here for the calls in this one. */
@@ -620,7 +621,10 @@ export abstract class CoordinatorBase {
   protected async ask(kind: 'land' | 'question' | 'domain' | 'plan' | 'intake' | 'delegation' | 'automation', issue: number | null, owner: string, question: string, options: string[], recommended: string, detail: string[], context?: DecisionContext): Promise<string> {
     const id = `d-${issue ?? kind}-${randomBytes(3).toString('hex')}`;
     // The recommendation is one of the options or nothing: prose (an agent's reasoning) moves into the detail.
-    const { recommendation, receipts } = settleRecommendation(options, recommended, detail);
+    const settled = settleRecommendation(options, recommended, detail);
+    const { recommendation } = settled;
+    // A receipt's reply instruction names this decision's id (plan-mode.ts DECISION_ID; R1182ae).
+    const receipts = settled.receipts.map((r) => r.split(DECISION_ID).join(id));
     // What it rests on (src/decision-context.ts), for the dashboard's detail view: never a viewer's (src/viewer-events.ts).
     this.emit('decision.asked', { id, kind, issue, owner, question, options, recommendation, receipts, ...(context ? { context } : {}) });
     if (issue === null) return id; // not tied to an issue: answered from the dashboard or CLI

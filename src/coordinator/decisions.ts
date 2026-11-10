@@ -9,7 +9,7 @@ import { type DoneWhenList, type Issue } from '../backlog/types.js';
 import { claim, release } from '../claims.js';
 import type { EventPayload } from '../events/types.js';
 import { mayAnswerKind, type Role } from '../dashboard-auth.js';
-import { commandLines } from '../decision-reply.js';
+import { readReply } from '../decision-reply.js';
 import { defaultRolePrompt, issueBrief } from '../roles.js';
 import { checkedPush } from '../push-check.js';
 import { domainDecision, withAllowedHost, type DomainAnswer, type RefusedRequest } from '../domain-requests.js';
@@ -144,14 +144,15 @@ export abstract class Decisions extends Recovery {
     const n = q.issue!;
     if (this.d.log.read(askedId, ['plan.decided']).some((e) => (e.payload as { decision: string }).decision === q.id)) return;
     let a = this.d.log.read(askedId, ['decision.answered']).map((e) => e.payload as EventPayload<'decision.answered'>).find((x) => x.id === q.id);
-    let body = '';
+    // R1182af: the note is the answering line's own (decision-reply.ts), never re-read from the whole comment.
+    let note = '';
     if (!a) {
       const reply = await this.commentAnswer(n, q, writers, cmd);
       if (!reply) return;
-      body = reply.body;
+      note = reply.note;
       a = this.emit('decision.answered', { id: q.id, by: reply.by, answer: reply.answer, role: reply.role }).payload;
     }
-    const act = planAnswer(a.answer, body);
+    const act = planAnswer(a.answer, note);
     const answer = a.answer as PlanAnswer;
     this.emit('plan.decided', { issue: n, decision: q.id, answer, by: a.by, note: act.act === 'replan' ? act.note.slice(0, 2000) : '' });
     await this.d.backlog.removeLabel(n, 'needs:decision');
@@ -251,7 +252,7 @@ export abstract class Decisions extends Recovery {
    * A writer's comment with a command line that answers nothing says so once (`reply_without_id`, `reply_unknown_id`,
    * `reply_several_ids`), one note per comment at most, with the open ids to use.
    */
-  private async commentAnswer(n: number, q: EventPayload<'decision.asked'>, writers: Set<string>, _cmd: RegExp): Promise<{ by: string; body: string; answer: string; role: 'owner' | 'writer' } | null> {
+  private async commentAnswer(n: number, q: EventPayload<'decision.asked'>, writers: Set<string>, _cmd: RegExp): Promise<{ by: string; body: string; answer: string; note: string; role: 'owner' | 'writer' } | null> {
     const comments = await this.d.backlog.comments(n);
     const asked = this.d.log.read(0, ['decision.asked']).map((e) => e.payload as EventPayload<'decision.asked'>).filter((p) => p.issue === n);
     const answered = new Set(this.d.log.read(0, ['decision.answered']).map((e) => (e.payload as EventPayload<'decision.answered'>).id));
@@ -259,21 +260,23 @@ export abstract class Decisions extends Recovery {
     const optionsHere = new Set(asked.flatMap((p) => p.options));
     const open = asked.filter((p) => !answered.has(p.id)).map((p) => p.id);
     const replies = comments.filter((c) => writers.has(c.author.toLowerCase()) && !c.body.trimStart().startsWith(`[${BRAND.cli}]`));
-    const parsed = replies.map((c) => ({ c, lines: commandLines(c.body) }));
+    const parsed = replies.map((c) => ({ c, ...readReply(c.body) }));
     // At most one note per comment, keyed by the comment; the notes already written are read once.
     const said = new Set<string>();
     for (const e of this.d.log.read(0, ['coordinator.error'])) {
       const m = /^(#\d+: reply \S+):/.exec((e.payload as { message: string }).message);
       if (m) said.add(m[1]!);
     }
-    for (const { c, lines } of parsed) {
+    for (const { c, lines, skipped } of parsed) {
       // A line is a reply to a decision when it names an id, or its option is one a decision here offers.
       const ours = lines.filter((l) => l.ids.length > 0 || optionsHere.has(l.option));
       const several = ours.find((l) => l.ids.length > 1);
       const unknown = ours.find((l) => l.ids.length === 1 && !byId.has(l.ids[0]!));
       const badOption = ours.find((l) => l.ids.length === 1 && byId.has(l.ids[0]!) && !byId.get(l.ids[0]!)!.options.includes(l.option));
       const none = ours.find((l) => l.ids.length === 0);
-      const kind = several ? 'reply_several_ids' : unknown ? 'reply_unknown_id' : badOption ? 'reply_unknown_option' : none ? 'reply_without_id' : null;
+      // A command line CommonMark shows inside code, a quote, a link or a comment, in a comment that has none read (R1182af).
+      const hidden = lines.length === 0 && skipped > 0;
+      const kind = several ? 'reply_several_ids' : unknown ? 'reply_unknown_id' : badOption ? 'reply_unknown_option' : none ? 'reply_without_id' : hidden ? 'reply_skipped' : null;
       if (!kind) continue;
       const key = `#${n}: reply ${c.id ?? createHash('sha256').update(`${c.author}\n${c.at ?? ''}\n${c.body}`).digest('hex').slice(0, 12)}`;
       if (said.has(key)) continue;
@@ -284,17 +287,19 @@ export abstract class Decisions extends Recovery {
           ? `names ${unknown.ids[0]}, which isn't a decision on this issue`
           : badOption
             ? `answers ${badOption.ids[0]} with \`${badOption.option}\`, which isn't one of its options (${byId.get(badOption.ids[0]!)!.options.join(', ')})`
-            : "doesn't name a decision";
+            : none
+              ? "doesn't name a decision"
+              : 'has its command inside code, a quote, a link or an HTML comment as it renders, so it is not read (put the command on a line of its own after a blank line)';
       const ids = open.length ? `open here: ${open.slice(0, 10).join(', ')}${open.length > 10 ? ` and ${open.length - 10} more` : ''}` : 'none is open here';
       this.emit('coordinator.error', { instance: this.d.instance, where: 'decision reply', kind, message: `${key}: by ${c.author} ${why}, so it answers nothing; a reply answers one decision, named by its id (\`/${BRAND.cli} <option> <id>\`); ${ids}` });
     }
     const id = q.id.toLowerCase();
     const picks = parsed
-      .map(({ c, lines }) => ({ c, answer: lines.filter((l) => l.ids.length === 1 && l.ids[0] === id && q.options.includes(l.option)).at(-1)?.option }))
-      .filter((x) => x.answer !== undefined);
+      .map(({ c, lines }) => ({ c, line: lines.filter((l) => l.ids.length === 1 && l.ids[0] === id && q.options.includes(l.option)).at(-1) }))
+      .filter((x) => x.line !== undefined);
     for (const r of picks.reverse()) {
       const role = await this.commenterRole(r.c.author);
-      if (mayAnswerKind(q.kind, role, this.approvals())) return { by: r.c.author, body: r.c.body, answer: r.answer!, role: role === 'owner' ? 'owner' : 'writer' };
+      if (mayAnswerKind(q.kind, role, this.approvals())) return { by: r.c.author, body: r.c.body, answer: r.line!.option, note: r.line!.note, role: role === 'owner' ? 'owner' : 'writer' };
     }
     return null;
   }
