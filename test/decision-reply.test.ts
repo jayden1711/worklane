@@ -75,3 +75,22 @@ test("the note is the rest of the first line without its ids, in its own case; n
   assert.equal(note(`${c} revise ${ID} keep it smaller\nand drop the cache`), 'keep it smaller', 'the next line is not part of it');
   assert.equal(note(`${c} revise ${ID.toUpperCase()}, keep it smaller`), 'keep it smaller');
 });
+
+test('R1182aj: the void scan reads the text as shown and counts a look-alike command name; line 1 is refused for invisible characters', () => {
+  const ZW = ['\\u200B', '\\u2060', '\\u00AD', '\\uFEFF', '\\u180E'].map((e) => JSON.parse(`"${e}"`) as string);
+  for (const z of ZW) {
+    assert.equal(answers(`${c} approve ${ID}\n/work${z}lane reject ${ID}`), false, `AJ1: ${JSON.stringify(z)} inside a later command`);
+    assert.equal(readReply(`${c} approve ${ID} ok${z}`).unsafe, true, `AJ2: ${JSON.stringify(z)} on line 1`);
+  }
+  assert.equal(answers(`${c} approve ${ID}\n/w\u043Erklane reject ${ID}`), false, 'AJ1d: a Cyrillic o in a later command');
+  assert.equal(answers(`${c} approve ${ID}\n${c}\u2800reject ${ID}`), false, 'AJ1f: the braille blank as the separator');
+  assert.equal(answers(`${c} approve ${ID} and /work\u200Blane reject ${ID}`), false, 'AJ1g: on the same line');
+  for (const ch of ['\u202E', '\u2800', '\u3164', '\u0007']) assert.equal(readReply(`${c} approve ${ID} x${ch}`).unsafe, true, JSON.stringify(ch));
+  assert.equal(readReply(`${c} reject ~~${ID}~~`).unsafe, true, 'AJ4: a tilde');
+  // Controls: plain text, an NBSP or an em space are fine; a leading BOM and an invisible-only line are no text (AJ3).
+  assert.equal(answers(`${c} approve ${ID}\nthanks`), true);
+  assert.equal(answers(`\u2003${c} approve ${ID}\u00A0thanks`), true, 'an em space and a no-break space print as spaces');
+  assert.equal(answers(`\uFEFF${c} approve ${ID}`), true, 'AJ3a: a leading byte order mark');
+  assert.equal(answers(`\u200B\n${c} approve ${ID}`), true, 'AJ3b: a first line of only a zero-width space');
+  assert.equal(answers(`${c} approve ${ID}\n\u65E5\u672C\u8A9E text`), true, 'non-ASCII text without a slash is no command');
+});
