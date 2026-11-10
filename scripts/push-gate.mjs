@@ -6,6 +6,7 @@
 //   pre-push hook:  node scripts/push-gate.mjs <remote> [<url>]   (refs on stdin)
 //   by hand / CI:   node scripts/push-gate.mjs --range <base>..<tip>
 //   a PR's body:    node scripts/push-gate.mjs --pr-body   (CI; the body from $GITHUB_EVENT_PATH)
+//   commit-msg hook: node push-gate.mjs --commit-msg <message file>   (the message rule alone: #1259)
 //
 // It refuses vendor attribution in a commit message or PR body (a Co-Authored-By trailer, a coding tool's
 // "Generated with" line): this repo's attribution is the DCO sign-off only (#576).
@@ -155,16 +156,36 @@ function withoutOwnSignOffs(msg, emails) {
 const SUBJECT_MAX = 180;
 
 /**
- * Why a commit's message is malformed, or nothing: line 2 must be blank (otherwise git reads the whole first
+ * Why a commit message is malformed (empty: it isn't): line 2 must be blank (otherwise git reads the whole first
  * paragraph as the subject) and line 1 at most SUBJECT_MAX characters. A one-line message passes; so does GitHub's
- * merge commit, whose title follows a blank line. Only the pushed commits are judged, never what's already on main.
+ * merge commit, whose title follows a blank line. The one rule for both a pushed commit (messageShape) and, through
+ * --commit-msg, the commit-msg hook before a commit is made (#1259), so the two can't drift.
  */
-function messageShape(sha) {
-  const lines = git('log', '-1', '--format=%B', sha).split(/\r?\n/);
+function messageShapeProblems(message) {
+  const lines = message.split(/\r?\n/);
   const why = [];
   if (lines.length > 1 && lines[1].trim() !== '') why.push('line 2 is not blank, so git reads the whole first paragraph as the subject');
   if (lines[0].length > SUBJECT_MAX) why.push(`the subject is ${lines[0].length} characters, over ${SUBJECT_MAX}`);
-  return why.length ? [`${sha.slice(0, 8)}: ${why.join('; and ')}\n    line 1: ${lines[0]}`] : [];
+  return why;
+}
+
+/** A pushed commit's message shape. Only the pushed commits are judged, never what's already on main. */
+function messageShape(sha) {
+  const message = git('log', '-1', '--format=%B', sha);
+  const why = messageShapeProblems(message);
+  return why.length ? [`${sha.slice(0, 8)}: ${why.join('; and ')}\n    line 1: ${message.split(/\r?\n/)[0]}`] : [];
+}
+
+/**
+ * The message as git will commit it, from the file the commit-msg hook is given: git strips comment lines, what
+ * follows a scissors line, and leading blank lines after the hook runs (its default cleanup), so the hook judges that.
+ */
+function asCommitted(text) {
+  const lines = text.split(/\r?\n/);
+  const cut = lines.indexOf('# ------------------------ >8 ------------------------');
+  const kept = (cut === -1 ? lines : lines.slice(0, cut)).filter((l) => !l.startsWith('#'));
+  while (kept.length && kept[0].trim() === '') kept.shift();
+  return kept.join('\n');
 }
 
 // A blob holding a NUL byte is still scanned for the hashed terms, never skipped (#989).
@@ -227,6 +248,23 @@ function gitleaks(commits) {
   if (r.error) fail(`gitleaks could not run (${r.error.code ?? r.error.message}); install it, the gate never skips the secret scan`);
   if (r.status === 1) fail(`gitleaks found a secret:\n${(r.stdout + r.stderr).trim().slice(-3000)}`);
   if (r.status !== 0) fail(`gitleaks exited ${r.status}:\n${r.stderr.trim().slice(-1000)}`);
+}
+
+// The commit-msg hook (#1259; installed by setup-hooks): the message rule alone, before the commit is made, so none is
+// made that the gate would refuse and that would then have to be rewritten. No rules or git are read.
+if (process.argv[2] === '--commit-msg') {
+  try {
+    const why = messageShapeProblems(asCommitted(readFileSync(process.argv[3], 'utf8')));
+    if (why.length) {
+      console.error(`commit refused (the push gate refuses it too): ${why.join('; and ')}`);
+      console.error(`Nothing was committed; the message is kept in ${process.argv[3]}. Put the subject alone on line 1 (at most ${SUBJECT_MAX} characters), then a blank line, then the body, and commit again.`);
+      process.exit(1);
+    }
+    process.exit(0);
+  } catch (e) {
+    console.error(`commit refused: the commit-msg hook could not read the message: ${e.message}`);
+    process.exit(1);
+  }
 }
 
 if (process.argv[2] === '--pr-body') {
