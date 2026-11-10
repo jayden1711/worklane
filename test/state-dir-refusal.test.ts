@@ -117,9 +117,10 @@ function probe(env: NodeJS.ProcessEnv, outside: string, pollution: Record<string
   // The controls: the wrappers saw this probe's call and the engine's own, and refused a path outside.
   assert.equal(out.touched.filter((p) => p === control).length, 2, `both controls recorded: ${out.touched.join(', ')}`);
   assert.equal(out.refusedOutside, true, 'a path outside the test machine is refused by the probe');
-  // Nothing outside the test machine was touched but the engine's modules, loaded (the refused control is recorded,
-  // never run).
-  assert.deepEqual(out.touched.filter((p) => p !== testMachine && !inside(testMachine, p) && !(inside(dist, p) && p.endsWith('.js')) && p !== join(outside, 'control')), [], 'nothing outside the test machine');
+  // Nothing outside the test machine was touched but the engine's modules, loaded, and their own tables files beside
+  // them, which a module reads as it loads (#941: src/os/git.ts's, since guardrails/push-hook.ts imports it). The
+  // refused control is recorded, never run.
+  assert.deepEqual(out.touched.filter((p) => p !== testMachine && !inside(testMachine, p) && !(inside(dist, p) && /\.(?:js|tables\.json)$/.test(p)) && p !== join(outside, 'control')), [], 'nothing outside the test machine');
   out.touched = out.touched.filter((p) => !inside(dist, p));
   return out;
 }
