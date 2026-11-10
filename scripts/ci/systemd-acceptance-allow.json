@@ -31,12 +31,6 @@
         "loginctl: export const SETUP_STEPS: readonly SetupStep[] = [\nfix: { kind: 'terminal', command: 'sudo loginctl enable-linger \"$USER\"', why: 'it needs sudo, which the dashboard never runs' },\n];"
       ]
     },
-    "src/guardrails/push-hook.ts": {
-      "why": "product code: systemd-run's option table",
-      "uses": [
-        "systemd: export const RUNNERS: Readonly<Record<string, Runner>> = {\n'systemd-run': { value: opts('HMEpu', 'unit', 'property', 'setenv', 'description', 'slice', 'uid', 'gid', 'working-directory', 'machine', 'host', 'nice', 'service-type', 'expand-environment', 'path-property', 'socket-property', 'on-active', 'on-boot', 'on-startup', 'on-unit-active', 'on-unit-inactive', 'on-calendar', 'timer-property') },\n};"
-      ]
-    },
     "src/intake/discord-setup.ts": {
       "why": "product code: a restart command shown to the owner",
       "uses": [
@@ -508,6 +502,12 @@
       "uses": [
         "systemd: const DELEGATE ='scripts/bench/README.md, one-time setup: the systemd Delegate= drop-in';"
       ]
+    },
+    "src/guardrails/shell.ts": {
+      "why": "product code: systemd-run's option table (moved from src/guardrails/push-hook.ts on main, which re-exports it)",
+      "uses": [
+        "systemd: export const RUNNERS: Readonly<Record<string, Runner>> = {\n'systemd-run': { value: opts('HMEpu', 'unit', 'property', 'setenv', 'description', 'slice', 'uid', 'gid', 'working-directory', 'machine', 'host', 'nice', 'service-type', 'expand-environment', 'path-property', 'socket-property', 'on-active', 'on-boot', 'on-startup', 'on-unit-active', 'on-unit-inactive', 'on-calendar', 'timer-property') },\n};"
+      ]
     }
   },
   "skipImports": {
@@ -559,23 +559,8 @@
       ]
     },
     "src/tool-path.ts: findTool": "a program on PATH (gitleaks, ssh-keygen)",
-    "test/runner-option-tables.test.ts: bin": {
-      "why": "whether each runner program the push guard reads (src/guardrails/push-hook.ts RUNNERS, systemd-run among them) is installed, to read its options; not a service manager check",
-      "pin": [
-        "const bin = installed(name);",
-        "for (const name of Object.keys(RUNNERS)) { const bin = installed(name); test(`${name}: every option the guard reads as taking the next word takes one in the installed program (#993)`, { skip: bin ? false : `${name} is not installed` }, () => { const check = CHECKS[name]; if (check) check(bin!); else { assertRequiresValue(name, bin!, valueWords(name)); // #1126 item 1: each listed option is checked above, which a dropped one escapes (flock -w, nsenter -S). So the // program's own getopt string must give a required value to exactly the table's letters, none more. const { short } = RUNNERS[name]!.value; if (short) assert.ok(getoptStringIn(bin!, short), `${name}: no getopt string in ${bin} with required values exactly ${short}`); } }); }",
-        "import src/guardrails/push-hook.ts: RUNNERS"
-      ]
-    },
-    "test/runner-option-tables.test.ts: name": {
-      "why": "the runner's name in the skip reason, from the same table",
-      "pin": [
-        "for (const name of Object.keys(RUNNERS)) { const bin = installed(name); test(`${name}: every option the guard reads as taking the next word takes one in the installed program (#993)`, { skip: bin ? false : `${name} is not installed` }, () => { const check = CHECKS[name]; if (check) check(bin!); else { assertRequiresValue(name, bin!, valueWords(name)); // #1126 item 1: each listed option is checked above, which a dropped one escapes (flock -w, nsenter -S). So the // program's own getopt string must give a required value to exactly the table's letters, none more. const { short } = RUNNERS[name]!.value; if (short) assert.ok(getoptStringIn(bin!, short), `${name}: no getopt string in ${bin} with required values exactly ${short}`); } }); }",
-        "import src/guardrails/push-hook.ts: RUNNERS"
-      ]
-    },
     "src/guardrails/push-hook.ts: RUNNERS": {
-      "why": "the push guard's table of runner programs and their options, a const literal in product code: the loop registers one test per row, a fixed set, and no row is a service manager check (R1169v D4 reads a loop's table). An import key applies to every file that imports it; today only test/runner-option-tables.test.ts does (test/git-runner.test.ts has a RUNNERS of its own)"
+      "why": "the push guard's table of runner programs and their options, a const literal in product code (src/guardrails/shell.ts, re-exported by push-hook.ts, where the test imports it from): the loop registers one test per row, a fixed set, and no row is a service manager check (R1169v D4 reads a loop's table). An import key applies to every file that imports it; today only test/runner-option-tables.test.ts does (test/git-runner.test.ts has a RUNNERS of its own)"
     },
     "test/adversarial/adversarial.test.ts: controls": {
       "why": "the adversarial suite's case files under test/adversarial/ (cases/*.json, controls.json, todo.json), read with readFileSync: one test per case in the repo's own data, none a service manager check (R1169v D4 reads a loop's table)",
