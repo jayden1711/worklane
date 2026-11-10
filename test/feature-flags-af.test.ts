@@ -2,11 +2,12 @@
 // (AF2). Ported from the review's probes (attacks-1173af/af-attacks.test.ts); each attack has its control.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
+import fs, { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+import { spawn, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { gunzipSync, gzipSync } from 'node:zlib';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { EventPayload } from '../src/events/types.js';
 import { EventLog } from '../src/events/log.js';
@@ -492,6 +493,251 @@ for (const order of ['export', 'off file first', 'log first'] as const) {
         assert.match(importChild(b, sd, { full: true }).stdout, /THREW/);
         const fl = restartOn(f, sd);
         assert.deepEqual(fl.after, fl.before, "no off/on pair the target's log never had");
+      });
+    } finally {
+      f.log.close();
+      for (const d of [f.base, src, sd]) rmSync(d, { recursive: true, force: true });
+    }
+  });
+}
+
+// --- R1173al AL1 (reserved names by case), AL2 (the replaced log's WAL) (ported from attacks-1173al/al-attacks.test.ts) ---
+const errorsOf = (log: EventLog) => [...new Set(log.read(0, ['coordinator.error']).map((e) => (e.payload as { message: string }).message))];
+/** A fresh process on `sd`'s log with main still turning T on: whose log it is, and the flips before and after its first adopt. */
+function reopen(f: Fixture, sd: string) {
+  const log = new EventLog(join(sd, 'events.db'));
+  try {
+    const before = flipsOf(log);
+    const whose = errorsOf(log);
+    adoptFlags({ flags: new FlagState(), log, repo: f.repo, actor: 'i', branch: 'main', check: () => [] });
+    return { before, whose, after: flipsOf(log) };
+  } finally {
+    log.close();
+  }
+}
+const readB = (file: string) => JSON.parse(gunzipSync(Buffer.from(readFileSync(file, 'utf8'), 'base64')).toString('utf8')) as Bundle;
+const writeB = (file: string, b: Bundle) => writeFileSync(file, gzipSync(JSON.stringify(b)).toString('base64'));
+/** A target whose log reads T on with T's off pending, anchored in its file. */
+function targetWithPendingOff(f: Fixture, sd: string) {
+  const log = new EventLog(join(sd, 'events.db'));
+  adoptFlags({ flags: new FlagState(), log, repo: f.repo, actor: 'i', branch: 'main', check: () => [] });
+  for (let i = 0; i < 3; i++) log.append('coordinator.error', { instance: 'i', where: 'w', kind: 'k', message: 'target' }, 'i');
+  const after = log.lastId();
+  const at = (log.db.prepare('SELECT ts FROM events WHERE id = ?').get(after) as { ts: string }).ts;
+  log.close();
+  writeFileSync(join(sd, OFF_FILE), `${JSON.stringify({ [T]: { sha: null, after, at } })}\n`);
+}
+/** A case-insensitive volume (macOS's default) for names already in a folder: a rename onto a case variant lands on it. */
+function caseInsensitive<R>(fn: () => R): R {
+  const rn = fs.renameSync;
+  fs.renameSync = ((a: fs.PathLike, d: fs.PathLike) => {
+    const dir = dirname(String(d));
+    const name = basename(String(d));
+    const hit = existsSync(dir) ? readdirSync(dir).find((n) => n !== name && n.toLowerCase() === name.toLowerCase()) : undefined;
+    return rn(a, hit ? join(dir, hit) : d);
+  }) as typeof fs.renameSync;
+  syncBuiltinESMExports();
+  try {
+    return fn();
+  } finally {
+    fs.renameSync = rn;
+    syncBuiltinESMExports();
+  }
+}
+
+for (const attack of [false, true]) {
+  test(`R1173al AL1a (${attack ? 'attack' : 'control'}): a bundle with no log carrying ${attack ? 'state/Flags-Unrecorded.json' : `state/${OFF_FILE}`}: refused or skipped, and the target's pending off survives`, { skip }, async () => {
+    const f = fixture();
+    const src = mkdtempSync(join(tmpdir(), 'al1a-src-'));
+    const sd = mkdtempSync(join(tmpdir(), 'al1a-sd-'));
+    try {
+      await withKnownFlags([T], async () => {
+        mainTurnsOn(f);
+        targetWithPendingOff(f, sd);
+        const ssd = join(src, 'state');
+        mkdirSync(ssd, { recursive: true });
+        writeFileSync(join(ssd, 'backlog.json'), '[]\n');
+        const file = exportBundle({ stateDir: ssd, root: null, repo: null, host: 'h', out: join(src, 'b.wlb') }).file;
+        const b = readB(file);
+        b.files.push({ path: `state/${attack ? 'Flags-Unrecorded.json' : OFF_FILE}`, data: Buffer.from('{}\n').toString('base64') });
+        writeB(file, b);
+        const imp = () => caseInsensitive(() => importBundle({ file, stateDir: sd, root: null, instance: true, force: true }));
+        if (attack) assert.throws(imp, /refused, a reserved state file's name: state\/Flags-Unrecorded\.json/);
+        else assert.ok(imp().skipped.some((x) => x.path === `state/${OFF_FILE}`), 'an off file without its log is skipped');
+        assert.deepEqual(reopen(f, sd).after, [[T, false, true], [T, true, false], [T, false, true]], "the target's pending off is recorded");
+      });
+    } finally {
+      f.log.close();
+      for (const d of [f.base, src, sd]) rmSync(d, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const attack of [false, true]) {
+  test(`R1173al AL1b (${attack ? 'attack' : 'control'}): --force import of a log named ${attack ? 'state/Events.db' : 'state/events.db'}: refused, or no off/on pair the imported log never ran`, { skip }, async () => {
+    const f = fixture();
+    const src = mkdtempSync(join(tmpdir(), 'al1b-src-'));
+    const sd = mkdtempSync(join(tmpdir(), 'al1b-sd-'));
+    try {
+      await withKnownFlags([T], async () => {
+        mainTurnsOn(f);
+        targetWithPendingOff(f, sd);
+        const ssd = join(src, 'state');
+        mkdirSync(ssd, { recursive: true });
+        const slog = new EventLog(join(ssd, 'events.db'));
+        adoptFlags({ flags: new FlagState(), log: slog, repo: f.repo, actor: 'i', branch: 'main', check: () => [] });
+        for (let i = 0; i < 7; i++) slog.append('coordinator.error', { instance: 'i', where: 'w', kind: 'k', message: 'bundle' }, 'i');
+        slog.close();
+        const file = exportBundle({ stateDir: ssd, root: null, repo: null, host: 'h', out: join(src, 'b.wlb') }).file;
+        if (attack) {
+          const b = readB(file);
+          for (const x of b.files) if (x.path === 'state/events.db') x.path = 'state/Events.db';
+          writeB(file, b);
+        }
+        const imp = () => caseInsensitive(() => importBundle({ file, stateDir: sd, root: null, instance: true, force: true }));
+        if (attack) {
+          assert.throws(imp, /refused, a reserved state file's name: state\/Events\.db/);
+          assert.deepEqual(reopen(f, sd).whose, ['target'], "the target's own log stays");
+          return;
+        }
+        imp();
+        const fl = reopen(f, sd);
+        assert.deepEqual(fl.whose, ['bundle']);
+        assert.deepEqual(fl.after, fl.before, 'no off/on pair the imported log never had');
+      });
+    } finally {
+      f.log.close();
+      for (const d of [f.base, src, sd]) rmSync(d, { recursive: true, force: true });
+    }
+  });
+}
+
+test('R1173al: a bundle carrying the log\'s -wal, -shm or -journal is refused, whatever their case', () => {
+  const src = mkdtempSync(join(tmpdir(), 'al-wal-'));
+  try {
+    const ssd = join(src, 'state');
+    mkdirSync(ssd, { recursive: true });
+    new EventLog(join(ssd, 'events.db')).close();
+    const file = exportBundle({ stateDir: ssd, root: null, repo: null, host: 'h', out: join(src, 'b.wlb') }).file;
+    for (const extra of ['events.db-wal', 'events.db-shm', 'events.db-journal', 'Events.db-WAL']) {
+      const b = readB(file);
+      b.files.push({ path: `state/${extra}`, data: Buffer.from('x').toString('base64') });
+      const f2 = join(src, `${extra}.wlb`);
+      writeB(f2, b);
+      assert.throws(() => importBundle({ file: f2, stateDir: join(src, `t-${extra}`), root: null, instance: true }), /refused, a reserved state file's name/, extra);
+    }
+  } finally {
+    rmSync(src, { recursive: true, force: true });
+  }
+});
+
+/** In a child: open the target's log, turn T on, add rows, save a pending off, then close or die (SIGKILL: its WAL stays). */
+function targetChild(f: Fixture, sd: string, die: boolean) {
+  const js = `import { EventLog } from ${JSON.stringify(join(repoRoot, 'dist/src/events/log.js'))};
+    import { FlagState, adoptFlags } from ${JSON.stringify(join(repoRoot, 'dist/src/flags.js'))};
+    import { withKnownFlags } from ${JSON.stringify(join(repoRoot, 'dist/src/config/schema.js'))};
+    import { writeFileSync } from 'node:fs';
+    await withKnownFlags([${JSON.stringify(T)}], async () => {
+      const log = new EventLog(${JSON.stringify(join(sd, 'events.db'))});
+      adoptFlags({ flags: new FlagState(), log, repo: ${JSON.stringify(f.repo)}, actor: 'i', branch: 'main', check: () => [] });
+      for (let i = 0; i < 3; i++) log.append('coordinator.error', { instance: 'i', where: 'w', kind: 'k', message: 'target' }, 'i');
+      const after = log.lastId();
+      const at = log.db.prepare('SELECT ts FROM events WHERE id = ?').get(after).ts;
+      writeFileSync(${JSON.stringify(join(sd, OFF_FILE))}, JSON.stringify({ [${JSON.stringify(T)}]: { sha: null, after, at } }) + '\\n');
+      if (${die}) process.kill(process.pid, 'SIGKILL');
+      log.close();
+    });`;
+  return spawnSync(process.execPath, ['--input-type=module', '-e', js], { encoding: 'utf8', env: { ...process.env, NODE_TEST_CONTEXT: 'child-v8' } });
+}
+/** A source whose log has no flags and no pending offs; its bundle. */
+function plainBundle(dir: string): string {
+  const ssd = join(dir, 'state');
+  mkdirSync(ssd, { recursive: true });
+  const slog = new EventLog(join(ssd, 'events.db'));
+  for (let i = 0; i < 4; i++) slog.append('coordinator.error', { instance: 'i', where: 'w', kind: 'k', message: 'bundle' }, 'i');
+  slog.close();
+  return exportBundle({ stateDir: ssd, root: null, repo: null, host: 'h', out: join(dir, 'b.wlb') }).file;
+}
+
+for (const attack of [false, true]) {
+  test(`R1173al AL2a (${attack ? 'attack' : 'control'}): --force import onto a target whose coordinator ${attack ? 'was killed (its WAL left)' : 'stopped cleanly'}: the imported log is the one read`, { skip: skip || process.platform === 'win32' }, async () => {
+    const f = fixture();
+    const src = mkdtempSync(join(tmpdir(), 'al2a-src-'));
+    const sd = mkdtempSync(join(tmpdir(), 'al2a-sd-'));
+    try {
+      await withKnownFlags([T], async () => {
+        mainTurnsOn(f);
+        const c = targetChild(f, sd, attack);
+        if (attack) assert.ok(existsSync(join(sd, 'events.db-wal')), `the killed coordinator's WAL is there: ${c.stderr.slice(0, 200)}`);
+        importBundle({ file: plainBundle(src), stateDir: sd, root: null, instance: true, force: true });
+        assert.equal(existsSync(join(sd, 'events.db-wal')) && readFileSync(join(sd, 'events.db-wal')).length > 0, false, 'no old WAL left over the new log');
+        const fl = reopen(f, sd);
+        assert.deepEqual(fl.whose, ['bundle'], 'the imported log is the one read');
+        assert.deepEqual(fl.after, [[T, false, true]], "the bundle's log records T on at its first start");
+      });
+    } finally {
+      f.log.close();
+      for (const d of [f.base, src, sd]) rmSync(d, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const attack of [false, true]) {
+  test(`R1173al AL2b (${attack ? 'attack' : 'control'}): coordinator stopped cleanly, ${attack ? 'a reader (a dashboard) still open on the log' : 'no other reader'}, --force import: ${attack ? 'refused, nothing imported' : 'the imported log is the one read'}`, { skip: skip || process.platform === 'win32' }, async () => {
+    const f = fixture();
+    const src = mkdtempSync(join(tmpdir(), 'al2b-src-'));
+    const sd = mkdtempSync(join(tmpdir(), 'al2b-sd-'));
+    let reader: ReturnType<typeof spawn> | null = null;
+    try {
+      await withKnownFlags([T], async () => {
+        mainTurnsOn(f);
+        if (attack) {
+          new EventLog(join(sd, 'events.db')).close();
+          const js = `import { EventLog } from ${JSON.stringify(join(repoRoot, 'dist/src/events/log.js'))};
+            const log = new EventLog(${JSON.stringify(join(sd, 'events.db'))});
+            log.read(0); console.log('ready'); setInterval(() => { try { log.read(0); } catch {} }, 50);`;
+          reader = spawn(process.execPath, ['--input-type=module', '-e', js], { stdio: ['ignore', 'pipe', 'inherit'] });
+          await new Promise<void>((ok) => reader!.stdout!.once('data', () => ok()));
+        }
+        targetChild(f, sd, false);
+        const file = plainBundle(src);
+        if (attack) {
+          assert.throws(() => importBundle({ file, stateDir: sd, root: null, instance: true, force: true }), /open in another process/);
+          (reader as ReturnType<typeof spawn> | null)?.kill('SIGKILL');
+          assert.deepEqual(reopen(f, sd).whose, ['target'], "nothing imported: the target's own log stays");
+          return;
+        }
+        importBundle({ file, stateDir: sd, root: null, instance: true, force: true });
+        const fl = reopen(f, sd);
+        assert.deepEqual(fl.whose, ['bundle']);
+        assert.deepEqual(fl.after, [[T, false, true]]);
+      });
+    } finally {
+      (reader as ReturnType<typeof spawn> | null)?.kill('SIGKILL');
+      f.log.close();
+      for (const d of [f.base, src, sd]) rmSync(d, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const attack of [false, true]) {
+  test(`R1173al AL2c (${attack ? 'attack' : 'control'}): events.db of a ${attack ? 'killed' : 'cleanly stopped'} coordinator moved aside by hand, then an import: ${attack ? 'refused (a WAL without its log)' : 'the imported log is the one read'}`, { skip: skip || process.platform === 'win32' }, async () => {
+    const f = fixture();
+    const src = mkdtempSync(join(tmpdir(), 'al2c-src-'));
+    const sd = mkdtempSync(join(tmpdir(), 'al2c-sd-'));
+    try {
+      await withKnownFlags([T], async () => {
+        mainTurnsOn(f);
+        targetChild(f, sd, attack);
+        renameSync(join(sd, 'events.db'), join(sd, 'events.db.old'));
+        const file = plainBundle(src);
+        if (attack) {
+          assert.throws(() => importBundle({ file, stateDir: sd, root: null, instance: true }), /is there without its log/);
+          assert.equal(existsSync(join(sd, 'events.db')), false, 'nothing imported');
+          return;
+        }
+        importBundle({ file, stateDir: sd, root: null, instance: true });
+        assert.deepEqual(reopen(f, sd).whose, ['bundle']);
       });
     } finally {
       f.log.close();

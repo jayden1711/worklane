@@ -109,6 +109,11 @@ export function readBundle(file: string): Bundle {
   if (b.version !== 1) throw new Error(`${file} is a version ${b.version} bundle; this engine reads version 1: update the engine`);
   for (const f of b.files) {
     if (!/^(state|config)\//.test(f.path) || f.path.split('/').some((s) => s === '..' || s === '.' || s === '') || f.path.includes('\\')) throw new Error(`${file}: refused, a path outside the bundle's places: ${f.path}`);
+    // R1173al AL1: on a case-insensitive volume (macOS's default) a case variant is the same file as the log or its off file.
+    const lower = f.path.toLowerCase();
+    // Nor does a bundle carry the log's WAL or shared memory, which export leaves out: they would be read over its log.
+    const variant = [`state/${EVENTS}`, `state/${OFF_FILE}`].some((n) => lower === n && f.path !== n);
+    if (variant || [`state/${EVENTS}-wal`, `state/${EVENTS}-shm`, `state/${EVENTS}-journal`].includes(lower)) throw new Error(`${file}: refused, a reserved state file's name: ${f.path}`);
   }
   return b;
 }
@@ -125,6 +130,21 @@ export function importBundle(o: { file: string; stateDir: string; root: string |
   const b = readBundle(o.file);
   if (existsSync(join(o.stateDir, EVENTS)) && !o.force) throw new Error(`${o.stateDir} already has history (${EVENTS}): nothing imported. Pass --force to replace it (export it first if it matters)`);
   const r: ImportResult = { state: [], config: [], configDiffers: [], skipped: [] };
+  // R1173al AL2: a log replaced while its old WAL remains is read through that WAL (SQLite replays it onto the new file).
+  // Fold a dead process's WAL into the old log first; one another process still holds open stays: refuse.
+  const db = join(o.stateDir, EVENTS);
+  if (b.files.some((f) => f.path === `state/${EVENTS}`) && (existsSync(`${db}-wal`) || existsSync(`${db}-shm`))) {
+    if (existsSync(db)) {
+      const d = openWaiting(db);
+      try {
+        d.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+      } finally {
+        d.close();
+      }
+    }
+    // A WAL without its log (the log moved aside by hand) can't be folded in: refused too.
+    if (existsSync(`${db}-wal`) || existsSync(`${db}-shm`)) throw new Error(existsSync(db) ? `${db} is open in another process (its -wal or -shm is still there): stop the coordinator and the dashboard, then import again. Nothing imported` : `${db}-wal or -shm is there without its log (moved aside?): put the log back, or move them aside with it, then import again. Nothing imported`);
+  }
   // The flags' unrecorded offs belong to the log they were made beside (R1173x X2), and an import brings another log, with
   // --force or after the old one was moved aside (R1173y Y-2): gone at every import; the bundle's own, from the log it
   // carries, comes in with that log. R1173aa AA-2: only when the bundle carries a log; one with none leaves the target's

@@ -41,8 +41,12 @@ new behaviour can be tried on one repo before it reaches the rest. Code: `src/co
     only once that position is read and saved: if either fails, that flag alone stays off and its off waits for the
     next tick; the tick's other records take effect. An import that carries a log moves the target's file aside
     while it writes that log, removes it once the log is written, and puts it back if the write fails (a full
-    disk), so an import that fails keeps it; one that carries none keeps the target's file, and a bundle's file is never taken without its log (a bundle path with a `.` or `..` segment is
-    refused). If the log can't be read when the file is judged, or the file can't be saved after it is, the entries
+    disk), so an import that fails keeps it; one that carries none keeps the target's file, and a bundle's file is
+    never taken without its log (a bundle path with a `.` or `..` segment is refused, and so is a case variant of the
+    log's or this file's name, or a log's `-wal`, `-shm` or `-journal`). Before it writes a log, the import folds the
+    old log's WAL into it (a coordinator that died leaves one) so SQLite never replays it over the new log; a WAL still
+    held open by another process (the coordinator, or a dashboard reading the log), or one left without its log (the
+    log moved aside), is refused, and nothing is imported. If the log can't be read when the file is judged, or the file can't be saved after it is, the entries
     stay as they were before and their flags stay off, with no record, until a later tick can. A save that fails (a
     full disk) is tried again at every tick. **Never silent:** while a flag is held off either way, each tick ends
     with an error naming it, so the config step records a `coordinator.error` at every tick until it clears; a failure
