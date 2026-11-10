@@ -115,8 +115,9 @@ test('one writer: only the coordinator adopts flags (#1173 review R1173h)', () =
   const makers = srcFiles().filter(([f, text]) => !f.endsWith(join('src', 'flags.ts')) && /\bnew FlagState\b/.test(text)).map(([f]) => f.slice(repoRoot.length));
   assert.deepEqual(makers, ['src/coordinator.ts']);
   const coord = srcFiles().find(([f]) => f.endsWith(join('src', 'coordinator.ts')))![1];
-  assert.deepEqual(coord.match(/\bnew FlagState\(\)/g), ['new FlagState()']);
-  assert.match(coord, /^ {2}readonly flags = new FlagState\(\);$/m, 'a readonly field of the Coordinator');
+  assert.deepEqual(coord.match(/\bnew FlagState\(/g), ['new FlagState('], 'one FlagState in the Coordinator');
+  // R1173aj AJ2: bound at creation to the Coordinator's own log and repo (adoptFlags refuses any other pair).
+  assert.match(coord, /^ {2}readonly flags = new FlagState\(\{ log: this\.d\.log, repo: this\.d\.repo \}\);$/m, 'a readonly field of the Coordinator, bound to its own log and repo');
   assert.deepEqual(coord.match(/adoptFlags\(\{[^}]*\}/g)?.map((c) => /\bflags: this\.flags\b/.test(c)), [true], 'adopted into its own state only');
 });
 

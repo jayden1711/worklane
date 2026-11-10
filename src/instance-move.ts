@@ -130,6 +130,8 @@ export function importBundle(o: { file: string; stateDir: string; root: string |
   // carries, comes in with that log. R1173aa AA-2: only when the bundle carries a log; one with none leaves the target's
   // log and so its file (a real pending off), and a file the bundle brings without its log is not taken.
   const carriesLog = b.files.some((f) => f.path === `state/${EVENTS}`);
+  // R1173aj AJ4: the bundle's own file is written in the log's step, just after the log, whatever the bundle's order.
+  const bundleSide = carriesLog ? b.files.find((f) => f.path === `state/${OFF_FILE}`) : undefined;
   const cfgDir = o.root ? join(o.root, BRAND.configDir) : null;
   const hasConfig = cfgDir !== null && existsSync(cfgDir);
   for (const f of b.files) {
@@ -154,6 +156,7 @@ export function importBundle(o: { file: string; stateDir: string; root: string |
         r.skipped.push({ path: f.path, why: "the flags' unrecorded offs of a log this bundle doesn't carry" });
         continue;
       }
+      if (rel === OFF_FILE) continue; // written with the log, below
       const to = join(o.stateDir, rel);
       mkdirSync(dirname(to), { recursive: true });
       // R1173ac AC-4, R1173af AF2: the target's file goes with the log it belongs to, only once that log is replaced.
@@ -173,6 +176,10 @@ export function importBundle(o: { file: string; stateDir: string; root: string |
           throw e;
         }
         rmSync(aside, { force: true });
+        if (bundleSide) {
+          writeGroupOnly(side, Buffer.from(bundleSide.data, 'base64'));
+          r.state.push(bundleSide.path);
+        }
       } else writeGroupOnly(to, data);
       r.state.push(f.path);
     } else if (cfgDir) {

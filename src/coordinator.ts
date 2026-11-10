@@ -6,6 +6,7 @@
 import { spawn } from './os/child-process.js';
 import { gitExecFileSync, gitSpawnSync } from './os/git.js';
 import { createHash, randomBytes } from 'node:crypto';
+import { types } from 'node:util';
 import { cpSync, mkdirSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { FlagState, adoptFlags } from './flags.js';
@@ -98,15 +99,19 @@ export { logTail } from './coordinator/shared.js';
 /** What one worker build ends in: stop the task, or go on to inspect its change. */
 type BuildOut = { stop: true } | { stop: false; stuck?: string; raise?: Level; noChange?: string; provider?: string };
 
+const isProxy = types.isProxy;
+
 /** A failed worker run shorter than this that committed nothing never got to work. */
 export const STARTUP_FAILURE_SECS = 90;
 
 export class Coordinator extends AutomationRuns {
   /** This coordinator's feature flags (src/flags.ts): its own, never another Coordinator's in the process (R1173af AF1). */
-  readonly flags = new FlagState();
+  readonly flags = new FlagState({ log: this.d.log, repo: this.d.repo });
 
   constructor(...a: ConstructorParameters<typeof AutomationRuns>) {
     super(...a);
+    // R1173aj AJ1: a parent swapped at run time can return a Proxy that redirects the lock below to another's state.
+    if (isProxy(this)) throw new Error('a Coordinator is never a Proxy');
     // R1173ah AH2b: `readonly` is compile-time only; never another Coordinator's state at run time either.
     Object.defineProperty(this, 'flags', { writable: false, configurable: false });
   }
