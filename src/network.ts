@@ -86,6 +86,16 @@ export const isRedirectGitKey = (key: string): boolean => GIT_KEY.test(key.trim(
 const GIT_CONFIG_FILES = ['GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM'] as const;
 /** git reads it as an empty file on every platform (Git for Windows maps it to NUL). */
 const NO_CONFIG_FILE = '/dev/null';
+/**
+ * #983: the global git config files this process wrote itself for agent runs (runner.ts agentGitConfig), read-only
+ * in a directory of their own. A GIT_CONFIG_GLOBAL naming exactly one of them is kept; any other file becomes none.
+ */
+const ENGINE_GIT_CONFIGS = new Set<string>();
+/** Record `file` as one of ENGINE_GIT_CONFIGS. For runner.ts agentGitConfig only. */
+export const engineGitConfig = (file: string): string => {
+  ENGINE_GIT_CONFIGS.add(file);
+  return file;
+};
 
 /** Node flags that change what TLS trusts or how it verifies: NODE_OPTIONS carrying one is dropped whole. */
 const NODE_TLS_FLAG = /(?:^|\s)--(?:use-openssl-ca|use-bundled-ca|use-system-ca|openssl-config|openssl-shared-config|openssl-legacy-provider|tls-[\w-]+|insecure-http-parser)\b/i;
@@ -297,8 +307,9 @@ export function outboundEnv<T extends Record<string, string | undefined>>(env: T
     if (isRedirectVar(k)) delete e[k];
     else if (k.toUpperCase() === 'NODE_OPTIONS' && NODE_TLS_FLAG.test(e[k] ?? '')) delete e[k];
     else if (file && e[k] !== undefined) {
+      const keep = k === 'GIT_CONFIG_GLOBAL' && ENGINE_GIT_CONFIGS.has(e[k]!) ? e[k] : undefined;
       delete e[k];
-      e[file] = NO_CONFIG_FILE;
+      e[file] = keep ?? NO_CONFIG_FILE;
     }
   }
   withoutRedirectGitConfig(e);

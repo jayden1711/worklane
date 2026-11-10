@@ -50,8 +50,12 @@
 // owner's own commands) keep their git as it was: the owner's own config is theirs to trust.
 // LIMIT: the read and the run are two processes, but both are pinned to the same dirs, so a link rewritten between
 // them changes nothing; a file in those dirs edited in between is read by the run: the checkout's .git/ is the
-// coordinator's alone (scripts/setup/checkout.sh, git-dir-lock.ts), and an agent-writable worktree admin dir holds no
-// config git reads unless the checkout's own config turns extensions.worktreeConfig on. remote.<name>.url is the
+// coordinator's alone (scripts/setup/checkout.sh, git-dir-lock.ts). An agent-writable worktree admin dir holds no
+// config file git reads unless the checkout's own config turns extensions.worktreeConfig on, but its `commondir` names
+// which repository (config, hooks, refs) git uses: a guarded git is pinned to the checkout's (GIT_GUARD_VAR). An
+// agent's commit is refused, when the guard decides, if it names a repository other than the one its admin dir sits
+// in, or one holding a link under refs/ or directly under objects/ (src/scan/secrets.ts repositoryElsewhere, R1124s,
+// R1124t); a rewrite after the decision isn't seen. remote.<name>.url is the
 // checkout's own setting, never refused: the locked .git/config is what keeps it.
 import { execFile, execFileSync, spawn, spawnSync } from './child-process.js';
 import { BRAND } from '../brand.js';
@@ -173,6 +177,20 @@ const marks = (v: string | undefined): v is string => v === '1' || (!!v && isAbs
 /** Whether `env`, or this process, is marked as an instance's. Own variables only (#786). */
 const marked = (env: NodeJS.ProcessEnv): boolean => marks(ownEnv(env).get(GIT_GUARD_VAR)) || marks(ownEnv(process.env).get(GIT_GUARD_VAR));
 
+/**
+ * Whether a git run here through this runner is guarded (this process, or `env`, marked as an instance's): its git
+ * then reads no global config (GIT_GUARD_ENV), so it can't answer for a git that does, such as an agent's own commit.
+ */
+export const gitGuarded = (env: NodeJS.ProcessEnv = process.env): boolean => marked(env);
+
+/**
+ * A file name folded at least as far as any file system git or the scan may be on folds it (R1124h, R1124j): NFKC
+ * (the compatibility forms: ſ, µ, ϐ, ligatures, the Kelvin sign), then upper and lower case (as APFS's case folding
+ * pairs them), and final sigma as sigma. Folding further than a file system does only makes a check stricter. Here,
+ * not in a module of its own, so the agents' tool guard's import tree (src/hook-imports.ts, #785) stays as pinned.
+ */
+export const foldName = (p: string) => p.normalize('NFKC').toUpperCase().toLowerCase().replaceAll('ς', 'σ');
+
 /** The instance checkout a marked git is pinned to: this process's mark first (the coordinator's own), then the git's. */
 function markedRepo(env: NodeJS.ProcessEnv): string | null {
   for (const v of [ownEnv(process.env).get(GIT_GUARD_VAR), ownEnv(env).get(GIT_GUARD_VAR)]) if (marks(v) && v !== '1') return v;
@@ -261,21 +279,24 @@ function globalOptions(args: readonly string[]): string[] {
 /**
  * What a `git config --list --show-scope --show-origin --includes -z` listing sets that a guarded git refuses, as a
  * reason; null when nothing. A key set at command scope is the engine's own; core.hooksPath in a file is fine when
- * the command scope sets it over (the coordinator's own hooks dir).
+ * the command scope sets it over (the coordinator's own hooks dir), and in the repository's own config when it names
+ * that repository's own hooks dir (`base`: the directory git ran in, which a relative origin is read from).
  */
-export function configRefusal(listing: string): string | null {
+export function configRefusal(listing: string, base?: string): string | null {
   const t = listing.split('\0');
   const ours = new Set<string>();
-  const files: [string, string, string][] = [];
+  const files: [string, string, string, string][] = [];
   for (let i = 0; i + 2 < t.length; i += 3) {
-    const key = (t[i + 2]!.split('\n', 1)[0] ?? '').toLowerCase();
+    const [k, ...v] = t[i + 2]!.split('\n');
+    const key = (k ?? '').toLowerCase();
     if (t[i] === 'command') ours.add(key);
-    else files.push([key, t[i + 1]!, t[i]!]);
+    else files.push([key, t[i + 1]!, t[i]!, v.join('\n')]);
   }
-  for (const [key, origin, scope] of files) {
+  for (const [key, origin, scope, value] of files) {
     // System config is root's (/etc/gitconfig), global is read as the null device: only a repo's own is suspect.
     if (scope === 'system' || scope === 'global') continue;
     if (key === 'core.hookspath' && ours.has(key)) continue;
+    if (key === 'core.hookspath' && base !== undefined && ownHooksPin(scope, origin, value, base)) continue;
     const hit = REFUSED_KEYS.find(([re]) => re.test(key));
     if (hit) return `the git config ${shown(origin.replace(/^file:/, ''))} sets ${shown(key)}, ${hit[1]}; an instance's coordinator runs nothing a checkout's config names. Take it out of that file`;
   }
@@ -298,7 +319,23 @@ function preflight(file: string, args: readonly string[], cwd: string | URL | un
   });
   if (r.error) return `its git config couldn't be read (${r.error.message})`;
   if (r.status !== 0) return `its git config couldn't be read (${(r.stderr || '').trim().split('\n').pop() || `exit ${r.status}`})`;
-  return configRefusal(r.stdout);
+  return configRefusal(r.stdout, startDir(args, cwd));
+}
+
+/**
+ * #983: whether a core.hooksPath row is the pin `install --git-hooks-only` writes (src/install.ts pinCheckoutHooks):
+ * in local scope, so in the repository's common config file, naming by absolute path the `hooks` dir beside that
+ * file, the dir git runs hooks from when nothing names one. It adds no hooks a guarded git wouldn't run anyway.
+ */
+function ownHooksPin(scope: string, origin: string, value: string, base: string): boolean {
+  if (scope !== 'local' || !origin.startsWith('file:') || !isAbsolute(value)) return false;
+  const file = resolve(base, origin.slice('file:'.length));
+  if (!file.endsWith('/config') && !file.endsWith('\\config')) return false;
+  try {
+    return realpathSync(value) === realpathSync(join(dirname(file), 'hooks'));
+  } catch {
+    return false;
+  }
 }
 
 /**

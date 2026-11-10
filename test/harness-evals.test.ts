@@ -12,7 +12,9 @@ import { EventLog } from '../src/events/log.js';
 import type { EventPayload, EventType, StoredEvent } from '../src/events/types.js';
 import { DEFAULT_COMMIT_IDENTITY, FakeRunner, type RunRequest } from '../src/runner.js';
 import { BRAND } from '../src/brand.js';
-import { BudgetRunner, overlayHarnessConfig, runSuite, scratchConfig, type SuiteOptions } from '../src/harness-evals/replay.js';
+import { BudgetRunner, overlayHarnessConfig, runSuite, scratchConfig, shadowLogName, type SuiteOptions } from '../src/harness-evals/replay.js';
+import { decisionTrace, shadowDiff } from '../src/shadow.js';
+import { readEvents } from '../src/events/read-only.js';
 import { harnessEvalDue } from '../src/harness-evals/schedule.js';
 import { baselineFor, commentMarkdown, evalRuns, scoreReplay } from '../src/harness-evals/score.js';
 import { engineRepo, HarnessTask, issueBody, loadSuite, PUBLIC_TASKS_DIR, readTasks, type LoadedTask } from '../src/harness-evals/tasks.js';
@@ -472,4 +474,34 @@ test('a task from a merged PR: its merge parent, its closing issue and done_when
   assert.deepEqual(t.outcome, { pr: 12, merge });
   assert.match(issueBody(t), /```done_when\n- test: test\/price\.test\.ts\n```/);
   assert.doesNotMatch(issueBody(t), new RegExp(merge));
+});
+
+test("shadow runs: each replay's log is kept by task and sample; the same engine twice decides the same, a changed one shows its decision diff; nothing is pushed", async () => {
+  const s = seedRepo();
+  const logs = (name: string) => join(s.base, name);
+  // The current engine, twice; and a "candidate" whose worker changes nothing (as a regression would).
+  await suite(s, agents(), { logsDir: logs('current') }).run();
+  await suite(s, agents(), { logsDir: logs('again') }).run();
+  await suite(s, agents({ fix: false }), { logsDir: logs('candidate') }).run();
+  const name = shadowLogName(s.task, 1);
+  for (const d of ['current', 'again', 'candidate']) assert.deepEqual(readdirSync(logs(d)), [name], `${d}: one log, named by task and sample`);
+  const trace = decisionTrace(readEvents(join(logs('current'), name)));
+  assert.ok(trace.includes('claimed') && trace.some((x) => x.startsWith('evaluator: ')), trace.join(' | '));
+  const same = shadowDiff({ current: logs('current'), candidate: logs('again') });
+  assert.deepEqual([same.same, same.differ], [[name], []], JSON.stringify(same.differ));
+  const changed = shadowDiff({ current: logs('current'), candidate: logs('candidate') });
+  assert.equal(changed.differ.length, 1);
+  assert.ok(changed.differ[0]!.diff.some((l) => l.startsWith('- ') || l.startsWith('+ ')), changed.differ[0]!.diff.join('\n'));
+  // No side effects: the task's source repository got nothing, and the scratch clones are gone.
+  assert.equal(git(s.seed, 'log', '--oneline', '--all').split('\n').length, 1, 'nothing pushed to the source');
+  assert.deepEqual(readdirSync(s.work), [], 'scratch clones deleted');
+});
+
+test('shadow log names: by task id and sample, the same on every engine; a held-out task under a hash of its id, never the id', () => {
+  assert.equal(shadowLogName({ id: 'price-guard', heldOut: false }, 2), 'price-guard-2.db');
+  assert.equal(shadowLogName({ id: 'a/../b c', heldOut: false }, 1), 'a_.._b_c-1.db');
+  const h = shadowLogName({ id: 'secret-customer-task', heldOut: true }, 1);
+  assert.match(h, /^held-out-[0-9a-f]{12}-1\.db$/);
+  assert.ok(!h.includes('secret'));
+  assert.equal(h, shadowLogName({ id: 'secret-customer-task', heldOut: true }, 1), 'stable, so two engines pair up');
 });

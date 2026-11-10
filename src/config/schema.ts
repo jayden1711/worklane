@@ -89,6 +89,107 @@ export const CommentPolicyConfig = z
 /** #727: config.yaml required_check_sources, by check name: an App id or an Actions workflow file. */
 const CHECK_SOURCES = z.record(z.string().min(1), z.union([z.strictObject({ app_id: z.number().int().positive() }), z.strictObject({ workflow: z.string().regex(/^\.github\/workflows\/[^/]+\.ya?ml$/) })]));
 
+// Feature flags (src/flags.ts, docs/feature-flags.md). WHY here: this module is in the agents' tool guard's import
+// tree (test/review.test.ts #785), and the schema of config.yaml needs nothing else; the log-reading half is src/flags.ts.
+export interface FlagInfo {
+  /** What turning it on changes, in a sentence. */
+  what: string;
+  /** The PR that added it. */
+  since: string;
+}
+
+/**
+ * The flags this engine knows. Add one with the change it guards. Once the change is the default everywhere, move its
+ * name to RETIRED_FLAGS (never just delete it). A flag's name: lowercase letters, digits and underscores. This file is
+ * in the agents' tool guard's import tree, so a change here is L3 (the owner reviews it).
+ */
+export const FLAGS: Readonly<Record<string, FlagInfo>> = Object.freeze({});
+
+/**
+ * Flags this engine retired: still accepted in a config.yaml, whatever their value, and always off (dropped from the
+ * parsed flags), so a repo that still names one keeps working across the engine upgrade that retired it. WHY (#1173
+ * review): at start the service reads the checkout's config with loadConfig, with no last good config to fall back
+ * on, so a removed name that made the config invalid stopped the engine. A name never leaves this list. Frozen: a
+ * test retires a name for one load through withRetiredFlags, never by changing this list.
+ */
+export const RETIRED_FLAGS: readonly string[] = Object.freeze([]);
+
+export const FLAG_NAME = /^[a-z][a-z0-9_]{0,63}$/;
+
+/** Names a test retires for the length of one call (withRetiredFlags); null: none. Never set by engine code. */
+let retiredForTest: readonly string[] | null = null;
+
+/**
+ * Run `fn` with `names` also retired: for the test that loads a config naming a retired flag at start. WHY (#1173
+ * review): the lists are frozen, so no module can grow RETIRED_FLAGS (a typo then loads quietly) or empty it (the
+ * startup outage again) without editing this file; the override lasts only while `fn` runs, and a test holds that
+ * nothing in src/ but this file calls it.
+ */
+export function withRetiredFlags<T>(names: readonly string[], fn: () => T): T {
+  const before = retiredForTest;
+  retiredForTest = Object.freeze([...(before ?? []), ...names]);
+  try {
+    return fn();
+  } finally {
+    retiredForTest = before;
+  }
+}
+
+/** What every parsed config's `flags` is: none. Frozen, so no write to a config turns a flag on. */
+export const NO_FLAGS: Readonly<Record<string, boolean>> = Object.freeze({});
+
+/** Names a test registers for the length of one call (withKnownFlags); null: none. Never set by engine code. */
+let knownForTest: readonly string[] | null = null;
+
+/** The flags this engine knows: FLAGS, and any a test registered for one call. */
+export function knownFlags(): readonly string[] {
+  return knownForTest ? [...Object.keys(FLAGS), ...knownForTest] : Object.keys(FLAGS);
+}
+
+/** The flags this engine retired: RETIRED_FLAGS, and any a test retired for one call. */
+export function retiredFlags(): readonly string[] {
+  return retiredForTest ? [...RETIRED_FLAGS, ...retiredForTest] : RETIRED_FLAGS;
+}
+
+/**
+ * Run `fn` (sync or async) with `names` also known: for the tests that turn a flag on through a coordinator, while the
+ * engine knows none. The same seam rule as withRetiredFlags: it lasts only while `fn` runs, and a test holds that
+ * nothing in src/ but this file names it.
+ */
+export async function withKnownFlags<T>(names: readonly string[], fn: () => T | Promise<T>): Promise<T> {
+  // Only in node's test runner (R1173j: a module reached this through a computed name). It registers a flag, so a
+  // config naming it would be valid; outside a test run it refuses.
+  if (!process.execArgv.includes('--test') && process.env.NODE_TEST_CONTEXT === undefined) throw new Error('withKnownFlags is for tests only (node --test)');
+  const before = knownForTest;
+  knownForTest = Object.freeze([...(before ?? []), ...names]);
+  try {
+    return await fn();
+  } finally {
+    knownForTest = before;
+  }
+}
+
+/**
+ * config.yaml `flags:`: known names, each true or false; absent is none. A retired name is accepted; any other name
+ * makes the config invalid. Both lists are read when a config is parsed. The parsed value is always NO_FLAGS: a flag
+ * is read only through a coordinator's FlagState (src/flags.ts), from the default branch's committed config at the commit the
+ * coordinator adopted (#1173 reviews R1173g, R1173h), never from a config object.
+ */
+export function flagsSchema(known: () => readonly string[] = knownFlags, retired: () => readonly string[] = retiredFlags) {
+  return z
+    .record(z.string().regex(FLAG_NAME, 'a flag name is lowercase letters, digits and underscores'), z.boolean())
+    .default({})
+    .superRefine((flags, ctx) => {
+      const k = known();
+      const r = retired();
+      for (const name of Object.keys(flags)) {
+        if (!k.includes(name) && !r.includes(name)) ctx.addIssue({ code: 'custom', path: [name], message: `no such flag: ${name} (the engine knows ${k.length ? k.join(', ') : 'none'}; docs/feature-flags.md)` });
+      }
+    })
+    .transform((): Readonly<Record<string, boolean>> => NO_FLAGS);
+}
+
+
 export const ProjectConfig = z.strictObject({
   version: z.literal(1),
   project: z.strictObject({
@@ -98,6 +199,8 @@ export const ProjectConfig = z.strictObject({
   }),
   mode: z.enum(['local', 'shared']).default('local'),
   backlog: z.enum(['github', 'file']).default('github'),
+  /** Feature flags for risky engine changes (src/flags.ts, docs/feature-flags.md): known names only, every one off unless true here. */
+  flags: flagsSchema(),
   runner: z.enum(['local', 'ci', 'remote-machine']).default('local'),
   agent_runtime: z
     .strictObject({
@@ -341,6 +444,8 @@ export const ProjectConfig = z.strictObject({
     })
     .prefault({}),
 });
+// Frozen (#1173 review R1173f): `ProjectConfig.shape.flags` can't be replaced in place by any module.
+Object.freeze(ProjectConfig.shape);
 
 // ---------- agents.yaml ----------
 
@@ -922,7 +1027,9 @@ export type TestsConfig = z.infer<typeof TestsConfig>;
 export type ReviewConfig = z.infer<typeof ReviewConfig>;
 export type DeployConfig = z.infer<typeof DeployConfig>;
 
-export const FILES = {
+// Frozen (#1173 review R1173f): no module can swap a file's schema at run time (a looser one would let a typo'd flag
+// load), and ProjectConfig's shape is frozen below for the same reason.
+export const FILES = Object.freeze({
   'config.yaml': ProjectConfig,
   'agents.yaml': AgentsConfig,
   'guardrails.yaml': GuardrailsConfig,
@@ -931,4 +1038,4 @@ export const FILES = {
   'deploy.yaml': DeployConfig,
   'app.yaml': AppConfig,
   'benchmarks.yaml': BenchmarksConfig,
-} as const;
+} as const);

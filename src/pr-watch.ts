@@ -4,7 +4,7 @@
 // cancelled, skipped or still running, a head that isn't the commit the
 // evaluator approved, or no approval at all, and it is not ready.
 import type { CommitCheck } from './backlog/types.js';
-import { assertJudged, type JudgedChecks } from './check-source.js';
+import { assertJudged, worstOf, type JudgedChecks } from './check-source.js';
 
 export type CheckOutcome = 'pass' | 'fail' | 'pending' | 'cancelled' | 'skipped' | 'missing';
 
@@ -27,14 +27,16 @@ function outcomeOf(c: CommitCheck): CheckOutcome {
 }
 
 /**
- * Each required check's outcome on a commit; a check run wins over a status of the same name. `checks` are only ever
+ * Each required check's outcome on a commit: any check of its name that isn't a pass, check run or status, decides it
+ * (worstOf, #925: never the first or latest alone); else its check run, else its status. `checks` are only ever
  * judged ones (src/check-source.ts PinnedChecks.of): a raw Backlog.checks answer doesn't compile here.
  */
 export function requiredOutcomes(required: string[], checks: JudgedChecks): RequiredCheck[] {
   // #727: at run time too, never a cast, an `any` or a mutated array: it throws (fails closed).
   assertJudged(checks);
   return required.map((name) => {
-    const c = checks.find((x) => x.name === name && x.source === 'check_run') ?? checks.find((x) => x.name === name);
+    const mine = checks.filter((x) => x.name === name);
+    const c = worstOf(mine) ?? mine.find((x) => x.source === 'check_run') ?? mine[0];
     if (!c) return { name, outcome: 'missing' as const };
     return { name, outcome: outcomeOf(c), ...(c.id !== undefined ? { id: c.id } : {}), ...(c.url ? { url: c.url } : {}) };
   });
