@@ -19,7 +19,7 @@ import type { Instance } from '../src/instance.js';
 import { inVersionedNodeDir, launchdPlist, nodePathProblem, ownedPath, programOf, stableNodePath, systemdUserUnit } from '../src/os/index.js';
 import { instanceEnv, localServiceSpec } from '../src/service.js';
 import { checkSetup, type SetupProbe } from '../src/setup-steps.js';
-import { exampleProject } from './helpers.js';
+import { exampleProject, claudeByRun } from './helpers.js';
 
 const posix = process.platform === 'win32' && 'POSIX symlinks and paths';
 const re = (s: string) => new RegExp(s.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&'));
@@ -120,7 +120,7 @@ test('#468 doctor and the first-run page: a service whose node is gone, or insid
   execFileSync('git', ['update-ref', 'refs/remotes/origin/main', 'HEAD'], { cwd: dir });
   install({ root: dir });
   const plist = `/Users/example/Library/LaunchAgents/dev.${BRAND.cli}.example-shop.plist`;
-  const probe = (node: string, exists: boolean): SetupProbe => ({
+  const probe = (node: string, exists: boolean): SetupProbe => ({ claude(spec, o) { return claudeByRun(this, spec, o); },
     which: (c) => `/stand-in/${c}`,
     serviceManagerEnv: () => ({ env: {} }),
     run: () => ({ status: 1, stdout: '', stderr: 'stand-in' }),

@@ -15,7 +15,7 @@ import { projectStateDir } from '../src/guardrails/context.js';
 import { install } from '../src/install.js';
 import { trackConfigPr } from '../src/config-pr.js';
 import type { RunResult, SetupProbe, SetupView } from '../src/setup-steps.js';
-import { asPerson, exampleProject, exampleRoles } from './helpers.js';
+import { asPerson, exampleProject, exampleRoles, claudeByRun } from './helpers.js';
 
 process.env[`${BRAND.envPrefix}_STATE_DIR`] = mkdtempSync(join(tmpdir(), 'repo-config-state-'));
 
@@ -30,7 +30,7 @@ function fixture() {
   return { dir, origin, git, remote: (...a: string[]) => execFileSync('git', a, { cwd: origin, encoding: 'utf8' }) };
 }
 
-const probe: SetupProbe = {
+const probe: SetupProbe = { claude(spec, o) { return claudeByRun(this, spec, o); },
   which: (c) => `/stand-in/${c}`,
   serviceManagerEnv: () => ({ env: {} }),
   run: (cmd, args, o = {}) => {

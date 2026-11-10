@@ -14,12 +14,12 @@ import { actionable, type Backlog, type Issue } from '../src/backlog/types.js';
 import { EventLog } from '../src/events/log.js';
 import { HTTPS_SCREEN, startSetupHub } from '../src/hub-setup.js';
 import { checkSetup, GROUPS, SETUP_STEPS, type MachinePaths, type SetupContext, type SetupProbe, type SetupView } from '../src/setup-steps.js';
-import { exampleProject } from './helpers.js';
+import { exampleProject, claudeByRun } from './helpers.js';
 
 const posix = process.platform !== 'win32';
 
 /** A probe that runs nothing: no tool on PATH, every command fails, no service manager. */
-const nothing: SetupProbe = {
+const nothing: SetupProbe = { claude(spec, o) { return claudeByRun(this, spec, o); },
   which: () => null,
   run: () => ({ status: 1, stdout: '', stderr: 'no stand-in' }),
   serviceRunning: () => null,

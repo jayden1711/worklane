@@ -20,7 +20,7 @@ import { localInitFile, newState, serverInitFile, STEPS, writeInitState } from '
 import { checkSetup, checkSetupOffThread, GROUPS, SETUP_STEPS, type InstanceFacts, type MachinePaths, type Mode, type RunResult, type SetupContext, type SetupProbe, type SetupView } from '../src/setup-steps.js';
 import { serviceChange, type ServiceSpec } from '../src/os/index.js';
 import { localServiceSpec } from '../src/service.js';
-import { asPerson, exampleProject, exampleRoles, repoRoot } from './helpers.js';
+import { asPerson, exampleProject, exampleRoles, repoRoot, claudeByRun } from './helpers.js';
 
 process.env[`${BRAND.envPrefix}_STATE_DIR`] = mkdtempSync(join(tmpdir(), 'setup-steps-state-'));
 process.env[`${BRAND.envPrefix}_MACHINE_INIT_DIR`] = mkdtempSync(join(tmpdir(), 'setup-steps-machine-init-'));
@@ -61,7 +61,7 @@ interface World {
 const calls: string[] = [];
 
 function probeFor(w: World): SetupProbe {
-  return {
+  return { claude(spec, o) { return claudeByRun(this, spec, o); },
     which: (c) => (w.tools.has(c) ? `/stand-in/${c}` : null),
     serviceManagerEnv: () => ({ env: {} }),
     run: (cmd, args, o = {}): RunResult => {

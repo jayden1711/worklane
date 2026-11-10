@@ -14,7 +14,7 @@ import { EventLog } from '../src/events/log.js';
 import { projectStateDir } from '../src/guardrails/context.js';
 import { install } from '../src/install.js';
 import { SETUP_STEPS, type SetupProbe, type SetupView } from '../src/setup-steps.js';
-import { asPerson, exampleProject, exampleRoles, repoRoot } from './helpers.js';
+import { asPerson, exampleProject, exampleRoles, repoRoot, claudeByRun } from './helpers.js';
 
 process.env[`${BRAND.envPrefix}_STATE_DIR`] = mkdtempSync(join(tmpdir(), 'setup-automation-state-'));
 
@@ -38,7 +38,7 @@ function fixture() {
   return dir;
 }
 
-const probe: SetupProbe = {
+const probe: SetupProbe = { claude(spec, o) { return claudeByRun(this, spec, o); },
   which: (c) => `/stand-in/${c}`,
   serviceManagerEnv: () => ({ env: {} }),
   run: (cmd, args, o = {}) => {

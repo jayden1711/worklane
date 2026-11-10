@@ -15,7 +15,7 @@ import { forViewer, stateForViewer, VIEWER_EVENTS } from '../src/viewer-events.j
 import { FIRST_TASK_FILED } from '../src/first-task-progress.js';
 import { holdWords } from '../src/hold-words.js';
 import type { SetupProbe } from '../src/setup-steps.js';
-import { asPerson, exampleProject, exampleRoles } from './helpers.js';
+import { asPerson, exampleProject, exampleRoles, claudeByRun } from './helpers.js';
 
 const seen = { issue: 1, title: 'Fix rounding', labels: ['ready'], author: 'example-owner', owner: null, actionable: true, why: '' };
 /**
@@ -83,7 +83,7 @@ test('a viewer gets only the allowlisted events and fields on /api/events and in
 
 test('#741 a held first task: a writer\'s first-run page has its hold reason in plain words; a viewer\'s page, state and events carry no hold reason', async () => {
   // The setup checks see stand-ins only: no real gh, claude or service is asked.
-  const setupProbe: SetupProbe = { which: (c) => `/stand-in/${c}`, run: () => ({ status: 1, stdout: '{"loggedIn": false}', stderr: 'stand-in' }), serviceRunning: () => false, systemUnitActive: () => false, linger: () => null, serviceManagerEnv: () => ({ env: {} }) };
+  const setupProbe: SetupProbe = { claude(spec, o) { return claudeByRun(this, spec, o); }, which: (c) => `/stand-in/${c}`, run: () => ({ status: 1, stdout: '{"loggedIn": false}', stderr: 'stand-in' }), serviceRunning: () => false, systemUnitActive: () => false, linger: () => null, serviceManagerEnv: () => ({ env: {} }) };
   const s = await serve({ setupProbe });
   try {
     const H = 'abc1234';

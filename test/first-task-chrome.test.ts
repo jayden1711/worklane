@@ -16,12 +16,12 @@ import { EventLog } from '../src/events/log.js';
 import { projectStateDir } from '../src/guardrails/context.js';
 import type { SetupProbe } from '../src/setup-steps.js';
 import { launchTestChrome, oneChromeAtATime, pressSteady, REAL_CHROME_TIMEOUT, realChromeTests, webUiSkip } from './browser-helpers.js';
-import { exampleProject } from './helpers.js';
+import { exampleProject, claudeByRun } from './helpers.js';
 
 realChromeTests();
 const chrome = findChrome(process.env.CHROME);
 
-const probe: SetupProbe = { which: (c) => `/stand-in/${c}`, run: () => ({ status: 1, stdout: '', stderr: 'stand-in' }), serviceRunning: () => false, systemUnitActive: () => false, linger: () => null, serviceManagerEnv: () => ({ env: {} }) };
+const probe: SetupProbe = { claude(spec, o) { return claudeByRun(this, spec, o); }, which: (c) => `/stand-in/${c}`, run: () => ({ status: 1, stdout: '', stderr: 'stand-in' }), serviceRunning: () => false, systemUnitActive: () => false, linger: () => null, serviceManagerEnv: () => ({ env: {} }) };
 
 async function js<T>(cdp: Cdp, expression: string): Promise<T> {
   const r = await cdp.send<{ result: { value: T }; exceptionDetails?: { text: string; exception?: { description?: string } } }>('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });

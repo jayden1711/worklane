@@ -17,7 +17,7 @@ import { EventLog } from '../src/events/log.js';
 import { projectStateDir } from '../src/guardrails/context.js';
 import type { ActionPlan } from '../src/setup-actions.js';
 import type { RunResult, SetupProbe } from '../src/setup-steps.js';
-import { asPerson, exampleProject, exampleRoles } from './helpers.js';
+import { asPerson, exampleProject, exampleRoles, claudeByRun } from './helpers.js';
 
 process.env[`${BRAND.envPrefix}_STATE_DIR`] = mkdtempSync(join(tmpdir(), 'live-config-state-'));
 const REPO = 'example-org/example-shop';
@@ -70,7 +70,7 @@ function github(bare: string, pr: { head: string; state?: string; base?: string 
   return { gh, calls, oid };
 }
 
-const probe: SetupProbe = { which: (c) => `/stand-in/${c}`, run: () => ({ status: 1, stdout: '', stderr: 'stand-in' }), serviceRunning: () => false, systemUnitActive: () => false, linger: () => null, serviceManagerEnv: () => ({ env: {} }) };
+const probe: SetupProbe = { claude(spec, o) { return claudeByRun(this, spec, o); }, which: (c) => `/stand-in/${c}`, run: () => ({ status: 1, stdout: '', stderr: 'stand-in' }), serviceRunning: () => false, systemUnitActive: () => false, linger: () => null, serviceManagerEnv: () => ({ env: {} }) };
 
 /** `own`: PR #7 is one the page opened itself, at this head (#468: only those merge from the page). */
 async function dashboard(dir: string, gh: (args: string[]) => RunResult, own?: string | null) {

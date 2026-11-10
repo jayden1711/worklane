@@ -22,7 +22,7 @@ import { firstRunLiveView, initCommand, localInitFile, newState, readInitState, 
 import { CliRunner, type RunRequest } from '../src/runner.js';
 import { checkSetup, checkSetupOffThread, MANAGER_LOGIN_VARS, systemProbe, type SetupProbe } from '../src/setup-steps.js';
 import { serviceManagerEnv } from '../src/os/index.js';
-import { exampleProject } from './helpers.js';
+import { exampleProject, claudeByRun } from './helpers.js';
 import { HOST_TOOLS, hostToolStandIns, onPath, testPath } from './host-tools.js';
 
 const posixOnly = process.platform === 'win32' && 'POSIX stand-ins and file modes';
@@ -82,7 +82,7 @@ function world(o: { method: string | null; ask?: string[]; manager?: { env: Reco
   const asked: string[] = [];
   const answers = [...(o.ask ?? [])];
   const claudeCalls: { args: string[]; opt: unknown }[] = [];
-  const io: InitIo = {
+  const io: InitIo = { claude(spec, o) { return claudeByRun(this, spec, o); },
     which: (c) => (['git', 'gitleaks', 'claude', 'gh'].includes(c) ? `/stand-in/${c}` : null),
     serviceManagerEnv: () => o.manager ?? { env: {} },
     run: (cmd, args, opt = {}) => {
@@ -118,7 +118,7 @@ function world(o: { method: string | null; ask?: string[]; manager?: { env: Reco
     plan: () => null,
     addProject: async () => ({ code: 1, steps: {}, last: '' }),
   };
-  const probe: SetupProbe = { which: io.which, run: io.run, serviceRunning: () => false, systemUnitActive: () => false, linger: () => null, serviceManagerEnv: io.serviceManagerEnv };
+  const probe: SetupProbe = { claude(spec, o) { return claudeByRun(this, spec, o); }, which: io.which, run: io.run, serviceRunning: () => false, systemUnitActive: () => false, linger: () => null, serviceManagerEnv: io.serviceManagerEnv };
   const prefix = mkdtempSync(join(tmpdir(), 'cr-prefix-'));
   const args = (root: string, a: Partial<InitArgs> = {}): InitArgs => ({ target: root, mode: 'local', instance: undefined, yes: false, reset: false, cwd: root, prefix, interactive: false, ...a });
   const runtimes = () => claudeCalls.map((c) => (c.opt as { agentRuntime?: string } | undefined)?.agentRuntime);

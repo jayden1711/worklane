@@ -15,6 +15,7 @@ src/claude-auth-failure.ts
 src/claude-launch.ts
 src/comment-policy.ts
 src/config/load.ts
+src/config/permission-rule.ts
 src/config/schema.ts
 src/confusables-data.ts
 src/confusables.ts

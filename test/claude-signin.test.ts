@@ -16,7 +16,7 @@ import { EventLog } from '../src/events/log.js';
 import { projectStateDir } from '../src/guardrails/context.js';
 import { browserRelay } from '../src/os/index.js';
 import type { SetupProbe, SetupView } from '../src/setup-steps.js';
-import { asPerson, exampleProject, exampleRoles, repoRoot } from './helpers.js';
+import { asPerson, exampleProject, exampleRoles, repoRoot, claudeByRun } from './helpers.js';
 
 process.env[`${BRAND.envPrefix}_STATE_DIR`] = mkdtempSync(join(tmpdir(), 'claude-signin-state-'));
 const posix = process.platform !== 'win32';
@@ -83,7 +83,7 @@ function standIn(url: string) {
 }
 
 function probeFor(s: { status: ClaudeStatus }): SetupProbe {
-  return {
+  return { claude(spec, o) { return claudeByRun(this, spec, o); },
     which: (c) => `/stand-in/${c}`,
     serviceManagerEnv: () => ({ env: {} }),
     run: (cmd, args, o = {}) => {
