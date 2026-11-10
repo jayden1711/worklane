@@ -197,24 +197,37 @@ export interface Acceptance {
 }
 
 export type Outcome = 'pass' | 'fail' | 'pending' | 'missing' | 'unknown';
+/** How readiness judged one required check on an open PR's head (checks.judged), and the pin it judged it under. */
+export interface ReadinessRecord {
+  outcome: Exclude<Outcome, 'unknown'>;
+  /** null: judged by name; undefined: a record from before pins were recorded, never trusted (R1176d D2). */
+  pin: CheckPin | null | undefined;
+}
 
 /**
- * Each required check's outcome on a commit at time `at` (a merge): the check run that had started by then, latest
- * first, passed only if it had completed with success by then; else the commit status set by then. `unknown`: no
- * check run of that name, and the statuses aren't read yet.
+ * Each required check's outcome on a commit at time `at` (a merge), from the check runs that had started by then (the
+ * latest attempt per check suite, as checksAt takes them): a fail when any had finished other than success by then,
+ * else pending when any hadn't finished, else a pass (#925: never the latest-started alone); with none, the commit
+ * status set by then. `unknown`: no check run of that name, and the statuses aren't read yet.
  */
 export function outcomesAt(required: string[], runs: CheckRunAt[], statuses: StatusAt[] | null, at: string): { name: string; outcome: Outcome }[] {
   const t = Date.parse(at);
   return required.map((name) => {
-    const run = runs
-      .filter((r) => r.name === name)
-      .map((r) => ({ r, start: Date.parse(r.startedAt ?? r.completedAt ?? '') }))
-      .filter((x) => Number.isFinite(x.start) && x.start <= t)
-      .sort((a, b) => b.start - a.start)[0]?.r;
-    if (run) {
-      const done = Date.parse(run.completedAt ?? '');
-      if (run.status !== 'completed' || !Number.isFinite(done) || done > t) return { name, outcome: 'pending' as const };
-      return { name, outcome: run.conclusion === 'success' ? ('pass' as const) : ('fail' as const) };
+    const latest = new Map<string, CheckRunAt>();
+    runs.forEach((r, i) => {
+      const start = Date.parse(r.startedAt ?? r.completedAt ?? '');
+      if (r.name !== name || !Number.isFinite(start) || start > t) return;
+      const key = r.suite !== undefined ? `suite ${r.suite}` : `run ${r.id ?? `#${i}`}`;
+      const prev = latest.get(key);
+      if (!prev || (r.id ?? -1) > (prev.id ?? -1)) latest.set(key, r);
+    });
+    if (latest.size) {
+      const states = [...latest.values()].map((run) => {
+        const done = Date.parse(run.completedAt ?? '');
+        if (run.status !== 'completed' || !Number.isFinite(done) || done > t) return 'pending' as const;
+        return run.conclusion === 'success' ? ('pass' as const) : ('fail' as const);
+      });
+      return { name, outcome: states.includes('fail') ? ('fail' as const) : states.includes('pending') ? ('pending' as const) : ('pass' as const) };
     }
     if (!statuses) return { name, outcome: 'unknown' as const };
     const st = statuses
@@ -285,7 +298,7 @@ const outcomeOf = (c: CommitCheck | undefined): Outcome => (!c ? 'missing' : c.s
  * Is commit `sha` accounted for, given what is known? Or which one call would tell. Pure: the watch and the tests
  * share it. An empty commit-to-PR link is asked again until an answer LINK_LAG_MS after its first one (pullsAt).
  */
-export function judge(sha: string, f: Facts, o: { branch: string; required: string[]; accepted?: Acceptance[]; pins?: WatchPins; rulesUnknown?: boolean }): Verdict {
+export function judge(sha: string, f: Facts, o: { branch: string; required: string[]; accepted?: Acceptance[]; pins?: WatchPins; rulesUnknown?: boolean; readiness?: (number: number, head: string) => Record<string, ReadinessRecord> | null }): Verdict {
   const short = sha.slice(0, 8);
   const bySha = o.accepted?.find((a) => a.sha === sha);
   if (bySha) return { done: true, accounted: true, how: 'accepted', number: null, acceptance: bySha };
@@ -379,7 +392,20 @@ export function judge(sha: string, f: Facts, o: { branch: string; required: stri
     out = out.map((byName) => {
       const pin = pinned(byName.name);
       if (pin === null) return byName;
-      return { name: byName.name, outcome: outcomeOf(pinnedVerdict(checksAt(byName.name, f.runs!, f.statuses ?? [], at, f.sources), pin, { repo: pins.repo, sha: head })) };
+      const checks = checksAt(byName.name, f.runs!, f.statuses ?? [], at, f.sources);
+      const now = outcomeOf(pinnedVerdict(checks, pin, { repo: pins.repo, sha: head, branch: o.branch }));
+      if (now !== 'missing') return { name: byName.name, outcome: now };
+      // #943 (a): a merged PR's runs no longer name it (GitHub fills pull_requests only for open PRs), so its own
+      // pinned runs read as missing now; and pinnedVerdict weighs other runs only beside an own pass. So first, any run
+      // or status of the name at merge time that isn't a pass, from any source, decides (a failure, else a wait); only
+      // then does the verdict readiness recorded at this head while the PR was open stand (R1176a: never a red hidden).
+      const bad = checks.filter((c) => !(c.status === 'completed' && c.conclusion === 'success'));
+      if (bad.length) return { name: byName.name, outcome: bad.some((c) => c.status === 'completed') ? 'fail' : 'pending' };
+      // R1176d D3: a record alone never accounts a merge: some run or status of the name must be there at merge time.
+      if (!checks.length) return { name: byName.name, outcome: now };
+      // R1176d D2: only a record judged under the pin judging now (a record with no pin, or another, never stands).
+      const rec = o.readiness?.(number, head)?.[byName.name];
+      return { name: byName.name, outcome: rec && rec.pin !== undefined && JSON.stringify(rec.pin) === JSON.stringify(pin) ? rec.outcome : now };
     });
   }
   const bad = out.filter((c) => c.outcome !== 'pass');
@@ -661,6 +687,11 @@ export interface MainWatchDeps {
   git: WatchGit;
   /** The harness's own merge whose merge commit is `sha` (merge.done), or null. */
   harnessMerge(sha: string): { number: number; head: string; at: string } | null;
+  /**
+   * #943 (a): how readiness judged PR `number`'s required checks at `head` while it was open (checks.judged), by
+   * name, or null when it never did. Absent: none is known.
+   */
+  readiness?(number: number, head: string): Record<string, ReadinessRecord> | null;
   now?: () => number;
   /** The mode changed (or its detail): recorded as main_watch.mode. */
   mode(mode: ProtectionMode, detail: string): void;
@@ -868,7 +899,8 @@ export class MainWatch {
     // #727: GitHub's rules never answered: judge waits at the checks (need 'rules', no call to make), and everything
     // before them is judged as before.
     const pins = this.d.pins && github ? { pins: { configured: sources, github, repo: this.d.pins.repo } } : {};
-    const ctx = { branch: this.d.branch, required: judgedBy, accepted, ...pins, ...(this.d.pins && github === null ? { rulesUnknown: true } : {}) };
+    const readiness = this.d.readiness?.bind(this.d);
+    const ctx = { branch: this.d.branch, required: judgedBy, accepted, ...pins, ...(this.d.pins && github === null ? { rulesUnknown: true } : {}), ...(readiness ? { readiness } : {}) };
     let v = judge(p.sha, p.facts, ctx);
     if (!v.done) {
       if (v.need.call === 'rules') return;

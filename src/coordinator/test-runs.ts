@@ -19,6 +19,8 @@ import { gitRemote } from '../git-remote.js';
 export interface OpenPr {
   number: number;
   headSha: string;
+  /** The head branch (`head.ref`): a PR's head is judged with it (#943, R1176e). Absent: its pinned checks never pass. */
+  headRef?: string;
   base: string;
   author: string;
   bot: boolean;
@@ -32,8 +34,8 @@ export async function listOpenPrs(repo: string, token: () => Promise<string>, f:
     headers: { authorization: `Bearer ${await token()}`, accept: 'application/vnd.github+json', 'x-github-api-version': '2022-11-28' },
   });
   if (!res.ok) throw new Error(`GitHub ${res.status} listing open PRs`);
-  const prs = (await res.json()) as { number: number; head: { sha: string }; base: { ref: string }; user?: { login?: string; type?: string } | null }[];
-  return prs.map((p) => ({ number: p.number, headSha: p.head.sha, base: p.base.ref, author: p.user?.login ?? '', bot: p.user?.type === 'Bot' || /\[bot\]$/.test(p.user?.login ?? '') }));
+  const prs = (await res.json()) as { number: number; head: { sha: string; ref?: string }; base: { ref: string }; user?: { login?: string; type?: string } | null }[];
+  return prs.map((p) => ({ number: p.number, headSha: p.head.sha, ...(typeof p.head.ref === 'string' ? { headRef: p.head.ref } : {}), base: p.base.ref, author: p.user?.login ?? '', bot: p.user?.type === 'Bot' || /\[bot\]$/.test(p.user?.login ?? '') }));
 }
 
 /** Whether a PR may have its full tiers run (a batch): a bot's only once the owner approved it. */
@@ -85,6 +87,23 @@ export function unfinishedRuns(events: readonly StoredEvent[]): string[] {
 /** What a check posted while the event log can't be written says (the run's own events wait in memory). */
 export const EVENTS_KEPT_NOTE = "The instance's disk is full: this run's record waits in memory and is written to its log when there is room. The result above is the run's.";
 
+/** A fast run's head cut off (the coordinator or the machine stopped during it) this many times runs no more by itself. */
+export const INTERRUPT_LIMIT = 2;
+/** What the check of such a head says. */
+export const interruptedLine = (n: number) => `cut off ${n} times (the coordinator or the machine stopped during it each time, e.g. a reboot that hung): not rerun automatically; check the machine, then push again`;
+
+/** How many times each head's fast runs were cut off (testrun.finished interrupted), by sha. */
+export function interruptedHeads(events: readonly StoredEvent[]): Map<string, number> {
+  const fast = new Set(events.filter((e) => e.type === 'testrun.queued' && (e.payload as EventPayload<'testrun.queued'>).kind === 'fast').map((e) => (e.payload as EventPayload<'testrun.queued'>).id));
+  const out = new Map<string, number>();
+  for (const e of events) {
+    if (e.type !== 'testrun.finished') continue;
+    const p = e.payload as EventPayload<'testrun.finished'>;
+    if (p.outcome === 'interrupted' && p.kind === 'fast' && fast.has(p.id)) out.set(p.sha, (out.get(p.sha) ?? 0) + 1);
+  }
+  return out;
+}
+
 export class PrTestRuns {
   private inFlight = new Map<number, InFlight>();
   /** pr -> heads whose fast run finished (from the log, so a restart doesn't run them again). */
@@ -107,12 +126,15 @@ export class PrTestRuns {
     // INVARIANT: a GPU run cut off (the coordinator or the machine stopped) or stopped at its cap is never run again by
     // itself, whatever its outcome (src/testrun/gpu.ts): its head counts as finished.
     const gpuNoRepeat = new Set(gpuRunsNotToRepeat(events));
+    const cutOff = interruptedHeads(events);
     for (const e of events) {
       if (e.type === 'testrun.queued') queued.set((e.payload as EventPayload<'testrun.queued'>).id, e.payload as EventPayload<'testrun.queued'>);
       else if (e.type === 'testrun.finished') {
         const p = e.payload as EventPayload<'testrun.finished'>;
-        // An interrupted or errored run runs again; a cancelled one was superseded.
-        if (p.kind !== 'fast' || (p.outcome !== 'done' && !gpuNoRepeat.has(p.id)) || !queued.has(p.id)) continue;
+        // An interrupted or errored run runs again, unless its head was cut off INTERRUPT_LIMIT times (a machine that
+        // hangs on it, rebooted each time: never run it again by itself); a cancelled one was superseded.
+        const held = p.outcome === 'interrupted' && (cutOff.get(p.sha) ?? 0) >= INTERRUPT_LIMIT;
+        if (p.kind !== 'fast' || (p.outcome !== 'done' && !gpuNoRepeat.has(p.id) && !held) || !queued.has(p.id)) continue;
         for (const n of p.prs) this.finished.set(n, new Set([...(this.finished.get(n) ?? []), p.sha]));
       }
     }
@@ -135,15 +157,20 @@ export class PrTestRuns {
       // INVARIANT: a PR's GPU fast run cut off by a stop gets a failing check on its head saying so, never a rerun: its
       // head is never run again by itself (the constructor counts it finished), and without a check it would look pending.
       if (gpu.has(id) && queued?.kind === 'fast' && queued.prs.length && /^[0-9a-f]{40}$/.test(queued.sha)) await this.postCutOff(id, queued.sha);
+      // INVARIANT (a reboot that hangs): a fast run's head cut off INTERRUPT_LIMIT times is never run again by itself;
+      // its PRs get a failing check saying so, as a cut-off GPU run's do.
+      else if (queued?.kind === 'fast' && queued.prs.length && /^[0-9a-f]{40}$/.test(queued.sha) && (interruptedHeads(this.d.log.read(0, ['testrun.queued', 'testrun.finished'])).get(queued.sha) ?? 0) >= INTERRUPT_LIMIT) {
+        for (const n of queued.prs) this.finished.set(n, new Set([...(this.finished.get(n) ?? []), queued.sha]));
+        await this.postCutOff(id, queued.sha, interruptedLine(INTERRUPT_LIMIT));
+      }
     }
     return ids;
   }
 
   /** The failing check on a cut-off GPU fast run's head: every fast tier, not run again (src/testrun/gpu.ts). */
-  private async postCutOff(id: string, sha: string): Promise<void> {
+  private async postCutOff(id: string, sha: string, line = gpuCutOffLine('the coordinator or the machine stopping during it')): Promise<void> {
     const tiers = this.d.fastTiers?.() ?? [];
     if (!tiers.length) return;
-    const line = gpuCutOffLine('the coordinator or the machine stopping during it');
     const result: TestRunResult = { id, sha, kind: 'fast', ok: false, outcome: 'error', tiers: tiers.map((tier) => ({ tier, ok: false, durationMs: 0, summary: line, logRef: '' })), setup: { step: GPU_STEP, detail: line, stderr: '' } };
     try {
       await this.d.post(sha, result);

@@ -54,7 +54,7 @@ test("the merge flow's checks of a commit keep a pinned check only from the App 
   const sha = 'c'.repeat(40);
   const lint: CommitCheck = { name: 'lint', source: 'check_run', status: 'completed', conclusion: 'success', id: 3, app: SPOOF_APP };
   f.backlog.setChecks(sha, [ci(SPOOF_APP), lint]);
-  const judged = () => (c as unknown as { headChecksOf(s: string): Promise<CommitCheck[]> }).headChecksOf(sha);
+  const judged = () => (c as unknown as { headChecksOf(s: string, at: { main: true }): Promise<CommitCheck[]> }).headChecksOf(sha, { main: true });
   assert.deepEqual(await judged(), [lint], 'the spoofed ci is dropped; lint, which nothing pins, is judged by name');
   f.backlog.setChecks(sha, [ci(CI_APP), lint]);
   assert.deepEqual(await judged(), [ci(CI_APP), lint]);
@@ -63,11 +63,23 @@ test("the merge flow's checks of a commit keep a pinned check only from the App 
   // Owner rule: listed after the pinned pass, another App's failure still blocks (the check of main after a merge reads these).
   f.backlog.setChecks(sha, [ci(CI_APP), ci(SPOOF_APP, 'failure'), lint]);
   assert.deepEqual(await judged(), [{ name: 'ci', source: 'check_run', status: 'completed', conclusion: 'failure' }, lint]);
-  // Round 8, the owner's decision: an App that isn't Actions has its latest run decide, so its later run supersedes its
-  // earlier cancelled or failed ones (round 6 held these, fail closed); a later failure blocks.
+  // #925: every run of a pinned App that isn't Actions must pass, so a later pass never supersedes its earlier
+  // cancelled or failed ones (round 8 had the App's latest run decide); a later failure blocks too.
   const own = (id: number, conclusion: string): CommitCheck => ({ name: 'ci', source: 'check_run', status: 'completed', conclusion, id, app: CI_APP });
   f.backlog.setChecks(sha, [own(7, 'success'), own(5, 'cancelled'), own(6, 'failure'), lint]);
-  assert.deepEqual(await judged(), [own(7, 'success'), lint]);
+  assert.deepEqual(await judged(), [own(6, 'failure'), lint]);
+  f.backlog.setChecks(sha, [own(7, 'success'), own(5, 'success'), lint]);
+  assert.deepEqual(await judged(), [own(7, 'success'), lint], 'every run passed: the latest is reported');
   f.backlog.setChecks(sha, [own(7, 'failure'), own(6, 'success'), lint]);
   assert.deepEqual(await judged(), [own(7, 'failure'), lint]);
+});
+
+test('readiness records each required check with the pin it was judged under (checks.judged): the main watch trusts a record only under that pin (#943, R1176d D2)', { skip }, async () => {
+  const t = await openPr({}, { edit: (cfg) => Object.assign(cfg.project, { required_check_sources: { ci: { app_id: CI_APP } } }) });
+  Object.assign(t.f.backlog, { checkApps: async () => ({}) });
+  t.f.backlog.setChecks(t.pr().headSha, [ci(CI_APP)]);
+  await t.c.tick();
+  const rec = t.f.log.read(0, ['checks.judged']).at(-1)?.payload as { head: string; checks: unknown[] } | undefined;
+  assert.equal(rec?.head, t.pr().headSha);
+  assert.deepEqual(rec?.checks, [{ name: 'ci', outcome: 'pass', pin: { app_id: CI_APP } }]);
 });

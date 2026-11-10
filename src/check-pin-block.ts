@@ -15,7 +15,7 @@ import { gitExecFileSync } from './os/git.js';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { parseDocument } from 'yaml';
-import { isJobOfRun, unrecorded, type CheckPin } from './check-source.js';
+import { fromBranch, isJobOfRun, unrecorded, workflowSourceOf, type CheckPin } from './check-source.js';
 import { ProjectConfig } from './config/schema.js';
 import { readWorkflowText } from './workflow-read.js';
 
@@ -289,12 +289,14 @@ export function ghTipRuns(repo: string, branch: string, api: Api = ghApi): Tip |
     const sha = typeof tip.sha === 'string' && /^[0-9a-f]{40}$/.test(tip.sha) ? tip.sha : '';
     if (!sha) return null;
     const cr = pages<{ id: number; name: string; head_sha: string; html_url?: string; app?: { id?: number; slug?: string }; check_suite?: { id?: number } }>(api, `repos/${repo}/commits/${sha}/check-runs?filter=latest`, 'check_runs');
-    const wr = pages<{ id: number; html_url: string; check_suite_id: number; path: string; head_sha: string; repository?: { full_name?: string } }>(api, `repos/${repo}/actions/runs?head_sha=${sha}`, 'workflow_runs');
+    const wr = pages<{ id: number; html_url: string; check_suite_id: number; path: string; head_sha: string; repository?: { full_name?: string }; head_repository?: { full_name?: string }; event?: unknown; head_branch?: unknown; pull_requests?: unknown }>(api, `repos/${repo}/actions/runs?head_sha=${sha}`, 'workflow_runs');
     const bySuite = new Map(wr.items.map((w) => [w.check_suite_id, w]));
     const runs = cr.items.map((c) => {
       const actions = c.app?.slug === 'github-actions';
       const w = actions && c.check_suite?.id !== undefined ? bySuite.get(c.check_suite.id) : undefined;
-      const ok = !!w && w.head_sha === sha && w.repository?.full_name?.toLowerCase() === repo.toLowerCase() && isJobOfRun(c.html_url, c.id, { run: w.id, url: w.html_url });
+      // #943: only a run started on `branch` itself (a PR into another base could post its own file's runs here).
+      const source = w ? workflowSourceOf(w) : null;
+      const ok = !!w && !!source && fromBranch(source, branch) && w.head_sha === sha && w.repository?.full_name?.toLowerCase() === repo.toLowerCase() && isJobOfRun(c.html_url, c.id, { run: w.id, url: w.html_url });
       return { name: c.name, app: typeof c.app?.id === 'number' ? c.app.id : null, slug: typeof c.app?.slug === 'string' ? c.app.slug : null, actions, workflow: ok ? w!.path : null };
     });
     return { sha, runs, partial: cr.partial || wr.partial };
