@@ -497,7 +497,9 @@ function scalars(v: unknown): string[] {
  * `on.<event>` filters, names, conditions, runner labels, the action a step uses, a services container's env, and a
  * step's run (it has its own check).
  */
+// check-table: never-grow
 const ON_FILTER_KEYS = ['paths', 'paths-ignore', 'branches', 'branches-ignore', 'tags', 'tags-ignore', 'types'];
+// check-table: never-grow
 const VALUE_KEYS_SKIPPED = ['name', 'run-name', 'if', 'concurrency', 'runs-on', 'uses', 'timeout-minutes', 'permissions'];
 /** Every string value in a workflow or action but those VALUE_KEYS_SKIPPED and on.<event>'s filters mark, each with its key path. */
 function valuesToCheck(doc: Doc): [string, string][] {
