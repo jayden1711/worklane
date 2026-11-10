@@ -141,12 +141,12 @@ const SOAK_STEPS: unknown[] = [
   },
   {
     "name": "install gitleaks",
-    "shell": "bash",
+    "shell": "/usr/bin/bash --noprofile --norc -p -eo pipefail {0}",
     "env": {
       "GITLEAKS_VERSION": "8.30.1",
       "BASH_ENV": ""
     },
-    "run": "f=\"gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz\"\nmkdir -p \"$RUNNER_TEMP/bin\" && cd \"$RUNNER_TEMP/bin\"\nbash -p \"$GITHUB_WORKSPACE/scripts/ci/fetch-pinned.sh\" \"https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${f}\" 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb \"$f\"\ntar -xzf \"$f\" gitleaks\necho \"$RUNNER_TEMP/bin\" >> \"$GITHUB_PATH\"\n"
+    "run": "f=\"gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz\"\nmkdir -p \"$RUNNER_TEMP/bin\" && cd \"$RUNNER_TEMP/bin\"\n/usr/bin/bash -p \"$GITHUB_WORKSPACE/scripts/ci/fetch-pinned.sh\" \"https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${f}\" 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb \"$f\"\ntar -xzf \"$f\" gitleaks\necho \"$RUNNER_TEMP/bin\" >> \"$GITHUB_PATH\"\n"
   },
   {
     "run": "npm ci --ignore-scripts"
@@ -210,7 +210,7 @@ test('the soak workflow: schedule and dispatch only, read-only, on GitHub-hosted
   for (const word of step.run!.split(/[\s;|&()$"`]+/)) assert.ok(!['rm', 'awk', 'timeout', 'env', 'mkdir', 'cat', 'sh', 'bash'].includes(word), `a bare ${word}`);
   // The gitleaks download goes through the pinned-download helper (#1201): retried, and checked against its sha256.
   const gitleaks = job.steps.find((s) => s.name === 'install gitleaks')!.run!;
-  assert.match(gitleaks, /^ {0}bash -p "\$GITHUB_WORKSPACE\/scripts\/ci\/fetch-pinned\.sh" "https:\/\/github\.com\/gitleaks\/gitleaks\/releases\/download\/v\$\{GITLEAKS_VERSION\}\/\$\{f\}" [0-9a-f]{64} "\$f"$/m);
+  assert.match(gitleaks, /^ {0}\/usr\/bin\/bash -p "\$GITHUB_WORKSPACE\/scripts\/ci\/fetch-pinned\.sh" "https:\/\/github\.com\/gitleaks\/gitleaks\/releases\/download\/v\$\{GITLEAKS_VERSION\}\/\$\{f\}" [0-9a-f]{64} "\$f"$/m);
   assert.doesNotMatch(gitleaks, /\bcurl\b/);
 });
 
