@@ -90,7 +90,8 @@ const INLINE_CHECK = new RegExp(String.raw`^\s*echo "(?:${VAR}|[0-9a-f]{64})  ($
  * The helper named as a path (R1228z/aa D2: the bare stem in a step id or an input's description is no call): the stem
  * after a `/`, or with `.sh` after it.
  */
-const HELPER_PATH = /\/\s*fetch-pinned|fetch-pinned\.sh\b/;
+// R1228ae D2: after a `/`, the stem as a whole name (`fetch-pinned-logs` is another).
+const HELPER_PATH = /\/\s*fetch-pinned(?![\w-])|fetch-pinned\.sh\b/;
 /** Whether a line names the helper as a path, read with its quotes and backslashes taken out (R1228ac D2: `"…/ci/""fetch-pinned"".sh"`, `\fetch-pinned\.sh`). */
 const namesHelperPath = (l: string) => HELPER_PATH.test(l.replace(/["'\\]/g, ''));
 /** `bash` made to name something else: a function (`bash()`, `function bash`), an alias, or `hash -p <path> bash`. */
@@ -232,7 +233,8 @@ export function lastRetry(cmd: string): number {
 export function workflowTextProblems(text: string): string[] {
   const out: string[] = [];
   for (const l of text.split('\n')) {
-    if (DOWNLOAD.test(l) && !HELPER_LINE.test(l) && !INLINE_CURL.test(l)) out.push(`a pinned URL not on a ${HELPER} line: ${l.trim()}`);
+    // R1228ae D1: a one-line `run:` holds its helper line after the key.
+    if (DOWNLOAD.test(l) && !HELPER_LINE.test(l.replace(/^\s*(?:-\s+)?run:\s+/, '')) && !INLINE_CURL.test(l)) out.push(`a pinned URL not on a ${HELPER} line: ${l.trim()}`);
     if (!/^\s*#/.test(l) && OTHER_FETCH.test(l)) out.push(`a download that isn't the helper's curl: ${l.trim()}`);
   }
   return out;
@@ -505,14 +507,18 @@ function scalars(v: unknown): string[] {
  * inputs or outputs included. A step's run has its own check. Nothing GitHub hands a step is skipped (R1228ab D1,
  * R1228ac D3): the workflow's `name` is every step's $GITHUB_WORKFLOW and `github.workflow`, a reusable workflow's path
  * (a job's `uses`) is `job.workflow_file_path`, and a local action's path (a step's `uses`) is a composite action's
- * $GITHUB_ACTION_PATH, so those are read. GitHub's contexts and default variables expose no run-name, job or step
- * name, condition, runner label, timeout, concurrency group or permissions (its docs, read 2026-11-10).
+ * $GITHUB_ACTION_PATH, so those are read. Nor is what another workflow's steps get through its event payload
+ * (`github.event`, R1228ad D1): a workflow's `run-name` is `github.event.workflow_run.display_title` in a workflow
+ * `on: workflow_run`, and a job's `name` is `github.event.check_run.name` in one `on: check_run` (an Actions job is
+ * its check run), so those are read too. Skipped: what no context, default variable or trigger event's payload holds
+ * (GitHub's docs and webhook schemas, read 2026-11-10): a step's name (only the workflow_job webhook carries step
+ * names, and it triggers no workflow), conditions, runner labels, timeouts, concurrency groups, permissions.
  */
 // check-table: never-grow
 const SKIPPED_PATHS = [
   'on.*.paths', 'on.*.paths-ignore', 'on.*.branches', 'on.*.branches-ignore', 'on.*.tags', 'on.*.tags-ignore', 'on.*.types',
-  'run-name', 'concurrency', 'permissions',
-  'jobs.*.name', 'jobs.*.if', 'jobs.*.runs-on', 'jobs.*.timeout-minutes', 'jobs.*.concurrency', 'jobs.*.permissions',
+  'concurrency', 'permissions',
+  'jobs.*.if', 'jobs.*.runs-on', 'jobs.*.timeout-minutes', 'jobs.*.concurrency', 'jobs.*.permissions',
   'jobs.*.steps.*.name', 'jobs.*.steps.*.if', 'jobs.*.steps.*.timeout-minutes', 'jobs.*.steps.*.run',
   'jobs.*.services.*.env',
   'runs.steps.*.name', 'runs.steps.*.if', 'runs.steps.*.run',
@@ -1183,7 +1189,7 @@ test("R1228v D1: on: paths, a step's name and a hashFiles() key are kept; the va
   assert.match(scan('.github/actions/zz/action.yml', `runs:\n  using: composite\n  steps:\n    - uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809\n      with:\n        path: scripts/ci/fetch-pinned.sh\n`).join(), off, "a composite step's with:");
 });
 
-test("R1228x/y D1: every value but those under a key that never reaches a shell is checked: workflow_dispatch defaults and options, a container's env, a job's outputs refused; if:, run-name: and a services container's env kept", () => {
+test("R1228x/y D1: every value but those under a key that never reaches a shell is checked: workflow_dispatch defaults and options, a container's env, a job's outputs refused; if: and a services container's env kept", () => {
   const scan = (text: string) => {
     const out: string[] = [];
     workflowFiles([{ name: '.github/workflows/zz.yml', text }], (_n, p) => out.push(p));
@@ -1207,7 +1213,6 @@ test("R1228x/y D1: every value but those under a key that never reaches a shell 
   // Must pass: under keys that never reach a shell.
   for (const [what, text] of [
     ['FR4 if: hashFiles()', `on: push\njobs:\n  a:\n${job('', `      - if: hashFiles('${H}') != ''\n        run: echo hi\n`)}`],
-    ['FR5 run-name', `run-name: check ${H}\non: push\njobs:\n  a:\n${job('')}`],
     ['P6 a services container env', `on: push\njobs:\n  a:\n${job(`    services:\n      db:\n        image: x\n        env:\n          F: ${H}\n`)}`],
     ['on.push.paths-ignore', `on:\n  push:\n    paths-ignore: [${H}]\njobs:\n  a:\n${job('')}`],
   ] as const) assert.deepEqual(scan(text), [], `kept: ${what}`);
@@ -1257,12 +1262,44 @@ test("R1228ab, R1228ac: what GitHub hands a step is read (the workflow's name, a
   // D2/D4: a description is shown, never handed to a step (R1228aa FR-b as F1, and FA1).
   assert.deepEqual(scan(`on:\n  workflow_dispatch:\n    inputs:\n      ver:\n        description: gitleaks version (downloaded through ${H})\n  workflow_call:\n    inputs:\n      a:\n        description: see ${H}\n        type: string\n    outputs:\n      o:\n        description: from ${H}\n        value: x\n    secrets:\n      s:\n        description: for ${H}\njobs:\n  a:\n${job}`), [], 'F1: input, output and secret descriptions');
   assert.deepEqual(scan(`name: x\ndescription: Downloads pinned gitleaks through ${H}\ninputs:\n  out:\n    description: where ${H} writes the tarball\noutputs:\n  o:\n    description: what ${H} wrote\n    value: x\nruns:\n  using: composite\n  steps:\n    - run: echo hi\n      shell: bash\n`, '.github/actions/zz/action.yml'), [], "FA1: an action's description and its inputs' and outputs'");
-  // Kept as before: run-name (FR5), a step's name (FR2), if: hashFiles (FR4).
-  assert.deepEqual(scan(`run-name: check ${H}\non: push\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - name: run ${H}\n        if: hashFiles('${H}') != ''\n        run: echo hi\n`), []);
+  // Kept as before: a step's name (FR2), if: hashFiles (FR4). (FR5, run-name, is read since R1228ad D1.)
+  assert.deepEqual(scan(`on: push\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - name: run ${H}\n        if: hashFiles('${H}') != ''\n        run: echo hi\n`), []);
   // A description's value under another key is still read: an input's default.
   assert.match(scan(`on:\n  workflow_dispatch:\n    inputs:\n      description:\n        default: ${H}\njobs:\n  a:\n${job}`).join(), /named in on\.workflow_dispatch\.inputs\.description\.default/, 'an input named description');
   // C1, C2: the bare stem in a value, the folder and .sh added in the run: a stated limit (a fix shows up here).
   assert.deepEqual(scan(`on: push\njobs:\n  a:\n    runs-on: ubuntu-latest\n    env:\n      H: fetch-pinned\n    strategy:\n      matrix:\n        tool: [fetch-pinned]\n    steps:\n      - run: echo hi\n`), [], 'C1, C2: not seen (a stated limit)');
+});
+
+test("R1228ad, R1228ae: run-name and a job's name, which reach another workflow's steps through its event, are read; a one-line run: helper line is kept; the stem after a / only as a whole name", () => {
+  const scan = (text: string, file = '.github/workflows/zz.yml') => {
+    const out: string[] = [];
+    workflowFiles([{ name: file, text }], (_n, p) => out.push(p));
+    return out;
+  };
+  const named = (text: string) => scan(text).filter((p) => /named in|named other than/.test(p));
+  const H = 'scripts/ci/fetch-pinned.sh';
+  const job = '    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi\n';
+  // ad D1 (W1): github.event.workflow_run.display_title in a workflow on: workflow_run.
+  assert.match(named(`name: zz producer\nrun-name: ${H}\non: push\njobs:\n  a:\n${job}`).join(), /named in run-name off a helper line/, 'run-name');
+  // github.event.check_run.name in a workflow on: check_run.
+  assert.match(named(`on: push\njobs:\n  a:\n    name: build ${H}\n${job}`).join(), /named in jobs\.a\.name off a helper line/, "a job's name");
+  assert.deepEqual(named(`on: push\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - name: run ${H}\n        run: echo hi\n`), [], "a step's name: no trigger's payload holds it");
+  // ae D1 (G1): the helper step as CI writes it, its one helper line on the run: key's own line.
+  const URL = 'https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz';
+  const step = (run: string) => `on: push\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - shell: ${HELPER_SHELL}\n        env:\n          BASH_ENV: ''\n        ${run}\n`;
+  const line = `/usr/bin/bash -p "$GITHUB_WORKSPACE/${H}" "${URL}" ${PIN} gl.tgz`;
+  // The file's text, line by line (the repo scan's first check), and its decoded values.
+  for (const check of [workflowTextProblems, (t: string) => scan(t)]) {
+    assert.deepEqual(check(step(`run: ${line}`)).filter((p) => /not on a .* line/.test(p)), [], 'G1: a one-line run:');
+    assert.deepEqual(check(step(`run: |\n          ${line}`)).filter((p) => /not on a .* line/.test(p)), [], 'G0: the same in a block');
+  }
+  assert.match(workflowTextProblems(step(`run: echo ${URL}`)).join(), /a pinned URL not on a/, 'control: the URL off a helper line, one-line');
+  assert.match(workflowTextProblems(step(`run: ${line}; echo done`)).join(), /a pinned URL not on a/, 'control: more after the helper call');
+  // ae D2 (G4, G5): a folder named after the helper is another name; G3 (the stem alone after a /) is still taken.
+  assert.deepEqual(named(`on: push\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - run: mkdir -p "$RUNNER_TEMP/fetch-pinned-logs"\n`), [], 'G4');
+  assert.deepEqual(named(`on: push\njobs:\n  a:\n    runs-on: ubuntu-latest\n    env:\n      LOGS: \${{ runner.temp }}/fetch-pinned_logs/x\n    steps:\n      - run: echo hi\n`), [], 'G5-like: an underscore name');
+  assert.match(named(`on: push\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - run: mkdir -p "$RUNNER_TEMP/fetch-pinned"\n`).join(), /named other than on a helper line/, 'G3: still refused');
+  for (const f of ['bash scripts/ci/fetch-pinned "$u"', 'bash scripts/ci/fetch-pinned.sh "$u"', 'x=/fetch-pinned;']) assert.match(named(`on: push\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - run: ${f}\n`).join(), /named other than/, `still refused: ${f}`);
 });
 
 // Limits (owner decision (c): stated, not closed; the helper's digest check holds for each download it handles):
@@ -1276,11 +1313,13 @@ test("R1228ab, R1228ac: what GitHub hands a step is read (the workflow's name, a
 //   after a `/` or with `.sh`, read with quotes and backslashes taken out (R1228p D3, R1228r D1, R1228s, R1228z/aa D2,
 //   R1228ac D2). The bare stem alone (`fetch-pinned`, an id, `needs:`, a word in a name) is not a call. They look in a
 //   run and in every other value of a workflow or action but those at the exact places that never reach a step
-//   (SKIPPED_PATHS, by structural path: on.<event>'s filters, run-name, job and step names, conditions, runner labels,
-//   timeouts, concurrency, permissions, descriptions, a services container's env): anything not there is read by
-//   default, a key named `name`, `run` or `if` inside env, matrix, with, inputs or outputs included, and so are the
-//   workflow's `name` and a job's or step's `uses`, which GitHub hands every step (R1228x/y D1, R1228z/aa D1,
-//   R1228ab D1). The one WSL step runs one helper line.
+//   (SKIPPED_PATHS, by structural path: on.<event>'s filters, step names, conditions, runner labels, timeouts,
+//   concurrency, permissions, descriptions, a services container's env): anything not there is read by default, a key
+//   named `name`, `run` or `if` inside env, matrix, with, inputs or outputs included, and so are the workflow's `name`
+//   and a job's or step's `uses`, which GitHub hands every step, and the `run-name` and a job's `name`, which reach
+//   another workflow's steps through its event (R1228x/y D1, R1228z/aa D1, R1228ab D1, R1228ad D1). The one WSL step
+//   runs one helper line. The stem after a `/` counts only as a whole name: `fetch-pinned-logs` is another (R1228ae
+//   D2); an extensionless `…/fetch-pinned` folder is still taken for the helper.
 //   Not seen, and not claimed:
 //   - a pin read at run time is no pin: one read from the release itself (`gh release view … assets`, GitHub's asset
 //     digest) is refused (R1228u N1), any other way of computing it isn't seen;
