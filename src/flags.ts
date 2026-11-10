@@ -39,23 +39,20 @@ export { FLAG_NAME, FLAGS, RETIRED_FLAGS, flagsSchema, type FlagInfo } from './c
  * is a handle, its state kept here (below), so nothing outside can write a flag on.
  */
 export class FlagState {
+  /** Whether a flag is on: only when the default branch's committed config, at the adopted commit, says `true` for it. */
+  readonly on: (name: string) => boolean;
+  /** What is on, and from which commit (a copy): for the audit and the dashboard. */
+  readonly state: () => { sha: string | null; on: string[] };
   constructor() {
-    inner.set(this, { snapshot: null, offUnrecorded: new Map(), offFile: null });
+    const i: Inner = { snapshot: null, offUnrecorded: new Map(), offFile: null };
+    inner.set(this, i);
+    // R1173ah AH2: the readers are this instance's own, and it is frozen, so no code outside this module can make `on`
+    // say true: a method put on the class's prototype is shadowed by them, and they can't be replaced.
+    this.on = (name) => i.snapshot !== null && i.snapshot.on.includes(name);
+    this.state = () => ({ sha: i.snapshot?.sha ?? null, on: [...(i.snapshot?.on ?? [])] });
     Object.freeze(this);
   }
-  /** Whether a flag is on: only when the default branch's committed config, at the adopted commit, says `true` for it. */
-  on(name: string): boolean {
-    const s = of(this).snapshot;
-    return s !== null && s.on.includes(name);
-  }
-  /** What is on, and from which commit (a copy): for the audit and the dashboard. */
-  state(): { sha: string | null; on: string[] } {
-    const s = of(this).snapshot;
-    return { sha: s?.sha ?? null, on: [...(s?.on ?? [])] };
-  }
 }
-// R1173ah AH2: the instance is frozen; so are its methods, so no code outside this module can make `on` say true.
-Object.freeze(FlagState.prototype);
 Object.freeze(FlagState);
 type Inner = {
   /** The flags on, at the commit they were read from; null: none adopted (every flag off). Never handed out. */

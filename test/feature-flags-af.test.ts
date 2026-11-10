@@ -265,25 +265,28 @@ for (const attack of [false, true]) {
 }
 
 for (const attack of [false, true]) {
-  test(`R1173ah AH2 (${attack ? 'attack' : 'control'}): main names no flag; ${attack ? 'FlagState.prototype.on reassigned outside src/flags.ts' : 'nothing else'}: the coordinator's flag stays off`, { skip }, async () => {
+  test(`R1173ah AH2 (${attack ? 'attack' : 'control'}): main names no flag; ${attack ? 'a method put on FlagState.prototype outside src/flags.ts' : 'nothing else'}: the coordinator's flag stays off`, { skip }, async () => {
     const f = fixture();
-    const realOn = FlagState.prototype.on;
+    const proto = FlagState.prototype as unknown as { on?: unknown };
     try {
       await withKnownFlags([T], async () => {
         const c = coordinator(f, new FakeRunner(() => ({ structured: { summary: 's' } })));
         await c.tick();
         assert.equal(c.flags.on(T), false);
         if (attack) {
-          assert.ok(Object.isFrozen(FlagState.prototype) && Object.isFrozen(FlagState), 'the class and its methods are frozen');
+          // A method put on the class's prototype: the instance's own reader shadows it.
+          proto.on = () => true;
+          // The instance's own reader can't be replaced either (it is frozen).
           assert.throws(() => {
-            FlagState.prototype.on = () => true;
+            (c.flags as unknown as { on: unknown }).on = () => true;
           }, TypeError);
+          assert.ok(Object.isFrozen(c.flags) && Object.isFrozen(FlagState) && Object.hasOwn(c.flags, 'on'));
         }
         await c.tick();
         assert.equal(c.flags.on(T), false, 'a flag reads on that no commit turned on and the log never recorded');
       });
     } finally {
-      if (!Object.isFrozen(FlagState.prototype)) FlagState.prototype.on = realOn;
+      delete proto.on;
       f.log.close();
       rmSync(f.base, { recursive: true, force: true });
     }
