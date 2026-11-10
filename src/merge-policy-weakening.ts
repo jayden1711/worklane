@@ -484,12 +484,20 @@ export function blockCommentRun(lines: readonly string[], k: number): boolean {
 }
 
 /**
+ * A line terminator inside what git calls one line (R1184w D1): U+2028, U+2029, or a CR not at its end (CRLF's CR is).
+ * JS and TS end a `//` comment there, so the text after it is code the line readers would take for comment. A line
+ * holding one is never a comment to the hold, and an added REPLACERS line holding one waits.
+ */
+export const LINE_BREAK = /\r(?!$)|[\u2028\u2029]/;
+
+/**
  * A line cut at its commas outside brackets, with brackets and commas counted in code only (R1184v D1): the text of
  * `'…'`, `"…"`, a template and a block comment is skipped, and a template's `${…}` is code. Null, so the line waits,
  * when the line can't be read alone: a quote, a backtick, a `${`, a block comment or a bracket it doesn't close, or a
  * `/` that isn't a comment (a regexp and a division look alike here). A `//` comment ends the line's code.
  */
 export function topLevelParts(l: string): string[] | null {
+  if (LINE_BREAK.test(l)) return null;
   const parts = [''];
   const add = (s: string) => {
     parts[parts.length - 1] += s;
@@ -1264,11 +1272,19 @@ function findings(i: WeakeningInput): Found {
     // anywhere else in the new one. Anything else (a spread, a computed or quoted key, get/set, a name used before, a
     // second property on the line, a replacer over several lines) waits.
     const keyOf = (l: string) => /^\s*([A-Za-z_$][\w$]*)\s*(?::|,\s*$|\()/.exec(l)?.[1];
-    const keys = (ls: string[]) => ls.slice(1, -1).flatMap((l) => (/^\s*(?:\/\/|\/\*|\*)/.test(l) ? [] : [keyOf(l) ?? '']));
+    // Each line read as JS reads it: cut at a line terminator other than \n first (R1184w D1: a key after a `//` comment's
+    // U+2028 is a key).
+    const keys = (ls: string[]) => ls.slice(1, -1).flatMap((l) => l.split(LINE_BREAK).flatMap((s) => (/^\s*(?:\/\/|\/\*|\*)/.test(s) ? [] : [keyOf(s) ?? ''])));
     const [old, fresh] = [new Set(keys(was)), keys(now)];
     const inBlock = new Set(now.slice(1, -1));
     for (const l of f.addedLines ?? []) {
-      if (!inBlock.has(l) || !l.trim() || /^\s*\/\//.test(l)) continue;
+      if (!inBlock.has(l) || !l.trim()) continue;
+      // A line terminator other than \n waits before any comment is skipped (R1184w D1: `// note<U+2028>...({ … }),`).
+      if (LINE_BREAK.test(l)) {
+        hit('table-shrunk', f.path, `REPLACERS: a line terminator inside a line: ${JSON.stringify(l.trim()).slice(0, 120)}`);
+        continue;
+      }
+      if (/^\s*\/\//.test(l)) continue;
       // Exactly one property (R1184t D1: `zz: (m) => m, ...({ stripe: … }),` is a new key and then a spread): cut at its
       // commas outside brackets, the line is one part and an empty one after its last `,`, and it closes every bracket
       // it opens (a replacer over several lines waits from its first line). The part is `name: …`, `name(…) {…}` or
@@ -1308,7 +1324,8 @@ function findings(i: WeakeningInput): Found {
   // place it stands in the file's text is in a run of `*` lines under a `/*` line, none of them closing it and none
   // holding a `${`.
   const commentOnly = (l: string, text: () => string | null) => {
-    if (/\/\/ (?:BEGIN|END) tables from /.test(l)) return false;
+    // A line terminator other than \n ends a comment, so what follows it is code (R1184w W2: `// note<U+2028>import.meta.url = …`).
+    if (/\/\/ (?:BEGIN|END) tables from /.test(l) || LINE_BREAK.test(l)) return false;
     if (/^\s*\/\//.test(l)) return true;
     if (/\*\/\s*\S/.test(l) || l.includes('${')) return false;
     if (/^\s*\/\*/.test(l)) return true;

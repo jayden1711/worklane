@@ -133,6 +133,7 @@ test("REPLACERS is plain named properties, each defined once, in the module and 
     ['T2a', "  zz: (m) => m, ...({ stripe: (m) => m }),"],
     ['T2b', "  zz(m) { return m; }, ...({ stripe: (m) => m }),"],
     ['V1a', "  zz: (m) => m + '(', ...({ stripe: (m) => m }), yy: (m) => m + ')',"],
+    ['W1a', '  zz: (m) => m, // note\u2028  ...({ stripe: (m) => m }),'],
     ['computed', "  ['basic']: (m) => m,"],
     ['quoted', "  'basic': (m) => m,"],
     ['accessor', '  get basic() { return (m) => m; },'],

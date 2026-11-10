@@ -179,7 +179,12 @@ test("R1184q, R1184s D1: import.meta.url written as a pattern or for...of target
     ['S1k a delete through a wrapper', 'delete (import.meta.url as never);'],
     ['S1l a delete in parentheses', 'delete (import.meta.url);'],
     ['S1m an increment in parentheses', '(import.meta.url)++;'],
+    // R1184w W2: a line terminator other than \n ends the `//` comment, so the write after it is code (the loader
+    // refuses it at run time too).
+    ['W2a Object.assign after U+2028 in a comment', `// note\u2028Object.assign(import.meta, { url: ${decoy} });`],
+    ['W2b a write after a lone CR in a comment', `// note\rimport.meta.url = ${decoy};`],
   ] as const) assert.ok(has(reasons(above(line), base), ADDED), label);
+  assert.ok(has(reasons({ 'src/zz.ts': "// note\u2029import { tablesOf as load } from './check-tables.js';\nvoid load;\n" }), ADDED), 'W2c an aliased import after U+2029 in a comment');
   // Control: a JSDoc comment that names import.meta passes.
   assert.deepEqual(reasons(above('/**\n * reads import.meta.url as its own\n * import\n */'), base), [], 'a JSDoc comment');
   // Q2a-c: a `//` inside a template literal, and a line that starts with an empty block comment.
@@ -218,6 +223,11 @@ test("R1184r D1, R1184s D2: a changed line, or an added one that isn't a new rep
     ['V1a brackets in strings', "  zz: (m: string) => m + '(', ...({ stripe: (m: string) => m } as Partial<Record<string, never>>), yy: (m: string) => m + ')',"],
     ['V1b brackets in comments', '  zz: (m: string) => m /* ( */, ...({ stripe: (m: string) => m } as Partial<Record<string, never>>), yy: (m: string) => m /* ) */,'],
     ['V1c brackets in regexps', "  zz: (m: string) => m.replace(/\\(/, ''), ...({ stripe: (m: string) => m } as Partial<Record<string, never>>), yy: (m: string) => m.replace(/\\)/, ''),"],
+    // R1184w D1: a line terminator other than \n ends a `//` comment, so the spread after it is code.
+    ['W1a U+2028 after a new key and a comment', '  zz: (m: string) => m, // note\u2028  ...({ stripe: (m: string) => m } as Partial<Record<string, never>>),'],
+    ['W1b U+2028 in a comment line', '  // note\u2028  ...({ stripe: (m: string) => m } as Partial<Record<string, never>>),'],
+    ['W1c a lone CR in a comment line', '  // note\r  ...({ stripe: (m: string) => m } as Partial<Record<string, never>>),'],
+    ['W1d U+2029 in a comment line', '  // note\u2029  ...({ stripe: (m: string) => m } as Partial<Record<string, never>>),'],
     ['V1d brackets in template text', '  zz: (m: string) => `${m}[`, ...({ stripe: (m: string) => m } as Partial<Record<string, never>>), yy: (m: string) => `${m}]`,'],
   ] as const) assert.ok(add(line).some((x) => x.includes(SHRUNK) && x.includes('REPLACERS')), label);
   const updSpread = upd.replace('});', '    ...({ basic: (m) => m }),\n});');
@@ -227,4 +237,7 @@ test("R1184r D1, R1184s D2: a changed line, or an added one that isn't a new rep
   assert.deepEqual(reasons({ 'src/events/redact.ts': `${redact}// a comment\n` }, { 'src/events/redact.ts': redact }), []);
   // Control (R1184v D1): a new one-line replacer whose string, template text or comment holds a comma or a bracket.
   assert.deepEqual(add("  zz: (m: string) => m + ',(' + `[${m},]`, /* ), */ // a trailing comment, ("), [], 'brackets and commas outside code');
+  // W1e (R1184w D1): a key the base hides after U+2028 in a comment is a name used before, so adding it again waits.
+  const hidden = redact.replace('});', '  // note\u2028  zz: (m: string) => m,\n});');
+  assert.ok(reasons({ 'src/events/redact.ts': hidden.replace('\n});', '\n  zz: (m: string) => m.slice(1),\n});') }, { 'src/events/redact.ts': hidden }).some((x) => x.includes(SHRUNK) && x.includes('REPLACERS')), 'W1e a key hidden after U+2028, defined again');
 });
