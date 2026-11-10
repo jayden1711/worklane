@@ -9,7 +9,7 @@
 // Import writes the state into the target's state dir and refuses one that already has history (--force replaces
 // it). The config dir is the repo's, kept in git: written only into a checkout that has none; otherwise the files
 // that differ are listed, to commit in a PR.
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { gunzipSync, gzipSync } from 'node:zlib';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, sep } from 'node:path';
@@ -156,10 +156,22 @@ export function importBundle(o: { file: string; stateDir: string; root: string |
       }
       const to = join(o.stateDir, rel);
       mkdirSync(dirname(to), { recursive: true });
-      // R1173ac AC-4: the target's file goes just before the log it belongs to is replaced, so an import that fails
-      // before then keeps the target's pending offs.
-      if (rel === EVENTS) rmSync(join(o.stateDir, OFF_FILE), { force: true });
-      writeGroupOnly(to, data);
+      // R1173ac AC-4, R1173af AF2: the target's file goes with the log it belongs to, only once that log is replaced.
+      // It is moved aside first and put back if the write fails (a full disk, the very fault the file is for), so an
+      // import that fails keeps the target's pending offs. A kill between the move and the end of the write leaves it
+      // at `<file>.import-old`: a stated limit (docs/feature-flags.md).
+      if (rel === EVENTS) {
+        const side = join(o.stateDir, OFF_FILE);
+        const aside = `${side}.import-old`;
+        if (existsSync(side)) renameSync(side, aside);
+        try {
+          writeGroupOnly(to, data);
+        } catch (e) {
+          if (existsSync(aside)) renameSync(aside, side);
+          throw e;
+        }
+        rmSync(aside, { force: true });
+      } else writeGroupOnly(to, data);
       r.state.push(f.path);
     } else if (cfgDir) {
       const to = join(cfgDir, rel);

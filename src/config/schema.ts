@@ -172,7 +172,7 @@ export async function withKnownFlags<T>(names: readonly string[], fn: () => T | 
 /**
  * config.yaml `flags:`: known names, each true or false; absent is none. A retired name is accepted; any other name
  * makes the config invalid. Both lists are read when a config is parsed. The parsed value is always NO_FLAGS: a flag
- * is read only through src/flags.ts's flagOn, from the default branch's committed config at the commit the
+ * is read only through a coordinator's FlagState (src/flags.ts), from the default branch's committed config at the commit the
  * coordinator adopted (#1173 reviews R1173g, R1173h), never from a config object.
  */
 export function flagsSchema(known: () => readonly string[] = knownFlags, retired: () => readonly string[] = retiredFlags) {
