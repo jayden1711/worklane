@@ -9,7 +9,7 @@ import { type DoneWhenList, type Issue } from '../backlog/types.js';
 import { claim, release } from '../claims.js';
 import type { EventPayload } from '../events/types.js';
 import { mayAnswerKind, type Role } from '../dashboard-auth.js';
-import { readReply, type CommandLine } from '../decision-reply.js';
+import { idsIn, readReply, type CommandLine } from '../decision-reply.js';
 import { defaultRolePrompt, issueBrief } from '../roles.js';
 import { checkedPush } from '../push-check.js';
 import { domainDecision, withAllowedHost, type DomainAnswer, type RefusedRequest } from '../domain-requests.js';
@@ -245,10 +245,9 @@ export abstract class Decisions extends Recovery {
    * The owner's decisions: a reply answers a decision only by naming its id (2026-11-09; #1248), and only on the comment's
    * first line, in plain text (2026-11-10, option (b) with (b'); src/decision-reply.ts):
    * - A comment answers only when its first non-blank line is `/<cli> <option> <id> [note]` (at most 3 spaces before it),
-   *   compared after NFKC, folding every Unicode dash to `-` and lower case (so a look-alike id can only equal the decision
-   *   it spells). Its note is the rest of that line.
-   * - That line answers nothing if it holds any of `` ` < > [ ] ( ) " ' \ & ! ~ `` or, as typed, a character that prints
-   *   nothing or reorders text (R1182aj), if it names no id or two or more, or if
+   *   compared in lower case. Its note is the rest of that line.
+   * - The whole comment must be plain ASCII (printable, tabs, line breaks; the owner, 2026-11-10, after R1182ak/al).
+   * - That line answers nothing if it holds any of `` ` < > [ ] ( ) " ' \ & ! ~ $ % ``, if it names no id or two or more, or if
    *   the comment has another `/<cli> <word>` anywhere (a reply is one command). The latest reply that answers wins.
    * - A comment starting with `[<cli>]` is the coordinator's own and is never a reply.
    * A writer's comment that looks like a reply here but answers nothing says why once (one note per comment), with the
@@ -277,7 +276,14 @@ export abstract class Decisions extends Recovery {
       const several = first && first.ids.length > 1 ? first : null;
       const unknown = first && first.ids.length === 1 && !byId.has(first.ids[0]!) ? first : null;
       const badOption = first && first.ids.length === 1 && byId.has(first.ids[0]!) && !byId.get(first.ids[0]!)!.options.includes(first.option) ? first : null;
-      const kind = !first
+      // A comment that isn't plain ASCII answers nothing; it says so only when its ASCII text names the command or a
+      // decision here (so discussion in another language stays quiet).
+      const mentions = r.ascii.includes(`/${BRAND.cli.toLowerCase()}`) || idsIn(r.ascii).some((x) => byId.has(x));
+      const kind = r.notAscii
+        ? mentions
+          ? 'reply_not_ascii'
+          : null
+        : !first
         ? later.length
           ? 'reply_not_first_line'
           : null
@@ -299,6 +305,7 @@ export abstract class Decisions extends Recovery {
       if (said.has(key)) continue;
       said.add(key);
       const why = {
+        reply_not_ascii: `has a character outside plain ASCII (${r.notAscii?.code} on line ${r.notAscii?.line}: an accented letter, an emoji or another symbol; curly quotes and en or em dashes are fine)`,
         reply_not_first_line: "has its command somewhere other than the start of the comment's first line, where it is not read",
         reply_unsafe_text: 'has a character a reply can\'t hold on its first line (` < > [ ] ( ) " \' \\ & ! ~, or one that prints nothing or reorders text)',
         reply_more_than_one: `has more than one \`/${BRAND.cli}\` command (a reply is one command, on its first line)`,
@@ -308,11 +315,11 @@ export abstract class Decisions extends Recovery {
         reply_without_id: "doesn't name a decision",
       }[kind];
       const ids = open.length ? `open here: ${open.slice(0, 10).join(', ')}${open.length > 10 ? ` and ${open.length - 10} more` : ''}` : 'none is open here';
-      this.emit('coordinator.error', { instance: this.d.instance, where: 'decision reply', kind, message: `${key}: by ${c.author} ${why}, so it answers nothing; a reply is a comment whose first line is \`/${BRAND.cli} <option> <id>\` in plain text, and nothing else in it is a command; ${ids}` });
+      this.emit('coordinator.error', { instance: this.d.instance, where: 'decision reply', kind, message: `${key}: by ${c.author} ${why}, so it answers nothing; a reply is a comment typed in plain ASCII whose first line is \`/${BRAND.cli} <option> <id>\`, with no other command in it; ${ids}` });
     }
     const id = q.id.toLowerCase();
     const picks = parsed
-      .map(({ c, r }) => ({ c, line: r.first && !r.unsafe && r.others.length === 0 && r.first.ids.length === 1 && r.first.ids[0] === id && q.options.includes(r.first.option) ? r.first : undefined }))
+      .map(({ c, r }) => ({ c, line: !r.notAscii && r.first && !r.unsafe && r.others.length === 0 && r.first.ids.length === 1 && r.first.ids[0] === id && q.options.includes(r.first.option) ? r.first : undefined }))
       .filter((x) => x.line !== undefined);
     for (const r of picks.reverse()) {
       const role = await this.commenterRole(r.c.author);
