@@ -10,12 +10,12 @@ import { fileURLToPath } from 'node:url';
 import type { EventPayload } from '../src/events/types.js';
 import { EventLog } from '../src/events/log.js';
 import { withKnownFlags } from '../src/config/schema.js';
-import { FlagState, adoptFlags } from '../src/flags.js';
+import { FlagState, OFF_FILE, adoptFlags } from '../src/flags.js';
 import { exportBundle } from '../src/instance-move.js';
 import { FakeRunner } from '../src/runner.js';
 import { runSuite } from '../src/harness-evals/replay.js';
 import { HarnessTask, type LoadedTask } from '../src/harness-evals/tasks.js';
-import { fixture, git, skip, type Fixture } from './repro-state-graph/harness.js';
+import { coordinator, fixture, git, skip, type Fixture } from './repro-state-graph/harness.js';
 
 const repoRoot = fileURLToPath(new URL('../..', import.meta.url));
 const T = 'test_flag';
@@ -151,6 +151,167 @@ for (const attack of [false, true]) {
       f.log.close();
       rmSync(f.base, { recursive: true, force: true });
       rmSync(s, { recursive: true, force: true });
+    }
+  });
+}
+
+// --- R1173ag AG1 / R1173ah AH1, AH1b, AH2, AH2b (ported from attacks-1173ag/ag-tail.ts, attacks-1173ah/ah-attacks.test.ts) ---
+const flipsOf = (log: EventLog) =>
+  log.read(0, ['flag.flipped']).map((e) => {
+    const p = e.payload as EventPayload<'flag.flipped'>;
+    return [p.flag, p.from, p.to];
+  });
+/** A bundle of another instance whose log is about 2 MB: its import fails on a disk that fills past 256 KiB. */
+function bigBundle(dir: string): string {
+  mkdirSync(join(dir, 'state'));
+  const b = new EventLog(join(dir, 'state', 'events.db'));
+  for (let i = 0; i < 4000; i++) b.append('coordinator.error', { instance: 'x', where: 'w', kind: 'k', message: 'm'.repeat(400) }, 'x');
+  b.close();
+  return exportBundle({ stateDir: join(dir, 'state'), root: null, repo: null, host: 'h', out: join(dir, 'b.wlb') }).file;
+}
+
+for (const stale of [false, true]) {
+  test(`R1173ag AG-2 (${stale ? 'attack' : 'control'}): no ${OFF_FILE}${stale ? ', a stale .import-old beside it' : ''}; an import --force that fails: the target's file state is unchanged`, { skip: skip || process.platform === 'win32' }, () => {
+    const f = fixture();
+    const s = mkdtempSync(join(tmpdir(), 'ag2-src-'));
+    try {
+      const side = join(f.base, OFF_FILE);
+      // An entry from some other log (an anchor this log doesn't have).
+      if (stale) writeFileSync(`${side}.import-old`, `${JSON.stringify({ [T]: { sha: null, after: 999999, at: '2020-01-01T00:00:00.000Z' } })}\n`);
+      const r = importOnFullDisk(bigBundle(s), f.base);
+      assert.match(r.stdout, /THREW/, r.stdout);
+      assert.equal(existsSync(side), false, `a failed import created ${OFF_FILE} the target didn't have`);
+    } finally {
+      f.log.close();
+      rmSync(f.base, { recursive: true, force: true });
+      rmSync(s, { recursive: true, force: true });
+    }
+  });
+}
+
+/** importBundle --force in a child: `kill`, SIGKILL as it removes `<file>.import-old` (after its log write); `full`, a disk that fills. */
+function importChild(bundle: string, stateDir: string, o: { kill?: boolean; full?: boolean }) {
+  const mod = join(repoRoot, 'dist', 'src', 'instance-move.js');
+  const js = `import fs from 'node:fs'; import { syncBuiltinESMExports } from 'node:module';
+    const rm = fs.rmSync;
+    fs.rmSync = (p, ...a) => { if (${o.kill ? 'true' : 'false'} && String(p).endsWith('.import-old')) process.kill(process.pid, 'SIGKILL'); return rm(p, ...a); };
+    syncBuiltinESMExports();
+    const m = await import(${JSON.stringify(mod)});
+    try { m.importBundle({ file: ${JSON.stringify(bundle)}, stateDir: ${JSON.stringify(stateDir)}, root: null, instance: true, force: true }); console.log('IMPORTED'); } catch (e) { console.log('THREW ' + e.code); }`;
+  const cmd = `${o.full ? "trap '' XFSZ; ulimit -f 512; " : ''}exec node --input-type=module -e '${js.replace(/'/g, "'\\''")}'`;
+  return spawnSync('bash', ['-c', cmd], { encoding: 'utf8' });
+}
+
+for (const attack of [false, true]) {
+  test(`R1173ah AH1 (${attack ? 'attack' : 'control'}): import #1 ${attack ? 'killed between its log write and its removal of .import-old' : 'completes'}; import #2 fails (disk full): the next start writes no flip that never ran`, { skip: skip || process.platform === 'win32' }, async () => {
+    const f = fixture();
+    const sd = join(f.base, 'sd');
+    const bk = mkdtempSync(join(tmpdir(), 'ah1-bk-'));
+    const big = mkdtempSync(join(tmpdir(), 'ah1-big-'));
+    mkdirSync(sd);
+    try {
+      await withKnownFlags([T], async () => {
+        mainTurnsOn(f);
+        let log = new EventLog(join(sd, 'events.db'));
+        const adoptInto = (l: EventLog) => adoptFlags({ flags: new FlagState(), log: l, repo: f.repo, actor: 'i', branch: 'main', check: () => [] });
+        adoptInto(log);
+        assert.deepEqual(flipsOf(log), [[T, false, true]]);
+        // A backup of this instance (its log reads T on), exported now.
+        mkdirSync(join(bk, 'state'));
+        log.db.exec(`VACUUM INTO '${join(bk, 'state', 'events.db')}'`);
+        const backup = exportBundle({ stateDir: join(bk, 'state'), root: null, repo: null, host: 'h', out: join(bk, 'b.wlb') }).file;
+        // Later: more rows, then a process turned T off and was killed after saving its pending off, before the row.
+        for (let i = 0; i < 5; i++) log.append('coordinator.error', { instance: 'i', where: 'w', kind: 'k', message: 'm' }, 'i');
+        const after = log.lastId();
+        const at = (log.db.prepare('SELECT ts FROM events WHERE id = ?').get(after) as { ts: string }).ts;
+        writeFileSync(join(sd, OFF_FILE), `${JSON.stringify({ [T]: { sha: null, after, at } })}\n`);
+        log.close();
+        // Import #1: the owner restores the backup.
+        importChild(backup, sd, { kill: attack });
+        // Import #2: another bundle on a disk that fills: it throws, the backup's log stays.
+        assert.match(importChild(bigBundle(big), sd, { full: true }).stdout, /THREW/);
+        // A fresh process on the backup's log; main still has T on, as it had throughout the backup's log.
+        log = new EventLog(join(sd, 'events.db'));
+        const before = flipsOf(log);
+        adoptInto(log);
+        assert.deepEqual(flipsOf(log), before, "no off/on pair the backup's log never had");
+        log.close();
+      });
+    } finally {
+      f.log.close();
+      rmSync(f.base, { recursive: true, force: true });
+      rmSync(bk, { recursive: true, force: true });
+      rmSync(big, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const attack of [false, true]) {
+  test(`R1173ah AH1b (${attack ? 'attack' : 'control'}): an export of a state folder with ${attack ? `${OFF_FILE}.import-old` : 'events.db-wal'} beside the log leaves it out`, () => {
+    const d = mkdtempSync(join(tmpdir(), 'ah1b-'));
+    try {
+      const log = new EventLog(join(d, 'events.db'));
+      log.append('coordinator.error', { instance: 'i', where: 'w', kind: 'k', message: 'm' }, 'i');
+      log.close();
+      const name = attack ? `${OFF_FILE}.import-old` : 'events.db-wal';
+      writeFileSync(join(d, name), attack ? '{"test_flag":{"sha":null,"after":1,"at":"x"}}\n' : 'x');
+      const r = exportBundle({ stateDir: d, root: null, repo: null, host: 'h', out: join(d, '..', `${d.split('/').pop()}.wlb`) });
+      rmSync(r.file, { force: true });
+      assert.ok(!r.files.includes(`state/${name}`), `${name} is carried in the bundle`);
+    } finally {
+      rmSync(d, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const attack of [false, true]) {
+  test(`R1173ah AH2 (${attack ? 'attack' : 'control'}): main names no flag; ${attack ? 'FlagState.prototype.on reassigned outside src/flags.ts' : 'nothing else'}: the coordinator's flag stays off`, { skip }, async () => {
+    const f = fixture();
+    const realOn = FlagState.prototype.on;
+    try {
+      await withKnownFlags([T], async () => {
+        const c = coordinator(f, new FakeRunner(() => ({ structured: { summary: 's' } })));
+        await c.tick();
+        assert.equal(c.flags.on(T), false);
+        if (attack) {
+          assert.ok(Object.isFrozen(FlagState.prototype) && Object.isFrozen(FlagState), 'the class and its methods are frozen');
+          assert.throws(() => {
+            FlagState.prototype.on = () => true;
+          }, TypeError);
+        }
+        await c.tick();
+        assert.equal(c.flags.on(T), false, 'a flag reads on that no commit turned on and the log never recorded');
+      });
+    } finally {
+      if (!Object.isFrozen(FlagState.prototype)) FlagState.prototype.on = realOn;
+      f.log.close();
+      rmSync(f.base, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const attack of [false, true]) {
+  test(`R1173ah AH2b (${attack ? 'attack' : 'control'}): two Coordinators; ${attack ? "one's flags handle assigned to the other (readonly is compile-time)" : 'untouched'}: their states stay apart`, { skip }, async () => {
+    const f = fixture();
+    const g = fixture();
+    try {
+      await withKnownFlags([T], async () => {
+        mainTurnsOn(f);
+        const a = coordinator(f, new FakeRunner(() => ({ structured: { summary: 's' } })));
+        const b = coordinator(g, new FakeRunner(() => ({ structured: { summary: 's' } })));
+        if (attack) {
+          const d = Object.getOwnPropertyDescriptor(b, 'flags')!;
+          assert.equal(d.writable || d.configurable, false, 'not writable, not configurable');
+          assert.throws(() => Object.assign(b, { flags: a.flags }), TypeError);
+        }
+        await a.tick();
+        assert.equal(b.flags.on(T), false, "b's flag reads on from a's repo, unrecorded in b's log");
+      });
+    } finally {
+      f.log.close();
+      g.log.close();
+      rmSync(f.base, { recursive: true, force: true });
+      rmSync(g.base, { recursive: true, force: true });
     }
   });
 }

@@ -48,9 +48,11 @@ new behaviour can be tried on one repo before it reaches the rest. Code: `src/co
     with an error naming it, so the config step records a `coordinator.error` at every tick until it clears; a failure
     of the config refresh in the same tick is recorded too, as its own error.
     Limits:
-    - An import killed between moving the target's file aside and the end of its log write leaves the file at
-      `flags-unrecorded.json.import-old`, which nothing reads: its unrecorded offs are lost. Move it back by hand
-      before the next start if the target's log is still its own.
+    - An import killed between moving the target's file aside and removing it leaves the file at
+      `flags-unrecorded.json.import-old`, which nothing reads: its unrecorded offs are lost. If the kill came before
+      the log write ended, the target's log is still its own: move it back by hand before the next start; if after,
+      the log is the bundle's and the file belongs to none, so delete it. Nothing else takes it up: a later import
+      puts back only a file it moved itself, and an export leaves `.import-old` out.
     - A restored or replaced log whose row at an entry's position was written again with the very same millisecond
       stamp reads as the entry's own log: if main turns the flag on, the next start writes that off and the on once
       more.

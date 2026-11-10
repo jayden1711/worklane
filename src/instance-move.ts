@@ -28,7 +28,7 @@ const LEAVE_OUT: [RegExp, string][] = [
   [/\.lock$|\.lock\/|(^|\/)locks?\//, 'a lock'],
   [/\.log(\.\d+)?$/, 'a log'],
   [/(^|\/)(worktrees|slots|tasks|dep-cache|chat\/pending)\//, "this machine's working files"],
-  [/\.tmp$|-wal$|-shm$|-journal$|(^|\/)\.[^/]+\.[0-9a-f]{16}\.new$/, 'a temporary file'],
+  [/\.tmp$|\.import-old$|-wal$|-shm$|-journal$|(^|\/)\.[^/]+\.[0-9a-f]{16}\.new$/, 'a temporary file'],
   // Removed with Siri (#743): its device store is never carried, so no bundle brings a live device to an older engine.
   [/^siri(\/|$)|^siri-gateway-token$/, 'removed with Siri (#743)'],
 ];
@@ -163,11 +163,13 @@ export function importBundle(o: { file: string; stateDir: string; root: string |
       if (rel === EVENTS) {
         const side = join(o.stateDir, OFF_FILE);
         const aside = `${side}.import-old`;
-        if (existsSync(side)) renameSync(side, aside);
+        // R1173ah AH1: only what this import moved goes back (a leftover .import-old is another log's).
+        const moved = existsSync(side);
+        if (moved) renameSync(side, aside);
         try {
           writeGroupOnly(to, data);
         } catch (e) {
-          if (existsSync(aside)) renameSync(aside, side);
+          if (moved) renameSync(aside, side);
           throw e;
         }
         rmSync(aside, { force: true });
