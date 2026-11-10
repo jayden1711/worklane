@@ -1,0 +1,12 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+test('unit states, swallowing-catch', () => {
+  try {
+    if (!process.env.FIXTURE_NEVER) throw new Error('no bus');
+    spawnSync('systemctl', ['--version']);
+  } catch {
+    // swallowed
+  }
+  assert.ok(true);
+});

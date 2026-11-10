@@ -29,7 +29,7 @@ type Script = {
   signUseList: (ts: unknown, path: string, text: string) => { at: string; pin: string }[];
   signProblems: (ts: unknown, texts: Map<string, string>, allow?: Allow) => string[];
   planProblems: (ts: unknown, path: string, text: string, gates: { name: string; line: number; column: number }[]) => string[];
-  mustRun: (ts: unknown, path: string, text: string, line: number, column: number) => { end: number; subtests: number[] } | null;
+  mustRun: (ts: unknown, path: string, text: string, line: number, column: number) => { ends: { line: number; what: string }[]; subtests: number[]; sign: number[]; refused: string | null } | null;
 };
 type Allow = { uses?: Record<string, { why: string; uses: string[] }>; skipImports?: Record<string, string>; runtime?: Record<string, string> };
 const sa = (await import(pathToFileURL(join(repoRoot, 'scripts', 'ci', 'systemd-acceptance.mjs')).href)) as Script;
@@ -969,7 +969,7 @@ test("R1169ab D2: a gate opens with node's own count; a sign test's own function
     '  await t.test(\'a\', () => {});',
     '  if (x) await t.test(\'b\', () => {});',
     '  try {',
-    '    one();',
+    `    run('${sd}ctl');`,
     '    two();',
     '  } finally {',
     '    three();',
@@ -977,10 +977,28 @@ test("R1169ab D2: a gate opens with node's own count; a sign test's own function
     '});',
     "test('e', () => go());",
   ].join('\n');
-  assert.deepEqual(sa.mustRun(ts, file, text, 2, 1), { end: 7, subtests: [3, 4] });
-  assert.deepEqual(sa.mustRun(ts, file, text, 12, 1), { end: 12, subtests: [] }, 'an expression body: its own line');
+  const its = (line: number, what = 'its function') => ({ line, what });
+  assert.deepEqual(sa.mustRun(ts, file, text, 2, 1), { ends: [its(7), its(3, 'the subtest at line 3'), its(4, 'the subtest at line 4')], subtests: [3, 4], sign: [6], refused: null });
+  assert.deepEqual(sa.mustRun(ts, file, text, 12, 1), { ends: [its(12)], subtests: [], sign: [], refused: null }, 'an expression body: its own line');
+  // Every way to start a subtest of the context (R1169ac D2), and a function given by name (R1169ac D1).
+  const shapes = [
+    "import { test } from 'node:test';",
+    'function body(t) {',
+    `  t['test']('a', () => { run('${sd}ctl'); });`,
+    '  const sub = t.test.bind(t);',
+    "  sub('b', named);",
+    '  const { test: other } = t;',
+    "  other('c', () => {});",
+    '}',
+    `function named() { run('journalctl'); }`,
+    "test('n', body);",
+    "test('m', imported);",
+  ].join('\n');
+  const n = sa.mustRun(ts, file, shapes, 10, 1)!;
+  assert.deepEqual([n.subtests, n.sign, n.refused], [[3, 5, 7], [3, 9], null], "t['test'], a bound alias, a destructured one; a same-file named function read");
+  assert.match(String(sa.mustRun(ts, file, shapes, 11, 1)!.refused), /its function is given by a name this file doesn't declare/, 'an imported function is refused, never skipped');
   // problems(): judged on the run's coverage of the file.
-  const t = { name: 's', line: 2, column: 1, label: "'s'", subtests: true, mustRun: { end: 7, subtests: [3, 4] } };
+  const t = { name: 's', line: 2, column: 1, label: "'s'", subtests: true, mustRun: { ends: [its(7), its(3, 'the subtest at line 3')], subtests: [3, 4], sign: [6], refused: null } };
   const ev = (name: string, line: number, nesting = 0) => ({ type: 'test:pass', name, nesting, file: '/r/dist/test/g.test.js', line, column: 1, skip: null, todo: null });
   const events = [ev('a', 3, 1), ev('b', 4, 1), ev('s', 2)];
   const run = (lines: [number, number][] | null, excused: string[] = []) => sa.problems([{ file: 'g.test.ts', gates: [], events, signTests: [t], excused: new Set(excused), coverage: lines && new Map(lines) } as never]);
@@ -988,6 +1006,8 @@ test("R1169ab D2: a gate opens with node's own count; a sign test's own function
   assert.deepEqual(run(all()), [], 'ran to its end, every subtest started');
   assert.match(run(all([7])).join('\n'), /its function's last statement \(line 7\) never ran: it returned early/, 'an early return');
   assert.match(run(all([4])).join('\n'), /the subtest at line 4 never started/, 'a subtest started only sometimes');
+  assert.match(run(all([3])).join('\n'), /the subtest at line 3's last statement \(line 3\) never ran/, "a subtest's early return");
+  assert.match(run(all([6])).join('\n'), /line 6, holding systemd's sign, never ran/, 'a branch, an empty loop or a catch left the systemd work unrun');
   assert.match(run(null).join('\n'), /no coverage of its file came back/, 'no coverage is never a pass');
   assert.deepEqual(run(all([7]), ['2:1']), [], 'an excused test (it skips here) is not judged on its coverage');
 });

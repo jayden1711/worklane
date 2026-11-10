@@ -1,0 +1,3 @@
+import { test } from 'node:test';
+const systemCi = true;
+test('base', { skip: !systemCi && 'needs systemd' }, (t) => { t.plan(1); try { t.assert.ok(process.env.FIXTURE_NEVER); } catch { /* swallowed */ } });

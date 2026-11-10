@@ -1,0 +1,3 @@
+import { test } from 'node:test';
+const systemCi = true;
+test('base', { skip: !systemCi && 'needs systemd' }, async (t) => { t.plan(1); await t.test('s', (s) => { if (!process.env.FIXTURE_NEVER) return; s.assert.ok(true); }); });

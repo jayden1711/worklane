@@ -1014,5 +1014,77 @@
   "r1169ab-a2c-control-sign-runs-to-end": [
     0,
     "^$"
+  ],
+  "r1169ad-if-else": [
+    1,
+    "test/y\\.test\\.ts: unit states, if-else: line \\d+, holding systemd's sign, never ran"
+  ],
+  "r1169ad-if-else-control": [
+    0,
+    "^$"
+  ],
+  "r1169ad-empty-loop": [
+    1,
+    "test/y\\.test\\.ts: unit states, empty-loop: line \\d+, holding systemd's sign, never ran"
+  ],
+  "r1169ad-empty-loop-control": [
+    0,
+    "^$"
+  ],
+  "r1169ad-swallowing-catch": [
+    1,
+    "test/y\\.test\\.ts: unit states, swallowing-catch: line \\d+, holding systemd's sign, never ran"
+  ],
+  "r1169ad-swallowing-catch-control": [
+    0,
+    "^$"
+  ],
+  "r1169ad-subtest-early-return": [
+    1,
+    "test/y\\.test\\.ts: unit states, in a subtest: the subtest at line \\d+'s last statement \\(line \\d+\\) never ran"
+  ],
+  "r1169ad-subtest-early-return-control": [
+    0,
+    "^$"
+  ],
+  "r1169ac-element-access-subtest": [
+    1,
+    "test/y\\.test\\.ts: unit states, t\\[test\\]: the subtest at line \\d+'s last statement"
+  ],
+  "r1169ac-element-access-subtest-control": [
+    0,
+    "^$"
+  ],
+  "r1169ac-aliased-subtest": [
+    1,
+    "test/y\\.test\\.ts: unit states, an alias: the subtest at line \\d+'s last statement"
+  ],
+  "r1169ac-aliased-subtest-control": [
+    0,
+    "^$"
+  ],
+  "r1169ac-named-function": [
+    1,
+    "test/y\\.test\\.ts: unit states, by name: its function's last statement \\(line \\d+\\) never ran"
+  ],
+  "r1169ac-named-function-control": [
+    0,
+    "^$"
+  ],
+  "r1169ac-named-function-elsewhere": [
+    2,
+    "test/y\\.test\\.ts: the systemctl unit restarts: its function is given by a name this file doesn't declare"
+  ],
+  "r1169ad-gate-catch": [
+    2,
+    "test/x\\.test\\.ts: base: a t\\.assert inside a try with a catch"
+  ],
+  "r1169ad-gate-catch-control": [
+    0,
+    "^$"
+  ],
+  "r1169ad-gate-subtest-no-plan": [
+    2,
+    "test/x\\.test\\.ts: base: the subtest at line \\d+ doesn't open with its own"
   ]
 }

@@ -1,0 +1,8 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+function body() {
+  if (!process.env.FIXTURE_NEVER) return;
+  spawnSync('systemctl', ['--version']);
+}
+test('unit states, by name', body);
