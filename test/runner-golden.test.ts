@@ -201,7 +201,10 @@ const NO_ATTRIBUTION_PIN = { attribution: { commit: '', pr: '', sessionUrl: fals
 const STREAM_FLAGS = ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose'];
 // Every case here is a guarded run (the instance's guardrails): it loads no setting source, --setting-sources '' (#958,
 // the owner's decision, 2026-11-08; was 'project'). Every other run's '' is held in test/planner-no-project-sources.test.ts.
-const FIXED_FLAGS = ['--setting-sources', '', '--strict-mcp-config', '--permission-mode', 'dontAsk'];
+const FIXED_FLAGS = ['--permission-mode', 'dontAsk'];
+// The launch's guards end every argv (R1185aa D1, intended: Claude Code takes the last --settings and --setting-sources,
+// so nothing earlier can stand in for them); the run's --settings come just before them.
+const GUARD_TAIL = ['--setting-sources', '', '--strict-mcp-config'];
 const PROMPT_LINE = '{"type":"user","message":{"role":"user","content":"do the task"}}';
 /** What every agent's environment starts from: the allowed variables of the engine's, then the fixed agent ones. */
 const AGENT_ENV = {
@@ -259,6 +262,8 @@ const GOLDEN: Record<string, unknown> = {
     {
       name: 'claude',
       argv: [
+        ...STREAM_FLAGS,
+        ...FULL_REQUEST_FLAGS,
         '--settings',
         {
           sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false, autoAllowBashIfSandboxed: true, network: { allowedDomains: ['registry.npmjs.org', 'example.org'] }, filesystem: { denyRead: ['/srv/coordinator'] } },
@@ -269,8 +274,7 @@ const GOLDEN: Record<string, unknown> = {
           ...NO_ATTRIBUTION_PIN,
           outputStyle: '<check>',
         },
-        ...STREAM_FLAGS,
-        ...FULL_REQUEST_FLAGS,
+        ...GUARD_TAIL,
       ],
       env: { ...AGENT_ENV, ...FULL_REQUEST_ENV },
       cwd: '<case>/work',
@@ -282,10 +286,11 @@ const GOLDEN: Record<string, unknown> = {
     {
       name: 'claude',
       argv: [
-        '--settings',
-        { ...GUARD, env: { '<PREFIX>_AGENT': '1', '<PREFIX>_ROLE': 'worker' }, ...NO_ATTRIBUTION_PIN, apiKeyHelper: 'cat -- /etc/keys/agent-api-key', outputStyle: '<check>' },
         ...STREAM_FLAGS,
         '--model', 'sonnet', ...FIXED_FLAGS, '--max-turns', '10', '--max-budget-usd', '1', '--allowedTools', 'Read',
+        '--settings',
+        { ...GUARD, env: { '<PREFIX>_AGENT': '1', '<PREFIX>_ROLE': 'worker' }, ...NO_ATTRIBUTION_PIN, apiKeyHelper: 'cat -- /etc/keys/agent-api-key', outputStyle: '<check>' },
+        ...GUARD_TAIL,
       ],
       env: AGENT_ENV,
       cwd: '<case>/work',
@@ -296,10 +301,11 @@ const GOLDEN: Record<string, unknown> = {
     {
       name: 'claude',
       argv: [
-        '--settings',
-        { ...GUARD, env: { '<PREFIX>_AGENT': '1', '<PREFIX>_ROLE': 'worker' }, ...NO_ATTRIBUTION_PIN, apiKeyHelper: 'cat -- /etc/keys/open', outputStyle: '<check>' },
         ...STREAM_FLAGS,
         '--model', 'open-model-1', ...FIXED_FLAGS, '--max-turns', '10', '--max-budget-usd', '1', '--allowedTools', 'Read',
+        '--settings',
+        { ...GUARD, env: { '<PREFIX>_AGENT': '1', '<PREFIX>_ROLE': 'worker' }, ...NO_ATTRIBUTION_PIN, apiKeyHelper: 'cat -- /etc/keys/open', outputStyle: '<check>' },
+        ...GUARD_TAIL,
       ],
       env: { ...AGENT_ENV, CLAUDE_CONFIG_DIR: '<tmp>/<cli>-provider-XXXXXX', ANTHROPIC_BASE_URL: 'https://models.example.test/v1' },
       cwd: '<case>/work',
@@ -313,10 +319,11 @@ const GOLDEN: Record<string, unknown> = {
       argv: [
         ...sudoFullRequest,
         'claude',
-        '--settings',
-        { ...GUARD, env: FULL_REQUEST_SETTINGS_ENV, ...NO_ATTRIBUTION_PIN, outputStyle: '<check>' },
         ...STREAM_FLAGS,
         ...FULL_REQUEST_FLAGS,
+        '--settings',
+        { ...GUARD, env: FULL_REQUEST_SETTINGS_ENV, ...NO_ATTRIBUTION_PIN, outputStyle: '<check>' },
+        ...GUARD_TAIL,
       ],
       env: { PATH: '<bin>' },
       cwd: '<case>/work',
