@@ -71,7 +71,9 @@ type Tier = 'both' | 'pr-only' | 'push-only' | 'slow';
 type Check = { name: string; key: string; file: string; tier: Tier; push: boolean; batch: boolean; pr: boolean };
 
 const PR_ONLY = /^github\.event_name == 'pull_request'$/;
-const PUSH_ONLY = /^github\.event_name == 'push'$/;
+// A push to main, or also a manual run (workflow_dispatch: the systemd acceptance job, once on a pull request's final
+// head before it merges, #1169): still never a pull_request run, so it's no check a PR requires.
+const PUSH_ONLY = /^github\.event_name == 'push'(?: \|\| github\.event_name == 'workflow_dispatch')?$/;
 /** ci-slow.yml's jobs: each runs when the scope job (scripts/ci/slow-jobs.sh) lists its own key. */
 const SLOW = /^\$\{\{ !cancelled\(\) && contains\(needs\.scope\.outputs\.run, ' ([a-z0-9-]+) '\) \}\}$/;
 /** A summary job runs whatever its needs did, so a failed, cancelled or skipped need fails it rather than skipping it. */
