@@ -33,12 +33,13 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: the pinned runner release is the one GitHub publishes (downloaded, sha256 against the pin, its layout)
+        shell: /usr/bin/bash --noprofile --norc -p -eo pipefail {0}
         env:
           BASH_ENV: ''
         run: |
           v="$(sed -n 's/^runner_version=//p' scripts/setup/ci-runner.sh)"
           s="$(sed -n 's/^runner_sha256_x64=//p' scripts/setup/ci-runner.sh)"
-          bash -p "$GITHUB_WORKSPACE/scripts/ci/fetch-pinned.sh" "https://github.com/actions/runner/releases/download/v$v/actions-runner-linux-x64-$v.tar.gz" "$s" "$RUNNER_TEMP/runner.tgz"
+          /usr/bin/bash -p "$GITHUB_WORKSPACE/scripts/ci/fetch-pinned.sh" "https://github.com/actions/runner/releases/download/v$v/actions-runner-linux-x64-$v.tar.gz" "$s" "$RUNNER_TEMP/runner.tgz"
           tar -tzf "$RUNNER_TEMP/runner.tgz" > "$RUNNER_TEMP/runner.list"
           for f in ./config.sh ./run.sh ./bin/Runner.Listener; do grep -qxF "$f" "$RUNNER_TEMP/runner.list" || { echo "the release has no $f" >&2; exit 1; }; done
           grep -q '^\./externals/' "$RUNNER_TEMP/runner.list" || { echo "the release has no externals/" >&2; exit 1; }

@@ -211,7 +211,7 @@ jobs:
           # The bootstrap's own pinned Node, in a scratch place off every PATH, removed once the tarball is made.
           v="$(sed -n 's/^NODE_VERSION=//p' "$ws/scripts/bootstrap.sh")"
           sum="$(sed -n 's/^NODE_SHA256_LINUX_X64=//p' "$ws/scripts/bootstrap.sh")"
-          bash -p "$ws/scripts/ci/fetch-pinned.sh" "https://nodejs.org/dist/$v/node-$v-linux-x64.tar.xz" "$sum" /tmp/node.tar.xz
+          /usr/bin/bash -p "$ws/scripts/ci/fetch-pinned.sh" "https://nodejs.org/dist/$v/node-$v-linux-x64.tar.xz" "$sum" /tmp/node.tar.xz
           mkdir -p /opt/pack-node && tar -xJf /tmp/node.tar.xz -C /opt/pack-node --strip-components 1
       - name: pack this commit's engine inside WSL (dist/ and the web UI built, as in a release), with a Node that's gone after
         run: |
@@ -1630,6 +1630,7 @@ jobs:
       # merges; a rerun reuses the PR; init says so and exits non-zero, with how the App was made; doctor as the
       # coordinator reads what init (root) recorded; once the PR merges, the rerun and init succeed.
       - name: "server mode, no .worklane/: a second fake GitHub, gitleaks, the instance, and the App by hand (B3)"
+        shell: /usr/bin/bash --noprofile --norc -p -eo pipefail {0}
         env:
           BASH_ENV: ''
           GH_FAKE2: http://127.0.0.1:8998
@@ -1648,7 +1649,7 @@ jobs:
           { echo "F2=$f2"; echo "GH_FAKE2=$GH_FAKE2"; } >> "$GITHUB_ENV"
           # gitleaks, pinned and checked as bootstrap.sh has it: the checkout's pre-commit secret scan runs it on the setup commit.
           v="$(sed -n 's/^GITLEAKS_VERSION=//p' scripts/bootstrap.sh)" && sum="$(sed -n 's/^GITLEAKS_SHA256_LINUX_X64=//p' scripts/bootstrap.sh)"
-          bash -p "$GITHUB_WORKSPACE/scripts/ci/fetch-pinned.sh" "https://github.com/gitleaks/gitleaks/releases/download/v$v/gitleaks_${v}_linux_x64.tar.gz" "$sum" "$f2/gitleaks.tgz"
+          /usr/bin/bash -p "$GITHUB_WORKSPACE/scripts/ci/fetch-pinned.sh" "https://github.com/gitleaks/gitleaks/releases/download/v$v/gitleaks_${v}_linux_x64.tar.gz" "$sum" "$f2/gitleaks.tgz"
           tar -xzf "$f2/gitleaks.tgz" -C "$f2" gitleaks && sudo install -m 0755 "$f2/gitleaks" /usr/local/bin/gitleaks
           for u in worklane-gamma worklane-dashboard-gamma; do
             sudo install -d "/etc/systemd/system/$u.service.d"
