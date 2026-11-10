@@ -8,7 +8,7 @@ import { gitExecFileSync, gitSpawnSync } from './os/git.js';
 import { createHash, randomBytes } from 'node:crypto';
 import { cpSync, mkdirSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { adoptFlags } from './flags.js';
+import { FlagState, adoptFlags } from './flags.js';
 import { CHECKPOINT_EVERY_MS, chainFileFor, checkpoint } from './audit-chain.js';
 import { BRAND } from './brand.js';
 import { RECOMMENDATION_PREFIX } from './decision-ask.js';
@@ -102,6 +102,9 @@ type BuildOut = { stop: true } | { stop: false; stuck?: string; raise?: Level; n
 export const STARTUP_FAILURE_SECS = 90;
 
 export class Coordinator extends AutomationRuns {
+  /** This coordinator's feature flags (src/flags.ts): its own, never another Coordinator's in the process (R1173af AF1). */
+  readonly flags = new FlagState();
+
   // ---------------------------------------------------------------- tick
 
   /** One deterministic pass: reconcile, handle approvals, land, dispatch. */
@@ -129,11 +132,24 @@ export class Coordinator extends AutomationRuns {
       // branch and its config is here and valid (by this instance's checks too); otherwise every flag is off. Adopted
       // here only, even when refreshing the config threw (R1173m: a failed config.applied write skipped it, and a flag
       // main turned off stayed on). Every flip is audited against the last state the log recorded (#1173 reviews).
+      // R1173ae AE1: both failures are recorded. A held flag throws at every tick of a lasting fault, and a throw from
+      // a `finally` replaced the refresh's own error, so a failing refresh left no coordinator.error.
+      let refreshFailed: { e: unknown } | null = null;
       try {
         this.refreshConfig();
-      } finally {
-        adoptFlags({ log: this.d.log, repo: this.d.repo, actor: this.d.instance, branch: this.branch, check: this.d.liveConfig?.check ?? (() => []) });
+      } catch (e) {
+        refreshFailed = { e };
       }
+      try {
+        adoptFlags({ flags: this.flags, log: this.d.log, repo: this.d.repo, actor: this.d.instance, branch: this.branch, check: this.d.liveConfig?.check ?? (() => []) });
+      } catch (e) {
+        if (refreshFailed) {
+          const r = refreshFailed.e as { kind?: string; message?: string };
+          this.emit('coordinator.error', { instance: this.d.instance, where: 'config', kind: r?.kind ?? 'error', message: String(r?.message ?? r).slice(0, 500) });
+        }
+        throw e;
+      }
+      if (refreshFailed) throw refreshFailed.e;
     }, undefined);
     await step('settings', () => this.refreshSettings(), undefined);
     // The audit chain's checkpoint (src/audit-chain.ts, docs/audit-log.md): at most every 10 minutes. WHY early: a step

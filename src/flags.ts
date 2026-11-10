@@ -1,7 +1,10 @@
 // Feature flags for risky engine changes (docs/feature-flags.md): a new behaviour that could hurt a project ships
 // behind a flag, off until a repo turns it on.
-//   - One reader: flagOn(name). It reads only this module's snapshot of the flags the default branch's committed
-//     config turns on, at a recorded commit; no config object carries flags (every parsed `flags:` is a frozen {}).
+//   - One reader: a coordinator's `flags.on(name)` (a FlagState, below). It reads only that coordinator's snapshot of
+//     the flags the default branch's committed config turns on, at a recorded commit; no config object carries flags
+//     (every parsed `flags:` is a frozen {}). Per coordinator, never per process (R1173af AF1: a harness-eval replay
+//     runs its own Coordinator in the instance's process, and a shared state let a task repo's config flip the
+//     instance's flags unrecorded).
 //     WHY (#1173 reviews R1173g, R1173h): with flags on the config, every path that built one (the checkout's start,
 //     the tool guard, the CLI, the dashboard, loadConfigAt on a branch) was another way to read a flag on, a mutable
 //     object a write could turn one on in, and an inherited property a polluted prototype could.
@@ -28,10 +31,42 @@ import { loadConfigAt, type Config, type ConfigError } from './config/load.js';
 
 export { FLAG_NAME, FLAGS, RETIRED_FLAGS, flagsSchema, type FlagInfo } from './config/schema.js';
 
-/** The flags on, at the commit they were read from; null: none adopted (every flag off). Never handed out. */
-let snapshot: Readonly<{ sha: string; on: readonly string[] }> | null = null;
-/** Flags this process turned off whose off record isn't durable yet, each with the commit that turned it off. */
-const offUnrecorded = new Map<string, string | null>();
+/**
+ * One coordinator's flags: what it adopted, and its offs not recorded yet. R1173af AF1: these were module globals, one
+ * set per process, and a harness-eval replay's own Coordinator in the instance's process (src/harness-evals/replay.ts)
+ * turned the instance's flags on and off from a task repo's config, with no record in the instance's log. Each
+ * Coordinator owns one now (`coordinator.flags`), and only this module can read or change what is inside: a FlagState
+ * is a handle, its state kept here (below), so nothing outside can write a flag on.
+ */
+export class FlagState {
+  constructor() {
+    inner.set(this, { snapshot: null, offUnrecorded: new Map(), offFile: null });
+    Object.freeze(this);
+  }
+  /** Whether a flag is on: only when the default branch's committed config, at the adopted commit, says `true` for it. */
+  on(name: string): boolean {
+    const s = of(this).snapshot;
+    return s !== null && s.on.includes(name);
+  }
+  /** What is on, and from which commit (a copy): for the audit and the dashboard. */
+  state(): { sha: string | null; on: string[] } {
+    const s = of(this).snapshot;
+    return { sha: s?.sha ?? null, on: [...(s?.on ?? [])] };
+  }
+}
+type Inner = {
+  /** The flags on, at the commit they were read from; null: none adopted (every flag off). Never handed out. */
+  snapshot: Readonly<{ sha: string; on: readonly string[] }> | null;
+  /** Flags this coordinator turned off whose off record isn't durable yet, each with the commit that turned it off. */
+  offUnrecorded: Map<string, string | null>;
+  offFile: OffFile | null;
+};
+const inner = new WeakMap<FlagState, Inner>();
+function of(s: FlagState): Inner {
+  const i = inner.get(s);
+  if (!i) throw new Error('not a FlagState');
+  return i;
+}
 /**
  * The same offs, kept on disk beside the event log until the log stores their off rows (R1173r 1: a SQLITE_BUSY longer
  * than the busy timeout ends the tick and the process, and the next process knew nothing of them). Written, synced,
@@ -44,7 +79,7 @@ const offUnrecorded = new Map<string, string | null>();
 // (`at`). A log restored from a backup, replaced, or with an `after` past its last id doesn't have that row: the entry
 // is from another log, and is judged against this one (below).
 type OffEntry = { sha: string | null; after: number; at: string | null };
-let offFile: { path: string; held: Map<string, OffEntry>; saved: boolean; judged: boolean } | null = null;
+type OffFile = { path: string; held: Map<string, OffEntry>; saved: boolean; judged: boolean };
 /** The file's name, beside the event log (instance-move clears it when a log is imported over this one). */
 export const OFF_FILE = 'flags-unrecorded.json';
 /** The log's last stored id and that row's stamp: where an entry stands in this log. */
@@ -59,11 +94,11 @@ function anchored(log: EventLog, e: OffEntry): boolean {
   const r = log.db.prepare('SELECT ts FROM events WHERE id = ?').get(e.after) as { ts: string } | undefined;
   return r?.ts === e.at;
 }
-function loadOffFile(log: EventLog): void {
+function loadOffFile(st: Inner, log: EventLog): void {
   if (typeof log.path !== 'string' || log.path === ':memory:') return; // no folder to keep it in: memory only
   const path = join(dirname(log.path), OFF_FILE);
-  if (offFile?.path !== path) {
-    offFile = { path, held: new Map(), saved: true, judged: false };
+  if (st.offFile?.path !== path) {
+    st.offFile = { path, held: new Map(), saved: true, judged: false };
     let saved: unknown;
     try {
       saved = JSON.parse(readFileSync(path, 'utf8'));
@@ -75,11 +110,11 @@ function loadOffFile(log: EventLog): void {
         const { sha, after, at } = (v && typeof v === 'object' ? v : {}) as { sha?: unknown; after?: unknown; at?: unknown };
         if (!FLAG_NAME.test(flag) || !(sha === null || (typeof sha === 'string' && /^[0-9a-f]{40,64}$/.test(sha)))) continue;
         if (typeof after !== 'number' || !Number.isSafeInteger(after) || after < 0) continue;
-        offFile.held.set(flag, { sha, after, at: typeof at === 'string' ? at : null });
+        st.offFile.held.set(flag, { sha, after, at: typeof at === 'string' ? at : null });
       }
     }
   }
-  if (!offFile.judged) judgeOffFile(log);
+  if (!st.offFile.judged) judgeOffFile(st, log);
 }
 /**
  * The file's entries judged against this log, once per process: one from another log (restored, replaced, a bad
@@ -88,47 +123,47 @@ function loadOffFile(log: EventLog): void {
  * fails (R1173x X5: SQLITE_BUSY at a process's first tick) leaves them to judge at the next tick; their flags stay off
  * until then.
  */
-function judgeOffFile(log: EventLog): void {
-  if (!offFile) return;
+function judgeOffFile(st: Inner, log: EventLog): void {
+  if (!st.offFile) return;
   // R1173ab AB3: any failure, a read or the save, puts the entries back as they were before the judge ran (a read that
   // threw after a re-anchor left that re-anchor in memory only, and the next judge took it as anchored).
-  const before = new Map(offFile.held);
+  const before = new Map(st.offFile.held);
   try {
-    if (offFile.held.size) {
+    if (st.offFile.held.size) {
       const recorded = recordedFlags(log);
       let changed = false;
-      for (const [flag, e] of offFile.held) {
+      for (const [flag, e] of st.offFile.held) {
         if (anchored(log, e)) continue;
-        if (recorded.get(flag)) offFile.held.set(flag, { sha: e.sha, ...anchorOf(log) });
-        else offFile.held.delete(flag);
+        if (recorded.get(flag)) st.offFile.held.set(flag, { sha: e.sha, ...anchorOf(log) });
+        else st.offFile.held.delete(flag);
         changed = true;
       }
       if (changed) {
-        saveOffFile();
+        saveOffFile(st);
         // R1173z Z2: a re-anchor that can't be saved would be redone at the next start, and its off written again:
         // the entries go back as they were and stay unjudged (their flags off) until the file can be saved.
-        if (!offFile.saved) throw new Error(`${OFF_FILE} couldn't be saved`);
+        if (!st.offFile.saved) throw new Error(`${OFF_FILE} couldn't be saved`);
       }
-      pruneOffFile(log);
+      pruneOffFile(st, log);
     }
-    offFile.judged = true;
+    st.offFile.judged = true;
   } catch {
-    offFile.held = before;
+    st.offFile.held = before;
     return;
   }
-  for (const [flag, e] of offFile.held) if (!offUnrecorded.has(flag)) offUnrecorded.set(flag, e.sha);
+  for (const [flag, e] of st.offFile.held) if (!st.offUnrecorded.has(flag)) st.offUnrecorded.set(flag, e.sha);
 }
-function saveOffFile(): void {
-  if (!offFile) return;
+function saveOffFile(st: Inner): void {
+  if (!st.offFile) return;
   try {
-    if (offFile.held.size) {
-      writeOwnerOnly(offFile.path, `${JSON.stringify(Object.fromEntries(offFile.held))}\n`);
-      syncToDisk(offFile.path);
-    } else rmSync(offFile.path, { force: true });
-    offFile.saved = true;
+    if (st.offFile.held.size) {
+      writeOwnerOnly(st.offFile.path, `${JSON.stringify(Object.fromEntries(st.offFile.held))}\n`);
+      syncToDisk(st.offFile.path);
+    } else rmSync(st.offFile.path, { force: true });
+    st.offFile.saved = true;
   } catch {
     // a full disk: tried again at every tick until it is written (R1173t D2); a stop before then is the stated limit
-    offFile.saved = false;
+    st.offFile.saved = false;
   }
 }
 /** The id of each flag's last stored off row (held records are not stored: a process that stops loses them). */
@@ -141,36 +176,18 @@ function storedOffs(log: EventLog): Map<string, number> {
   return last;
 }
 /** Each entry whose off is a stored row after it went off leaves the file (and the map). */
-function pruneOffFile(log: EventLog): void {
-  if (!offFile?.held.size) return;
+function pruneOffFile(st: Inner, log: EventLog): void {
+  if (!st.offFile?.held.size) return;
   const stored = storedOffs(log);
   let changed = false;
-  for (const [flag, e] of offFile.held) {
+  for (const [flag, e] of st.offFile.held) {
     if ((stored.get(flag) ?? -1) > e.after) {
-      offFile.held.delete(flag);
-      offUnrecorded.delete(flag);
+      st.offFile.held.delete(flag);
+      st.offUnrecorded.delete(flag);
       changed = true;
     }
   }
-  if (changed) saveOffFile();
-}
-
-/** Whether a flag is on: only when the default branch's committed config, at the adopted commit, says `true` for it. */
-export function flagOn(name: string): boolean {
-  const s = snapshot;
-  return s !== null && s.on.includes(name);
-}
-
-/** What is on, and from which commit (a copy): for the audit and the dashboard. */
-export function flagState(): { sha: string | null; on: string[] } {
-  return { sha: snapshot?.sha ?? null, on: [...(snapshot?.on ?? [])] };
-}
-
-/** Every flag off. Anyone may: it only turns things off (a test resets with it). */
-export function clearFlags(): void {
-  snapshot = null;
-  offUnrecorded.clear();
-  offFile = null;
+  if (changed) saveOffFile(st);
 }
 
 /**
@@ -261,7 +278,8 @@ export function recordedFlags(log: EventLog): Map<string, boolean> {
  *   its record is durably written (R1173k K2, R1173l D3: a buffered or dropped record turns nothing on). Returns what
  *   it recorded.
  */
-export function adoptFlags(o: { log: EventLog; repo: string; actor: string; branch: string; check: (cfg: Config) => ConfigError[] }): EventPayload<'flag.flipped'>[] {
+export function adoptFlags(o: { flags: FlagState; log: EventLog; repo: string; actor: string; branch: string; check: (cfg: Config) => ConfigError[] }): EventPayload<'flag.flipped'>[] {
+  const st = of(o.flags);
   const known = knownFlags();
   // origin's HEAD must be the default branch this instance is configured for (R1173n M3: an origin HEAD moved to an
   // unprotected branch turned flags on from it). A mismatch reads nothing: every flag off. So does a read or a check
@@ -277,18 +295,18 @@ export function adoptFlags(o: { log: EventLog; repo: string; actor: string; bran
   const sha = read && head ? head.sha : null;
   // The file of offs not yet recorded, judged against this log (it catches its own failures: R1173x X5). A flag it
   // names that couldn't be judged yet stays off this tick.
-  loadOffFile(o.log);
-  const unjudged = offFile && !offFile.judged ? [...offFile.held.keys()] : [];
+  loadOffFile(st, o.log);
+  const unjudged = st.offFile && !st.offFile.judged ? [...st.offFile.held.keys()] : [];
   const on = (read ?? []).filter((n) => !unjudged.includes(n));
-  const before = snapshot?.on ?? [];
+  const before = st.snapshot?.on ?? [];
   // Turn-offs first, before anything here can throw (R1173m/n N2, N3: a failed record write kept a flag on while the
   // log said off): only what is on now and still on at the head stays on until the records are written.
   const keep = on.filter((n) => before.includes(n));
   // A flag turned off here is off unrecorded until its record is durable (R1173p 2: its off record lost, then main
   // turned it on again, and the log, still reading on, recorded no change), kept on disk first (R1173r 1).
-  const turnedOff = before.filter((n) => !keep.includes(n) && !offUnrecorded.has(n));
+  const turnedOff = before.filter((n) => !keep.includes(n) && !st.offUnrecorded.has(n));
   for (const n of turnedOff) {
-    offUnrecorded.set(n, sha);
+    st.offUnrecorded.set(n, sha);
     // Where it stands in this log; a read that fails must not stop the turn-off: then an anchor no log has, so the
     // entry is never pruned in this process and is judged as from another log at the next start.
     let anchor: { after: number; at: string | null };
@@ -297,10 +315,10 @@ export function adoptFlags(o: { log: EventLog; repo: string; actor: string; bran
     } catch {
       anchor = { after: Number.MAX_SAFE_INTEGER, at: null };
     }
-    offFile?.held.set(n, { sha, ...anchor });
+    st.offFile?.held.set(n, { sha, ...anchor });
   }
-  if (turnedOff.length || offFile?.saved === false) saveOffFile();
-  snapshot = sha ? Object.freeze({ sha, on: Object.freeze([...keep]) }) : null;
+  if (turnedOff.length || st.offFile?.saved === false) saveOffFile(st);
+  st.snapshot = sha ? Object.freeze({ sha, on: Object.freeze([...keep]) }) : null;
   const was = recordedFlags(o.log);
   const out: EventPayload<'flag.flipped'>[] = [];
   /** Flags whose off couldn't be appended this tick (its anchor not read or saved): they alone wait (R1173ad AD1). */
@@ -313,21 +331,21 @@ export function adoptFlags(o: { log: EventLog; repo: string; actor: string; bran
     // a save that fails puts the entry back as it was and ends this tick for that flag alone (R1173ad AD1: the whole
     // tick's durability went with it, so another flag's stored on never took effect): it stays off and unrecorded, its
     // off tried again at the next tick, and the tick ends with an error naming it (below).
-    const e = offFile?.held.get(p.flag);
+    const e = st.offFile?.held.get(p.flag);
     if (!p.to && e && e.at === null) {
       try {
-        offFile!.held.set(p.flag, { sha: e.sha, ...anchorOf(o.log) });
-        saveOffFile();
-        if (!offFile!.saved) throw new Error(`${OFF_FILE} couldn't be saved`);
+        st.offFile!.held.set(p.flag, { sha: e.sha, ...anchorOf(o.log) });
+        saveOffFile(st);
+        if (!st.offFile!.saved) throw new Error(`${OFF_FILE} couldn't be saved`);
       } catch {
-        offFile!.held.set(p.flag, e);
+        st.offFile!.held.set(p.flag, e);
         skipped.add(p.flag);
         return false;
       }
     }
     if (o.log.append('flag.flipped', p, o.actor).id === 0) durable = false;
     // Its off appended (written or held): never written again (R1173q 1: every held tick wrote the pair again).
-    else if (!p.to) offUnrecorded.delete(p.flag);
+    else if (!p.to) st.offUnrecorded.delete(p.flag);
     out.push(p);
     return true;
   };
@@ -338,11 +356,11 @@ export function adoptFlags(o: { log: EventLog; repo: string; actor: string; bran
     if (unjudged.includes(flag)) continue;
     let from = was.get(flag) ?? false;
     // The log already reads off: nothing unrecorded.
-    if (!from) offUnrecorded.delete(flag);
+    if (!from) st.offUnrecorded.delete(flag);
     // The log still reads on for a flag turned off (by this process, or one before it): record that off first, as it ran.
-    if (from && offUnrecorded.has(flag)) {
+    if (from && st.offUnrecorded.has(flag)) {
       // Not appended yet (its anchor couldn't be read or saved): nothing else for this flag until it is.
-      if (!write({ flag, from: true, to: false, sha: offUnrecorded.get(flag) ?? null })) continue;
+      if (!write({ flag, from: true, to: false, sha: st.offUnrecorded.get(flag) ?? null })) continue;
       from = false;
     }
     const to = on.includes(flag);
@@ -351,11 +369,11 @@ export function adoptFlags(o: { log: EventLog; repo: string; actor: string; bran
   // Durable only when nothing is held in memory: a held record reads as recorded on the next tick (R1173m 1: a real
   // SQLITE_FULL turned a flag on with no row on disk). A held record from an earlier tick is still held here.
   if (o.log.buffered().count > 0) durable = false;
-  if (durable) for (const k of [...offUnrecorded.keys()]) if (!skipped.has(k)) offUnrecorded.delete(k);
+  if (durable) for (const k of [...st.offUnrecorded.keys()]) if (!skipped.has(k)) st.offUnrecorded.delete(k);
   // The file keeps an entry until its off is a stored row: checked at every tick, and at a process's start.
-  if (offFile?.judged) pruneOffFile(o.log);
+  if (st.offFile?.judged) pruneOffFile(st, o.log);
   // Durably recorded: the head's flags on; otherwise nothing goes on that wasn't (the turn-offs above stand).
-  if (durable && sha) snapshot = Object.freeze({ sha, on: Object.freeze(on.filter((n) => !skipped.has(n))) });
+  if (durable && sha) st.snapshot = Object.freeze({ sha, on: Object.freeze(on.filter((n) => !skipped.has(n))) });
   // R1173ac AC-1: a flag held back (its off not recordable yet, or the file not judged) is never silent: after the
   // tick's work, one error names them, so the config step records coordinator.error at every tick until it clears.
   if (skipped.size || unjudged.length) {

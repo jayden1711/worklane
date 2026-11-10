@@ -1,8 +1,8 @@
 # Feature flags
 
 A risky change to the engine ships behind a flag. It stays off in every project until that project turns it on, so a
-new behaviour can be tried on one repo before it reaches the rest. Code: `src/config/schema.ts` (`FLAGS`, `RETIRED_FLAGS` and the schema) and `src/flags.ts` (`flagOn`, `adoptFlags` and the audit). Tests:
-`test/feature-flags.test.ts`.
+new behaviour can be tried on one repo before it reaches the rest. Code: `src/config/schema.ts` (`FLAGS`, `RETIRED_FLAGS` and the schema) and `src/flags.ts` (`FlagState`, `adoptFlags` and the audit). Tests:
+`test/feature-flags.test.ts` and `test/feature-flags-af.test.ts`.
 
 ## The rules
 
@@ -11,9 +11,9 @@ new behaviour can be tried on one repo before it reaches the rest. Code: `src/co
 - **Per repo, from the default branch only.** Flags live in the repo's own `.worklane/config.yaml`. A flag changes
   only through a commit that was reviewed and merged on the default branch, like any other config change.
 - **One reader, one writer.** No config object carries flags: every parsed `flags:` is a frozen `{}`, whichever
-  loader read it (the coordinator, the tool guard, the CLI, the dashboard, a branch). The one reader is
-  `flagOn('<name>')`. It reads only a snapshot of the flags the default branch's committed config turns on, at one
-  commit: the default branch's head, as the remote last said it was, when its config was valid.
+  loader read it (the coordinator, the tool guard, the CLI, the dashboard, a branch). The one reader is a
+  coordinator's `flags.on('<name>')`. It reads only that coordinator's snapshot of the flags the default branch's
+  committed config turns on, at one commit: the default branch's head, as the remote last said it was, when its config was valid.
   - The coordinator's config step is the only writer. Nothing it is passed picks the source: it asks `origin` for
     its own default branch (its `HEAD`) and that branch's head, by its exact ref (`ls-remote`, never a local ref an
     agent could move), and adopts that commit's flags only when the commit is here (fetched) and its config is valid,
@@ -39,14 +39,18 @@ new behaviour can be tried on one repo before it reaches the rest. Code: `src/co
     entry, at a process's start, is written once to this log if it still reads the flag on, else dropped. An entry
     whose position couldn't be read at the turn-off takes it just before its off is written, and the off is written
     only once that position is read and saved: if either fails, that flag alone stays off and its off waits for the
-    next tick; the tick's other records take effect. An import that carries a log removes the target's file just
-    before it writes that log, so an import that fails before then keeps it; one that carries none keeps the
-    target's file, and a bundle's file is never taken without its log (a bundle path with a `.` or `..` segment is
+    next tick; the tick's other records take effect. An import that carries a log moves the target's file aside
+    while it writes that log, removes it once the log is written, and puts it back if the write fails (a full
+    disk), so an import that fails keeps it; one that carries none keeps the target's file, and a bundle's file is never taken without its log (a bundle path with a `.` or `..` segment is
     refused). If the log can't be read when the file is judged, or the file can't be saved after it is, the entries
     stay as they were before and their flags stay off, with no record, until a later tick can. A save that fails (a
     full disk) is tried again at every tick. **Never silent:** while a flag is held off either way, each tick ends
-    with an error naming it, so the config step records a `coordinator.error` at every tick until it clears.
+    with an error naming it, so the config step records a `coordinator.error` at every tick until it clears; a failure
+    of the config refresh in the same tick is recorded too, as its own error.
     Limits:
+    - An import killed between moving the target's file aside and the end of its log write leaves the file at
+      `flags-unrecorded.json.import-old`, which nothing reads: its unrecorded offs are lost. Move it back by hand
+      before the next start if the target's log is still its own.
     - A restored or replaced log whose row at an entry's position was written again with the very same millisecond
       stamp reads as the entry's own log: if main turns the flag on, the next start writes that off and the on once
       more.
@@ -59,8 +63,9 @@ new behaviour can be tried on one repo before it reaches the rest. Code: `src/co
   - A coordinator started on the checkout's config (main's invalid or missing) adopts nothing until main's config is
     valid: **every flag is off**. A branch, a hand edit, a written-to config object or a polluted prototype never
     turns one on.
-  - The snapshot is the process's own: one coordinator process, one repo. A process serving several would need one
-    per repo.
+  - The snapshot is each coordinator's own (`coordinator.flags`), never the process's. A harness-eval replay builds a
+    second coordinator in the instance's process and ticks it with a task repo's config: it has its own flags, and
+    can't turn the instance's on or off.
 - **Only flags the engine knows.** The engine lists its flags in `FLAGS` (`src/config/schema.ts`).
   - **A name it doesn't know makes the config invalid.** The coordinator keeps running on the last good config and
     raises `config_invalid`, naming the flag and the ones it knows. A typo never turns something on, and never quietly
@@ -92,9 +97,9 @@ Once it's merged, the next tick applies it and records `flag.flipped` (`from: fa
 
 1. Add an entry to `FLAGS` in `src/config/schema.ts`, with what turning it on changes and the PR that adds it. That file
    is in the agents' tool guard's import tree, so the change is L3 and waits for the owner.
-2. Guard the new behaviour with `flagOn('<name>')`, keeping the old behaviour when it's off. Only the coordinator's
-   process has flags on: elsewhere (the tool guard, the CLI, the dashboard) `flagOn` is always off, so a flag guards
-   only the coordinator's own behaviour.
+2. Guard the new behaviour with `this.flags.on('<name>')` in the coordinator, keeping the old behaviour when it's off.
+   Only a coordinator has flags on, each its own: elsewhere (the tool guard, the CLI, the dashboard) no flag is ever
+   on, so a flag guards only the coordinator's own behaviour.
 3. Test both states. Off must behave exactly as before.
 4. Once the change is the default everywhere, **retire** the flag:
    - move its name from `FLAGS` to `RETIRED_FLAGS` (never just delete it);

@@ -11,7 +11,18 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { EventPayload } from '../src/events/types.js';
 import { FILES, NO_FLAGS, ProjectConfig, withKnownFlags, withRetiredFlags } from '../src/config/schema.js';
-import { FLAGS, FLAG_NAME, FlagsHeldError, RETIRED_FLAGS, adoptFlags, clearFlags, flagOn, flagState, flagsInText, flagsSchema, recordedFlags } from '../src/flags.js';
+import { FLAGS, FLAG_NAME, FlagState, FlagsHeldError, RETIRED_FLAGS, adoptFlags as adoptFlagsWith, flagsInText, flagsSchema, recordedFlags } from '../src/flags.js';
+
+// R1173af AF1: flag state is per coordinator (a FlagState). These tests stand for one coordinator's process: they adopt
+// into `flags`, and `clearFlags()` is a fresh process (a new FlagState). A test with a real Coordinator reads its own
+// `c.flags`.
+let flags = new FlagState();
+const adoptFlags = (o: Omit<Parameters<typeof adoptFlagsWith>[0], 'flags'>) => adoptFlagsWith({ ...o, flags });
+const flagOn = (name: string) => flags.on(name);
+const flagState = () => flags.state();
+const clearFlags = () => {
+  flags = new FlagState();
+};
 import { startConfig } from '../src/config/live.js';
 import { loadConfig, loadConfigAt } from '../src/config/load.js';
 import { FakeRunner } from '../src/runner.js';
@@ -99,6 +110,14 @@ test('the flag lists are frozen and share no name; only the schema itself retire
 test('one writer: only the coordinator adopts flags (#1173 review R1173h)', () => {
   const users = srcFiles().filter(([f, text]) => !f.endsWith(join('src', 'flags.ts')) && /\badoptFlags\b/.test(text)).map(([f]) => f.slice(repoRoot.length));
   assert.deepEqual(users, ['src/coordinator.ts']);
+  // R1173af AF1: several Coordinators run in one process (a harness-eval replay builds its own), so the state is each
+  // coordinator's: only the Coordinator makes a FlagState, as its own field, and adopts into that one.
+  const makers = srcFiles().filter(([f, text]) => !f.endsWith(join('src', 'flags.ts')) && /\bnew FlagState\b/.test(text)).map(([f]) => f.slice(repoRoot.length));
+  assert.deepEqual(makers, ['src/coordinator.ts']);
+  const coord = srcFiles().find(([f]) => f.endsWith(join('src', 'coordinator.ts')))![1];
+  assert.deepEqual(coord.match(/\bnew FlagState\(\)/g), ['new FlagState()']);
+  assert.match(coord, /^ {2}readonly flags = new FlagState\(\);$/m, 'a readonly field of the Coordinator');
+  assert.deepEqual(coord.match(/adoptFlags\(\{[^}]*\}/g)?.map((c) => /\bflags: this\.flags\b/.test(c)), [true], 'adopted into its own state only');
 });
 
 test('FILES and ProjectConfig.shape are frozen (a shallow freeze: zod objects inside can be changed), and no flag depends on the schema: a loosened one turns nothing on (#1173 reviews R1173f 2, R1173g, R1173h A8)', async () => {
@@ -338,7 +357,7 @@ test("a checkout's config never turns a flag on: started on it (main invalid or 
         const { start, c } = startOn(f);
         assert.match(start.note ?? '', /started with the checkout's/);
         await ticks(c, 2);
-        assert.equal(flagOn(T), false);
+        assert.equal(c.flags.on(T), false);
         assert.deepEqual(flips(f), []);
       });
     } finally {
@@ -358,7 +377,7 @@ test("the coordinator's tick adopts main's flag with its record; main broken or 
         const { start, c } = startOn(f);
         assert.equal(start.note, null);
         await ticks(c);
-        assert.equal(flagOn(T), true, `${what}: main's head, adopted at the first tick`);
+        assert.equal(c.flags.on(T), true, `${what}: main's head, adopted at the first tick`);
         assert.deepEqual(flips(f), [[T, false, true, s0]]);
         clearFlags();
         const f2 = fixture();
@@ -367,12 +386,12 @@ test("the coordinator's tick adopts main's flag with its record; main broken or 
           const { c: c2 } = startOn(f2);
           onMain(f2, breakMain, `main ${what}`);
           await ticks(c2, 2);
-          assert.equal(flagOn(T), false, `${what} before the first tick: nothing adopted (fail-closed)`);
+          assert.equal(c2.flags.on(T), false, `${what} before the first tick: nothing adopted (fail-closed)`);
           assert.deepEqual(flips(f2), [], `${what}: nothing recorded`);
           if (what === 'invalid') {
             const s2 = onMain(f2, (p) => writeFileSync(cfgFile(p), readFileSync(cfgFile(p), 'utf8').replace('bogus_top: 1\n', '')), 'fix');
             await ticks(c2);
-            assert.equal(flagOn(T), true);
+            assert.equal(c2.flags.on(T), true);
             assert.deepEqual(flips(f2), [[T, false, true, s2]]);
           }
         } finally {
@@ -398,11 +417,11 @@ test("started on the checkout, then main is valid again on that same tree: recov
       const { start, c } = startOn(f);
       assert.match(start.note ?? '', /committed config \(HEAD\)/);
       await ticks(c);
-      assert.equal(flagOn(T), false, 'the checkout: off');
+      assert.equal(c.flags.on(T), false, 'the checkout: off');
       const s2 = onMain(f, (p) => writeFileSync(cfgFile(p), readFileSync(cfgFile(p), 'utf8').replace('bogus_top: 1\n', '')), 'revert');
       await ticks(c);
       assert.equal(f.log.read(0, ['config.recovered']).length, 1);
-      assert.equal(flagOn(T), true, "main's config, at its commit");
+      assert.equal(c.flags.on(T), true, "main's config, at its commit");
       assert.deepEqual(flips(f), [[T, false, true, s2]]);
     });
   } finally {
@@ -503,7 +522,7 @@ test("R1173m: the coordinator adopts flags even when refreshing the config threw
       onMain(f, (p) => appendFileSync(cfgFile(p), `flags:\n  ${T}: true\n`), 'on');
       const { c } = startOn(f);
       await ticks(c);
-      assert.equal(flagOn(T), true);
+      assert.equal(c.flags.on(T), true);
       // main turns it off and changes another setting, so the poll applies a new config and writes config.applied.
       onMain(f, (p) => writeFileSync(cfgFile(p), readFileSync(cfgFile(p), 'utf8').replace(`${T}: true`, `${T}: false`) + '# changed\n'), 'off, and a change');
       const append = f.log.append.bind(f.log);
@@ -512,7 +531,7 @@ test("R1173m: the coordinator adopts flags even when refreshing the config threw
         return (append as (...a: unknown[]) => unknown)(type, ...rest);
       };
       await ticks(c);
-      assert.equal(flagOn(T), false, 'off, though the config step threw');
+      assert.equal(c.flags.on(T), false, 'off, though the config step threw');
     });
   } finally {
     clearFlags();
@@ -647,11 +666,11 @@ test("R1173p 1: the coordinator's tick, the instance check throwing: the flag go
       const start = startConfig({ repo: f.repo, remote: 'origin', fallback: loadConfig(f.repo) });
       const c = coordinator(f, new FakeRunner(() => ({ structured: { summary: 's' } })), { cfg: { ...start.cfg, project: { ...start.cfg.project, land_mode: 'direct' } }, liveConfig: { tree: start.tree, check } });
       await ticks(c);
-      assert.equal(flagOn(T), true);
+      assert.equal(c.flags.on(T), true);
       onMain(f, turnOff, 'off');
       broken = true;
       await ticks(c, 3);
-      assert.equal(flagOn(T), false);
+      assert.equal(c.flags.on(T), false);
     });
   } finally {
     clearFlags();
@@ -673,7 +692,7 @@ test("R1173o 1: the coordinator's tick on a repo whose default branch is trunk a
         const cfg = { ...base, project: { ...base.project, land_mode: 'direct' as const, project: { ...base.project.project, default_branch: configured } } };
         const c = coordinator(f, new FakeRunner(() => ({ structured: { summary: 's' } })), { cfg });
         await ticks(c);
-        assert.equal(flagOn(T), configured === 'trunk', `configured ${configured}, origin's HEAD trunk`);
+        assert.equal(c.flags.on(T), configured === 'trunk', `configured ${configured}, origin's HEAD trunk`);
       });
     } finally {
       clearFlags();
@@ -762,7 +781,7 @@ test("R1173r 1: the coordinator's tick under a log locked past the busy timeout 
       const s1 = onMain(f, (p) => appendFileSync(cfgFile(p), `flags:\n  ${T}: true\n`), 'on');
       const { c } = startOn(f);
       await ticks(c);
-      assert.equal(flagOn(T), true);
+      assert.equal(c.flags.on(T), true);
       const s2 = onMain(f, turnOff, 'off');
       const lock = lockLog(f.log.path);
       try {
@@ -771,13 +790,13 @@ test("R1173r 1: the coordinator's tick under a log locked past the busy timeout 
       } finally {
         lock.release();
       }
-      assert.equal(flagOn(T), false);
+      assert.equal(c.flags.on(T), false);
       // The process ends (the service's loop has no catch; systemd starts a fresh one): nothing in memory survives.
       clearFlags();
       const s3 = onMain(f, turnOn, 'on again');
       const { c: c2 } = startOn(f);
       await ticks(c2);
-      assert.equal(flagOn(T), true);
+      assert.equal(c2.flags.on(T), true);
       assert.deepEqual(flips(f), [[T, false, true, s1], [T, true, false, s2], [T, false, true, s3]], 'the off it ran, then the on');
     });
   } finally {
@@ -2132,7 +2151,7 @@ test("R1173ac AC-1 (AC1c): the coordinator's tick under a lasting by-id read fau
       const start = startConfig({ repo: f.repo, remote: 'origin', fallback: loadConfig(f.repo) });
       const c = coordinator(f, new FakeRunner(() => ({ structured: { summary: 's' } })), { cfg: { ...start.cfg, project: { ...start.cfg.project, land_mode: 'direct' } }, liveConfig: { tree: start.tree } });
       await ticks(c);
-      assert.equal(flagOn(T), true);
+      assert.equal(c.flags.on(T), true);
       for (let i = 0; i < 20; i++) f.log.append('coordinator.tick', { instance: 'i', dispatched: 0, reconciled: 0 } as never, 'i');
       onMain(f, turnOff, 'off');
       const fl = fault(f.log, /SELECT ts FROM events WHERE id = \?/, BUSY);
@@ -2143,7 +2162,7 @@ test("R1173ac AC-1 (AC1c): the coordinator's tick under a lasting by-id read fau
       fl.on = false;
       const errs = f.log.read(0, ['coordinator.error']).map((e) => e.payload as { where: string; message: string });
       const held = errs.filter((e) => e.where === 'config' && /flags held off/.test(e.message) && e.message.includes(T));
-      assert.equal(flagOn(T), false);
+      assert.equal(c.flags.on(T), false);
       assert.ok(held.length >= 7, `a coordinator.error for the config step at each held tick: ${JSON.stringify(errs)}`);
     });
   } finally {
@@ -2211,3 +2230,40 @@ test("R1173ac AC-4: an import --force that fails before the bundle's events.db i
     rmSync(base, { recursive: true, force: true });
   }
 });
+
+// --- R1173ae AE1: a held flag's error never hides the config refresh's own failure (attacks-1173ae/ae-tail.ts) ---
+for (const held of [false, true]) {
+  test(`R1173ae AE1 (${held ? 'attack' : 'control'}): a refreshConfig failure ${held ? 'while a flag is held' : 'with nothing held'} is recorded as a coordinator.error`, { skip }, async () => {
+    const f = fixture();
+    try {
+      await withKnownFlags([T], async () => {
+        onMain(f, (p) => appendFileSync(cfgFile(p), `flags:\n  ${T}: true\n`), 'on');
+        const start = startConfig({ repo: f.repo, remote: 'origin', fallback: loadConfig(f.repo) });
+        const c = coordinator(f, new FakeRunner(() => ({ structured: { summary: 's' } })), { cfg: { ...start.cfg, project: { ...start.cfg.project, land_mode: 'direct' } }, liveConfig: { tree: start.tree } });
+        await ticks(c);
+        for (let i = 0; i < 20; i++) f.log.append('coordinator.tick', { instance: 'i', dispatched: 0, reconciled: 0 } as never, 'i');
+        onMain(f, turnOff, 'off');
+        const fl = fault(f.log, /SELECT ts FROM events WHERE id = \?/, BUSY);
+        fl.on = held;
+        await ticks(c, 1);
+        // Stand-in for any refresh failure (a poll that throws, a config.applied write refused, an incident raise).
+        const cc = c as unknown as { refreshConfig: () => void };
+        const real = cc.refreshConfig.bind(c);
+        cc.refreshConfig = () => {
+          real();
+          throw new Error('probe: refresh failed');
+        };
+        await ticks(c, 3);
+        fl.on = false;
+        const errs = f.log.read(0, ['coordinator.error']).map((e) => e.payload as { where: string; message: string });
+        const refresh = errs.filter((e) => e.where === 'config' && /probe: refresh failed/.test(e.message));
+        const heldErrs = errs.filter((e) => e.where === 'config' && /flags held off/.test(e.message));
+        assert.ok(refresh.length >= 3, `the refresh failure is recorded at each of the 3 ticks: ${JSON.stringify(errs)}`);
+        if (held) assert.ok(heldErrs.length >= 3, `and the held flag too: ${JSON.stringify(errs)}`);
+      });
+    } finally {
+      f.log.close();
+      rmSync(f.base, { recursive: true, force: true });
+    }
+  });
+}
