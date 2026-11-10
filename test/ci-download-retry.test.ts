@@ -267,7 +267,8 @@ export function runProblems(run: string, rootStep = false): string[] {
   }
   // R1228p D3: the checkout's helper only as HELPER_LINE: a call in any other form (another `bash`, its URL built from
   // pieces) would run outside both structural rules (the step's shell and the line's /usr/bin/bash -p).
-  for (const l of lines) if (!/^\s*#/.test(l) && /scripts\/ci\/fetch-pinned\.sh/.test(l) && !HELPER_LINE.test(l)) out.push(`${HELPER} named other than on a helper line (\`/usr/bin/bash -p "$GITHUB_WORKSPACE/${HELPER}" <url> <pin> <out>\`): ${l.trim()}`);
+  // R1228r D1, R1228s: by the helper's file stem, any path to it (`scripts/ci/./`, `scripts//ci/`, a quote split).
+  for (const l of lines) if (!/^\s*#/.test(l) && /fetch-pinned/.test(l) && !HELPER_LINE.test(l)) out.push(`${HELPER} named other than on a helper line (\`/usr/bin/bash -p "$GITHUB_WORKSPACE/${HELPER}" <url> <pin> <out>\`): ${l.trim()}`);
   for (const [i, l] of lines.entries()) {
     if (HELPER_LINE.test(l) && rootStep) out.push(`${HELPER} from the checkout in a step that runs as root in the self-hosted container: ${l.trim()}`);
     const m = INLINE_CURL.exec(l);
@@ -450,6 +451,8 @@ function workflowFiles(files: readonly { name: string; text: string }[], report:
         const stepName = String((s as { name?: unknown }).name ?? '');
         const shell = (s as { shell?: unknown }).shell;
         const wsl = shell === undefined && defaultShell === 'wsl-bash {0}' && WSL_HELPER_STEPS.includes(`${name.split('/').pop()}#${job}#${stepName}`) && stepCount.get(`${name.split('/').pop()}#${job}#${stepName}`) === 1;
+        // R1228r D2: the excepted WSL step runs one helper line, its own.
+        if (wsl && logicalLines(s.run).filter((l) => HELPER_LINE.test(l)).length > 1) report(name, `more than one helper line in the one WSL helper step (it runs its own download only): ${stepName}`);
         if (shell !== HELPER_SHELL && !wsl) report(name, `a step that runs ${HELPER} without \`shell: ${HELPER_SHELL}\` (a step shell that isn't privileged imports a \`bash\` function from the environment): ${stepName || s.run.split('\n')[0]}`);
         // R1228l D1 (N2): the step's own shell isn't started with -p, so a BASH_ENV an earlier step wrote to
         // GITHUB_ENV defines its `bash`. Only the step's own env overrides GITHUB_ENV: each helper step clears it there.
@@ -1041,6 +1044,37 @@ test("R1228p D1-D3: a function named /usr/bin/bash, a second step named as the W
   assert.match(twice, /without `shell:/, 'and neither is excepted');
 });
 
+test("R1228r, R1228s: the helper named by its file stem in any other spelling is refused; the one WSL step runs one helper line; a name built at run time is a stated limit", () => {
+  const pre = 'u="https://github.com/a/b/rel""eases/download/v1/x.tgz"\n';
+  // X1-X3, S2-S4 (S5 is S1's shape with no shell key: the same line), W2's quote split: each keeps the stem.
+  for (const call of [
+    `bash "$GITHUB_WORKSPACE/scripts/ci/./fetch-pinned.sh" "$u" ${PIN} gl.tgz`,
+    `bash "$GITHUB_WORKSPACE/scripts//ci/fetch-pinned.sh" "$u" ${PIN} gl.tgz`,
+    `bash scripts/ci/./fetch-pinned.sh "$u" ${PIN} gl.tgz`,
+    `bash "$GITHUB_WORKSPACE/scripts/ci/"fetch-pinned.sh "$u" ${PIN} gl.tgz`,
+    `bash "$ws/scripts/ci/"fetch-pinned.sh "$u" "$sum" /tmp/node2.tar.xz`,
+    `cp scripts/ci/fetch-pinned.sh /tmp/x.sh`,
+  ]) assert.match(runProblems(pre + call).join(), /named other than on a helper line/, `refused: ${call}`);
+  // A name built at run time (S1 a glob, S6 a bracket class, S7 a variable, X4 a quote split of the stem): not seen. A
+  // stated limit (code in the job, out of scope; the digest still checks): a fix shows up here as a change.
+  for (const call of [`bash scripts/ci/fetch-pinne?.sh "$u" ${PIN} gl.tgz`, `bash scripts/ci/fetch-pinne[d].sh "$u" ${PIN} gl.tgz`, `h=fetch-; bash "$GITHUB_WORKSPACE/scripts/ci/\${h}pinned.sh" "$u" ${PIN} gl.tgz`, `f="scripts/ci/fetch-pin""ned.sh"; bash "$f" "$u" ${PIN} gl.tgz`]) {
+    assert.deepEqual(runProblems(pre + call).filter((p) => /named other than/.test(p)), [], `not seen (a stated limit): ${call}`);
+  }
+  const scan = (f: { name: string; text: string }) => {
+    const out: string[] = [];
+    workflowFiles([f], (_n, p) => out.push(p));
+    return out;
+  };
+  const step = (name: string, extra: string) => `      - name: ${JSON.stringify(name)}\n        env:\n          BASH_ENV: ''\n        run: |\n          ${WS_FROM_WORKSPACE}\n          /usr/bin/bash -p "$ws/${HELPER}" "https://nodejs.org/dist/$v/node-$v-linux-x64.tar.xz" "$sum" /tmp/node.tar.xz\n${extra}`;
+  const wsl = (steps: string) => ({ name: '.github/workflows/ci-slow.yml', text: `on: push\njobs:\n  bootstrap-windows:\n    runs-on: windows-latest\n    defaults:\n      run:\n        shell: wsl-bash {0}\n    steps:\n${steps}` });
+  const pinned = "fetch the bootstrap's pinned Node inside WSL, for packing below";
+  assert.deepEqual(scan(wsl(step(pinned, ''))), [], 'control: the pinned step, one helper line');
+  // W2: a second helper line (here the literal one) in the excepted step.
+  assert.match(scan(wsl(step(pinned, `          /usr/bin/bash -p "$ws/${HELPER}" "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz" ${PIN} /tmp/gl.tgz\n`))).join(), /more than one helper line in the one WSL helper step/);
+  // W3: another WSL step, another name, the helper by a quote split: refused by the stem.
+  assert.match(scan(wsl(step(pinned, '') + `      - name: other\n        run: |\n          ${WS_FROM_WORKSPACE}\n          /usr/bin/bash -p "$ws/scripts/ci/"fetch-pinned.sh "$u" "$sum" /tmp/n2\n`)).join(), /named other than on a helper line/);
+});
+
 // Limits (owner decision (c): stated, not closed; the helper's digest check holds for each download it handles):
 // - A download that never names a URL the lint knows (DOWNLOAD), through a tool it doesn't know (python, node, perl, a
 //   compiled binary, an action not in USES_ALLOWED once allowed), or built from pieces at run time, isn't seen.
@@ -1048,8 +1082,12 @@ test("R1228p D1-D3: a function named /usr/bin/bash, a second step named as the W
 //   earlier steps, and whose own run, can change what they run, and the lint doesn't model that. Structurally, a helper
 //   step's shell is HELPER_SHELL (privileged: no imported function, no BASH_ENV) and its line names /usr/bin/bash -p (no
 //   PATH or hash table); the rules on PATH, `bash` redefinition (any function name ending in `bash`, R1228p D1) and
-//   BASH_ENV in its run catch the plain accidents, and the helper is named nowhere but on a helper line (R1228p D3).
+//   BASH_ENV in its run catch the plain accidents. The structural rules recognise the helper by its file stem
+//   (`fetch-pinned`, any path to it: R1228p D3, R1228r D1, R1228s), and the one WSL step runs one helper line.
 //   Not seen, and not claimed:
+//   - the helper's name or path built from pieces at run time: a glob (`fetch-pinne?.sh`, `fetch-pinne[d].sh`), a
+//     variable (`${h}pinned.sh`) or a quote split of the stem (R1228s S1, S5-S7; R1228r X4). That is code in the job,
+//     out of scope; the digest still checks;
 //   - LD_PRELOAD or LD_LIBRARY_PATH, from GITHUB_ENV or the same run, reach curl, sha256sum and mv by their absolute
 //     paths (R1228n D1: L1, L2);
 //   - every hosted runner has passwordless sudo, so an earlier step or the same run can replace /usr/bin/sha256sum,
