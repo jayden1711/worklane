@@ -135,11 +135,17 @@ test('AD1b (legacy, end to end): a question asked before decision.posted existed
 
 // ===== AD2: one line naming two ids answers the first and drops the second with no word =====
 
-test('AD2 control: two lines, one id each: both answered', async () => {
+test('AD2 control: two lines, one id each, answer neither (one note); one comment each answers both (changed by (b); was both answered)', async () => {
   const f = fixture();
   const d1 = await ask(f, 'land', LAND);
   const d2 = await ask(f, 'land', LAND);
   f.backlog.humanComment(1, 'example-owner', `/worklane approve ${d1.id}\n/worklane approve ${d2.id}`);
+  // changed by (b) (the owner, 2026-11-10: only a comment's first line is read, in plain text; a second command voids it).
+  assert.equal(await commentAnswer(f, d1), null);
+  assert.equal(await commentAnswer(f, d2), null);
+  assert.deepEqual(notes(f).map((n) => n.kind), ['reply_more_than_one']);
+  f.backlog.humanComment(1, 'example-owner', `/worklane approve ${d1.id}`);
+  f.backlog.humanComment(1, 'example-owner', `/worklane approve ${d2.id}`);
   assert.equal((await commentAnswer(f, d1))?.answer, 'approve');
   assert.equal((await commentAnswer(f, d2))?.answer, 'approve');
 });
@@ -199,11 +205,13 @@ for (const [name, fmt] of [
 
 // ===== AD4: fences. A fence is toggled by any ``` or ~~~ line, not by CommonMark's rules =====
 
-test('AD4 control: a ``` fence around a named approve, then a bare reject: reject (held, AB5)', async () => {
+test('AD4 control: a ``` fence around a named approve, then a reject: nothing, one note (changed by (b); was reject)', async () => {
   const f = fixture();
   const d1 = await ask(f, 'land', LAND);
   f.backlog.humanComment(1, 'example-owner', `The bot suggests\n\n\`\`\`\n/worklane approve ${d1.id}\n\`\`\`\n\n/worklane reject ${d1.id}`);
-  assert.equal((await commentAnswer(f, d1))?.answer, 'reject');
+  // changed by (b) (the owner, 2026-11-10: only a comment's first line is read, in plain text; a second command voids it).
+  assert.equal(await commentAnswer(f, d1), null);
+  assert.deepEqual(notes(f).map((n) => n.kind), ['reply_not_first_line']);
 });
 
 for (const [name, body] of [
@@ -225,9 +233,10 @@ test('AD4 held: indented code (4 spaces) and an unterminated fence are not read'
   const f = fixture();
   const d1 = await ask(f, 'land', LAND);
   f.backlog.humanComment(1, 'example-owner', `    /worklane approve ${d1.id}\n\n/worklane reject ${d1.id}`);
-  assert.equal((await commentAnswer(f, d1))?.answer, 'reject');
+  // changed by (b) (the owner, 2026-11-10: only a comment's first line is read, in plain text; a second command voids it): the reject is on line 3, so nothing answers (was 'reject'), and the fenced approve below still answers nothing.
+  assert.equal(await commentAnswer(f, d1), null);
   f.backlog.humanComment(1, 'example-owner', `\`\`\`\n/worklane approve ${d1.id}`);
-  assert.equal((await commentAnswer(f, d1))?.answer, 'reject');
+  assert.equal(await commentAnswer(f, d1), null);
 });
 
 // ===== AD5: the notes themselves, and the question comment, are never replies =====
@@ -344,5 +353,5 @@ test('IDS4: one note per reply, whatever its lines; a second pass writes none (R
   await commentAnswer(f, d1);
   const n = notes(f).filter((x) => x.kind.startsWith('reply_'));
   assert.equal(n.length, 1, JSON.stringify(n));
-  assert.equal(n[0]!.kind, 'reply_several_ids', 'the gravest problem is the one named');
+  assert.equal(n[0]!.kind, 'reply_more_than_one', 'the gravest problem is the one named'); // changed by (b) (the owner, 2026-11-10: only a comment's first line is read, in plain text; a second command voids it): four commands (was reply_several_ids)
 });

@@ -210,7 +210,7 @@ test('a high-risk change waits for the owner; a writer\'s /approve comment relea
   f.backlog.humanComment(n, 'stranger', `/worklane approve ${decisionOn(f.log, n)}`);
   await c.tick();
   assert.equal(f.log.read(0, ['land.result']).length, 0, 'a non-writer cannot approve');
-  f.backlog.humanComment(n, 'example-owner', `looks right\n/worklane approve ${decisionOn(f.log, n)}`);
+  f.backlog.humanComment(n, 'example-owner', `/worklane approve ${decisionOn(f.log, n)}\nlooks right`); // the command is the first line (the owner, 2026-11-10)
   await c.tick(); // records the answer and queues landing
   await c.tick(); // lands
   assert.equal((f.log.read(0, ['land.result']).at(-1)!.payload as { outcome: string }).outcome, 'landed');

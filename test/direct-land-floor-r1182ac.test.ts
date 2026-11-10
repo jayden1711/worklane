@@ -133,7 +133,7 @@ async function ac1(how: 'named' | 'dashboard' | 'none') {
   const land = await ask(f);
   f.backlog.humanComment(1, 'example-owner', 'The plan is fine.\n/worklane approve'); // typed for the plan
   await handleDecisions(f);
-  const first = { plan: answeredOf(f, plan.id), land: answeredOf(f, land.id), queued: f.log.read(0, ['land.queued']).length, ambiguous: errors(f).filter((e) => e.kind === 'reply_without_id').length };
+  const first = { plan: answeredOf(f, plan.id), land: answeredOf(f, land.id), queued: f.log.read(0, ['land.queued']).length, ambiguous: errors(f).filter((e) => e.kind === 'reply_not_first_line').length }; // changed by (b) (the owner, 2026-11-10: only a comment's first line is read, in plain text): the bare line is line 2, so its note is reply_not_first_line (was reply_without_id)
   if (how === 'named') f.backlog.humanComment(1, 'example-owner', `/worklane approve ${plan.id}`);
   if (how === 'dashboard') answerOnDashboard(f, plan.id, 'approve');
   await handleDecisions(f);
@@ -176,11 +176,13 @@ test('AC1w (unit): a writer answering the other question by id turns the owner\'
 });
 
 // ===== AC2 (minor): fence toggling ignores the fence's length and character (CommonMark closes ```` only with ````+) =====
-test('AC2 control: a ``` fence holding an approve, then `/worklane reject`: reject', async () => {
+test('AC2 control: a ``` fence holding an approve, then `/worklane reject`: nothing, one note (changed by (b); was reject)', async () => {
   const f = unit();
   const d = await ask(f);
   f.backlog.humanComment(1, 'example-owner', `Quoting:\n\`\`\`\n/worklane approve ${d.id}\n\`\`\`\n/worklane reject ${d.id}`);
-  assert.equal((await commentAnswer(f, d))?.answer, 'reject');
+  // changed by (b) (the owner, 2026-11-10: only a comment's first line is read, in plain text): neither line is the first, so nothing answers (was 'reject'), with one note.
+  assert.equal(await commentAnswer(f, d), null);
+  assert.deepEqual(errors(f).filter((e) => /^reply_/.test(e.kind)).map((e) => e.kind), ['reply_not_first_line']);
 });
 test('AC2 (minor): a ```` fence quoting markdown that holds a ``` line flips the reading: the fenced approve counts and the real reject is skipped', async () => {
   const f = unit();

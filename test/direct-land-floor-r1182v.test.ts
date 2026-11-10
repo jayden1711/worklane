@@ -386,7 +386,7 @@ test('V4b: an L3 change the owner approved at review by comment; the landing flo
   for (let i = 0; i < 3 && !asked(f).length; i++) await cycle(f);
   assert.equal(asked(f).length, 1, 'control: asked at review (L3)');
   assert.ok(!(f.log.read(0, ['review.level_set']).map((e) => e.payload as EventPayload<'review.level_set'>).at(-1)!.reasons.some((r) => r.startsWith(PRINT))), 'control: a review-time question, no landing print');
-  f.backlog.humanComment(1, 'example-owner', `looks right\n/worklane approve ${asked(f)[0]!.id}`);
+  f.backlog.humanComment(1, 'example-owner', `/worklane approve ${asked(f)[0]!.id} looks right`); // changed by (b) (the owner, 2026-11-10: only a comment's first line is read, in plain text; a second command voids it): the command first (was \`looks right\` on the line before)
   for (let i = 0; i < 6; i++) await cycle(f);
   const q = asked(f);
   const answered = f.log.read(0, ['decision.answered']).map((e) => e.payload as EventPayload<'decision.answered'>);

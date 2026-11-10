@@ -203,20 +203,23 @@ test('AE6 (held): `[worklane]` after leading whitespace is still skipped; `[Work
   f.backlog.humanComment(1, 'example-owner', `  \n[worklane] note\n/worklane approve ${land.id}`);
   assert.equal(await commentAnswer(f, land), null);
   f.backlog.humanComment(1, 'example-owner', `[Worklane] mine\n/worklane reject ${land.id}`);
-  assert.equal((await commentAnswer(f, land))?.answer, 'reject');
+  // changed by (b) (the owner, 2026-11-10: only a comment's first line is read, in plain text; a second command voids it): the reject is line 2, so it answers nothing (was 'reject'); the comment is still read (its note shows it).
+  assert.equal(await commentAnswer(f, land), null);
+  assert.deepEqual(errors(f).filter((e) => /^reply_/.test(e.kind)).map((e) => e.kind), ['reply_not_first_line']);
 });
 
-test('AE7 (held): last named line wins across comments and lines; a later bare line or a two-id line changes nothing', async () => {
+test('AE7 (held): two commands in one comment answer nothing, one note each (changed by (b); was: the last named line wins)', async () => {
   const f = unit();
   const land = await ask(f);
   const other = await ask(f);
   f.backlog.humanComment(1, 'example-owner', `/worklane approve ${land.id}\n/worklane reject ${land.id}`);
   f.backlog.humanComment(1, 'example-owner', `/worklane approve\n/worklane approve ${land.id} ${other.id}`);
-  assert.equal((await commentAnswer(f, land))?.answer, 'reject');
+  // changed by (b) (the owner, 2026-11-10: only a comment's first line is read, in plain text; a second command voids it): both comments hold two commands, so neither answers (was 'reject' for land), one note each (was one
+  // reply_several_ids).
+  assert.equal(await commentAnswer(f, land), null);
   assert.equal(await commentAnswer(f, other), null);
   const notes = errors(f).filter((e) => /^reply_/.test(e.kind));
-  assert.equal(notes.length, 1, JSON.stringify(notes));
-  assert.equal(notes[0]!.kind, 'reply_several_ids');
+  assert.deepEqual(notes.map((n) => n.kind), ['reply_more_than_one', 'reply_more_than_one'], JSON.stringify(notes));
 });
 
 test('AE1 (dashboard): the plan revise text names the id, and the question names this decision\'s', async () => {
@@ -225,14 +228,14 @@ test('AE1 (dashboard): the plan revise text names the id, and the question names
   const f = unit();
   const plan = await askPlan(f);
   const body = (await f.backlog.comments(1)).find((c) => c.body.includes(plan.id))!.body;
-  assert.ok(body.includes(`reply \`/worklane revise ${plan.id} <note>\``), body);
+  assert.ok(body.includes(`start a comment with \`/worklane revise ${plan.id} <note>\`; the note is the rest of that line`), body);
   assert.ok(plan.receipts.some((r) => r.includes(`revise ${plan.id} <note>`)), 'the recorded receipt (the dashboard) too');
 });
 
-test('AE3b (liveness): a command in a list item answers nothing, with one reply_skipped note', async () => {
+test('AE3b (liveness): a command in a list item answers nothing, with one note (reply_not_first_line under (b))', async () => {
   const f = unit();
   const land = await ask(f);
   f.backlog.humanComment(1, 'example-owner', `- /worklane approve ${land.id}`);
   assert.equal(await commentAnswer(f, land), null);
-  assert.deepEqual(errors(f).filter((e) => /^reply_/.test(e.kind)).map((e) => e.kind), ['reply_skipped']);
+  assert.deepEqual(errors(f).filter((e) => /^reply_/.test(e.kind)).map((e) => e.kind), ['reply_not_first_line']);
 });

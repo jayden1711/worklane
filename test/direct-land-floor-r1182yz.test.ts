@@ -236,12 +236,13 @@ test('Z2e (end to end): the owner writes `/worklane approve`, then on reading ag
   assert.equal(r.blob, null, `WRONG OPTION: landed on a reply whose only id line says reject (${JSON.stringify(r.answered)})`);
 });
 
-test('Z2b (liveness): `/worklane reject <id 1>` then `/worklane approve <id 2>` in one reply: question 2 gets nothing and no notice', async () => {
+test('Z2b (liveness): `/worklane reject <id 1>` then `/worklane approve <id 2>` in one reply: neither answers, one note naming both (changed by (b))', async () => {
   const f = unit();
   const d1 = await ask(f);
   const d2 = await ask(f);
   f.backlog.humanComment(1, 'example-owner', `/worklane reject ${d1.id}\n/worklane approve ${d2.id}`);
-  assert.equal((await commentAnswer(f, d1))?.answer, 'reject', 'control: question 1 rejected');
+  assert.equal(await commentAnswer(f, d1), null, 'changed by (b) (the owner, 2026-11-10; only the first line of a comment is read, and a second command voids it): two commands void the comment (was: question 1 rejected)');
+  assert.deepEqual(errors(f).filter((e) => /^reply_/.test(e.kind)).map((e) => e.kind), ['reply_more_than_one']);
   const a = await commentAnswer(f, d2);
   assert.ok(a?.answer === 'approve' || errors(f).some((e) => e.message.includes(d2.id)), `SILENT: question 2's own \`approve ${d2.id}\` line is ignored with no notice (${JSON.stringify(a)})`);
 });
@@ -343,15 +344,14 @@ test('Y1 (two open questions): one comment `/worklane approve` (for question 1) 
   assert.notEqual(a?.answer, 'approve', `WRONG OPTION: the owner wrote "reject ${d2.id}"; recorded ${JSON.stringify(a)}`);
 });
 
-test('Y1b (end to end through handleDecisions, one question): `/worklane approve` then `/worklane reject <id>` in one comment queues the land', async () => {
+test('Y1b (end to end through handleDecisions, one question): `/worklane approve` then `/worklane reject <id>` in one comment answers nothing and queues nothing (changed by (b))', async () => {
   const f = unit();
   const d = await ask(f);
   f.log.append('review.level_set', { issue: 1, head: 'a'.repeat(40), level: 'L3', reasons: ['high-risk: ci-config (.gitlab-ci.yml)'] }, 'coordinator');
   f.backlog.humanComment(1, 'example-owner', `Hmm.\n/worklane approve\nNo, on reflection:\n/worklane reject ${d.id}`);
   await handleDecisions(f);
   const a = f.log.read(0, ['decision.answered']).map((e) => e.payload as EventPayload<'decision.answered'>).find((x) => x.id === d.id);
-  assert.ok(a, 'control: the comment answers the question');
-  assert.equal(a!.answer, 'reject', `WRONG OPTION: the named line says reject; recorded ${a!.answer}`);
+  assert.equal(a, undefined, 'changed by (b) (the owner, 2026-11-10; only the first line of a comment is read, and a second command voids it): no command on the first line, so no answer (was: reject)');
   assert.deepEqual(f.log.read(0, ['land.queued']), [], 'nothing is queued to land');
 });
 

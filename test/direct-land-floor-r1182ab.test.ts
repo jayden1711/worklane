@@ -234,7 +234,11 @@ test('AB5 control: `/worklane reject` alone rejects; a blockquoted `> /worklane 
   const f = fixture();
   const d1 = await ask(f, 'land', LAND);
   f.backlog.humanComment(1, 'example-owner', `> /worklane approve ${d1.id}\n\n/worklane reject ${d1.id}`);
-  assert.equal((await commentAnswer(f, d1))?.answer, 'reject');
+  // changed by (b) (the owner, 2026-11-10: only a comment's first line is read, in plain text): the reject was a later line, so the comment answers nothing, with one note; was 'reject'.
+  assert.equal(await commentAnswer(f, d1), null);
+  assert.deepEqual(notes(f).map((n) => n.kind), ['reply_not_first_line']);
+  f.backlog.humanComment(1, 'example-owner', `/worklane reject ${d1.id}`);
+  assert.equal((await commentAnswer(f, d1))?.answer, 'reject', 'the reject on a first line');
 });
 
 test('AB5 (code fence): the owner quotes the suggested command in a fence, then answers `/worklane reject`; the answer must not be approve', async () => {
@@ -307,7 +311,9 @@ test("Q text (not the review's): the question says the id is required", async ()
   const f = fixture();
   const d = await ask(f, 'land', LAND);
   const body = (await f.backlog.comments(1)).map((c) => c.body).find((b) => b.includes('decision needed'))!;
-  assert.match(body, /the id is required: a reply without it answers nothing/);
+  // changed by (b) (the owner, 2026-11-10: only a comment's first line is read, in plain text): the question says so; was "the id is required: a reply without it answers nothing".
+  assert.match(body, /Reply with a comment that starts with `\/worklane approve d-/);
+  assert.match(body, /Only a comment's first line is read, in plain text: with the id, no other command in the comment/);
   assert.ok(body.includes(`/worklane approve ${d.id}`), body);
   assert.doesNotMatch(body, /may leave out the id|only open question/);
 });
@@ -318,12 +324,16 @@ test("AB1b (not the review's): an id in backticks, parentheses or after a word n
   const d2 = await ask(f, 'land', LAND, 'Land the other?');
   f.backlog.humanComment(1, 'example-owner', `/worklane approve for \`${d1.id}\``);
   f.backlog.humanComment(1, 'example-owner', `/worklane reject (${d2.id})`);
-  assert.equal((await commentAnswer(f, d1))?.answer, 'approve', 'named in backticks after a word');
-  assert.equal((await commentAnswer(f, d2))?.answer, 'reject', 'named in parentheses');
+  // changed by (b) (the owner, 2026-11-10: only a comment's first line is read, in plain text): a backtick or parenthesis on the line refuses it (was: approve and reject); after a word, plain, it answers.
+  assert.equal(await commentAnswer(f, d1), null, 'in backticks: refused');
+  assert.equal(await commentAnswer(f, d2), null, 'in parentheses: refused');
+  assert.deepEqual(notes(f).map((n) => n.kind), ['reply_unsafe_text', 'reply_unsafe_text']);
+  f.backlog.humanComment(1, 'example-owner', `/worklane approve for ${d1.id}, thanks`);
+  assert.equal((await commentAnswer(f, d1))?.answer, 'approve', 'named after a word, before a comma');
   // One open question; the reply names (in parentheses) an id no decision has: no answer, and a note, never bare.
   const g = fixture();
   const e = await ask(g, 'land', LAND);
-  g.backlog.humanComment(1, 'example-owner', '/worklane approve (d-1-0badid)');
+  g.backlog.humanComment(1, 'example-owner', '/worklane approve d-1-0badid'); // changed by (b) (the owner, 2026-11-10: only a comment's first line is read, in plain text): no parentheses (they refuse the line)
   assert.equal(await commentAnswer(g, e), null, 'a line naming an unknown id answers nothing');
   assert.ok(notes(g).some((n) => n.kind === 'reply_unknown_id' && n.message.includes('d-1-0badid')), JSON.stringify(notes(g)));
 });

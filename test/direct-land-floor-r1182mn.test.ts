@@ -367,7 +367,8 @@ test('Q1 (end to end): the backlog refuses every comment: the land result is sti
   assert.ok(f.log.read(0, ['coordinator.error']).some((e) => (e.payload as { kind: string }).kind === 'ask_failed'), 'the failure is recorded');
   // R1182x: and it says how to answer without the comment (a reply naming the id, the dashboard, or decide).
   const np = f.log.read(0, ['coordinator.error']).map((e) => e.payload as { kind: string; message: string }).find((e) => e.kind === 'question_not_posted');
-  assert.ok(np && np.message.includes(asked(f).at(-1)!.id) && np.message.includes('naming the id'), JSON.stringify(np));
+  // changed by (b) (the owner, 2026-11-10: only a comment's first line is read, in plain text; a second command voids it): the wording (was "a reply naming the id").
+  assert.ok(np && np.message.includes(asked(f).at(-1)!.id) && np.message.includes('a comment whose first line is'), JSON.stringify(np));
   f.log.append('decision.answered', { id: asked(f).at(-1)!.id, by: 'example-owner', answer: 'approve' }, 'example-owner', 'human');
   for (let i = 0; i < 3 && !onMain(f).includes('d/CLAUDE.md'); i++) await cycle(f);
   assert.ok(onMain(f).includes('d/CLAUDE.md'), `never landed: ${JSON.stringify(results(f).map((r) => r.outcome))}, questions ${asked(f).length}`);
