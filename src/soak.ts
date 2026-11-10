@@ -248,8 +248,9 @@ export function soakVerdict(samples: readonly SoakSample[], limits: SoakLimits =
   if (samples.length < 4) return { failures: [`only ${samples.length} sample(s): a soak needs at least 4 to compare its start and end`], measured: {} };
   // Every field the verdict reads must be there: a sample missing one can't be judged, and that fails closed.
   // `extended`: the driver's own run, which records errors, worktrees and disk too (R1181j 1, 2); a driver that drops
-  // them fails closed. `linux`: there the watches can always be counted, so they are required too (R1181o). (Without it they are judged when there, so the frozen acceptance file's samples stay valid.)
-  const fields: (keyof SoakSample)[] = ['at', 'rss', 'heapUsed', 'eventsBytes', 'walBytes', 'events', 'tickMs', 'maxTickMs', 'tasksDone', 'filed', 'oldestUnlandedMs', 'openRuns', 'oldestOpenRunMs', 'slotsHeld', ...(o.extended ? (['errors', 'worktrees', 'diskBytes', 'children', 'failedRuns', 'failureEvents', 'worktreeDirs', 'files', 'fullRunHeld', 'childRss'] as const) : []), ...(o.extended && o.linux ? (['watches'] as const) : [])];
+  // them fails closed. `linux`: there the watches can always be counted, so they are required too (R1181o), and on a
+  // real soak (`expectedMs`) the filesystems' level as well (R1181q N2: a level that read null went unjudged, unnamed). (Without it they are judged when there, so the frozen acceptance file's samples stay valid.)
+  const fields: (keyof SoakSample)[] = ['at', 'rss', 'heapUsed', 'eventsBytes', 'walBytes', 'events', 'tickMs', 'maxTickMs', 'tasksDone', 'filed', 'oldestUnlandedMs', 'openRuns', 'oldestOpenRunMs', 'slotsHeld', ...(o.extended ? (['errors', 'worktrees', 'diskBytes', 'children', 'failedRuns', 'failureEvents', 'worktreeDirs', 'files', 'fullRunHeld', 'childRss'] as const) : []), ...(o.extended && o.linux ? (['watches'] as const) : []), ...(o.extended && o.linux && o.expectedMs !== undefined ? (['levelBytes'] as const) : [])];
   const missing = fields.filter((k) => samples.some((s) => typeof s[k] !== 'number' || !Number.isFinite(s[k])));
   if (missing.length) return { failures: [`samples missing ${missing.join(', ')}: nothing was judged`], measured: {} };
   // WHY (#1181 review): with too few samples past the warm-up, the warm-up's were judged instead, so a 4-minute run
@@ -336,7 +337,8 @@ export function soakVerdict(samples: readonly SoakSample[], limits: SoakLimits =
       leak('inotify watches', { growth: Math.round(g.growth * 10) / 10, peak: g.peak }, limits.fdGrowth, (n) => `by ${Math.round(n * 10) / 10}`);
     }
   }
-  // R1181o D1, R1181p D2: the filesystems' and the kernel's levels, as the disk is held (growth with the 4x peak).
+  // R1181o D1, R1181p D2: the filesystems' and the kernel's levels, as the disk is held (growth with the 4x peak). The
+  // driver takes the event log out of it (R1181q D2: the log is judged on its own above, by its own limits).
   if (use.some((s) => typeof s.levelBytes === 'number')) {
     const counted = use.filter((s) => typeof s.levelBytes === 'number');
     if (counted.length * 2 < use.length) failures.push(`the filesystems' used space not read in ${use.length - counted.length} of ${use.length} sample(s): a leak of it can't be judged`);

@@ -37,12 +37,12 @@ verdict). Workflow: `.github/workflows/soak.yml`.
 | `coordinator.error` events, agent runs that didn't succeed (or failed to start), and every other event type whose name ends in `.failed` or `_failed` (read from the event schema itself), in the whole run, the warm-up included (the stand-in agents never fail) | 0 |
 | The machine's full-run test lock, held at any sample | never |
 | The coordinator's git worktrees grew, and the entries in its worktree folder (a checkout git no longer lists is still there), as open file handles are judged | 2 |
-| The processes the soak started grew; the same way. Counted: its descendants; any in a group or session one of them leads or led; its own group only when it leads it (under `node --test` the group is the runner's and every test file's); and on Linux, any carrying the soak's mark in its environment, and any of this user's that started after the soak in a session that didn't exist then (an orphan in a new session that dropped the mark, or a user-manager service). So a detached child or a setsid'd double fork counts | 4 |
+| The processes the soak started grew; the same way. Counted: its descendants; any of this user's in a group or session one of them leads or led (that same leader, by its start time); and on Linux, any carrying the soak's mark in its environment. The smoke counts its own group only when it leads it (under `node --test` the group is the runner's and every test file's). A real soak, which has its machine to itself, also counts its own group whether it leads it or not (never the test runner, its parent), and on Linux any of this user's that started after the soak (by pid and start time) in its own session or in a session that didn't exist then: an orphan that dropped the mark and left the group, one in a new session, or a user-manager service. So a detached child or a setsid'd double fork counts in both; a plain double fork that dropped the mark counts in a real soak, and in the smoke only by the mark | 4 |
 | Those processes' resident memory grew, as RSS is judged | 256 MB |
-| inotify watches grew, this process's and those processes' (Linux, where they are required in every sample), as open file handles are judged | 32 |
-| Disk under the soak's folder, the test isolate's home, the `/dev/shm` entries the soak or one of its processes holds open or mapped, and (Linux) files they hold open after unlinking them, besides the event log (judged on its own above), per landed task after the warm-up | 64 KB |
+| inotify watches and fanotify marks grew, this process's and those processes' (Linux, where they are required in every sample), as open file handles are judged | 32 |
+| Disk under the soak's folder, the test isolate's home, the `/dev/shm` entries the soak or one of its processes holds open or mapped, and (Linux) files they hold open or mapped after unlinking them, besides the event log (judged on its own above), per landed task after the warm-up | 64 KB |
 | The same disk, grown or held mid-run, as memory is judged (temp files are made inside the folder) | 256 MB, 4× held |
-| A real soak on Linux only: the used space of the filesystems of the soak's folder, `/var/tmp`, `/dev/shm` and `$XDG_RUNTIME_DIR` (statfs), plus the kernel's `Shmem`, grown or held, as the disk is judged. This is what no walk can name: an unlinked open file, a memfd, a file outside the walked folders. Not read in the smoke, which shares its machine with other test files, nor off Linux | 256 MB, 4× held |
+| A real soak on Linux only (required in every sample there): the used space of the filesystems of the soak's folder and `/var/tmp` (statfs), plus the kernel's `Shmem` (which holds `/dev/shm`, `$XDG_RUNTIME_DIR` and every other tmpfs, so they aren't read twice), less the event log, which is on the soak folder's filesystem and judged on its own above. Grown or held, with the same envelope as the disk. It catches what a walk misses: an unlinked open or mapped file, a memfd, a file outside the walked folders. But it also counts anything else on those filesystems, so it is read only where the soak has its machine to itself: not in the smoke, which shares its machine with other test files, nor off Linux | 256 MB, 4× held |
 | Files and folders under the soak's folder, per landed task after the warm-up | 64 |
 | Agent runs open, at any sample | 0 |
 | Agent slots held, at any sample | 0 |
@@ -133,8 +133,12 @@ replaces main's pending scheduled run.
   knobs, clears NODE_OPTIONS and BASH_ENV, and runs the node recorded right after setup-node.
 - **It can't see what it doesn't count off Linux, or below what it reads:** off Linux, an orphan that dropped the mark
   and left every group it was seen in, a file held open after unlinking, and the filesystems' levels aren't read. A
-  process of another user, and a process of this user that kept a session alive since before the soak, aren't counted.
-  On a desktop, a new session of the same user during the soak (a new terminal) is counted as the soak's: it runs on a
-  CI runner.
+  process of another user, and a new process in a session of this user's that was alive before the soak and isn't
+  the soak's own (a daemon started earlier), aren't counted.
+- **The smoke counts less than a real soak:** it shares its machine with other test files and the user's programs, so
+  it counts by descent, a seen leader and the mark only. In the smoke, an orphan that dropped the mark and left the
+  groups it was seen in (a plain double fork from a clean environment, or a new session) isn't counted, nor are the
+  filesystems' levels read. A real soak counts both: it runs on a CI runner with the machine to itself, where a new
+  session of the same user during the soak (on a desktop, a new terminal) would be counted as the soak's.
 - **It is a heuristic over a sampled series.** Each review round found shapes it misjudged; issue #1231 proposes a
   written attack spec as its acceptance bar. A tick that grows with the log (issue #1234) is expected to fail it today.
