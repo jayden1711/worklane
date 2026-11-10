@@ -87,7 +87,8 @@ const INLINE_CURL = new RegExp(
 const INLINE_CHECK = new RegExp(String.raw`^\s*echo "(?:${VAR}|[0-9a-f]{64})  (${PATH})\.part" \| sha256sum -c - --strict && mv -f -- "(${PATH})\.part" "(${PATH})"\s*$`);
 
 /** `bash` made to name something else: a function (`bash()`, `function bash`), an alias, or `hash -p <path> bash`. */
-const BASH_REDEFINED = /(?:^|[\s;&|(`{])(?:function\s+bash\b|bash\s*\(\s*\))|\balias\s+(?:-[A-Za-z]+\s+)*bash=|\bhash\s+(?:-[A-Za-z]+\s+)*-[A-Za-z]*p/;
+// R1228p D1: any function name that ends in `bash` (`/usr/bin/bash() {…}`, `function /usr/bin/bash {…}`); `bashful()` is kept.
+const BASH_REDEFINED = /(?:^|[\s;&|(`{])(?:function\s+\S*\bbash(?![\w-])|\S*\bbash\s*\(\s*\))|\balias\s+(?:-[A-Za-z]+\s+)*bash=|\bhash\s+(?:-[A-Za-z]+\s+)*-[A-Za-z]*p/;
 /** PATH given a value, however it is set (the helper line's `bash` is found on it). */
 const PATH_SET = /(?:^|[\s;&|(`])(?:(?:export|declare|typeset|local|readonly)(?:\s+-[A-Za-z]+)*\s+)?PATH\+?=/;
 /** BASH_ENV or ENV given a value (an empty one clears it), however it is set: assigned, exported, declared, by env. */
@@ -264,6 +265,9 @@ export function runProblems(run: string, rootStep = false): string[] {
       if (PATH_SET.test(l)) out.push(`PATH set in a run with ${HELPER} (its \`bash\` is found on PATH): ${l.trim()}`);
     }
   }
+  // R1228p D3: the checkout's helper only as HELPER_LINE: a call in any other form (another `bash`, its URL built from
+  // pieces) would run outside both structural rules (the step's shell and the line's /usr/bin/bash -p).
+  for (const l of lines) if (!/^\s*#/.test(l) && /scripts\/ci\/fetch-pinned\.sh/.test(l) && !HELPER_LINE.test(l)) out.push(`${HELPER} named other than on a helper line (\`/usr/bin/bash -p "$GITHUB_WORKSPACE/${HELPER}" <url> <pin> <out>\`): ${l.trim()}`);
   for (const [i, l] of lines.entries()) {
     if (HELPER_LINE.test(l) && rootStep) out.push(`${HELPER} from the checkout in a step that runs as root in the self-hosted container: ${l.trim()}`);
     const m = INLINE_CURL.exec(l);
@@ -430,6 +434,14 @@ function workflowFiles(files: readonly { name: string; text: string }[], report:
       ...Object.entries(doc?.jobs ?? {}).flatMap(([jn, j]) => (j?.steps ?? []).map((s) => ({ s, root: rootContainer(j ?? {}), envs: [(doc as { env?: unknown })?.env, (j as { env?: unknown })?.env], job: jn, defaultShell: (j as { defaults?: { run?: { shell?: unknown } } })?.defaults?.run?.shell ?? wfDefault }))),
       ...(doc?.runs?.steps ?? []).map((s) => ({ s, root: actionRoot, envs: [] as unknown[], job: '', defaultShell: undefined as unknown })),
     ];
+    // R1228p D2: a WSL_HELPER_STEPS entry names one step: a second step with that name in that job (the exception
+    // copied, the table unchanged) is refused, and neither is excepted.
+    const stepCount = new Map<string, number>();
+    for (const { s, job } of steps) if (job) {
+      const k = `${name.split('/').pop()}#${job}#${String((s as { name?: unknown }).name ?? '')}`;
+      stepCount.set(k, (stepCount.get(k) ?? 0) + 1);
+    }
+    for (const [k, n] of stepCount) if (n > 1 && WSL_HELPER_STEPS.includes(k)) report(name, `${n} steps named as the one WSL helper step (WSL_HELPER_STEPS names one): ${k}`);
     for (const { s, root, envs, job, defaultShell } of steps) {
       if (typeof s?.run !== 'string') continue;
       // Owner decision (c): a step that runs the helper gets no BASH_ENV or ENV with a value, from any level.
@@ -437,7 +449,7 @@ function workflowFiles(files: readonly { name: string; text: string }[], report:
         // R1228o D1: its own shell is HELPER_SHELL, set on the step itself; the one WSL step in WSL_HELPER_STEPS aside.
         const stepName = String((s as { name?: unknown }).name ?? '');
         const shell = (s as { shell?: unknown }).shell;
-        const wsl = shell === undefined && defaultShell === 'wsl-bash {0}' && WSL_HELPER_STEPS.includes(`${name.split('/').pop()}#${job}#${stepName}`);
+        const wsl = shell === undefined && defaultShell === 'wsl-bash {0}' && WSL_HELPER_STEPS.includes(`${name.split('/').pop()}#${job}#${stepName}`) && stepCount.get(`${name.split('/').pop()}#${job}#${stepName}`) === 1;
         if (shell !== HELPER_SHELL && !wsl) report(name, `a step that runs ${HELPER} without \`shell: ${HELPER_SHELL}\` (a step shell that isn't privileged imports a \`bash\` function from the environment): ${stepName || s.run.split('\n')[0]}`);
         // R1228l D1 (N2): the step's own shell isn't started with -p, so a BASH_ENV an earlier step wrote to
         // GITHUB_ENV defines its `bash`. Only the step's own env overrides GITHUB_ENV: each helper step clears it there.
@@ -999,25 +1011,60 @@ test("R1228o D1, D2: a helper step's own shell is the privileged /usr/bin/bash a
   assert.match(scan(wsl('ci-slow.yml', 'bootstrap-windows', step, '        shell: wsl-bash {0}\n')).join(), /without `shell:/, 'its shell set on the step');
 });
 
+test("R1228p D1-D3: a function named /usr/bin/bash, a second step named as the WSL exception, and the helper named other than on a helper line are refused", () => {
+  const GL = 'https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz';
+  const line = `/usr/bin/bash -p "$GITHUB_WORKSPACE/${HELPER}" "${GL}" ${PIN} gl.tgz`;
+  // D1: A5, A6 (and the plain `bash` forms); `bashful()` and a `bash` command are kept.
+  for (const pre of ['/usr/bin/bash() { printf EVIL > "$5"; }', 'function /usr/bin/bash { :; }', '/usr/bin/bash () { :; }', 'bash() { :; }', 'function bash { :; }']) {
+    assert.match(runProblems(`${pre}\n${line}`).join(), /`bash` redefined/, `refused: ${pre}`);
+  }
+  for (const pre of ['bashful() { :; }', 'function bashrc_load { :; }', '/usr/bin/bash --version', 'echo bash']) {
+    assert.deepEqual(runProblems(`${pre}\n${line}`).filter((p) => /redefined/.test(p)), [], `kept: ${pre}`);
+  }
+  // D3 (V3): the helper by another form, its URL built from pieces: no DOWNLOAD URL on the line, so before this no rule fired.
+  for (const call of [`bash "$GITHUB_WORKSPACE/${HELPER}" "$u" ${PIN} gl.tgz`, `/usr/bin/bash -p "$GITHUB_WORKSPACE/${HELPER}" "$u" ${PIN} gl.tgz`, `sh scripts/ci/fetch-pinned.sh "$u" ${PIN} gl.tgz`, `. "$GITHUB_WORKSPACE/${HELPER}"`]) {
+    assert.match(runProblems(`u="https://github.com/a/b/rel""eases/download/v1/x.tgz"\n${call}`).join(), /named other than on a helper line/, `refused: ${call}`);
+  }
+  assert.deepEqual(runProblems(`# ${HELPER} is the one downloader\n${line}`).filter((p) => /named other than/.test(p)), [], 'a comment naming it is kept');
+  assert.deepEqual(runProblems(line), [], 'the helper line itself');
+  // D2 (W1): the pinned WSL step, copied under the same name into the same job.
+  const wslStep = (out: string) => `      - name: "fetch the bootstrap's pinned Node inside WSL, for packing below"\n        env:\n          BASH_ENV: ''\n        run: |\n          ${WS_FROM_WORKSPACE}\n          /usr/bin/bash -p "$ws/${HELPER}" "https://nodejs.org/dist/$v/node-$v-linux-x64.tar.xz" "$sum" ${out}\n`;
+  const wsl = (steps: string) => ({ name: '.github/workflows/ci-slow.yml', text: `on: push\njobs:\n  bootstrap-windows:\n    runs-on: windows-latest\n    defaults:\n      run:\n        shell: wsl-bash {0}\n    steps:\n${steps}` });
+  const scan = (f: { name: string; text: string }) => {
+    const out: string[] = [];
+    workflowFiles([f], (_n, p) => out.push(p));
+    return out;
+  };
+  assert.deepEqual(scan(wsl(wslStep('/tmp/node.tar.xz'))), [], 'control: the one pinned step');
+  const twice = scan(wsl(wslStep('/tmp/node.tar.xz') + wslStep('/tmp/node2.tar.xz'))).join(' | ');
+  assert.match(twice, /2 steps named as the one WSL helper step/, 'W1: a second step under the pinned name');
+  assert.match(twice, /without `shell:/, 'and neither is excepted');
+});
+
 // Limits (owner decision (c): stated, not closed; the helper's digest check holds for each download it handles):
 // - A download that never names a URL the lint knows (DOWNLOAD), through a tool it doesn't know (python, node, perl, a
 //   compiled binary, an action not in USES_ALLOWED once allowed), or built from pieces at run time, isn't seen.
 // - **Code already running in the same job is out of scope.** The helper and its step shell run inside a job whose
 //   earlier steps, and whose own run, can change what they run, and the lint doesn't model that. Structurally, a helper
 //   step's shell is HELPER_SHELL (privileged: no imported function, no BASH_ENV) and its line names /usr/bin/bash -p (no
-//   PATH or hash table); the rules on PATH, `bash` redefinition and BASH_ENV in its run catch the plain accidents. Not
-//   seen, and not claimed:
+//   PATH or hash table); the rules on PATH, `bash` redefinition (any function name ending in `bash`, R1228p D1) and
+//   BASH_ENV in its run catch the plain accidents, and the helper is named nowhere but on a helper line (R1228p D3).
+//   Not seen, and not claimed:
 //   - LD_PRELOAD or LD_LIBRARY_PATH, from GITHUB_ENV or the same run, reach curl, sha256sum and mv by their absolute
 //     paths (R1228n D1: L1, L2);
 //   - every hosted runner has passwordless sudo, so an earlier step or the same run can replace /usr/bin/sha256sum,
-//     /usr/bin/curl or /usr/bin/bash itself (R1228o D3: O7, O8);
-//   - a function named /usr/bin/bash defined through eval with a split name (`eval '/usr/bin/ba''sh() {…}'`); and the
-//     plain spellings the PATH and `bash` rules don't read (read -r PATH, printf -v PATH, mapfile, for PATH in, declare
-//     -n, BASH_CMDS[bash], BASH_ALIASES, a sourced file; R1228n B1-B4, R1228o D2: O3-O6), which /usr/bin/bash -p now
-//     makes moot for the helper's own `bash`;
+//     /usr/bin/curl, /usr/local/bin/bash or /usr/bin/bash itself (R1228o D3: O7, O8, O8s; R1228n S1, S2);
+//   - an exported `bash` function from a step, job or workflow `env:` key or from GITHUB_ENV (R1228o D1: O1, O1j, O1w,
+//     O2): the privileged step shell doesn't import it, but the lint doesn't read those keys;
+//   - a function named /usr/bin/bash defined by eval with a split name (`eval '/usr/bin/ba''sh() {…}'`) or in a sourced
+//     file (R1228p D1: A4, A7): these stay open (the plain forms, A5 and A6, are refused);
+//   - the plain spellings the PATH and `bash` rules don't read (read -r PATH, printf -v PATH, mapfile, for PATH in,
+//     declare -n, BASH_CMDS[bash], BASH_ALIASES; R1228n B1, B2, B4, R1228o D2: O3-O6), which /usr/bin/bash -p makes
+//     moot for the helper's own `bash`;
 //   - the one WSL helper step (WSL_HELPER_STEPS): its step shell is setup-wsl's `wsl-bash {0}`, not HELPER_SHELL, so
 //     what that shell takes from the environment (an exported `bash` function, BASH_ENV) and what earlier WSL steps put
-//     in the distro (it keeps its filesystem between steps) can change what runs; only its helper line is held;
+//     in the distro (it keeps its filesystem between steps) can change what runs; only its helper line is held, and
+//     a second step under its name is refused (R1228p D2);
 //   - a stand-in `bash` on GITHUB_PATH (R1228l N1) is moot for the helper line, which names /usr/bin/bash.
 // - The helper line runs whatever file is at its path, so a helper file changed before it runs isn't seen: by `sed -i`
 //   or `cp` in the same run or an earlier step (M1, M2), or copied over from a folder no walk reads, such as `.claude/`
