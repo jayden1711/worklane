@@ -38,6 +38,7 @@ const MODULES = (spec: string, path: string) => spec === 'node:child_process' ||
 const CLAUDE = /^claude$|\/claude$|(?:^|[\s;&|(])claude(?:\s|$)|@anthropic-ai\/claude-code|claude-code\/cli\.js/;
 const LAUNCHER = 'src/claude-launch.ts';
 /** Pinned exceptions: file, then the argv (its literal elements, in order) the call passes. */
+// check-table: never-grow
 const EXCEPTIONS: [string, string[]][] = [
   ['src/claude-signin.ts', ['auth', 'login']],
   ['src/claude-signin.ts', ['auth', 'status', '--json']],
