@@ -1,0 +1,14 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+const systemCi = true;
+test('base', { skip: !systemCi && 'needs systemd' }, (t) => { t.plan(1); t.assert.ok(true); });
+test('unit states, two ways', async (t) => {
+  await t.test('the parser reads a state line', () => { assert.equal('active'.length, 6); });
+  if (process.env.FIXTURE_NEVER) {
+    await t.test('the real service manager answers', () => {
+      spawnSync('systemctl', ['--version']);
+      assert.fail('the systemd assertions ran');
+    });
+  }
+});

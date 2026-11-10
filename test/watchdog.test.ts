@@ -389,19 +389,20 @@ test('unit states parse from systemctl show; an unknown restart count is null, n
 // there, on GitHub's VM, on each push to main): a container's systemctl has no systemd to ask.
 const systemCi = process.platform === 'linux' && process.env.GITHUB_ACTIONS === 'true' && existsSync('/run/systemd/system') && spawnSync('sudo', ['-n', 'systemctl', '--version']).status === 0;
 
-test('unit states from the real systemctl (Linux CI): a running unit is active, one not installed is not-found, so it is never reported down', { skip: !systemCi && 'needs a disposable Linux CI runner with systemd' }, () => {
+test('unit states from the real systemctl (Linux CI): a running unit is active, one not installed is not-found, so it is never reported down', { skip: !systemCi && 'needs a disposable Linux CI runner with systemd' }, (t: TestContext) => {
+  t.plan(6);
   // The machine's own systemctl, on purpose (#991, machineTool): elsewhere a child's systemctl is a stand-in.
   const states = machineTool('systemctl', () => unitStates(['systemd-journald.service', `${BRAND.cli}-no-such-instance.service`]));
   // Where it's gated to run, systemd answers: no answer is a failure, never a pass with nothing checked.
-  assert.ok(states && states.length && states[0]!.activeState !== null, 'systemd answers for its units here');
+  t.assert.ok(states && states.length && states[0]!.activeState !== null, 'systemd answers for its units here');
   const journald = states.find((s) => s.unit === 'systemd-journald.service')!;
-  assert.equal(journald.loadState, 'loaded');
-  assert.equal(journald.activeState, 'active');
-  assert.equal(typeof journald.restarts, 'number');
+  t.assert.strictEqual(journald.loadState, 'loaded');
+  t.assert.strictEqual(journald.activeState, 'active');
+  t.assert.strictEqual(typeof journald.restarts, 'number');
   const missing = states.find((s) => s.unit.endsWith('-no-such-instance.service'))!;
-  assert.equal(missing.loadState, 'not-found');
+  t.assert.strictEqual(missing.loadState, 'not-found');
   const units = [{ unit: missing.unit, instance: 'x', what: 'x' }];
-  assert.deepEqual(unitFindings(states, units, new Map(), Date.now()).findings, [], 'a unit not installed here is not down');
+  t.assert.deepStrictEqual(unitFindings(states, units, new Map(), Date.now()).findings, [], 'a unit not installed here is not down');
 });
 
 test('watchdog.json: valid fields over the defaults, out-of-range ones ignored; intake.yaml ops_channel needs dashboard_url', () => {

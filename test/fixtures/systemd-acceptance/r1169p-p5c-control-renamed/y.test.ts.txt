@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import { spawnSync } from 'node:child_process';
 const systemCi = true;
-test('acceptance: the engine unit restarts', { skip: !systemCi && 'needs systemd' }, () => {});
+test('acceptance: the engine unit restarts', { skip: !systemCi && 'needs systemd' }, (t) => { t.plan(1); t.assert.ok(true); });
 test('the restart command is systemctl', () => { if (!'systemctl restart x'.startsWith('systemctl')) throw new Error('x'); });
 test('acceptance: the engine unit restarts (journal)', { todo: 'flaky on hosted runners' }, () => {
   const r = spawnSync('systemctl', ['is-active', 'worklane.service'], { encoding: 'utf8' });

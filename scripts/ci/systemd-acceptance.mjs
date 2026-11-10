@@ -87,15 +87,18 @@
 // minor 3: any call can end the process, as any can throw). #1250 tracks measuring the
 // alternative, the whole suite on the VM.
 //
-// A named limit pending the owner's choice (R1169ab D2; option (2), node's own count on the gates and coverage of
-// each sign test's body on the VM, would close it): a test that passes without checking on the VM's own answer (an early
-// return, or a subtest started only sometimes, on GITHUB_ACTIONS, the uid or PROJECT_SANDBOX_REQUIRED) runs and passes
-// here with no skip. The run sees that it ran and passed, not how much of it checked anything.
+// A test that passes having checked less, on what only this VM answers (an early return, or a subtest started only
+// sometimes, on GITHUB_ACTIONS, the uid or PROJECT_SANDBOX_REQUIRED; R1169ab D2), fails here (the owner's decision of
+// 2026-11-10, option (2)). Each gate opens with `t.plan(<n>)` (planProblems: refused statically without it), so node
+// fails it when it made fewer `t.assert` calls and subtests. Each sign test's file runs with node's line coverage of
+// itself (mustRun): the test's own function must have reached its last statement and started every subtest it names.
+// What that can't see: a check skipped inside one statement (a ternary, `&&`), a branch of a helper the test calls, or
+// assertions a gate's count still matches by another path; an excused test (it skips here) isn't judged on it.
 //
 // Results come from node's test events (systemd-acceptance-reporter.mjs, R1169f), not from TAP text: each gate is
 // matched by its built file, the line and column its test() call is on, and its name, and the reporter writes to a
-// pipe (fd 3) no test process holds. A named limit pending the owner's threat-model answer (R1169ab D1): those events are not out of a test
-// file's reach. Node's runner reads them from each test file's own process, as frames on that process's stdout, which
+// pipe (fd 3) no test process holds. A named limit, by the owner's threat model (2026-11-10: test code is trusted;
+// R1169ab D1): those events are not out of a test file's reach. Node's runner reads them from each test file's own process, as frames on that process's stdout, which
 // the file's code holds: a test file that rewrites its own stdout (or its exit code) can turn a failure or a skip
 // into a pass. The run trusts the test files' code not to forge its own results.
 //
@@ -1459,6 +1462,80 @@ export function findAll(dir, prefix = 'test/') {
   return found;
 }
 
+/** The test() call in `sf` whose `test` token is at `line`:`column` (1-based, as node reports a test's place). */
+function callAt(ts, sf, line, column) {
+  let hit = null;
+  const visit = (n) => {
+    if (hit) return;
+    if (ts.isCallExpression(n)) {
+      const p = sf.getLineAndCharacterOfPosition(n.getStart(sf));
+      if (p.line + 1 === line && p.character + 1 === column) {
+        hit = n;
+        return;
+      }
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(sf);
+  return hit;
+}
+
+/**
+ * Each gate in `text` (a built test file, `path` its source) that doesn't open with node's own count of what it checks
+ * (R1169ab D2, the owner's decision of 2026-11-10): its function's first statement must be `<t>.plan(<n>)`, `<t>` its
+ * first parameter and `<n>` a whole-number literal of 1 or more, alone. Node then fails the gate, on the VM, when it
+ * made fewer (or more) `t.assert` calls and subtests than that: an early return, or a subtest started only sometimes,
+ * can't pass there having checked less. `gates` as gatesOf gives them.
+ */
+export function planProblems(ts, path, text, gates) {
+  const sf = parsed(ts, path, text);
+  return gates.flatMap((g) => {
+    const at = `${path}: ${g.name}`;
+    const call = callAt(ts, sf, g.line, g.column);
+    const fn = call?.arguments.at(-1);
+    if (!fn || !(ts.isArrowFunction(fn) || ts.isFunctionExpression(fn))) return [`${at}: its function isn't inline, so its count can't be read`];
+    const p = fn.parameters[0]?.name;
+    const first = fn.body && ts.isBlock(fn.body) ? fn.body.statements[0] : null;
+    const c = first && ts.isExpressionStatement(first) ? first.expression : null;
+    const ok =
+      p && ts.isIdentifier(p) && c && ts.isCallExpression(c) && ts.isPropertyAccessExpression(c.expression) && ts.isIdentifier(c.expression.expression) &&
+      c.expression.expression.text === p.text && c.expression.name.text === 'plan' && c.arguments.length === 1 && ts.isNumericLiteral(c.arguments[0]) &&
+      /^[1-9]\d*$/.test(c.arguments[0].text);
+    return ok ? [] : [`${at}: its first statement isn't \`t.plan(<n>)\` (its context's own count, a literal of 1 or more, alone): node then fails it when it checks less, as an early return does`];
+  });
+}
+
+/**
+ * What must have run of a sign test's own function, on the VM (R1169ab D2, the owner's decision of 2026-11-10), read
+ * from `text` (a built test file) at the test's `line`:`column`: `end`, the line of its function's last statement (in a
+ * trailing `try`, its block's last; an expression body's own line), which an early return never reaches; and
+ * `subtests`, the line of each subtest it starts (`<t>.test(`, `<t>` its first parameter), which one started only
+ * sometimes never reaches. Lines are the built file's, 1-based, as node's coverage reports them. null when its
+ * function isn't inline.
+ */
+export function mustRun(ts, path, text, line, column) {
+  const sf = parsed(ts, path, text);
+  const call = callAt(ts, sf, line, column);
+  const fn = call?.arguments.at(-1);
+  if (!fn || !(ts.isArrowFunction(fn) || ts.isFunctionExpression(fn))) return null;
+  const lineOf = (n) => sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1;
+  let last = fn.body;
+  while (last && ts.isBlock(last) && last.statements.length) {
+    last = last.statements.at(-1);
+    if (ts.isTryStatement(last)) last = last.tryBlock;
+  }
+  const p = fn.parameters[0]?.name;
+  const subtests = [];
+  if (p && ts.isIdentifier(p)) {
+    const visit = (n) => {
+      if (ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression) && ts.isIdentifier(n.expression.expression) && n.expression.expression.text === p.text && n.expression.name.text === 'test') subtests.push(lineOf(n));
+      ts.forEachChild(n, visit);
+    };
+    visit(fn.body);
+  }
+  return { end: lineOf(last), subtests };
+}
+
 /**
  * What's wrong with each gate in `runs`, one entry per file: { file, gates: [{ name, line }], events }, where `events`
  * are node's own results from running that file alone (systemd-acceptance-reporter.mjs: { type, name, nesting, file,
@@ -1469,7 +1546,7 @@ export function findAll(dir, prefix = 'test/') {
  * run that skipped with a reason naming systemd. [] when every gate ran once and passed, all of it.
  */
 export function problems(runs) {
-  return runs.flatMap(({ file, gates, events, signTests = [], excused = new Set() }) => {
+  return runs.flatMap(({ file, gates, events, signTests = [], excused = new Set(), coverage = null }) => {
     const built = `dist/test/${file.replace(/\.ts$/, '.js')}`;
     const inFile = (e) => typeof e.file === 'string' && (e.file.split(sep).join('/').endsWith(`/${built}`) || e.file === built);
     const out = [];
@@ -1533,6 +1610,19 @@ export function problems(runs) {
         if (!bad && t.subtests && !subtestsOf(k) && !why) {
           out.push(`${at}: ran no subtest (its function starts subtests, and none ran: it checked nothing)`);
           continue;
+        }
+        // Its own function ran to its end, and started every subtest it names (R1169ab D2, the owner's decision of
+        // 2026-11-10): node's line coverage of the built file. An early return, or a subtest started only sometimes, on
+        // what only this VM answers (GITHUB_ACTIONS, the uid, PROJECT_SANDBOX_REQUIRED) passes having checked less.
+        if (!bad && !why && t.mustRun) {
+          if (!coverage) {
+            out.push(`${at}: no coverage of its file came back, so what of it ran can't be read`);
+            continue;
+          }
+          const ran = (l) => (coverage.get(l) ?? 0) > 0;
+          if (!ran(t.mustRun.end)) out.push(`${at}: its function's last statement (line ${t.mustRun.end}) never ran: it returned early, having checked less`);
+          const notStarted = t.mustRun.subtests.filter((l) => !ran(l));
+          if (notStarted.length) out.push(`${at}: the subtest at line ${notStarted.join(', ')} never started: started only sometimes, it checked less`);
         }
         for (let j = k - 1; j >= 0 && events[j].nesting > r.nesting; j--) {
           matched.add(j);
@@ -1660,6 +1750,11 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
       const a = [...f.names].sort();
       const b = f.gates.map((g) => g.name).sort();
       if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error(`test/${f.file}: its gates ${JSON.stringify(a)} aren't the built file's ${JSON.stringify(b)} (build again)`);
+      // Each gate opens with node's own count (R1169ab D2): fewer checks than that fails it here.
+      const unplanned = planProblems(ts, `test/${f.file}`, built, f.gates);
+      if (unplanned.length) throw new Error(unplanned.join('\n'));
+      // Each sign test: what of its own function must have run (R1169ab D2), read on the coverage of its run.
+      for (const t of f.signTests ?? []) t.mustRun = mustRun(ts, `test/${f.file}`, built, t.line, t.column);
     }
   } catch (e) {
     console.error(e.message);
@@ -1685,6 +1780,9 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
       // Never a child of another test run (NODE_TEST_CONTEXT), and no NODE_OPTIONS (an --enable-source-maps there would
       // report TS lines, so every gate would read as not run).
       const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'NODE_TEST_CONTEXT' && k !== 'NODE_OPTIONS'));
+      // A file with sign tests runs with node's line coverage of that file alone (R1169ab D2): what of each test's
+      // own function ran. Test files are left out of coverage by default; this names the one built file.
+      if (whole) args.splice(args.indexOf('--test') + 1, 0, '--experimental-test-coverage', `--test-coverage-include=dist/test/${f.file.replace(/\.ts$/, '.js')}`, '--test-coverage-exclude=/dev/null/*');
       const r = spawnSync(process.execPath, args, { cwd: root, env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'inherit', 'pipe'] });
       process.stdout.write(r.stdout ?? '');
       let events;
@@ -1694,7 +1792,9 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
         console.error(`test/${f.file}: its results couldn't be read (${e.message})`);
         process.exit(1);
       }
-      runs.push({ file: f.file, gates: f.gates, events, signTests: f.signTests ?? [], excused: f.excused ?? new Set() });
+      const cov = events.find((e) => e.type === 'coverage' && typeof e.path === 'string' && e.path.split(sep).join('/').endsWith(`/dist/test/${f.file.replace(/\.ts$/, '.js')}`));
+      events = events.filter((e) => e.type !== 'coverage');
+      runs.push({ file: f.file, gates: f.gates, events, signTests: f.signTests ?? [], excused: f.excused ?? new Set(), coverage: cov ? new Map(cov.lines) : null });
       exits.push(...summaryProblems(r.stdout ?? '', f.file, f.gates.length + (f.signTests?.length ?? 0), whole));
       if (r.status !== 0) exits.push(`test/${f.file}: the test run exited ${r.status ?? r.signal}`);
     }

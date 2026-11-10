@@ -2,6 +2,6 @@ import { test } from 'node:test';
 const systemCi = false;
 // R1169g c2: a gate on a subtest (t.test) and a top-level namesake that passes.
 test('outer', async (t) => {
-  await t.test('acceptance: x', { skip: !systemCi && 'needs systemd' }, () => {});
+  await t.test('acceptance: x', { skip: !systemCi && 'needs systemd' }, (t) => { t.plan(1); t.assert.ok(true); });
 });
 test('acceptance: x', () => {});

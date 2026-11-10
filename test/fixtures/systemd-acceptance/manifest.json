@@ -255,8 +255,8 @@
     "a skip reads test/y\\.test\\.ts: UNITS, which carries"
   ],
   "r1169m-m04-early-return": [
-    0,
-    "^$",
+    1,
+    "test/y\\.test\\.ts: y: a unit restarts: its function's last statement \\(line 5\\) never ran",
     "test/y\\.test\\.ts:\\d+: y: a unit restarts"
   ],
   "r1169o-o01-helper-registers": [
@@ -299,8 +299,8 @@
     "test/y\\.test\\.ts:\\d+: acceptance: units are installed in the system folder"
   ],
   "r1169p-p3b-allowlisted-local-early-return": [
-    0,
-    "^$",
+    1,
+    "test/y\\.test\\.ts: acceptance: units are installed in the system folder: its function's last statement \\(line 8\\) never ran",
     "test/y\\.test\\.ts:\\d+: acceptance: units are installed in the system folder"
   ],
   "r1169p-p3c-control-options-skip": [
@@ -992,6 +992,26 @@
     "test/x\\.test\\.ts: `w \\$\\{process\\.platform\\}`: named in the allowlist's runtime, but 2 tests have that name"
   ],
   "r1169aa-a1c-control-excused-alone": [
+    0,
+    "^$"
+  ],
+  "r1169ab-a1-gate-no-plan": [
+    2,
+    "test/x\\.test\\.ts: base: its first statement isn't `t\\.plan\\(<n>\\)`"
+  ],
+  "r1169ab-a1b-gate-early-return-planned": [
+    1,
+    "test/x\\.test\\.ts: base: failed"
+  ],
+  "r1169ab-a2-sign-early-return": [
+    1,
+    "test/x\\.test\\.ts: the watchdog reads unit states from the real service manager: its function's last statement \\(line \\d+\\) never ran"
+  ],
+  "r1169ab-a3-conditional-subtest": [
+    1,
+    "test/x\\.test\\.ts: unit states, two ways: the subtest at line \\d+ never started"
+  ],
+  "r1169ab-a2c-control-sign-runs-to-end": [
     0,
     "^$"
   ]

@@ -1,3 +1,3 @@
 import { test } from 'node:test';
 const systemCi = true;
-test('gate a', { skip: !systemCi && 'x' }, () => {});
+test('gate a', { skip: !systemCi && 'x' }, (t) => { t.plan(1); t.assert.ok(true); });

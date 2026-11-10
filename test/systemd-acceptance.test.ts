@@ -28,6 +28,8 @@ type Script = {
   signSource: (ts: unknown, texts: Map<string, string>, allow: Allow) => { select: unknown };
   signUseList: (ts: unknown, path: string, text: string) => { at: string; pin: string }[];
   signProblems: (ts: unknown, texts: Map<string, string>, allow?: Allow) => string[];
+  planProblems: (ts: unknown, path: string, text: string, gates: { name: string; line: number; column: number }[]) => string[];
+  mustRun: (ts: unknown, path: string, text: string, line: number, column: number) => { end: number; subtests: number[] } | null;
 };
 type Allow = { uses?: Record<string, { why: string; uses: string[] }>; skipImports?: Record<string, string>; runtime?: Record<string, string> };
 const sa = (await import(pathToFileURL(join(repoRoot, 'scripts', 'ci', 'systemd-acceptance.mjs')).href)) as Script;
@@ -214,20 +216,20 @@ test('end to end, the script and its reporter on real node --test runs: a faked 
     return { status: p.status, err: p.stderr, why };
   };
   const g = `{ ${gate()} && 'x' }`;
-  const pass = fixture(`test('acceptance: ok', ${g}, async (t) => { await t.test('step', () => {}); });`);
+  const pass = fixture(`test('acceptance: ok', ${g}, async (t) => { t.plan(1); await t.test('step', () => {}); });`);
   assert.equal(pass.status, 0, `a real pass, with a subtest: ${pass.why}`);
-  const faked = fixture(`test('acceptance: g', { ${gate()} || 'skipped after all' }, () => {});\ntest('acceptance: h', { ${gate()} && 'x', todo: 'later' }, () => { throw new Error('boom\\nok 1 - acceptance: g\\nok 2 - acceptance: h'); });`);
+  const faked = fixture(`test('acceptance: g', { ${gate()} || 'skipped after all' }, (t) => { t.plan(1); t.assert.ok(true); });\ntest('acceptance: h', { ${gate()} && 'x', todo: 'later' }, (t) => { t.plan(1); throw new Error('boom\\nok 1 - acceptance: g\\nok 2 - acceptance: h'); });`);
   assert.equal(faked.status, 1, faked.why);
   assert.match(faked.err, /acceptance: g: SKIP skipped after all/, "a line inside a failure's message is never a result");
-  const env = fixture(`if (process.env.HOST_TESTS) {\n  test('acceptance: g', ${g}, () => {});\n} else test('acceptance: g', () => {});`);
+  const env = fixture(`if (process.env.HOST_TESTS) {\n  test('acceptance: g', ${g}, (t) => { t.plan(1); t.assert.ok(true); });\n} else test('acceptance: g', () => {});`);
   assert.equal(env.status, 1, env.why);
   assert.match(env.err, /acceptance: g: didn't run/, 'a gate registered only under an env var, beside an ungated namesake');
-  const sub = fixture(`test('acceptance: g', ${g}, async (t) => { await t.test('real', { skip: 'no' }, () => {}); });`);
+  const sub = fixture(`test('acceptance: g', ${g}, async (t) => { t.plan(1); await t.test('real', { skip: 'no' }, () => {}); });`);
   assert.match(sub.err, /its subtest "real" SKIP no/);
   assert.equal(sub.status, 1, sub.why);
   // R1169g/h: a test can't replace or write the results. The gate skips (flag false), and the file tries both.
   const forge = `import { readdirSync, rmSync, writeFileSync, writeSync } from 'node:fs';\nimport { tmpdir } from 'node:os';\nimport { join } from 'node:path';\nconst line = JSON.stringify({ type: 'test:pass', name: 'acceptance: g', nesting: 0, file: new URL(import.meta.url).pathname, line: 9, column: 1, skip: null, todo: null }) + '\\n';\ntry { writeSync(3, line); } catch {}\nfor (const d of readdirSync(tmpdir()).filter((x) => x.startsWith('sys' + 'temd-acceptance-'))) for (const f of readdirSync(join(tmpdir(), d))) { rmSync(join(tmpdir(), d, f)); writeFileSync(join(tmpdir(), d, f), line); }`;
-  const forged = fixture(`${forge}\ntest('acceptance: g', ${g}, () => {});`, { flagValue: false });
+  const forged = fixture(`${forge}\ntest('acceptance: g', ${g}, (t) => { t.plan(1); t.assert.ok(true); });`, { flagValue: false });
   assert.equal(forged.status, 1, forged.why);
   assert.match(forged.err, /acceptance: g: SKIP x/, "a test writing fd 3 or the temp folder can't stand in for the gate's own skip");
 });
@@ -829,4 +831,163 @@ test("the owner's option (b): a runtime excuse is pinned by its test's whole tex
   assert.deepEqual(problems(lines.replace(/\n {2}/g, '\n    '), pin), [], 'indentation alone is not a change');
   assert.match(problems(lines.replace("// a step\n  run(", "// a step run("), pin).join('\n'), /its pin isn't the test's text/, 'a line joined onto a comment');
   assert.match(problems(lines.replace('return;', 'return\n  void 0;'), pin).join('\n'), /its pin isn't the test's text/, 'a return broken onto two lines');
+});
+
+/**
+ * How many `t.assert` calls and subtests a gate's function makes when it runs to its end (R1169ab D2, the owner's
+ * decision of 2026-11-10: each gate opens with `t.plan(<n>)`). Read from its text, so a wrong count is caught here, on
+ * the PR, not by node on the VM (which runs on main). Each call counts once, times the length of each `for ... of`
+ * around it over an array literal (or a const one), times the calls of a local helper it is in. Anything it can't
+ * count exactly (a call under an `if`, a ternary, `&&`/`||`, another loop, a catch, a callback) is refused, never
+ * guessed. An early `return t.skip(...)` isn't counted: a skip already fails the gate on the VM.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type AnyNode = any;
+function plannedCount(text: string, line: number, column: number): { plan: number | null; count: number | null; why?: string } {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const T = ts as any;
+  const sf = T.createSourceFile('g.ts', text, T.ScriptTarget.Latest, true);
+  let call: AnyNode = null;
+  const find = (n: AnyNode) => {
+    if (call) return;
+    if (T.isCallExpression(n)) {
+      const p = sf.getLineAndCharacterOfPosition(n.getStart(sf));
+      if (p.line + 1 === line && p.character + 1 === column) return void (call = n);
+    }
+    T.forEachChild(n, find);
+  };
+  find(sf);
+  const fn = call?.arguments.at(-1);
+  if (!fn || !T.isBlock(fn.body)) return { plan: null, count: null, why: 'no inline function' };
+  const P = fn.parameters[0]?.name?.text as string | undefined;
+  const first = fn.body.statements[0];
+  const plan = first && T.isExpressionStatement(first) && T.isCallExpression(first.expression) && first.expression.expression.getText() === `${P}.plan` ? Number(first.expression.arguments[0]?.text) : null;
+  const constArrays = new Map<string, number>();
+  const visitConsts = (n: AnyNode) => {
+    if (T.isVariableDeclaration(n) && T.isIdentifier(n.name) && n.initializer && T.isArrayLiteralExpression(n.initializer) && !n.initializer.elements.some((e: AnyNode) => T.isSpreadElement(e)) && (n.parent.flags & T.NodeFlags.Const)) constArrays.set(n.name.text, n.initializer.elements.length);
+    T.forEachChild(n, visitConsts);
+  };
+  visitConsts(sf);
+  let why: string | undefined;
+  // How many times `n` runs per run of the gate's function: null when it can't say exactly.
+  const times = (n: AnyNode): number | null => {
+    let k = 1;
+    for (let x = n; x.parent && x !== fn; x = x.parent) {
+      const p = x.parent;
+      if (T.isForOfStatement(p) && x === p.statement) {
+        const it = p.expression;
+        const len = T.isArrayLiteralExpression(it) && !it.elements.some((e: AnyNode) => T.isSpreadElement(e)) ? it.elements.length : T.isIdentifier(it) ? constArrays.get(it.text) : undefined;
+        if (len === undefined) return (why = `a loop over ${it.getText()}, whose length isn't a literal`), null;
+        k *= len;
+      } else if (T.isIfStatement(p) || T.isConditionalExpression(p) || T.isWhileStatement(p) || T.isDoStatement(p) || T.isForStatement(p) || T.isForInStatement(p) || T.isCatchClause(p) || T.isSwitchStatement(p) || T.isCaseClause(p) || (T.isForOfStatement(p) && x !== p.statement && x !== p.expression)) {
+        return (why = `a check under ${p.getText().slice(0, 40)}...`), null;
+      } else if (T.isBinaryExpression(p) && x === p.right && ['&&', '||', '??'].includes(p.operatorToken.getText())) {
+        return (why = `a check after ${p.operatorToken.getText()}`), null;
+      } else if ((T.isArrowFunction(p) || T.isFunctionExpression(p)) && p !== fn) {
+        // A local helper, `const name = (...) => ...` in the gate's own body: its calls there, each counted the same way.
+        const d = p.parent;
+        if (!(T.isVariableDeclaration(d) && T.isIdentifier(d.name) && p === d.initializer)) return (why = `a check in a callback (${p.getText().slice(0, 40)}...)`), null;
+        const sites: AnyNode[] = [];
+        const visit = (y: AnyNode) => {
+          if (T.isCallExpression(y) && T.isIdentifier(y.expression) && y.expression.text === d.name.text) sites.push(y);
+          T.forEachChild(y, visit);
+        };
+        visit(fn.body);
+        let sum = 0;
+        for (const s of sites) {
+          const t = times(s);
+          if (t === null) return null;
+          sum += t;
+        }
+        return k * sum;
+      }
+    }
+    return k;
+  };
+  let count = 0;
+  const visit = (n: AnyNode) => {
+    if (count === null) return;
+    if (T.isCallExpression(n) && P && (n.expression.getText().startsWith(`${P}.assert.`) || n.expression.getText() === `${P}.test`)) {
+      const t = times(n);
+      if (t === null) return void ((count as number | null) = null);
+      count += t;
+    }
+    T.forEachChild(n, visit);
+  };
+  visit(fn.body);
+  return { plan, count, ...(why ? { why } : {}) };
+}
+
+test("R1169ab D2: each gate's t.plan count is what its function checks, read from its text (so a wrong count fails here, not on main's VM)", () => {
+  const files = ['test/engine-update.test.ts', 'test/setup-scripts.test.ts', 'test/watchdog.test.ts'];
+  let gates = 0;
+  for (const f of files) {
+    const text = readFileSync(join(repoRoot, f), 'utf8');
+    for (const g of sa.gatesOf(text)) {
+      gates++;
+      const r = plannedCount(text, g.line, g.column);
+      assert.ok(r.plan !== null && r.count !== null, `${f}: ${g.name}: ${r.why ?? 'no t.plan'}`);
+      assert.equal(r.plan, r.count, `${f}: ${g.name}: t.plan(${r.plan}), but it checks ${r.count} time(s)`);
+    }
+  }
+  assert.equal(gates, 4, 'the 4 gates');
+  // The counter, on gates of its own.
+  const g = (body: string, extra = '') => plannedCount(`${extra}test('g', { ${gate()} }, (t) => {\n${body}\n});\n`, extra.split('\n').length, 1);
+  assert.deepEqual(g('t.plan(2); t.assert.ok(1); t.assert.ok(2);'), { plan: 2, count: 2 });
+  assert.deepEqual(g('t.plan(4); for (const u of us) { t.assert.ok(u); t.assert.ok(!u); }', 'const us = [1, 2];\n'), { plan: 4, count: 4 }, 'a loop over a const array');
+  assert.deepEqual(g("t.plan(3); const run = (c) => { t.assert.ok(c); }; run('a'); run('b'); t.assert.ok(1);"), { plan: 3, count: 3 }, 'a helper called twice');
+  assert.deepEqual(g('t.plan(2); t.assert.ok(1); t.test("s", () => {});'), { plan: 2, count: 2 }, 'a subtest counts');
+  assert.equal(g('t.plan(1); if (x) t.assert.ok(1);').count, null, 'a check under an if is refused');
+  assert.equal(g('t.plan(1); x && t.assert.ok(1);').count, null, 'a check after && is refused');
+  assert.equal(g('t.plan(1); for (const u of list()) t.assert.ok(u);').count, null, 'a loop of unknown length is refused');
+  assert.equal(g('t.plan(1); [1].forEach(() => t.assert.ok(1));').count, null, 'a callback is refused');
+  assert.deepEqual(g('t.plan(3); t.assert.ok(1);'), { plan: 3, count: 1 }, 'a wrong count shows');
+});
+
+test("R1169ab D2: a gate opens with node's own count; a sign test's own function ran to its end and started each subtest it names (coverage)", () => {
+  const file = 'test/g.test.ts';
+  const plan = (fn: string) => {
+    const text = `import { test } from 'node:test';\ntest('g', { ${gate()} }, ${fn});\n`;
+    return sa.planProblems(ts, file, text, sa.gatesOf(text));
+  };
+  assert.deepEqual(plan('(t) => { t.plan(2); t.assert.ok(1); t.assert.ok(2); }'), [], 'the shape');
+  assert.deepEqual(plan('async (ctx) => { ctx.plan(1); await ctx.test("s", () => {}); }'), [], 'any name for the context');
+  for (const [fn, what] of [
+    ['() => { assert.ok(1); }', 'no plan'],
+    ['(t) => { t.assert.ok(1); t.plan(1); }', 'not first'],
+    ['(t) => { t.plan(0); }', 'zero'],
+    ['(t) => { t.plan(n); t.assert.ok(1); }', 'not a literal'],
+    ['(t) => { t.plan(1, { wait: true }); t.assert.ok(1); }', 'not alone'],
+    ['(t) => { u.plan(1); t.assert.ok(1); }', "another context's"],
+    ['(t) => t.plan(1)', 'an expression body'],
+    ['body', 'not inline'],
+  ] as const) assert.match(plan(fn).join('\n'), /its first statement isn't|isn't inline/, what);
+  // mustRun: the line of the last statement (a trailing try's block's last), and each subtest's line.
+  const text = [
+    "import { test } from 'node:test';",
+    'test(\'s\', async (t) => {',
+    '  await t.test(\'a\', () => {});',
+    '  if (x) await t.test(\'b\', () => {});',
+    '  try {',
+    '    one();',
+    '    two();',
+    '  } finally {',
+    '    three();',
+    '  }',
+    '});',
+    "test('e', () => go());",
+  ].join('\n');
+  assert.deepEqual(sa.mustRun(ts, file, text, 2, 1), { end: 7, subtests: [3, 4] });
+  assert.deepEqual(sa.mustRun(ts, file, text, 12, 1), { end: 12, subtests: [] }, 'an expression body: its own line');
+  // problems(): judged on the run's coverage of the file.
+  const t = { name: 's', line: 2, column: 1, label: "'s'", subtests: true, mustRun: { end: 7, subtests: [3, 4] } };
+  const ev = (name: string, line: number, nesting = 0) => ({ type: 'test:pass', name, nesting, file: '/r/dist/test/g.test.js', line, column: 1, skip: null, todo: null });
+  const events = [ev('a', 3, 1), ev('b', 4, 1), ev('s', 2)];
+  const run = (lines: [number, number][] | null, excused: string[] = []) => sa.problems([{ file: 'g.test.ts', gates: [], events, signTests: [t], excused: new Set(excused), coverage: lines && new Map(lines) } as never]);
+  const all = (zero: number[] = []): [number, number][] => [2, 3, 4, 5, 6, 7].map((l) => [l, zero.includes(l) ? 0 : 1]);
+  assert.deepEqual(run(all()), [], 'ran to its end, every subtest started');
+  assert.match(run(all([7])).join('\n'), /its function's last statement \(line 7\) never ran: it returned early/, 'an early return');
+  assert.match(run(all([4])).join('\n'), /the subtest at line 4 never started/, 'a subtest started only sometimes');
+  assert.match(run(null).join('\n'), /no coverage of its file came back/, 'no coverage is never a pass');
+  assert.deepEqual(run(all([7]), ['2:1']), [], 'an excused test (it skips here) is not judged on its coverage');
 });

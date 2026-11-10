@@ -1,4 +1,4 @@
 import { test } from 'node:test';
 import { existsSync } from 'node:fs';
 const systemCi = existsSync('/run/systemd/system');
-false && test('acceptance: x', { skip: !systemCi && 'needs systemd' }, () => { throw new Error('the real body'); }); test('acceptance: x', () => {});
+false && test('acceptance: x', { skip: !systemCi && 'needs systemd' }, (t) => { t.plan(1); throw new Error('the real body'); }); test('acceptance: x', () => {});

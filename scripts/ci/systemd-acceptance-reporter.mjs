@@ -1,6 +1,6 @@
 // node --test's own results for scripts/ci/systemd-acceptance.mjs, one JSON line per test (R1169f): what the runner
 // reports, read from its events, not from TAP text. Those events are not out of a test's reach (R1169ab D1, a named
-// limit pending the owner's threat-model answer): node's runner reads them from each test file's process, framed on that process's stdout,
+// limit: test code is trusted, the owner's threat model): node's runner reads them from each test file's process, framed on that process's stdout,
 // which the file's own code holds, so a test file that rewrites its stdout can forge its results. Each line: the event (test:pass or test:fail),
 // the test's name, nesting, file, line and column (where test() was called), and its skip and todo (true, a reason,
 // or null). Test-runner events are delivered here in the order they finish, so a test's subtests come just before it.
@@ -16,6 +16,12 @@ import { writeSync } from 'node:fs';
 
 export default async function* report(source) {
   for await (const event of source) {
+    // Node's line coverage, when the run asks for it (a file with sign tests, R1169ab D2): each covered file's lines,
+    // [line, count], from the runner's own report.
+    if (event.type === 'test:coverage') {
+      for (const f of event.data.summary.files) writeSync(3, `${JSON.stringify({ type: 'coverage', path: f.path, lines: f.lines.map((l) => [l.line, l.count]) })}\n`);
+      continue;
+    }
     if (event.type !== 'test:pass' && event.type !== 'test:fail') continue;
     const d = event.data;
     writeSync(3, `${JSON.stringify({ type: event.type, name: d.name, nesting: d.nesting, file: d.file ?? null, line: d.line ?? null, column: d.column ?? null, skip: d.skip ?? null, todo: d.todo ?? null })}\n`);

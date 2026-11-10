@@ -1,5 +1,5 @@
 import { test } from 'node:test';
 import { onVm } from '../src/flags.js';
 const systemCi = true;
-test('gate a', { skip: !systemCi && 'x' }, () => {});
+test('gate a', { skip: !systemCi && 'x' }, (t) => { t.plan(1); t.assert.ok(true); });
 test('acceptance: from src', { skip: !onVm && 'x' }, () => {});
