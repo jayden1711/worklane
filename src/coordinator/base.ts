@@ -628,15 +628,14 @@ export abstract class CoordinatorBase {
       await this.d.backlog.addLabels(issue, ['needs:decision']);
       // R1182v: each line redacted on its own, as the tracker redacts (the backlog redacts the body again): a redaction that
       // runs to an end marker (a private key's) can't cross from one line into the next and hide the lines between.
-      const comment = await this.d.backlog.comment(
+      // The owner's decision (2026-11-09): a reply answers a decision only by naming its id (decisions.ts commentAnswer).
+      await this.d.backlog.comment(
         issue,
-        `[${BRAND.cli}] @${owner} decision needed: **${question}**\n\nOptions: ${options.join(' / ')}.${recommendation ? ` Recommendation: **${recommendation}**.` : ''}\n\n${receipts.map((r) => `- ${redactString(r, TRACKER)}`).join('\n')}\n\nReply \`${options.map((o) => `/${BRAND.cli} ${o} ${id}`).join('` or `')}\` (owner or a writer; a reply without the id counts only while this is the only open question on the issue), or run \`${BRAND.cli} decide ${id} <option>\`.`,
+        `[${BRAND.cli}] @${owner} decision needed: **${question}**\n\nOptions: ${options.join(' / ')}.${recommendation ? ` Recommendation: **${recommendation}**.` : ''}\n\n${receipts.map((r) => `- ${redactString(r, TRACKER)}`).join('\n')}\n\nReply \`${options.map((o) => `/${BRAND.cli} ${o} ${id}`).join('` or `')}\` (owner or a writer; the id is required: a reply without it answers nothing), or run \`${BRAND.cli} decide ${id} <option>\`.`,
       );
-      // R1182z: the question's comment by its id, so a reply's place is measured from this very comment.
-      if (typeof comment === 'string' && comment) this.emit('decision.posted', { id, issue, comment });
     } catch (e) {
-      // R1182x: with no question comment, only a reply naming the id answers it (decisions.ts commentAnswer). Say so where
-      // health and the dashboard show it, so a bare reply is never ignored without a word.
+      // R1182x: without the question's comment the owner can't see the id to reply with. Say so where health and the
+      // dashboard show it, with the id and the ways to answer.
       this.emit('coordinator.error', { instance: this.d.instance, where: 'decision question', kind: 'question_not_posted', message: `#${issue}: decision ${id} is recorded, but its comment could not be posted (${(e as Error).message.slice(0, 300)}); answer it on the dashboard, with \`${BRAND.cli} decide ${id} <option>\`, or by a reply naming the id (\`/${BRAND.cli} <option> ${id}\`)` });
       throw e;
     }

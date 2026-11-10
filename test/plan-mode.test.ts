@@ -83,6 +83,8 @@ test("a held plan's decision: approve builds, revise plans again with the note, 
   assert.deepEqual(planAnswer('approve'), { act: 'build' });
   assert.deepEqual(planAnswer('revise', `Close, but:\n/${BRAND.cli} revise make the migration reversible\nand keep old rows`), { act: 'replan', note: 'make the migration reversible\nand keep old rows' });
   assert.deepEqual(planAnswer('revise', `/${BRAND.cli} revise`), { act: 'replan', note: 'no note given; plan it again with the risks in mind' });
+  assert.deepEqual(planAnswer('revise', `/${BRAND.cli} revise d-12-a3f9c1 make it reversible`), { act: 'replan', note: 'make it reversible' }, 'the decision id a reply names is not part of the note');
+  assert.deepEqual(planAnswer('revise', `/${BRAND.cli} revise d-12-a3f9c1`), { act: 'replan', note: 'no note given; plan it again with the risks in mind' });
   assert.deepEqual(planAnswer('reject'), { act: 'stop' });
 });
 

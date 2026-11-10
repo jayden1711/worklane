@@ -244,7 +244,8 @@ export function planDecision(reasons: string[], acceptance: string[] = []) {
 export function planAnswer(answer: string, comment = ''): { act: 'build' } | { act: 'replan'; note: string } | { act: 'stop' } {
   if (answer === 'approve') return { act: 'build' };
   if (answer === 'revise') {
-    const m = new RegExp(`/${BRAND.cli}\\s+revise\\b\\s*([\\s\\S]*)$`, 'im').exec(comment);
+    // The decision's id follows the option (a reply names it: decisions.ts commentAnswer); it isn't part of the note.
+    const m = new RegExp(`/${BRAND.cli}\\s+revise\\b\\s*(?:d-[\\w-]*\\w(?![\\w-])\\s*)?([\\s\\S]*)$`, 'im').exec(comment);
     return { act: 'replan', note: (m?.[1] ?? '').trim() || 'no note given; plan it again with the risks in mind' };
   }
   return { act: 'stop' };

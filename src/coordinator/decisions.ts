@@ -1,6 +1,6 @@
 // Decisions: held plans, refused hosts, and the owner's answers on issues.
 import { gitSpawnSync } from '../os/git.js';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { BRAND } from '../brand.js';
@@ -9,6 +9,7 @@ import { type DoneWhenList, type Issue } from '../backlog/types.js';
 import { claim, release } from '../claims.js';
 import type { EventPayload } from '../events/types.js';
 import { mayAnswerKind, type Role } from '../dashboard-auth.js';
+import { commandLines } from '../decision-reply.js';
 import { defaultRolePrompt, issueBrief } from '../roles.js';
 import { checkedPush } from '../push-check.js';
 import { domainDecision, withAllowedHost, type DomainAnswer, type RefusedRequest } from '../domain-requests.js';
@@ -235,102 +236,63 @@ export abstract class Decisions extends Recovery {
   }
 
   /**
-   * The latest `/<cli> <option>` reply to decision `q` on issue `n` from someone who may answer it (#715): a listed
+   * The latest `/<cli> <option> <id>` reply to decision `q` on issue `n` from someone who may answer it (#715): a listed
    * writer whose role on the repo passes the one rule every surface uses (mayAnswerKind), with review.yaml's
    * `approvals` as the default branch has it. A reply from anyone else answers nothing: a writer's `approve` of a
    * high-risk merge (`land`) or a held plan waits for an owner, as on the dashboard.
    *
-   * Only a reply to this question counts (#1248; R1182v to R1182ab), decided by the tracker's own order, never by a
-   * clock or by text anyone can write:
-   * - Each command line (`/<cli> <option> …`, outside fenced code) is read on its own. Any `d-…` token after the option
-   *   on that line is the id it names, in backticks, parentheses or after a word too (the id ends at a word character).
-   *   The last line naming this decision's id answers it; a line naming another id never does.
-   * - A bare line (no id) answers this decision only when it is the one open question the reply can be for: its own
-   *   comment (the one ask() posted, found by the id the backlog gave back, `decision.posted`, never by its text) is
-   *   above the reply and unedited; no other recorded question comment, answered or not, edited or not, lies between
-   *   them; and every other unanswered decision posted on the issue has its comment, unedited, below the reply (none
-   *   gone). Otherwise it answers nothing, and says so once (`reply_ambiguous`, with the ids to use).
-   * - No usable recorded comment (it couldn't be posted, was edited, or is gone): only a line naming the id counts
-   *   (`reply_without_id` says so once). A command naming an id no decision on the issue has: `reply_unknown_id`, once.
+   * The owner's decision (2026-11-09; #1248, R1182v to R1182ad): a reply answers a decision only by naming its id.
+   * - Each command line (outside fenced code and HTML comments, as CommonMark reads them) is read on its own: its option,
+   *   and every decision id on it. Text is normalized first (NFKC, every Unicode dash to `-`, lower case), so a
+   *   full-width or look-alike id reads as the id it spells and can only ever equal that decision.
+   * - A line naming exactly one id answers that decision with that line's option; the last such line wins. A line naming
+   *   no id, or two or more, answers nothing.
+   * - A comment starting with `[<cli>]` is the coordinator's own and is never a reply.
+   * A writer's comment with a command line that answers nothing says so once (`reply_without_id`, `reply_unknown_id`,
+   * `reply_several_ids`), one note per comment at most, with the open ids to use.
    */
   private async commentAnswer(n: number, q: EventPayload<'decision.asked'>, writers: Set<string>, _cmd: RegExp): Promise<{ by: string; body: string; answer: string; role: 'owner' | 'writer' } | null> {
-    const comments = await this.d.backlog.comments(n, { edits: true });
-    const at = (cid: string) => comments.findIndex((c) => c.id === cid);
-    // The question comments ask() posted on this issue, in the order it posted them; one per decision (its latest).
-    const posted = new Map<string, string>();
-    for (const e of this.d.log.read(0, ['decision.posted'])) {
-      const p = e.payload as EventPayload<'decision.posted'>;
-      if (p.issue !== n) continue;
-      posted.delete(p.id);
-      posted.set(p.id, p.comment);
-    }
-    const recorded = new Set(posted.values());
+    const comments = await this.d.backlog.comments(n);
+    const asked = this.d.log.read(0, ['decision.asked']).map((e) => e.payload as EventPayload<'decision.asked'>).filter((p) => p.issue === n);
     const answered = new Set(this.d.log.read(0, ['decision.answered']).map((e) => (e.payload as EventPayload<'decision.answered'>).id));
-    const mine = posted.get(q.id);
-    const qa = mine === undefined ? -1 : at(mine);
-    const usable = qa >= 0 && !comments[qa]!.edited;
-    const after = mine === undefined ? [] : [...posted].slice([...posted.keys()].indexOf(q.id) + 1);
-    /** Whether a bare line in comment i can be for this decision alone (see above). */
-    const bareFor = (i: number) => {
-      if (!usable || i <= qa) return false;
-      for (let j = qa + 1; j < i; j++) if (comments[j]!.id !== undefined && recorded.has(comments[j]!.id!)) return false;
-      for (const [did, cid] of posted) {
-        if (did === q.id || answered.has(did)) continue;
-        const k = at(cid);
-        if (k < 0 || comments[k]!.edited || k < i) return false;
-      }
-      return !after.some(([, cid]) => at(cid) < 0);
-    };
-    const lineRe = new RegExp(`^/${BRAND.cli}[^\\S\\r\\n]+(\\S+)([^\\r\\n]*)$`);
-    const lines = (body: string) => {
-      const out: { option: string; id: string | undefined }[] = [];
-      let fence = false;
-      for (const raw of body.split(/\r?\n/)) {
-        if (/^\s*(```|~~~)/.test(raw)) {
-          fence = !fence;
-          continue;
-        }
-        const m = fence ? null : raw.match(lineRe);
-        if (m) out.push({ option: m[1]!, id: m[2]!.match(/d-[\w-]*\w/)?.[0] });
-      }
-      return out;
-    };
-    const said = (kind: string, key: string) => this.d.log.read(0, ['coordinator.error']).some((e) => (e.payload as { kind: string }).kind === kind && (e.payload as { message: string }).message.includes(key));
-    const note = (kind: string, key: string, message: string) => {
-      if (!said(kind, key)) this.emit('coordinator.error', { instance: this.d.instance, where: 'decision reply', kind, message });
-    };
-    const isBare = (l: { option: string; id: string | undefined }) => l.id === undefined && q.options.includes(l.option);
-    // A question comment ask() posted is never a reply, even when the tracker account is a listed writer and the
-    // question quotes a worker's text holding a command line (R1182ab AB11).
-    const ours = comments.map((c, i) => ({ c, i })).filter(({ c }) => writers.has(c.author.toLowerCase()) && !(c.id !== undefined && recorded.has(c.id)));
-    const how = `reply \`/${BRAND.cli} <option> ${q.id}\`, answer on the dashboard, or run \`${BRAND.cli} decide ${q.id} <option>\``;
-    // A writer's bare reply set aside because the question's own comment can't be used: said once (R1182x, R1182aa).
-    if (!usable && ours.some(({ c }) => lines(c.body).some(isBare))) {
-      note('reply_without_id', q.id, `#${n}: a reply to decision ${q.id} doesn't name it, and the question's own comment ${mine === undefined ? "was never posted" : qa < 0 ? 'is gone from the issue' : 'was edited'}, so a reply must name the id; ${how}`);
+    const byId = new Map(asked.map((p) => [p.id.toLowerCase(), p]));
+    const optionsHere = new Set(asked.flatMap((p) => p.options));
+    const open = asked.filter((p) => !answered.has(p.id)).map((p) => p.id);
+    const replies = comments.filter((c) => writers.has(c.author.toLowerCase()) && !c.body.trimStart().startsWith(`[${BRAND.cli}]`));
+    const parsed = replies.map((c) => ({ c, lines: commandLines(c.body) }));
+    // At most one note per comment, keyed by the comment; the notes already written are read once.
+    const said = new Set<string>();
+    for (const e of this.d.log.read(0, ['coordinator.error'])) {
+      const m = /^(#\d+: reply \S+):/.exec((e.payload as { message: string }).message);
+      if (m) said.add(m[1]!);
     }
-    // A writer's bare reply that could be for more than one open question: said once (R1182ab).
-    if (usable && ours.some(({ c, i }) => i > qa && !bareFor(i) && lines(c.body).some(isBare))) {
-      const open = [...posted.keys()].filter((d) => !answered.has(d));
-      note('reply_ambiguous', q.id, `#${n}: a reply without an id came while more than one question may be open (${open.join(', ')}), or a question comment above it was edited or is gone, so it answers none of them; ${how}`);
+    for (const { c, lines } of parsed) {
+      // A line is a reply to a decision when it names an id, or its option is one a decision here offers.
+      const ours = lines.filter((l) => l.ids.length > 0 || optionsHere.has(l.option));
+      const several = ours.find((l) => l.ids.length > 1);
+      const unknown = ours.find((l) => l.ids.length === 1 && !byId.has(l.ids[0]!));
+      const badOption = ours.find((l) => l.ids.length === 1 && byId.has(l.ids[0]!) && !byId.get(l.ids[0]!)!.options.includes(l.option));
+      const none = ours.find((l) => l.ids.length === 0);
+      const kind = several ? 'reply_several_ids' : unknown ? 'reply_unknown_id' : badOption ? 'reply_unknown_option' : none ? 'reply_without_id' : null;
+      if (!kind) continue;
+      const key = `#${n}: reply ${c.id ?? createHash('sha256').update(`${c.author}\n${c.at ?? ''}\n${c.body}`).digest('hex').slice(0, 12)}`;
+      if (said.has(key)) continue;
+      said.add(key);
+      const why = several
+        ? `names ${several.ids.length} decisions on one line (${several.ids.slice(0, 5).join(', ')})`
+        : unknown
+          ? `names ${unknown.ids[0]}, which isn't a decision on this issue`
+          : badOption
+            ? `answers ${badOption.ids[0]} with \`${badOption.option}\`, which isn't one of its options (${byId.get(badOption.ids[0]!)!.options.join(', ')})`
+            : "doesn't name a decision";
+      const ids = open.length ? `open here: ${open.slice(0, 10).join(', ')}${open.length > 10 ? ` and ${open.length - 10} more` : ''}` : 'none is open here';
+      this.emit('coordinator.error', { instance: this.d.instance, where: 'decision reply', kind, message: `${key}: by ${c.author} ${why}, so it answers nothing; a reply answers one decision, named by its id (\`/${BRAND.cli} <option> <id>\`); ${ids}` });
     }
-    // A writer's command naming an id no decision on this issue has (a typo): said once (R1182z).
-    const known = new Set(this.d.log.read(0, ['decision.asked']).map((e) => e.payload as EventPayload<'decision.asked'>).filter((p) => p.issue === n).map((p) => p.id));
-    for (const { c } of ours) {
-      for (const l of lines(c.body)) {
-        if (l.id === undefined || known.has(l.id)) continue;
-        const key = `#${n}: a reply names decision ${l.id},`;
-        note('reply_unknown_id', key, `${key} which isn't one on this issue, so it answers nothing; reply with the id the question shows, answer on the dashboard, or run \`${BRAND.cli} decide <id> <option>\``);
-      }
-    }
-    const pick = (c: { body: string }, i: number): string | undefined => {
-      const ls = lines(c.body).filter((l) => q.options.includes(l.option));
-      const named = ls.filter((l) => l.id === q.id);
-      if (named.length) return named.at(-1)!.option;
-      const bare = ls.filter((l) => l.id === undefined);
-      return bare.length && bareFor(i) ? bare.at(-1)!.option : undefined;
-    };
-    const replies = ours.map(({ c, i }) => ({ c, answer: pick(c, i) })).filter((x) => x.answer !== undefined);
-    for (const r of replies.reverse()) {
+    const id = q.id.toLowerCase();
+    const picks = parsed
+      .map(({ c, lines }) => ({ c, answer: lines.filter((l) => l.ids.length === 1 && l.ids[0] === id && q.options.includes(l.option)).at(-1)?.option }))
+      .filter((x) => x.answer !== undefined);
+    for (const r of picks.reverse()) {
       const role = await this.commenterRole(r.c.author);
       if (mayAnswerKind(q.kind, role, this.approvals())) return { by: r.c.author, body: r.c.body, answer: r.answer!, role: role === 'owner' ? 'owner' : 'writer' };
     }

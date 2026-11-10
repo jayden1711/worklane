@@ -5,10 +5,10 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { redactString, TRACKER } from '../events/redact.js';
-
-/** A comment's id: never reused on an issue, also after a comment is deleted (as GitHub's ids). */
-const commentId = (n: number) => `${n}-${randomBytes(6).toString('hex')}`;
 import type { Backlog, CommitCheck, Issue, PrReview, PrReviewComment, PullRequest, RerunJobs } from './types.js';
+
+/** A comment's id, as the tracker gives one: never reused on an issue, also after a comment is deleted. */
+const commentId = (n: number) => `${n}-${randomBytes(6).toString('hex')}`;
 
 interface FilePr {
   head: string;
@@ -41,7 +41,7 @@ interface FilePr {
 
 interface FileState {
   // As on GitHub, a pull request is an issue too (same numbering, labels and comments), with `pr` set.
-  issues: (Issue & { labelEvents: { label: string; actor: string }[]; comments: { id?: string; author: string; body: string; at?: string; edited?: boolean }[]; pr?: FilePr })[];
+  issues: (Issue & { labelEvents: { label: string; actor: string }[]; comments: { id?: string; author: string; body: string; at?: string }[]; pr?: FilePr })[];
   labels: string[];
   /** Checks per commit sha (tests set them). */
   checks?: Record<string, CommitCheck[]>;
@@ -108,7 +108,6 @@ export class FileBacklog implements Backlog {
       const c = i.comments.find((x) => x.id === id);
       if (!c) throw new Error(`no comment ${id} on #${n}`);
       c.body = body;
-      c.edited = true;
     });
   }
 
@@ -147,9 +146,7 @@ export class FileBacklog implements Backlog {
   // What the harness writes is redacted first (events/redact.ts), as the GitHub backlog does for everything it sends:
   // secrets, and in issue, comment and PR text the identifiers too (emails, internal hosts, private IPs, paths).
   async comment(n: number, body: string) {
-    let id = '';
-    this.edit(n, (i) => i.comments.push({ id: (id = commentId(n)), author: this.actor, body: redactString(body, TRACKER), at: new Date().toISOString() }));
-    return id;
+    this.edit(n, (i) => i.comments.push({ id: commentId(n), author: this.actor, body: redactString(body, TRACKER), at: new Date().toISOString() }));
   }
   async comments(n: number) {
     return this.load().issues.find((x) => x.number === n)?.comments ?? [];

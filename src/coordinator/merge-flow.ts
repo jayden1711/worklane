@@ -199,7 +199,7 @@ export abstract class MergeFlow extends FixRuns {
         return live();
       },
       pullRequest: (n) => this.d.backlog.pullRequest(n),
-      comment: async (n, body) => void (await this.d.backlog.comment(n, body)),
+      comment: (n, body) => this.d.backlog.comment(n, body),
       addLabels: (n, labels) => this.d.backlog.addLabels(n, labels),
       removeLabel: (n, label) => this.d.backlog.removeLabel(n, label),
       ownerOf: (issue) => this.ownerOf(issue),
