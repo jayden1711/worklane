@@ -9,7 +9,7 @@
 // Import writes the state into the target's state dir and refuses one that already has history (--force replaces
 // it). The config dir is the repo's, kept in git: written only into a checkout that has none; otherwise the files
 // that differ are listed, to commit in a PR.
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { gunzipSync, gzipSync } from 'node:zlib';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, sep } from 'node:path';
@@ -32,6 +32,42 @@ const LEAVE_OUT: [RegExp, string][] = [
   // Removed with Siri (#743): its device store is never carried, so no bundle brings a live device to an older engine.
   [/^siri(\/|$)|^siri-gateway-token$/, 'removed with Siri (#743)'],
 ];
+
+/** The state files the flags and the log are kept in: never under another name, never a folder (R1173al AL1, R1173an AN2). */
+const RESERVED = [EVENTS, OFF_FILE];
+/**
+ * Why a state path (relative to the state folder) is never in a bundle, or null. One rule for both ends: export leaves
+ * such a path out and says why, and import refuses it, so an import accepts only what export writes (R1173am, R1173an:
+ * a hand-made bundle's names were each a new way past the import's checks).
+ */
+export function statePathProblem(p: string): string | null {
+  if (isNativeGuardPath(p)) return 'a machine-local native lock guard';
+  const lower = p.toLowerCase();
+  const left = LEAVE_OUT.find(([re]) => re.test(p) || re.test(lower))?.[1];
+  if (left) return left;
+  const segs = p.split('/');
+  // R1173an AN1, R1173am AM2: plain ASCII names only. A case-insensitive volume folds more than ASCII case (`ſ` is `s`),
+  // so a lowercase compare is exact only for ASCII names.
+  if (segs.some((s) => !/^[\x20-\x7e]+$/.test(s))) return "a name that isn't plain ASCII";
+  if (RESERVED.some((n) => lower === n && p !== n)) return "a case variant of a reserved state file's name";
+  // R1173an AN2: a reserved name (or a temporary file's) as a folder: written as one, it lost the bundle's pending offs
+  // and blocked every later import.
+  if (segs.slice(0, -1).some((s) => RESERVED.includes(s.toLowerCase()) || /\.import-old$|-wal$|-shm$|-journal$/.test(s.toLowerCase()))) return "a reserved state file's name used as a folder";
+  return null;
+}
+/**
+ * The subset of statePathProblem an import refuses outright (the whole bundle), not just skips: each would land on, or
+ * be read over, the log or its off file (R1173al AL1, AL2, R1173am AM2, R1173an AN1, AN2). Other paths export leaves
+ * out (a secret, a lock, an older engine's Siri files) are skipped, with why, as before.
+ */
+function refusedStatePath(p: string): string | null {
+  const why = statePathProblem(p);
+  if (!why) return null;
+  const lower = p.toLowerCase();
+  if (why !== 'a temporary file' && why !== "a name that isn't plain ASCII" && !/reserved/.test(why)) return null;
+  if (why === 'a temporary file' && !/\.import-old$|-wal$|-shm$|-journal$/.test(lower)) return null;
+  return why;
+}
 
 export interface BundleFile {
   /** state/<path> or config/<path>, with forward slashes. */
@@ -78,7 +114,7 @@ export function exportBundle(o: { stateDir: string; root: string | null; repo: s
   for (const p of walk(o.stateDir).map(posix).sort()) {
     // The event log's own WAL and shared-memory files are in its snapshot already.
     if (p === `${EVENTS}-wal` || p === `${EVENTS}-shm`) continue;
-    const why = isNativeGuardPath(p) ? 'a machine-local native lock guard' : LEAVE_OUT.find(([re]) => re.test(p))?.[1];
+    const why = statePathProblem(p);
     if (why) {
       left.push({ path: `state/${p}`, why });
       continue;
@@ -109,11 +145,16 @@ export function readBundle(file: string): Bundle {
   if (b.version !== 1) throw new Error(`${file} is a version ${b.version} bundle; this engine reads version 1: update the engine`);
   for (const f of b.files) {
     if (!/^(state|config)\//.test(f.path) || f.path.split('/').some((s) => s === '..' || s === '.' || s === '') || f.path.includes('\\')) throw new Error(`${file}: refused, a path outside the bundle's places: ${f.path}`);
-    // R1173al AL1: on a case-insensitive volume (macOS's default) a case variant is the same file as the log or its off file.
-    const lower = f.path.toLowerCase();
-    // Nor does a bundle carry the log's WAL or shared memory, which export leaves out: they would be read over its log.
-    const variant = [`state/${EVENTS}`, `state/${OFF_FILE}`].some((n) => lower === n && f.path !== n);
-    if (variant || [`state/${EVENTS}-wal`, `state/${EVENTS}-shm`, `state/${EVENTS}-journal`].includes(lower)) throw new Error(`${file}: refused, a reserved state file's name: ${f.path}`);
+    // Only what export writes (statePathProblem): a case variant of the log or its off file (on a case-insensitive volume
+    // the same file, R1173al AL1), the log's -wal, -shm or -journal (read over its log), a reserved name as a folder.
+    const why = f.path.startsWith('state/') ? refusedStatePath(f.path.slice('state/'.length)) : null;
+    if (why) throw new Error(`${file}: refused, ${why} (an import takes only what export writes): ${f.path}`);
+  }
+  // A file and a path under it can't both be written (R1173an AN2: the second one is written into the first as a folder).
+  const paths = new Set(b.files.map((f) => f.path.toLowerCase()));
+  for (const f of b.files) {
+    const segs = f.path.toLowerCase().split('/');
+    for (let k = 1; k < segs.length; k++) if (paths.has(segs.slice(0, k).join('/'))) throw new Error(`${file}: refused, a path under another file of the bundle: ${f.path}`);
   }
   return b;
 }
@@ -130,10 +171,24 @@ export function importBundle(o: { file: string; stateDir: string; root: string |
   const b = readBundle(o.file);
   if (existsSync(join(o.stateDir, EVENTS)) && !o.force) throw new Error(`${o.stateDir} already has history (${EVENTS}): nothing imported. Pass --force to replace it (export it first if it matters)`);
   const r: ImportResult = { state: [], config: [], configDiffers: [], skipped: [] };
+  // R1173an AN2c: the target's off file and its aside, when there, are plain files (a folder or a link there, from a
+  // bundle before this check, made every import fail midway): refused before anything is written.
+  for (const n of [OFF_FILE, `${OFF_FILE}.import-old`]) {
+    let st: ReturnType<typeof lstatSync> | null = null;
+    try {
+      st = lstatSync(join(o.stateDir, n));
+    } catch {
+      st = null; // not there
+    }
+    if (st && !st.isFile()) throw new Error(`${join(o.stateDir, n)} is not a plain file: remove it by hand, then import again. Nothing imported`);
+  }
   // R1173al AL2: a log replaced while its old WAL remains is read through that WAL (SQLite replays it onto the new file).
   // Fold a dead process's WAL into the old log first; one another process still holds open stays: refuse.
   const db = join(o.stateDir, EVENTS);
-  if (b.files.some((f) => f.path === `state/${EVENTS}`) && (existsSync(`${db}-wal`) || existsSync(`${db}-shm`))) {
+  // R1173am AM1: a hot rollback journal (a coordinator killed in its first open, before WAL) is rolled back onto whatever
+  // file is at the log's path when it is next opened: opened here first, so it rolls back into the old log, not the new one.
+  const sidecars = () => ['-wal', '-shm', '-journal'].some((x) => existsSync(`${db}${x}`));
+  if (b.files.some((f) => f.path === `state/${EVENTS}`) && sidecars()) {
     if (existsSync(db)) {
       const d = openWaiting(db);
       try {
@@ -143,7 +198,7 @@ export function importBundle(o: { file: string; stateDir: string; root: string |
       }
     }
     // A WAL without its log (the log moved aside by hand) can't be folded in: refused too.
-    if (existsSync(`${db}-wal`) || existsSync(`${db}-shm`)) throw new Error(existsSync(db) ? `${db} is open in another process (its -wal or -shm is still there): stop the coordinator and the dashboard, then import again. Nothing imported` : `${db}-wal or -shm is there without its log (moved aside?): put the log back, or move them aside with it, then import again. Nothing imported`);
+    if (sidecars()) throw new Error(existsSync(db) ? `${db} is open in another process (its -wal, -shm or -journal is still there): stop the coordinator and the dashboard, then import again. Nothing imported` : `${db}-wal, -shm or -journal is there without its log (moved aside?): put the log back, or move them aside with it, then import again. Nothing imported`);
   }
   // The flags' unrecorded offs belong to the log they were made beside (R1173x X2), and an import brings another log, with
   // --force or after the old one was moved aside (R1173y Y-2): gone at every import; the bundle's own, from the log it
@@ -170,6 +225,12 @@ export function importBundle(o: { file: string; stateDir: string; root: string |
       // Removed with Siri (#743): an older bundle's device token store and gateway token are never brought back.
       if (rel === 'siri-gateway-token' || rel.startsWith('siri/')) {
         r.skipped.push({ path: f.path, why: 'Siri was removed; its tokens are not imported' });
+        continue;
+      }
+      // Anything else export leaves out (statePathProblem) is skipped, never written: an import takes only what export writes.
+      const left = statePathProblem(rel);
+      if (left) {
+        r.skipped.push({ path: f.path, why: `${left}: export leaves it out` });
         continue;
       }
       if (rel === OFF_FILE && !carriesLog) {

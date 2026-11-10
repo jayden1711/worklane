@@ -2,7 +2,7 @@
 // (AF2). Ported from the review's probes (attacks-1173af/af-attacks.test.ts); each attack has its control.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import fs, { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import fs, { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { spawn, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -562,7 +562,7 @@ for (const attack of [false, true]) {
         b.files.push({ path: `state/${attack ? 'Flags-Unrecorded.json' : OFF_FILE}`, data: Buffer.from('{}\n').toString('base64') });
         writeB(file, b);
         const imp = () => caseInsensitive(() => importBundle({ file, stateDir: sd, root: null, instance: true, force: true }));
-        if (attack) assert.throws(imp, /refused, a reserved state file's name: state\/Flags-Unrecorded\.json/);
+        if (attack) assert.throws(imp, /refused, a case variant of a reserved state file's name .*: state\/Flags-Unrecorded\.json/);
         else assert.ok(imp().skipped.some((x) => x.path === `state/${OFF_FILE}`), 'an off file without its log is skipped');
         assert.deepEqual(reopen(f, sd).after, [[T, false, true], [T, true, false], [T, false, true]], "the target's pending off is recorded");
       });
@@ -596,7 +596,7 @@ for (const attack of [false, true]) {
         }
         const imp = () => caseInsensitive(() => importBundle({ file, stateDir: sd, root: null, instance: true, force: true }));
         if (attack) {
-          assert.throws(imp, /refused, a reserved state file's name: state\/Events\.db/);
+          assert.throws(imp, /refused, a case variant of a reserved state file's name .*: state\/Events\.db/);
           assert.deepEqual(reopen(f, sd).whose, ['target'], "the target's own log stays");
           return;
         }
@@ -624,7 +624,7 @@ test('R1173al: a bundle carrying the log\'s -wal, -shm or -journal is refused, w
       b.files.push({ path: `state/${extra}`, data: Buffer.from('x').toString('base64') });
       const f2 = join(src, `${extra}.wlb`);
       writeB(f2, b);
-      assert.throws(() => importBundle({ file: f2, stateDir: join(src, `t-${extra}`), root: null, instance: true }), /refused, a reserved state file's name/, extra);
+      assert.throws(() => importBundle({ file: f2, stateDir: join(src, `t-${extra}`), root: null, instance: true }), /refused, a temporary file \(an import takes only what export writes\)/, extra);
     }
   } finally {
     rmSync(src, { recursive: true, force: true });
@@ -745,3 +745,90 @@ for (const attack of [false, true]) {
     }
   });
 }
+
+// --- R1173am AM1 (a hot -journal), R1173an AN1/AN2 (Unicode names, reserved names as folders; ported from attacks-1173am, -an) ---
+for (const real of [true, false]) {
+  test(`R1173am AM1 (${real ? 'a real leftover: a coordinator killed in its first open' : 'a target killed mid-transaction in rollback mode'}): its hot -journal is rolled back into the old log, never over the imported one`, { skip: skip || process.platform === 'win32' }, async () => {
+    const src = mkdtempSync(join(tmpdir(), 'am1-src-'));
+    const sd = mkdtempSync(join(tmpdir(), 'am1-sd-'));
+    try {
+      if (real) {
+        // attacks-1173am/am1b-leftovers/r13-87: a 4096-byte events.db and its 512-byte hot journal.
+        for (const n of ['events.db', 'events.db-journal']) writeFileSync(join(sd, n), readFileSync(join(repoRoot, 'test', 'fixtures', 'hot-journal', n)));
+      } else {
+        const db = join(sd, 'events.db');
+        const js = `import { DatabaseSync } from 'node:sqlite'; const d = new DatabaseSync(${JSON.stringify(db)});
+          d.exec("PRAGMA journal_mode=DELETE; PRAGMA cache_size=1; CREATE TABLE t(x); INSERT INTO t VALUES(randomblob(100000));");
+          d.exec("BEGIN; UPDATE t SET x=randomblob(100000); INSERT INTO t SELECT randomblob(100000) FROM t; INSERT INTO t SELECT randomblob(100000) FROM t;");
+          process.kill(process.pid, 'SIGKILL');`;
+        spawnSync(process.execPath, ['--input-type=module', '-e', js]);
+      }
+      assert.ok(existsSync(join(sd, 'events.db-journal')), 'a hot journal beside the target log');
+      importBundle({ file: plainBundle(src), stateDir: sd, root: null, instance: true, force: true });
+      assert.equal(existsSync(join(sd, 'events.db-journal')), false, 'no journal left beside the imported log');
+      const log = new EventLog(join(sd, 'events.db'));
+      try {
+        assert.deepEqual(errorsOf(log), ['bundle'], "the bundle's log is the one read");
+        assert.equal(log.lastId(), 4, "all 4 of the bundle's rows");
+      } finally {
+        log.close();
+      }
+    } finally {
+      for (const d of [src, sd]) rmSync(d, { recursive: true, force: true });
+    }
+  });
+}
+
+test('R1173an AN1, AN2: a state path with a non-ASCII name, a reserved name (or .import-old) as a folder, or under another file is refused; export leaves a non-ASCII name out', () => {
+  const src = mkdtempSync(join(tmpdir(), 'an-'));
+  try {
+    const ssd = join(src, 'state');
+    mkdirSync(ssd, { recursive: true });
+    new EventLog(join(ssd, 'events.db')).close();
+    const file = exportBundle({ stateDir: ssd, root: null, repo: null, host: 'h', out: join(src, 'b.wlb') }).file;
+    const refused: [string, RegExp][] = [
+      ['state/flagſ-unrecorded.json', /a name that isn't plain ASCII/],
+      ['state/ＥＶＥＮＴＳ.db', /a name that isn't plain ASCII/],
+      [`state/${OFF_FILE}/x`, /a reserved state file's name used as a folder/],
+      [`state/${OFF_FILE}.import-old/x`, /a reserved state file's name used as a folder/],
+      ['state/Events.db/x', /a reserved state file's name used as a folder/],
+      ['state/events.db-wal/x', /a reserved state file's name used as a folder/],
+    ];
+    for (const [path, why] of refused) {
+      const b = readB(file);
+      b.files.push({ path, data: Buffer.from('{}\n').toString('base64') });
+      const f2 = join(src, 'x.wlb');
+      writeB(f2, b);
+      assert.throws(() => importBundle({ file: f2, stateDir: join(src, 't'), root: null, instance: true, force: true }), why, path);
+    }
+    // A file and a path under it, both in the bundle.
+    const b = readB(file);
+    b.files.push({ path: 'state/notes', data: '' }, { path: 'state/notes/a', data: '' });
+    writeB(join(src, 'y.wlb'), b);
+    assert.throws(() => importBundle({ file: join(src, 'y.wlb'), stateDir: join(src, 't2'), root: null, instance: true }), /a path under another file of the bundle: state\/notes\/a/);
+    // Export's side of the same rule: a non-ASCII name is left out, with why, so no bundle export makes is refused.
+    writeFileSync(join(ssd, 'naïve.json'), '{}\n');
+    const r = exportBundle({ stateDir: ssd, root: null, repo: null, host: 'h', out: join(src, 'c.wlb') });
+    assert.ok(!r.files.includes('state/naïve.json'));
+    assert.ok(r.left.some((x) => x.path === 'state/naïve.json' && /plain ASCII/.test(x.why)));
+    importBundle({ file: r.file, stateDir: join(src, 't3'), root: null, instance: true });
+  } finally {
+    rmSync(src, { recursive: true, force: true });
+  }
+});
+
+for (const kind of ['folder', 'link'] as const) {
+  test(`R1173an AN2c: the target's ${OFF_FILE} as a ${kind}: the import is refused before anything is written`, { skip: process.platform === 'win32' }, () => {
+    const src = mkdtempSync(join(tmpdir(), 'an2c-src-'));
+    const sd = mkdtempSync(join(tmpdir(), 'an2c-sd-'));
+    try {
+      if (kind === 'folder') mkdirSync(join(sd, OFF_FILE));
+      else symlinkSync('/nonexistent', join(sd, OFF_FILE));
+      assert.throws(() => importBundle({ file: plainBundle(src), stateDir: sd, root: null, instance: true }), /is not a plain file: remove it by hand/);
+      assert.equal(existsSync(join(sd, 'events.db')), false, 'nothing imported');
+    } finally {
+      for (const d of [src, sd]) rmSync(d, { recursive: true, force: true });
+    }
+  });
+}
+
