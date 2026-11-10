@@ -9,7 +9,7 @@ import { type DoneWhenList, type Issue } from '../backlog/types.js';
 import { claim, release } from '../claims.js';
 import type { EventPayload } from '../events/types.js';
 import { mayAnswerKind, type Role } from '../dashboard-auth.js';
-import { readReply } from '../decision-reply.js';
+import { readReply, type CommandLine } from '../decision-reply.js';
 import { defaultRolePrompt, issueBrief } from '../roles.js';
 import { checkedPush } from '../push-check.js';
 import { domainDecision, withAllowedHost, type DomainAnswer, type RefusedRequest } from '../domain-requests.js';
@@ -242,15 +242,16 @@ export abstract class Decisions extends Recovery {
    * `approvals` as the default branch has it. A reply from anyone else answers nothing: a writer's `approve` of a
    * high-risk merge (`land`) or a held plan waits for an owner, as on the dashboard.
    *
-   * The owner's decision (2026-11-09; #1248, R1182v to R1182ad): a reply answers a decision only by naming its id.
-   * - Each command line (outside fenced code and HTML comments, as CommonMark reads them) is read on its own: its option,
-   *   and every decision id on it. Text is normalized first (NFKC, every Unicode dash to `-`, lower case), so a
-   *   full-width or look-alike id reads as the id it spells and can only ever equal that decision.
-   * - A line naming exactly one id answers that decision with that line's option; the last such line wins. A line naming
-   *   no id, or two or more, answers nothing.
+   * The owner's decisions: a reply answers a decision only by naming its id (2026-11-09; #1248), and only on the comment's
+   * first line, in plain text (2026-11-10, option (b) with (b'); src/decision-reply.ts):
+   * - A comment answers only when its first non-blank line is `/<cli> <option> <id> [note]` (at most 3 spaces before it),
+   *   compared after NFKC, folding every Unicode dash to `-` and lower case (so a look-alike id can only equal the decision
+   *   it spells). Its note is the rest of that line.
+   * - That line answers nothing if it holds any of `` ` < > [ ] ( ) " ' \ & ! ``, if it names no id or two or more, or if
+   *   the comment has another `/<cli> <word>` anywhere (a reply is one command). The latest reply that answers wins.
    * - A comment starting with `[<cli>]` is the coordinator's own and is never a reply.
-   * A writer's comment with a command line that answers nothing says so once (`reply_without_id`, `reply_unknown_id`,
-   * `reply_several_ids`), one note per comment at most, with the open ids to use.
+   * A writer's comment that looks like a reply here but answers nothing says why once (one note per comment), with the
+   * open ids to use.
    */
   private async commentAnswer(n: number, q: EventPayload<'decision.asked'>, writers: Set<string>, _cmd: RegExp): Promise<{ by: string; body: string; answer: string; note: string; role: 'owner' | 'writer' } | null> {
     const comments = await this.d.backlog.comments(n);
@@ -260,42 +261,57 @@ export abstract class Decisions extends Recovery {
     const optionsHere = new Set(asked.flatMap((p) => p.options));
     const open = asked.filter((p) => !answered.has(p.id)).map((p) => p.id);
     const replies = comments.filter((c) => writers.has(c.author.toLowerCase()) && !c.body.trimStart().startsWith(`[${BRAND.cli}]`));
-    const parsed = replies.map((c) => ({ c, ...readReply(c.body) }));
+    const parsed = replies.map((c) => ({ c, r: readReply(c.body) }));
     // At most one note per comment, keyed by the comment; the notes already written are read once.
     const said = new Set<string>();
     for (const e of this.d.log.read(0, ['coordinator.error'])) {
       const m = /^(#\d+: reply \S+):/.exec((e.payload as { message: string }).message);
       if (m) said.add(m[1]!);
     }
-    for (const { c, lines, skipped } of parsed) {
-      // A line is a reply to a decision when it names an id, or its option is one a decision here offers.
-      const ours = lines.filter((l) => l.ids.length > 0 || optionsHere.has(l.option));
-      const several = ours.find((l) => l.ids.length > 1);
-      const unknown = ours.find((l) => l.ids.length === 1 && !byId.has(l.ids[0]!));
-      const badOption = ours.find((l) => l.ids.length === 1 && byId.has(l.ids[0]!) && !byId.get(l.ids[0]!)!.options.includes(l.option));
-      const none = ours.find((l) => l.ids.length === 0);
-      // A command line CommonMark shows inside code, a quote, a link or a comment, in a comment that has none read (R1182af).
-      const hidden = lines.length === 0 && skipped > 0;
-      const kind = several ? 'reply_several_ids' : unknown ? 'reply_unknown_id' : badOption ? 'reply_unknown_option' : none ? 'reply_without_id' : hidden ? 'reply_skipped' : null;
+    // A command is about a decision here when it names an id or its option is one a decision here offers.
+    const ours = (l: CommandLine | null): l is CommandLine => l !== null && (l.ids.length > 0 || optionsHere.has(l.option));
+    for (const { c, r } of parsed) {
+      const first = ours(r.first) ? r.first : null;
+      const later = r.others.filter(ours);
+      const several = first && first.ids.length > 1 ? first : null;
+      const unknown = first && first.ids.length === 1 && !byId.has(first.ids[0]!) ? first : null;
+      const badOption = first && first.ids.length === 1 && byId.has(first.ids[0]!) && !byId.get(first.ids[0]!)!.options.includes(first.option) ? first : null;
+      const kind = !first
+        ? later.length
+          ? 'reply_not_first_line'
+          : null
+        : r.unsafe
+          ? 'reply_unsafe_text'
+          : r.others.length
+            ? 'reply_more_than_one'
+            : several
+              ? 'reply_several_ids'
+              : unknown
+                ? 'reply_unknown_id'
+                : badOption
+                  ? 'reply_unknown_option'
+                  : first.ids.length === 0
+                    ? 'reply_without_id'
+                    : null;
       if (!kind) continue;
       const key = `#${n}: reply ${c.id ?? createHash('sha256').update(`${c.author}\n${c.at ?? ''}\n${c.body}`).digest('hex').slice(0, 12)}`;
       if (said.has(key)) continue;
       said.add(key);
-      const why = several
-        ? `names ${several.ids.length} decisions on one line (${several.ids.slice(0, 5).join(', ')})`
-        : unknown
-          ? `names ${unknown.ids[0]}, which isn't a decision on this issue`
-          : badOption
-            ? `answers ${badOption.ids[0]} with \`${badOption.option}\`, which isn't one of its options (${byId.get(badOption.ids[0]!)!.options.join(', ')})`
-            : none
-              ? "doesn't name a decision"
-              : 'has its command inside code, a quote, a link or an HTML comment as it renders, so it is not read (put the command on a line of its own after a blank line)';
+      const why = {
+        reply_not_first_line: "has its command after the comment's first line, where it is not read",
+        reply_unsafe_text: 'has a character a reply can\'t hold on its first line (` < > [ ] ( ) " \' \\ & !)',
+        reply_more_than_one: `has more than one \`/${BRAND.cli}\` command (a reply is one command, on its first line)`,
+        reply_several_ids: `names ${several?.ids.length} decisions (${several?.ids.slice(0, 5).join(', ')})`,
+        reply_unknown_id: `names ${unknown?.ids[0]}, which isn't a decision on this issue`,
+        reply_unknown_option: `answers ${badOption?.ids[0]} with \`${badOption?.option}\`, which isn't one of its options (${badOption ? byId.get(badOption.ids[0]!)!.options.join(', ') : ''})`,
+        reply_without_id: "doesn't name a decision",
+      }[kind];
       const ids = open.length ? `open here: ${open.slice(0, 10).join(', ')}${open.length > 10 ? ` and ${open.length - 10} more` : ''}` : 'none is open here';
-      this.emit('coordinator.error', { instance: this.d.instance, where: 'decision reply', kind, message: `${key}: by ${c.author} ${why}, so it answers nothing; a reply answers one decision, named by its id (\`/${BRAND.cli} <option> <id>\`); ${ids}` });
+      this.emit('coordinator.error', { instance: this.d.instance, where: 'decision reply', kind, message: `${key}: by ${c.author} ${why}, so it answers nothing; a reply is a comment whose first line is \`/${BRAND.cli} <option> <id>\` in plain text, and nothing else in it is a command; ${ids}` });
     }
     const id = q.id.toLowerCase();
     const picks = parsed
-      .map(({ c, lines }) => ({ c, line: lines.filter((l) => l.ids.length === 1 && l.ids[0] === id && q.options.includes(l.option)).at(-1) }))
+      .map(({ c, r }) => ({ c, line: r.first && !r.unsafe && r.others.length === 0 && r.first.ids.length === 1 && r.first.ids[0] === id && q.options.includes(r.first.option) ? r.first : undefined }))
       .filter((x) => x.line !== undefined);
     for (const r of picks.reverse()) {
       const role = await this.commenterRole(r.c.author);

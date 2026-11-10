@@ -635,12 +635,12 @@ export abstract class CoordinatorBase {
       // The owner's decision (2026-11-09): a reply answers a decision only by naming its id (decisions.ts commentAnswer).
       await this.d.backlog.comment(
         issue,
-        `[${BRAND.cli}] @${owner} decision needed: **${question}**\n\nOptions: ${options.join(' / ')}.${recommendation ? ` Recommendation: **${recommendation}**.` : ''}\n\n${receipts.map((r) => `- ${redactString(r, TRACKER)}`).join('\n')}\n\nReply \`${options.map((o) => `/${BRAND.cli} ${o} ${id}`).join('` or `')}\` (owner or a writer; the id is required: a reply without it answers nothing), or run \`${BRAND.cli} decide ${id} <option>\`.`,
+        `[${BRAND.cli}] @${owner} decision needed: **${question}**\n\nOptions: ${options.join(' / ')}.${recommendation ? ` Recommendation: **${recommendation}**.` : ''}\n\n${receipts.map((r) => `- ${redactString(r, TRACKER)}`).join('\n')}\n\nReply with a comment that starts with \`${options.map((o) => `/${BRAND.cli} ${o} ${id}`).join('` or `')}\` (owner or a writer). Only a comment's first line is read, in plain text: with the id, no other command in the comment, and no backtick, angle bracket, square bracket, parenthesis, quote, backslash, & or ! on that line. Or run \`${BRAND.cli} decide ${id} <option>\`.`,
       );
     } catch (e) {
       // R1182x: without the question's comment the owner can't see the id to reply with. Say so where health and the
       // dashboard show it, with the id and the ways to answer.
-      this.emit('coordinator.error', { instance: this.d.instance, where: 'decision question', kind: 'question_not_posted', message: `#${issue}: decision ${id} is recorded, but its comment could not be posted (${(e as Error).message.slice(0, 300)}); answer it on the dashboard, with \`${BRAND.cli} decide ${id} <option>\`, or by a reply naming the id (\`/${BRAND.cli} <option> ${id}\`)` });
+      this.emit('coordinator.error', { instance: this.d.instance, where: 'decision question', kind: 'question_not_posted', message: `#${issue}: decision ${id} is recorded, but its comment could not be posted (${(e as Error).message.slice(0, 300)}); answer it on the dashboard, with \`${BRAND.cli} decide ${id} <option>\`, or by a comment whose first line is \`/${BRAND.cli} <option> ${id}\`` });
       throw e;
     }
     return id;

@@ -235,17 +235,15 @@ export function planDecision(reasons: string[], acceptance: string[] = []) {
       ...reasons.map((r) => `holds because ${r}`),
       ...acceptance.map((a) => `${ACCEPTANCE_RECEIPT}${a}`),
       'approve: the build starts with this plan',
-      `revise: the plan is written again with your note (reply \`/${BRAND.cli} revise ${DECISION_ID} <note>\`)`,
+      `revise: the plan is written again with your note (start a comment with \`/${BRAND.cli} revise ${DECISION_ID} <note>\`; the note is the rest of that line)`,
       'reject: the task stops; nothing is built',
     ],
   };
 }
 
-/** What an answer to a held plan does: build with it, plan again with a note, or stop. */
 /**
- * What the owner's answer to a held plan does. `note`: what they wrote with a `revise` (the answering line's own note,
- * src/decision-reply.ts: the rest of that line without its id, and the plain lines of its paragraph after it; R1182af:
- * never re-read from the whole comment, so text in a comment, a fence, a quote or another decision's line is never it).
+ * What an answer to a held plan does: build with it, plan again with a note, or stop. `note`: what they wrote with a `revise`, the rest of the reply's first
+ * line without its id (src/decision-reply.ts); never re-read from the comment (R1182af).
  */
 export function planAnswer(answer: string, note = ''): { act: 'build' } | { act: 'replan'; note: string } | { act: 'stop' } {
   if (answer === 'approve') return { act: 'build' };
