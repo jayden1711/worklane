@@ -334,6 +334,7 @@ jobs:
           fetch-depth: 0
       - name: install gitleaks
         env:
+          BASH_ENV: ''
           GITLEAKS_VERSION: 8.30.1
         run: |
           f="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"

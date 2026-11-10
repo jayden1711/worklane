@@ -33,6 +33,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: the pinned runner release is the one GitHub publishes (downloaded, sha256 against the pin, its layout)
+        env:
+          BASH_ENV: ''
         run: |
           v="$(sed -n 's/^runner_version=//p' scripts/setup/ci-runner.sh)"
           s="$(sed -n 's/^runner_sha256_x64=//p' scripts/setup/ci-runner.sh)"

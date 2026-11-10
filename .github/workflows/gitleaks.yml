@@ -24,6 +24,8 @@ jobs:
       # The gitleaks CLI is MIT; we run the pinned, checksum-verified binary
       # directly rather than the gitleaks-action wrapper.
       - name: install gitleaks
+        env:
+          BASH_ENV: ''
         run: |
           tarball="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
           bash -p "$GITHUB_WORKSPACE/scripts/ci/fetch-pinned.sh" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${tarball}" "${GITLEAKS_SHA256}" "$tarball"
