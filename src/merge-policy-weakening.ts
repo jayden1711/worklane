@@ -483,6 +483,135 @@ export function blockCommentRun(lines: readonly string[], k: number): boolean {
   return false;
 }
 
+/** Where each line of a JS or TS text starts: in code, in a block comment, in a template's text, or not known. */
+export type LineStart = 'code' | 'block' | 'template' | 'unknown';
+
+/** Words after which a `/` starts a regexp, not a division. */
+const BEFORE_REGEXP = new Set(['return', 'typeof', 'case', 'do', 'else', 'in', 'of', 'void', 'yield', 'await', 'throw', 'delete', 'new', 'instanceof']);
+
+/**
+ * Where each line of `text` starts (R1184y Y2: a `//` or `/*` line inside a template literal is template text, not a
+ * comment). It reads strings, templates and their `${…}`, comments and regexps. Where it can't be sure (a string or a
+ * regexp left open on its line, a string continued over a line, a `/` read as a division with a quote, a backtick or a
+ * `/*` after it on the line), every later line is 'unknown': the caller reads it as code, fail closed.
+ */
+export function lineStarts(text: string): LineStart[] {
+  const starts: LineStart[] = ['code'];
+  let mode: LineStart = 'code';
+  let depth = 0;
+  const opened: number[] = []; // the depth each open `${` was at
+  let prev = ''; // the last character of code that isn't space
+  const endOfLine = (i: number) => {
+    const n = text.indexOf('\n', i);
+    return n < 0 ? text.length : n;
+  };
+  for (let i = 0; i < text.length; ) {
+    const c = text[i]!;
+    if (c === '\n') {
+      starts.push(mode);
+      i++;
+      continue;
+    }
+    if (mode === 'unknown') {
+      i++;
+      continue;
+    }
+    if (mode === 'block') {
+      if (text.startsWith('*/', i)) {
+        mode = 'code';
+        i += 2;
+      } else i++;
+      continue;
+    }
+    if (mode === 'template') {
+      if (c === '\\') i += text[i + 1] === '\n' ? 1 : 2;
+      else if (c === '`') {
+        mode = 'code';
+        prev = '`';
+        i++;
+      } else if (c === '$' && text[i + 1] === '{') {
+        opened.push(depth++);
+        mode = 'code';
+        prev = '{';
+        i += 2;
+      } else i++;
+      continue;
+    }
+    if (text.startsWith('//', i)) {
+      // A `//` comment ends at any line terminator (R1184w): what follows a U+2028, a U+2029 or a CR is code.
+      const end = /[\n\r\u2028\u2029]/g;
+      end.lastIndex = i;
+      const at = end.exec(text);
+      i = at === null ? text.length : at[0] === '\n' ? at.index : at.index + 1;
+      continue;
+    }
+    if (text.startsWith('/*', i)) {
+      mode = 'block';
+      i += 2;
+      continue;
+    }
+    if (c === "'" || c === '"') {
+      let j = i + 1;
+      while (j < text.length && text[j] !== c && text[j] !== '\n') j += text[j] === '\\' ? 2 : 1;
+      if (text[j] !== c) {
+        mode = 'unknown';
+        continue;
+      }
+      prev = c;
+      i = j + 1;
+      continue;
+    }
+    if (c === '`') {
+      mode = 'template';
+      i++;
+      continue;
+    }
+    if (c === '/') {
+      const word = /([A-Za-z_$][\w$]*)\s*$/.exec(text.slice(Math.max(0, i - 40), i))?.[1];
+      const regexp = prev === '' || /[(,=:[!&|?{};+\-*%<>~^]/.test(prev) || (word !== undefined && BEFORE_REGEXP.has(word));
+      if (regexp) {
+        let j = i + 1;
+        let cls = false;
+        while (j < text.length && text[j] !== '\n' && (cls || text[j] !== '/')) {
+          if (text[j] === '\\') j++;
+          else if (text[j] === '[') cls = true;
+          else if (text[j] === ']') cls = false;
+          j++;
+        }
+        if (text[j] !== '/') {
+          mode = 'unknown';
+          continue;
+        }
+        i = j + 1;
+        while (/[a-z]/.test(text[i] ?? '')) i++;
+        prev = '/';
+        continue;
+      }
+      // A division: unless what follows on the line is plain code, it may have been a regexp after all.
+      if (/['"`]|\/\*/.test(text.slice(i + 1, endOfLine(i)))) {
+        mode = 'unknown';
+        continue;
+      }
+      prev = '/';
+      i++;
+      continue;
+    }
+    if (c === '{') depth++;
+    else if (c === '}') {
+      depth--;
+      if (opened.length && depth === opened[opened.length - 1]) {
+        opened.pop();
+        mode = 'template';
+        i++;
+        continue;
+      }
+    }
+    if (!/\s/.test(c)) prev = c;
+    i++;
+  }
+  return starts;
+}
+
 /**
  * A line terminator inside what git calls one line (R1184w D1): U+2028, U+2029, or a CR not at its end (CRLF's CR is).
  * JS and TS end a `//` comment there, so the text after it is code the line readers would take for comment. A line
@@ -565,6 +694,21 @@ export function topLevelParts(l: string): string[] | null {
     i++;
   }
   return template || opened.length || depth !== 0 ? null : parts;
+}
+
+/** The tables file beside the module or script at `path` (`scripts/push-gate.mjs` → `scripts/push-gate.tables.json`). */
+export const tablesFileFor = (path: string): string => `${path.replace(/\.[cm]?[jt]s$/, '')}.tables.json`;
+
+/** The lines of `text` between a generated copy's `// BEGIN tables from ` and `// END tables from ` markers. */
+export function copyLines(text: string | null): Set<string> {
+  const out = new Set<string>();
+  let inside = false;
+  for (const l of (text ?? '').split('\n')) {
+    if (l.startsWith('// BEGIN tables from ')) inside = true;
+    else if (l.startsWith('// END tables from ')) inside = false;
+    else if (inside) out.add(l);
+  }
+  return out;
 }
 
 /** The files whose REPLACERS block is a table's code-held entries: the redactor and the root updater's copy of it. */
@@ -1299,6 +1443,24 @@ function findings(i: WeakeningInput): Found {
     }
   }
 
+  // A script's generated copy of its tables (R1184y Y6a): a line between its BEGIN and END markers changed while the
+  // tables file it copies didn't is drift, never a regeneration, so it waits (main held the marked table so). With the
+  // data changed too, the compare judges the data and test/table-copies.test.ts holds the copy to it.
+  for (const f of i.files) {
+    const own = tablesFileFor(f.path);
+    if (!MARKABLE.test(f.path) || !i.tablesFiles?.has(own) || isTest(f.path) || !holds(f.path, i.scope) || i.files.some((g) => g.path === own)) continue;
+    let was: Set<string>;
+    let now: Set<string>;
+    try {
+      [was, now] = [copyLines(i.before(f.path)), copyLines(i.after(f.path))];
+    } catch (e) {
+      hit('unreadable', f.path, String((e as Error).message ?? e));
+      continue;
+    }
+    for (const l of f.removedLines ?? []) if (was.has(l)) hit('table-shrunk', f.path, `a generated copy changed without its data: ${l.trim().slice(0, 120)}`);
+    for (const l of f.addedLines ?? []) if (now.has(l)) hit('table-shrunk', f.path, `a generated copy changed without its data: ${l.trim().slice(0, 120)}`);
+  }
+
   // The data tables (#941), compared before and after as parsed data.
   for (const f of i.files) if (dataTables(f.path)) jsonTableFindings(f.path, i.before, i.after, hit);
   // A tables file the change adds whose name differs only in case from another's (R1184l #4): on a checkout that folds
@@ -1323,21 +1485,27 @@ function findings(i: WeakeningInput): Found {
   // line that starts with `*` is a comment's only inside one (R1184s D1: `a\n* (import.meta.url = …)` is code): every
   // place it stands in the file's text is in a run of `*` lines under a `/*` line, none of them closing it and none
   // holding a `${`.
+  const scanned = new Map<string, { lines: string[]; starts: LineStart[] }>();
   const commentOnly = (l: string, text: () => string | null) => {
     // A line terminator other than \n ends a comment, so what follows it is code (R1184w W2: `// note<U+2028>import.meta.url = …`).
     if (/\/\/ (?:BEGIN|END) tables from /.test(l) || LINE_BREAK.test(l)) return false;
-    if (/^\s*\/\//.test(l)) return true;
-    if (/\*\/\s*\S/.test(l) || l.includes('${')) return false;
-    if (/^\s*\/\*/.test(l)) return true;
-    if (!/^\s*\*/.test(l)) return false;
-    let lines: string[];
+    const slashes = /^\s*\/\//.test(l);
+    if (!slashes && (/\*\/\s*\S/.test(l) || l.includes('${'))) return false;
+    if (!slashes && !/^\s*\/?\*/.test(l)) return false;
+    // Every place the line stands in the file's text starts outside a string and a template (R1184y Y2: a `//` or `/*`
+    // line in a template literal is its text; lineStarts), and a `*` line also sits in a run of `*` lines under a `/*`.
+    let read: { lines: string[]; starts: LineStart[] };
     try {
-      lines = (text() ?? '').split('\n');
+      const t = text();
+      if (t === null) return false;
+      read = scanned.get(t) ?? { lines: t.split('\n'), starts: lineStarts(t) };
+      scanned.set(t, read);
     } catch {
       return false;
     }
-    const at = lines.flatMap((x, k) => (x === l ? [k] : []));
-    return at.length > 0 && at.every((k) => blockCommentRun(lines, k));
+    const at = read.lines.flatMap((x, k) => (x === l ? [k] : []));
+    const outside = (k: number) => read.starts[k] === 'code' || read.starts[k] === 'block';
+    return at.length > 0 && at.every((k) => outside(k) && (!/^\s*\*/.test(l) || blockCommentRun(read.lines, k)));
   };
   for (const f of i.files) {
     if (!MARKABLE.test(f.path) || !holds(f.path, i.scope) || isTest(f.path)) continue;
@@ -1555,8 +1723,11 @@ export function weakeningOf(cwd: string, base: string, head: string, files: Chan
  * With `at`, the default branch's tip and where `to` meets it: their marks are read as well as `from`'s (#869). With
  * `conflicts`, the paths a merge `to` is the tree of conflicts on (their marks at `from` are read too).
  */
-/** A file with a changed line that starts with `*`: the load rules read its text to tell a comment's line from code (R1184s D1). */
-const starLine = (f: ChangeFile) => MARKABLE.test(f.path) && [...(f.addedLines ?? []), ...(f.removedLines ?? [])].some((l) => /^\s*\*/.test(l));
+/**
+ * A file with a changed line that starts like a comment (`*`, `//` or `/*`): the load rules read its text to tell a
+ * comment's line from code or a template's text (R1184s D1, R1184y Y2).
+ */
+const starLine = (f: ChangeFile) => MARKABLE.test(f.path) && [...(f.addedLines ?? []), ...(f.removedLines ?? [])].some((l) => /^\s*(?:\*|\/\/|\/\*)/.test(l));
 
 function measured(cwd: string, from: string, to: string, files: ChangeFile[], scope: LockScope | undefined, at?: { tip: string; meet: string }, conflicts?: string[]): WeakeningInput {
   const deleted = new Set(changedNames(cwd, ['--diff-filter=D', `${from}..${to}`]));
@@ -1566,7 +1737,12 @@ function measured(cwd: string, from: string, to: string, files: ChangeFile[], sc
   const markable = (set: Set<string>) => new Set([...files.map((f) => f.path), ...(conflicts ?? [])].filter((p) => set.has(p) && MARKABLE.test(p) && !isNonUtf8Path(p)));
   const marked = markable(new Set(filesWithText(cwd, from, [TABLE_MARK.trimEnd(), LINT_MARK])));
   const tipMarked = at ? markable(new Set(filesWithText(cwd, at.tip, [TABLE_MARK.trimEnd(), LINT_MARK]))) : new Set<string>();
-  const paths = [...new Set([...CHECK_TABLES.map((t) => t.path), ...marked, ...tipMarked, ...files.filter((f) => TABLES_FILE.test(f.path) || REPLACER_FILES.test(f.path) || starLine(f)).map((f) => f.path)])].filter((p) => files.some((f) => f.path === p) && !isNonUtf8Path(p));
+  // The base's tables files, for the case-folded name check: by path, from its tree (R1184n N4: by text, a file
+  // spelling its keys with escapes wasn't one).
+  const tablesFiles = new Set([...presentNames(cwd, from)].filter((p) => TABLES_FILE.test(p)));
+  // A file with a tables file of its own beside it is read too: a script's generated copy (R1184y Y6a).
+  const ownData = (f: ChangeFile) => MARKABLE.test(f.path) && tablesFiles.has(tablesFileFor(f.path));
+  const paths = [...new Set([...CHECK_TABLES.map((t) => t.path), ...marked, ...tipMarked, ...files.filter((f) => TABLES_FILE.test(f.path) || REPLACER_FILES.test(f.path) || starLine(f) || ownData(f)).map((f) => f.path)])].filter((p) => files.some((f) => f.path === p) && !isNonUtf8Path(p));
   // A file over the cap isn't read at all: the change waits.
   const side = (rev: string) => {
     const { texts, tooBig } = filesAt(cwd, rev, paths, MAX_TABLE_FILE);
@@ -1575,9 +1751,6 @@ function measured(cwd: string, from: string, to: string, files: ChangeFile[], sc
       return texts.get(p) ?? null;
     };
   };
-  // The base's tables files, for the case-folded name check: by path, from its tree (R1184n N4: by text, a file
-  // spelling its keys with escapes wasn't one).
-  const tablesFiles = new Set([...presentNames(cwd, from)].filter((p) => TABLES_FILE.test(p)));
   const input: WeakeningInput = { files, deleted, moved, before: side(from), after: side(to), scope, marked, tablesFiles, ...(conflicts ? { conflicts } : {}) };
   return at ? { ...input, tip: side(at.tip), tipMarked, meet: side(at.meet) } : input;
 }

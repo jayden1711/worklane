@@ -56,3 +56,10 @@ test("a copy's tables are the loader's, deep-frozen; a copy changed on its own i
   const text = readFileSync(join(repoRoot, hook.script), 'utf8').replace('"scripts/lib/denylist.mjs"', '');
   assert.notEqual(lib.blockIn(text, hook), lib.blockFor(repoRoot, hook, readFileSync(join(repoRoot, lib.tablesFileFor(hook.script)), 'utf8')));
 });
+
+test("a copy writes a key named __proto__ as an own key, as the loader reads it, never as the copy's prototype (#941, R1184y Y4j)", async () => {
+  const { literal } = (await import(pathToFileURL(join(repoRoot, 'scripts', 'lib', 'table-copies.mjs')).href)) as { literal(v: unknown): string };
+  const data = tablesFrom('{"T": {"kind": "never-shrink", "value": {"__proto__": ["x"], "a": 1}}}', 'p.tables.json').get<Record<string, unknown>>('T');
+  const copy = new Function(`return ${literal(data)};`)() as Record<string, unknown>;
+  assert.deepEqual([Object.keys(copy), Object.getPrototypeOf(copy) === Object.prototype, Object.isFrozen(copy)], [['__proto__', 'a'], true, true]);
+});

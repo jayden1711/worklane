@@ -65,7 +65,10 @@ for (const [kind, mod] of [['fs', fs], ['fsp', fsp], ['fsp', fs.promises]]) {
         const p = pathOf(args[i]);
         if (p === null) continue;
         const abs = resolve(p);
-        touched.push(abs);
+        // A tables file is recorded by its bare path only when read (R1184y Y3): a write, rename or rm of one is
+        // recorded as the call, which no allowance takes.
+        const read = /^(?:readFile|readFileSync|existsSync|stat|statSync|lstat|lstatSync|realpath|realpathSync|access|accessSync)$/.test(name) || (/^open(?:Sync)?$/.test(name) && (args[1] === undefined || args[1] === 'r'));
+        touched.push(abs.endsWith('.tables.json') && !read ? kind + '.' + name + ' ' + abs : abs);
         if (!ok(abs)) throw Object.assign(new Error('refused by the probe: ' + kind + '.' + name + ' ' + abs), { code: 'EACCES' });
       }
       return real.apply(this, args);
@@ -117,10 +120,11 @@ function probe(env: NodeJS.ProcessEnv, outside: string, pollution: Record<string
   // The controls: the wrappers saw this probe's call and the engine's own, and refused a path outside.
   assert.equal(out.touched.filter((p) => p === control).length, 2, `both controls recorded: ${out.touched.join(', ')}`);
   assert.equal(out.refusedOutside, true, 'a path outside the test machine is refused by the probe');
-  // Nothing outside the test machine was touched but the engine's modules, loaded, and their own tables files beside
-  // them, which a module reads as it loads (#941: src/os/git.ts's, since guardrails/push-hook.ts imports it). The
-  // refused control is recorded, never run.
-  assert.deepEqual(out.touched.filter((p) => p !== testMachine && !inside(testMachine, p) && !(inside(dist, p) && /\.(?:js|tables\.json)$/.test(p)) && p !== join(outside, 'control')), [], 'nothing outside the test machine');
+  // Nothing outside the test machine was touched but the engine's modules, loaded, and the tables file of a module
+  // loaded, read as it loads (#941: src/os/git.ts's, since guardrails/push-hook.ts imports it; R1184y Y3: read only,
+  // never written, renamed or removed). The refused control is recorded, never run.
+  const loaded = (p: string) => inside(dist, p) && (p.endsWith('.js') || (p.endsWith('.tables.json') && out.touched.includes(p.replace(/\.tables\.json$/, '.js'))));
+  assert.deepEqual(out.touched.filter((p) => p !== testMachine && !inside(testMachine, p) && !loaded(p) && p !== join(outside, 'control')), [], 'nothing outside the test machine');
   out.touched = out.touched.filter((p) => !inside(dist, p));
   return out;
 }

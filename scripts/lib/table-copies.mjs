@@ -51,7 +51,9 @@ export function literal(v) {
     if ('$set' in v) return `frozenSet([${v.$set.map(literal).join(', ')}])`;
     if ('$regexp' in v) return `Object.freeze({ source: ${JSON.stringify(v.$regexp)}, flags: ${JSON.stringify(v.flags)} })`;
     return `Object.freeze({ ${Object.entries(v)
-      .map(([k, x]) => `${JSON.stringify(k)}: ${literal(x)}`)
+      // A key named __proto__ written plainly would set the literal's prototype, so it is written as a computed key: an
+      // own key, as the loader makes it (R1184y Y4j).
+      .map(([k, x]) => `${k === '__proto__' ? `[${JSON.stringify(k)}]` : JSON.stringify(k)}: ${literal(x)}`)
       .join(', ')} })`;
   }
   return JSON.stringify(v);

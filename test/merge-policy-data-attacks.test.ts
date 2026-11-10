@@ -187,6 +187,11 @@ test("R1184q, R1184s D1: import.meta.url written as a pattern or for...of target
   assert.ok(has(reasons({ 'src/zz.ts': "// note\u2029import { tablesOf as load } from './check-tables.js';\nvoid load;\n" }), ADDED), 'W2c an aliased import after U+2029 in a comment');
   // Control: a JSDoc comment that names import.meta passes.
   assert.deepEqual(reasons(above('/**\n * reads import.meta.url as its own\n * import\n */'), base), [], 'a JSDoc comment');
+  // R1184y Y2: a `//` or `/*` line inside a template literal is the template's text, so the code on it after the
+  // template closes is read. Control: a real comment that names the loader passes.
+  assert.ok(has(reasons({ 'src/zz-y2.ts': "const pad = `\n// `; const L = await import('./check-tables.js'); void L; const pad2 = `\n`;\nvoid pad; void pad2;\n" }), ADDED), 'Y2a a // line in a template');
+  assert.ok(has(reasons({ 'src/zz-y2.ts': "const pad = `\n/* `; Object.assign(import.meta, { url: 'file:///x.ts' }); const pad2 = `\n`;\nvoid pad; void pad2;\n" }), ADDED), 'Y2b a /* line in a template');
+  assert.deepEqual(reasons({ 'src/zz-y2.ts': "const pad = `a`;\n// see check-tables.js: Object.assign(import.meta, {}) is refused\n/* and import.meta.url = x */\nvoid pad;\n" }), [], 'real comments');
   // Q2a-c: a `//` inside a template literal, and a line that starts with an empty block comment.
   assert.ok(has(reasons(above("const sep = `//`; Object.assign(import.meta, { url: `${new URL(`./x-decoy.ts`, import.meta.url).href}` });"), base), ADDED), 'Q2a');
   assert.ok(has(reasons({ 'src/zz.ts': "const sep = `//`; const L = await import(`./check-tables.js`);\nvoid sep;\nvoid L;\n" }), ADDED), 'Q2b');
@@ -240,4 +245,16 @@ test("R1184r D1, R1184s D2: a changed line, or an added one that isn't a new rep
   // W1e (R1184w D1): a key the base hides after U+2028 in a comment is a name used before, so adding it again waits.
   const hidden = redact.replace('});', '  // note\u2028  zz: (m: string) => m,\n});');
   assert.ok(reasons({ 'src/events/redact.ts': hidden.replace('\n});', '\n  zz: (m: string) => m.slice(1),\n});') }, { 'src/events/redact.ts': hidden }).some((x) => x.includes(SHRUNK) && x.includes('REPLACERS')), 'W1e a key hidden after U+2028, defined again');
+});
+
+test('R1184y Y6a: a line of a generated copy changed without its data waits; changed with its data, the data is judged (#941)', () => {
+  const data = (v: string[]) => `${JSON.stringify({ POLICY_ONLY: { kind: 'never-shrink', value: v } }, null, 2)}\n`;
+  const copy = (v: string[]) => `// a script\n// BEGIN tables from x-gate.tables.json: generated, do not edit\nconst TABLES = Object.freeze({\n  POLICY_ONLY: Object.freeze(${JSON.stringify(v)}),\n});\n// END tables from x-gate.tables.json\nexport const P = TABLES.POLICY_ONLY;\n`;
+  const base = { 'scripts/x-gate.mjs': copy(['auto_merge', 'review']), 'scripts/x-gate.tables.json': data(['auto_merge', 'review']) };
+  const r = reasons({ 'scripts/x-gate.mjs': copy(['review']) }, base);
+  assert.ok(r.some((x) => x.includes('a generated copy changed without its data')), `Y6a: ${r.join(' | ')}`);
+  // Control: the copy and its data, an entry added to both, pass (the compare reads the data; the drift test the copy).
+  assert.deepEqual(reasons({ 'scripts/x-gate.mjs': copy(['auto_merge', 'review', 'x']), 'scripts/x-gate.tables.json': data(['auto_merge', 'review', 'x']) }, base), []);
+  // A line outside the copy's markers is the script's own code.
+  assert.deepEqual(reasons({ 'scripts/x-gate.mjs': `${copy(['auto_merge', 'review'])}export const Q = 1;\n` }, base), []);
 });

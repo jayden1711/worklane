@@ -3,7 +3,9 @@
 // parsed data, before and after a change, and never runs code (src/merge-policy-weakening.ts, jsonTableFindings). A
 // module loads its own file here, by its own URL (checked against its call sites: callerScript), and gets each table deep-frozen: no write to a table succeeds after
 // load. What the load returns can still be changed by code that runs before it and replaces a built-in it calls
-// (JSON.parse, Array.prototype.map, Object.freeze, readFileSync): open, named by the owner (R1184p P1; #1251). No path is
+// (JSON.parse, Array.prototype.map, Object.freeze, readFileSync), or that writes the tables file the load reads (the
+// installed `dist/**/<module>.tables.json`, which nothing checks against the data the hold compared; R1184y Y3): open,
+// named by the owner (R1184p P1; #1251). No path is
 // written at the load site. The load line and each `TABLES.get('NAME')` line can't be removed or
 // changed without the owner (the hold's TABLE_LOAD; each load statement is on one line), and an added line that
 // imports the loader any other way, or uses `import.meta` other than to read it (this reads the path from its `.url`),
@@ -25,7 +27,8 @@
 //
 // Anything else fails to load: a key or a tag not listed here, a kind not listed, a `$regexp` that doesn't compile, a
 // number that isn't finite (1e400) or is -0 (either would compare as another value). (A
-// `__proto__` key is an own key like any other: objects are made with Object.fromEntries, never by assignment.)
+// `__proto__` key is an own key like any other: objects are made with Object.fromEntries, never by assignment; a
+// generated copy writes it as a computed key, scripts/lib/table-copies.mjs literal, R1184y Y4j.)
 // The hold reads the file with the same parser (parseTables), so a file that can't load waits.
 // scripts/lib/check-tables.mjs is the same loader for the scripts that run without a build; test/check-tables.test.ts
 // holds the two to the same answers on every tables file in the repo.
