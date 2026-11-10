@@ -100,7 +100,7 @@ const WS_ENV_ROOT = /^\$\{?WS\}?\/(?:scripts|\.github)\//;
 /** A shell file from the checkout's root: scripts/ or .github/, plainly or from $GITHUB_WORKSPACE or $ws. */
 const SHELL_FILE_ROOT = /^(?:\.\/|\$\{?(?:GITHUB_WORKSPACE|ws)\}?\/)?(?:scripts|\.github)\//;
 /** Downloaders other than curl: none may run in a workflow or a script (a probe to /dev/null aside, below). */
-const OTHER_FETCH = /\bwget\b|\bgh\s+release\s+download\b|\bInvoke-WebRequest\b|\biwr\b|\bInvoke-RestMethod\b|\birm\b|\bWebClient\b|\bDownloadFile\b|\bHttpClient\b|\bStart-BitsTransfer\b|\baria2c\b|\bcurl\.exe\b|=\s*["']?curl\b|\bgh\s+api\b[^\n]*(?:releases\/|octet-stream)|\b(?:command\s+-v|which|type\s+-[pP])\s+curl\b/i;
+const OTHER_FETCH = /\bwget\b|\bgh\s+release\s+download\b|\bInvoke-WebRequest\b|\biwr\b|\bInvoke-RestMethod\b|\birm\b|\bWebClient\b|\bDownloadFile\b|\bHttpClient\b|\bStart-BitsTransfer\b|\baria2c\b|\bcurl\.exe\b|=\s*["']?curl\b|\bgh\s+api\b[^\n]*(?:releases\/|octet-stream)|\bgh\s+release\s+(?:view|list)\b[^\n]*\bassets\b|\b(?:command\s+-v|which|type\s+-[pP])\s+curl\b/i;
 
 /** A run script's lines, with backslash-continued lines joined. */
 // R1228f D2: bash removes a backslash-newline outright (no space), keeping the next line's indentation.
@@ -420,6 +420,13 @@ function workflowFiles(files: readonly { name: string; text: string }[], report:
     // R1228f D3: every string the file holds, as YAML decodes it (an escape like \x67 or \x2F hides nothing), with its
     // continuations joined: the pinned-URL and downloader rules are read over these, not over the raw text.
     for (const v of scalars(doc)) for (const p of decodedProblems(v)) report(name, p);
+    // R1228u D1: the helper's file stem anywhere off a helper line, in any value, not only a run's lines (the whole path in
+    // an env:, matrix or with: value ran it outside the step-shell rule). A step's run is read below, with its own message.
+    const runs = new Set<string>([...Object.values(doc?.jobs ?? {}).flatMap((j) => (j?.steps ?? []).map((s) => s?.run)), ...(doc?.runs?.steps ?? []).map((s) => s?.run)].filter((r): r is string => typeof r === 'string'));
+    for (const v of scalars(doc)) {
+      if (runs.has(v)) continue;
+      for (const l of logicalLines(v)) if (!/^\s*#/.test(l) && /fetch-pinned/.test(l) && !HELPER_LINE.test(l)) report(name, `${HELPER} named in a value off a helper line (an env:, matrix or with: value): ${l.trim()}`);
+    }
     // R1228f D4: only the actions used today, each pinned by commit (a new downloader action needs a lint edit).
     for (const u of usesOf(doc)) if (!USES_ALLOWED.test(u)) report(name, `an action this lint doesn't allow (pinned: ${USES_ALLOWED.source}): ${u}`);
     for (const [k, v] of entries(doc)) {
@@ -1075,6 +1082,25 @@ test("R1228r, R1228s: the helper named by its file stem in any other spelling is
   assert.match(scan(wsl(step(pinned, '') + `      - name: other\n        run: |\n          ${WS_FROM_WORKSPACE}\n          /usr/bin/bash -p "$ws/scripts/ci/"fetch-pinned.sh "$u" "$sum" /tmp/n2\n`)).join(), /named other than on a helper line/);
 });
 
+test("R1228u D1, N1: the helper's path in an env:, matrix or with: value is refused; a pin read from the release's own asset digest is refused", () => {
+  const scan = (text: string) => {
+    const out: string[] = [];
+    workflowFiles([{ name: '.github/workflows/zz.yml', text }], (_n, p) => out.push(p));
+    return out;
+  };
+  const wf = (job: string) => `on: push\njobs:\n  a:\n    runs-on: ubuntu-latest\n${job}`;
+  // E1: env, E2: matrix, and a with: value: the whole literal path, off a helper line.
+  assert.match(scan(wf(`    steps:\n      - shell: bash\n        env:\n          FETCH: scripts/ci/fetch-pinned.sh\n          U: \${{ vars.GITLEAKS_URL }}\n        run: bash "$FETCH" "$U" ${PIN} gl.tgz\n`)).join(), /named in a value off a helper line/, 'E1: an env: value');
+  assert.match(scan(wf(`    strategy:\n      matrix:\n        helper: [scripts/ci/fetch-pinned.sh]\n    steps:\n      - shell: bash\n        run: bash "\${{ matrix.helper }}" "\${{ vars.GITLEAKS_URL }}" ${PIN} gl.tgz\n`)).join(), /named in a value off a helper line/, 'E2: a matrix value');
+  assert.match(scan(wf(`    env:\n      H: ./scripts/ci/./fetch-pinned.sh\n    steps:\n      - shell: bash\n        run: bash "$H" "$U" ${PIN} gl.tgz\n`)).join(), /named in a value off a helper line/, 'a job-level env value, another spelling');
+  // The helper step as CI writes it: no report from the value check (its run is a helper line).
+  const GL = 'https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz';
+  assert.deepEqual(scan(wf(`    steps:\n      - name: get\n        shell: ${HELPER_SHELL}\n        env:\n          BASH_ENV: ''\n        run: |\n          /usr/bin/bash -p "$GITHUB_WORKSPACE/${HELPER}" "${GL}" ${PIN} gl.tgz\n`)), [], 'control: the helper step');
+  // N1: the pin read at run time from the release itself (GitHub's asset digest): no pin. Refused as a fetch.
+  assert.match(decodedProblems(`sum="$(gh release view v8.30.1 -R gitleaks/gitleaks --json assets --jq '.assets[0].digest')"`).join(), /./, 'gh release view … assets');
+  assert.deepEqual(decodedProblems('gh release view v1 --json tagName'), [], 'control: a release view that reads no asset');
+});
+
 // Limits (owner decision (c): stated, not closed; the helper's digest check holds for each download it handles):
 // - A download that never names a URL the lint knows (DOWNLOAD), through a tool it doesn't know (python, node, perl, a
 //   compiled binary, an action not in USES_ALLOWED once allowed), or built from pieces at run time, isn't seen.
@@ -1085,6 +1111,8 @@ test("R1228r, R1228s: the helper named by its file stem in any other spelling is
 //   BASH_ENV in its run catch the plain accidents. The structural rules recognise the helper by its file stem
 //   (`fetch-pinned`, any path to it: R1228p D3, R1228r D1, R1228s), and the one WSL step runs one helper line.
 //   Not seen, and not claimed:
+//   - a pin read at run time is no pin: one read from the release itself (`gh release view … assets`, GitHub's asset
+//     digest) is refused (R1228u N1), any other way of computing it isn't seen;
 //   - the helper's name or path built from pieces at run time: a glob (`fetch-pinne?.sh`, `fetch-pinne[d].sh`), a
 //     variable (`${h}pinned.sh`) or a quote split of the stem (R1228s S1, S5-S7; R1228r X4). That is code in the job,
 //     out of scope; the digest still checks;
