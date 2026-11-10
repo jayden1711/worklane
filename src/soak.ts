@@ -78,8 +78,9 @@ export interface SoakSample {
   childFds?: number | null;
   /**
    * The job's cgroup (a real soak on Linux, R1181t D1, D4): its processes, every one whatever its uid, session or pid
-   * history (cgroup.procs, its sub-groups included), and its unreclaimable kernel memory (memory.stat
-   * slab_unreclaimable + sock), which bounds what no fd table names (an object held only in flight). Null elsewhere.
+   * history (cgroup.procs, its sub-groups included), and its kernel memory less what the kernel can reclaim
+   * (memory.stat kernel - slab_reclaimable: R1181u C1), which bounds a pipe's or socket's buffers held only in flight,
+   * which no fd table names. Null elsewhere.
    */
   cgroupProcs?: number | null;
   cgroupKernelBytes?: number | null;
@@ -431,6 +432,12 @@ export function soakVerdict(input: readonly SoakSample[], limits: SoakLimits = S
     ] as const) {
       const n = at(k);
       if (n !== null && n - base(k) > limit) failures.push(`left at stop: ${what} ${fmt(n - base(k))} above the first quarter's after stop() and idle() (limit ${fmt(limit)})`);
+    }
+    // R1181v L1: an error or failure logged by the shutdown itself (the usual way a shutdown leaves something).
+    for (const [k, what] of [['errors', 'coordinator.error event(s)'], ['failedRuns', 'agent run(s) that did not succeed'], ['failureEvents', 'failure event(s)']] as const) {
+      const was = end[k];
+      const now = stop[k];
+      if (typeof was === 'number' && typeof now === 'number' && now > was) failures.push(`left at stop: ${now - was} ${what} logged during stop() and idle()`);
     }
     if (stop.openRuns > 0) failures.push(`left at stop: ${stop.openRuns} agent run(s) open after stop() and idle()`);
     if (stop.slotsHeld > 0) failures.push(`left at stop: ${stop.slotsHeld} agent slot(s) held after stop() and idle()`);

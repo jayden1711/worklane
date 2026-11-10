@@ -27,7 +27,8 @@ verdict). Workflow: `.github/workflows/soak.yml`.
   - agent slots held;
   - on Linux, the open file handles the processes it started hold (each one's `/proc/<pid>/fd`);
   - on a real soak on Linux, the job's cgroup (named by `/proc/self/cgroup`): the processes in it and its sub-groups
-    (`cgroup.procs`), and its unreclaimable kernel memory (`memory.stat` `slab_unreclaimable` + `sock`).
+    (`cgroup.procs`), and its kernel memory less what the kernel can reclaim (`memory.stat` `kernel` less
+    `slab_reclaimable`).
 
   After the last tick the driver stops the coordinator, waits for its `idle()` and 2 s more, and takes **one more
   sample**, the stop sample, judged on its own (below): what the shutdown leaves is read too.
@@ -47,8 +48,8 @@ verdict). Workflow: `.github/workflows/soak.yml`.
 | Those processes' resident memory grew, as RSS is judged | 256 MB |
 | Those processes' open file handles grew (Linux, where they are required in every sample), as this process's are judged | 32 |
 | A real soak on Linux only (required in every sample there): the processes in the job's cgroup grew, as child processes are judged. They are counted whatever their uid, session or pid history (`sudo` doesn't move a process out of the cgroup). Processes, not tasks: `pids.current` counts threads, which the runner's own .NET processes add and drop | 4 |
-| A real soak on Linux only: the job cgroup's unreclaimable kernel memory grew, as memory is judged. It bounds what no fd table names: an inotify instance, a pipe or a socket buffer held only in flight (sent over a unix socket and never received) | 64 MB, 4× held |
-| The stop sample (read after `stop()`, `idle()` and 2 s): processes the soak started, processes in the job's cgroup, worktrees or the worktree folder's entries above the first quarter's median; an agent run open, a slot or the full-run lock held; open file handles (its own, the children's), watches, the children's RSS, the cgroup's kernel memory or the filesystems' level above the first quarter's median by more than its growth limit | any one, or the limit above |
+| A real soak on Linux only: the job cgroup's kernel memory less what the kernel can reclaim (`kernel` − `slab_reclaimable`) grew, as memory is judged. It bounds what no fd table names: a pipe's or a socket's buffers held only in flight (sent over a unix socket and never received), which the kernel charges as kernel pages (R1181u C1: `slab_unreclaimable` + `sock` read about a tenth of them). The dentry cache is reclaimable, so walking files doesn't move it | 64 MB, 4× held |
+| The stop sample (read after `stop()`, `idle()` and 2 s): processes the soak started, processes in the job's cgroup, worktrees or the worktree folder's entries above the first quarter's median; an agent run open, a slot or the full-run lock held; a `coordinator.error`, a failed run or another failure event logged during the shutdown (R1181v L1); open file handles (its own, the children's), watches, the children's RSS, the cgroup's kernel memory or the filesystems' level above the first quarter's median by more than its growth limit | any one, or the limit above |
 | inotify watches and fanotify marks grew, this process's and those processes' (Linux, where they are required in every sample), as open file handles are judged | 32 |
 | Disk under the soak's folder, the test isolate's home, the `/dev/shm` entries the soak or one of its processes holds open or mapped, and (Linux) files they hold open or mapped after unlinking them, besides the event log (judged on its own above), per landed task after the warm-up | 64 KB |
 | The same disk, grown or held mid-run, as memory is judged (temp files are made inside the folder) | 256 MB, 4× held |
@@ -147,14 +148,19 @@ replaces main's pending scheduled run.
   - A process of another user (a `run_as` command through `sudo -n -u`), and a new process in a session of this
     user's that was alive before the soak and isn't the soak's own (a worker a daemon started earlier starts on the
     soak's request), aren't counted by process, nor are their file handles. A real soak on Linux counts them through
-    the job's cgroup while they stay in it (R1181t). A process that moves to another cgroup (a user-manager service) is
-    counted only as a new session of this user's; the smoke counts none of them.
+    the job's cgroup, but only those started in it (R1181t). A worker that a daemon outside the job's cgroup starts
+    (a user service, another job's daemon) isn't counted at all, nor is a process of another user that leaves the
+    cgroup (`sudo systemd-run`, a container started through a root daemon): its only link to the soak is a request
+    over IPC (R1181v D2). A process of this user's that moves to another cgroup in a new session (a user-manager
+    service) is counted as a new session; the smoke counts none of them.
   - A session is the soak's when it is new since the snapshot: its id unknown then, or now led by another process
     than the one that led it then (R1181t D4: a pid reused as a session id). A session whose leader has gone keeps its
     id, so the kernel won't reuse it.
-  - What no process holds in its fd table (an inotify instance, a pipe or a socket's buffers held only in flight,
-    sent over a unix socket and never received) is read only through the job cgroup's unreclaimable kernel memory, on a
-    real soak on Linux: a hoard under its 64 MB limit isn't seen, and in the smoke none is (R1181t D1).
+  - What no process holds in its fd table (a pipe's or a socket's buffers held only in flight, sent over a unix socket
+    and never received) is read only through the job cgroup's kernel memory, on a real soak on Linux: a hoard under its
+    64 MB limit isn't seen, and in the smoke none is (R1181t D1, R1181u C1). An inotify instance held in flight costs
+    about 88 bytes a watch, so it is bounded only by the system's `max_user_watches` (65,536 on a stock Ubuntu: about
+    6 MB), never by this check.
   - The stop sample is read 2 s after `stop()` and `idle()`: what the shutdown starts later, or ends later, isn't seen
     as left. A process the coordinator's git starts in the background (`git gc --auto` detaches) that is still running
     then would read as left behind.

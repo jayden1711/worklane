@@ -560,9 +560,11 @@ export function childFds(pids: readonly number[]): number | null {
 
 /**
  * The job's cgroup (cgroup v2, named by /proc/self/cgroup's `0::` line; R1181t D1, D4): the processes in it and its
- * sub-groups, whatever their uid, session or pid history (sudo doesn't move a process out of it), and its
- * unreclaimable kernel memory (memory.stat slab_unreclaimable + sock), which bounds what no fd table names: an inotify
- * instance or a socket buffer held only in flight. Each null where it can't be read.
+ * sub-groups, whatever their uid, session or pid history (sudo doesn't move a process out of it), and its kernel
+ * memory less what the kernel can reclaim (memory.stat `kernel` - `slab_reclaimable`), which bounds what no fd table
+ * names: a pipe's or a socket's buffers held only in flight. R1181u C1, R1181v D1: those are charged as kernel pages,
+ * not slab, so `slab_unreclaimable + sock` read about a tenth of them; the dentry cache (reclaimable slab) is left out,
+ * so walking files doesn't move it. Each null where it can't be read.
  */
 export function cgroupLevels(root = '/sys/fs/cgroup'): { procs: number | null; kernelBytes: number | null } {
   let dir: string;
@@ -576,7 +578,15 @@ export function cgroupLevels(root = '/sys/fs/cgroup'): { procs: number | null; k
   let count = 0;
   const walk = (d: string) => {
     count += readFileSync(join(d, 'cgroup.procs'), 'utf8').split('\n').filter(Boolean).length;
-    for (const e of readdirSync(d, { withFileTypes: true })) if (e.isDirectory()) walk(join(d, e.name));
+    for (const e of readdirSync(d, { withFileTypes: true })) {
+      if (!e.isDirectory()) continue;
+      try {
+        walk(join(d, e.name));
+      } catch (err) {
+        // R1181u lesser 1: a sub-group removed while it is read had nothing in it to count.
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      }
+    }
   };
   let procs: number | null = null;
   try {
@@ -589,7 +599,7 @@ export function cgroupLevels(root = '/sys/fs/cgroup'): { procs: number | null; k
   try {
     const stat = readFileSync(join(dir, 'memory.stat'), 'utf8');
     const get = (k: string) => Number(new RegExp(`^${k} (\\d+)$`, 'm').exec(stat)?.[1]);
-    const n = get('slab_unreclaimable') + get('sock');
+    const n = get('kernel') - get('slab_reclaimable');
     if (Number.isFinite(n)) kernelBytes = n;
   } catch {
     // no memory controller here
@@ -1582,6 +1592,16 @@ test('soak verdict: the sample read after stop() fails on what the shutdown left
   assert.match(run({ childFds: 43 }), /^left at stop: the child processes' open file handles 40 above the first quarter's/);
   assert.equal(run({ childFds: 30 }), '', 'within the limit');
   assert.match(run({ childRss: 300 * MB }), /^left at stop: the child processes' RSS/);
+  // R1181v L1: an error the shutdown logs (its stop-error probe: errors [0, ..., 0, 1], the 1 in the stop sample).
+  const err = (stop: Partial<SoakSample>) => {
+    const s = series(331, () => ({ errors: 0, failedRuns: 0, failureEvents: 0 }));
+    s[330] = { ...s[329]!, at: s[329]!.at + 3000, ...stop };
+    return soakVerdict(s, SOAK_LIMITS, opts).failures.join(' | ');
+  };
+  assert.match(err({ errors: 1 }), /^left at stop: 1 coordinator\.error event\(s\) logged during stop\(\) and idle\(\)$/);
+  assert.match(err({ failedRuns: 2 }), /^left at stop: 2 agent run\(s\) that did not succeed logged during/);
+  assert.match(err({ failureEvents: 1 }), /^left at stop: 1 failure event\(s\) logged during/);
+  assert.equal(err({}), '', 'none logged: passes');
   // The stop sample is the last one only with `stopped`: without it, one sample's rise at the end is the run's to judge.
   const s = series(331, () => ({ children: 1 }));
   s[330] = { ...s[329]!, children: 2 };
@@ -1675,5 +1695,42 @@ test("soak driver (Linux, R1181t D1, D4): the job's cgroup is read: a process st
     else assert.ok(before.kernelBytes > 0, 'its unreclaimable kernel memory is read');
   } finally {
     if (pid > 0) try { process.kill(pid); } catch { /* gone */ }
+  }
+});
+
+test("soak driver (Linux, R1181u C1, C2): the job cgroup's kernel level reads a pipe's buffers in full", linuxOnly, async (t) => {
+  if (!python) return t.skip('no python3');
+  if (cgroupLevels().kernelBytes === null) return t.skip('no memory controller on this cgroup');
+  // 32 pipes of 1 MB (an unprivileged pipe's largest), each filled: 32 MB of pipe buffers, charged as kernel pages.
+  const PIPES = `import fcntl, os, sys, time
+held = []
+for i in range(32):
+    r, w = os.pipe()
+    try:
+        fcntl.fcntl(w, 1031, 1 << 20)
+    except OSError:
+        print('skip', flush=True); sys.exit(0)
+    os.set_blocking(w, False)
+    n = 0
+    try:
+        while n < (1 << 20): n += os.write(w, b'x' * 65536)
+    except BlockingIOError:
+        pass
+    held.append((r, w))
+print('ready', flush=True)
+time.sleep(60)`;
+  // memory.stat is flushed at most every 2 s.
+  const settle = () => new Promise((r) => setTimeout(r, 2500));
+  await settle();
+  const before = cgroupLevels().kernelBytes!;
+  const c = await readyChild(PIPES, []);
+  try {
+    if (!c) return t.skip('a 1 MB pipe is refused here (pipe-max-size or the per-user pipe limit)');
+    await settle();
+    const rise = cgroupLevels().kernelBytes! - before;
+    // `slab_unreclaimable + sock` rose about 3 MB here (R1181u C1); `kernel - slab_reclaimable` the full 32.
+    assert.ok(rise >= 16 * 2 ** 20, `the kernel level rose ${(rise / 2 ** 20).toFixed(1)} MB with 32 MB of pipe buffers held`);
+  } finally {
+    c?.kill();
   }
 });
