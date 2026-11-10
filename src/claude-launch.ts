@@ -8,7 +8,7 @@
 // cli.js under node, by any spelling the lint reads (its limits are in that test). scripts/ci/setting-sources-probe.mjs
 // drives this function on the real binary, over every field of ClaudeLaunch (LAUNCH_FIELDS) and the shapes production's
 // call sites make, so the boundary is proven at this one choke point.
-import { spawn, type ChildProcessWithoutNullStreams } from './os/child-process.js';
+import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from './os/child-process.js';
 
 export type ClaudeLaunch = {
   /** The claude binary (or a test's stand-in for it). */
@@ -42,30 +42,68 @@ export type ClaudeLaunch = {
 /** Every field of ClaudeLaunch: the probe names each, so a field it doesn't drive can't be added unseen. */
 export const LAUNCH_FIELDS = ['bin', 'cwd', 'env', 'asUser', 'detached', 'settings', 'mode', 'model', 'maxTurns', 'maxBudgetUsd', 'allowedTools', 'disallowedTools', 'appendSystemPromptFile', 'appendSystemPrompt', 'jsonSchema', 'effort', 'resume', 'pluginDirs', 'mcpConfigFile'] as const satisfies readonly (keyof ClaudeLaunch)[];
 
+/** Every tool Claude Code has, for a launch that may use none (skill-eval's answer, the login proof). */
+export const NO_TOOLS = ['Bash', 'Edit', 'Write', 'MultiEdit', 'Read', 'Glob', 'Grep', 'WebFetch', 'WebSearch', 'NotebookEdit', 'Task'];
+
 /** What every launch adds to its environment. */
 export const LAUNCH_ENV = { CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' } as const;
 
+/** The guards every launch ends with: Claude Code takes the last `--settings` and `--setting-sources` it is given. */
+export const launchGuards = (settings: object): string[] => ['--settings', JSON.stringify(settings), '--setting-sources', '', '--strict-mcp-config'];
+
 /**
- * The argv a launch gives claude: `--settings`, `--setting-sources ''` and `--strict-mcp-config` always, then what the
- * spec asks for. In the runner's order for a stream-json session, and in a one-shot answer's for `json`.
+ * Why a spec's values can't be read as flags (R1185aa D1): Claude Code ends a list (`--allowedTools a b`) at the first
+ * element starting with `-` and reads it as a flag, so `--setting-sources=user,project,local` in `allowedTools` (a
+ * repo's `pre_approved`) would load every source. Every list element must be a string not starting with `-`, and so
+ * must every value given as a separate argument (a model, an effort, a session id, a path). The appended system prompt
+ * is free text (a skill's own instructions, which may start with `---`): it goes as `--append-system-prompt=<text>`,
+ * one argument a flag can't be read out of. Throws naming the field.
+ */
+function flagFree(spec: Omit<ClaudeLaunch, 'bin' | 'cwd' | 'env' | 'asUser' | 'detached'>): void {
+  const bad = (v: unknown) => typeof v !== 'string' || v.startsWith('-');
+  for (const k of ['allowedTools', 'disallowedTools', 'pluginDirs'] as const) {
+    const list: unknown = spec[k] ?? [];
+    if (!Array.isArray(list)) throw new Error(`claudeArgv: ${k} isn't a list`);
+    for (const v of list as unknown[]) if (bad(v)) throw new Error(`claudeArgv: ${k} element ${JSON.stringify(v)} would be read as a flag (or isn't text): refused`);
+  }
+  for (const k of ['model', 'effort', 'resume', 'mcpConfigFile', 'appendSystemPromptFile'] as const) {
+    const v: unknown = spec[k];
+    if (v !== undefined && bad(v)) throw new Error(`claudeArgv: ${k} ${JSON.stringify(v)} would be read as a flag (or isn't text): refused`);
+  }
+}
+
+/**
+ * The argv a launch gives claude: what the spec asks for, in the runner's order for a stream-json session and a
+ * one-shot answer's for `json`, then always `--settings`, `--setting-sources ''` and `--strict-mcp-config`, last, so
+ * no earlier argument can stand in for them (R1185aa D1). A spec value that would be read as a flag is refused.
  */
 export function claudeArgv(spec: Omit<ClaudeLaunch, 'bin' | 'cwd' | 'env' | 'asUser' | 'detached'>): string[] {
-  const guards = ['--setting-sources', '', '--strict-mcp-config'];
-  const args = ['--settings', JSON.stringify(spec.settings)];
-  if (spec.mode === 'stream') args.push('-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--model', spec.model, ...guards, '--permission-mode', 'dontAsk', '--max-turns', String(spec.maxTurns), '--max-budget-usd', String(spec.maxBudgetUsd));
-  else args.push('-p', '--model', spec.model, '--output-format', 'json', '--max-turns', String(spec.maxTurns), '--max-budget-usd', String(spec.maxBudgetUsd), ...guards);
+  flagFree(spec);
+  const args: string[] = [];
+  if (spec.mode === 'stream') args.push('-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--model', spec.model, '--permission-mode', 'dontAsk', '--max-turns', String(spec.maxTurns), '--max-budget-usd', String(spec.maxBudgetUsd));
+  else args.push('-p', '--model', spec.model, '--output-format', 'json', '--max-turns', String(spec.maxTurns), '--max-budget-usd', String(spec.maxBudgetUsd));
   if (spec.effort) args.push('--effort', spec.effort);
   if (spec.mode === 'json' && spec.jsonSchema) args.push('--json-schema', JSON.stringify(spec.jsonSchema));
   if (spec.allowedTools.length) args.push('--allowedTools', ...spec.allowedTools);
   if (spec.disallowedTools?.length) args.push('--disallowedTools', ...spec.disallowedTools);
   if (spec.appendSystemPromptFile) args.push('--append-system-prompt-file', spec.appendSystemPromptFile);
-  if (spec.appendSystemPrompt) args.push('--append-system-prompt', spec.appendSystemPrompt);
+  if (spec.appendSystemPrompt) args.push(`--append-system-prompt=${spec.appendSystemPrompt}`);
   // One flag per approved plugin directory, never a folder of them: exactly what was checked.
   for (const d of spec.pluginDirs ?? []) args.push('--plugin-dir', d);
   if (spec.mcpConfigFile) args.push('--mcp-config', spec.mcpConfigFile);
   if (spec.mode === 'stream' && spec.jsonSchema) args.push('--json-schema', JSON.stringify(spec.jsonSchema));
   if (spec.resume) args.push('--resume', spec.resume);
-  return args;
+  return [...args, ...launchGuards(spec.settings)];
+}
+
+/**
+ * A one-shot answer, waited for (the setup wizard's login proof, #1245): the same argv and environment as launchClaude,
+ * run to its end. `input`: what goes on stdin (none: closed). Never through asUser: the caller's own login is what it
+ * proves.
+ */
+export function launchClaudeSync(spec: Omit<ClaudeLaunch, 'asUser' | 'detached'>, o: { timeoutMs: number; input?: string }): { status: number | null; stdout: string; stderr: string; error?: Error } {
+  const r = spawnSync(spec.bin, claudeArgv(spec), { cwd: spec.cwd, env: { ...spec.env, ...LAUNCH_ENV }, encoding: 'utf8', timeout: o.timeoutMs, input: o.input ?? '' });
+  return { status: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '', ...(r.error ? { error: r.error } : {}) };
 }
 
 /** Start a Claude Code session: the only way the engine does (see the top of this file). */

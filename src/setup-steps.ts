@@ -6,7 +6,9 @@
 // `git rev-parse`, the service manager's status) and reads files; it never changes anything.
 import { startSetupWorker } from './os/child-process.js';
 import { commandSpawnSync } from './os/git.js';
-import { existsSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { launchClaudeSync, NO_TOOLS, type ClaudeLaunch } from './claude-launch.js';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BRAND } from './brand.js';
@@ -76,6 +78,8 @@ export const probeEnv = (o: ProbeRunOptions = {}): NodeJS.ProcessEnv => (o.agent
 export interface SetupProbe {
   which(cmd: string): string | null;
   run(cmd: string, args: string[], o?: ProbeRunOptions): RunResult;
+  /** A one-shot Claude Code answer (the login proof), started only through src/claude-launch.ts (#958, R1185z D1). */
+  claude(spec: LoginProofSpec, o?: ProbeRunOptions): RunResult;
   /** This user's service (local mode's coordinator) running now; null where there is no service manager to ask. */
   serviceRunning(label: string): boolean | null;
   /** A system unit (a server instance's coordinator, the dashboard hub) active now; null off Linux. */
@@ -92,6 +96,25 @@ export interface SetupProbe {
 
 export type ManagerEnv = { env: Record<string, string> } | { error: string };
 
+/** What the login proof asks claude for: a launch spec, with the prompt that goes on its stdin. */
+export type LoginProofSpec = Omit<ClaudeLaunch, 'bin' | 'cwd' | 'env' | 'asUser' | 'detached'> & { prompt: string };
+
+/**
+ * The login proof's launch, for a probe (#958, R1185z D1): through launchClaudeSync, so it loads no setting source, no
+ * MCP config and no auto memory, in an empty folder of its own (no checkout's files around it), with the environment
+ * the probe would give `claude` (its login).
+ */
+export function claudeProbeRun(spec: LoginProofSpec, env: NodeJS.ProcessEnv, timeoutMs: number, bin = findTool('claude') ?? 'claude'): RunResult {
+  const cwd = mkdtempSync(join(tmpdir(), 'login-proof-'));
+  try {
+    const { prompt, ...launch } = spec;
+    const r = launchClaudeSync({ ...launch, bin, cwd, env }, { timeoutMs, input: prompt });
+    return { status: r.error ? null : r.status, stdout: r.stdout, stderr: r.error ? r.error.message : r.stderr };
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+}
+
 /** The real probe; `managerEnv`: a given service-manager reading instead of asking the manager (tests, the worker's). */
 export function systemProbe(o: { managerEnv?: ManagerEnv } = {}): SetupProbe {
   return {
@@ -101,6 +124,7 @@ export function systemProbe(o: { managerEnv?: ManagerEnv } = {}): SetupProbe {
       const r = commandSpawnSync(cmd, args, { encoding: 'utf8', timeout: 30_000, env: probeEnv(o), ...(o.cwd ? { cwd: o.cwd } : {}) });
       return { status: r.error ? null : r.status, stdout: r.stdout ?? '', stderr: r.error ? r.error.message : (r.stderr ?? '') };
     },
+    claude: (spec, o = {}) => claudeProbeRun(spec, probeEnv(o), 30_000),
     serviceRunning,
     systemUnitActive,
     linger: () => lingerEnabled(),
@@ -367,16 +391,19 @@ export function detectTools(mode: Mode, p: Pick<SetupProbe, 'which'>, node = pro
   return { done: true, detail: `node ${node}, ${REQUIRED_TOOLS[mode].join(', ')}; ${docker}`, missing };
 }
 
-/** The minimal real call that proves a login: the cheapest model, a one-word answer, one turn, a hard budget cap. */
-export const LOGIN_PROOF_ARGS = ['-p', AUTH_CHECK.prompt, '--model', AUTH_CHECK.model, '--max-turns', String(AUTH_CHECK.maxTurns), '--max-budget-usd', String(AUTH_CHECK.maxBudgetUsd), '--output-format', 'json'];
+/**
+ * The minimal real call that proves a login: the cheapest model, a one-word answer, one turn, a hard budget cap, no
+ * tools, and nothing loaded from anywhere (empty settings, launched through src/claude-launch.ts: #958, #1245).
+ */
+export const LOGIN_PROOF: LoginProofSpec = { settings: {}, mode: 'json', model: AUTH_CHECK.model, maxTurns: AUTH_CHECK.maxTurns, maxBudgetUsd: AUTH_CHECK.maxBudgetUsd, allowedTools: [], disallowedTools: NO_TOOLS, prompt: AUTH_CHECK.prompt };
 
 /**
  * Whether the API takes the login (issue #463: `claude auth status` says a credential is configured, not that it
  * works): one minimal real call. Done when Claude answered (a reply, or the budget cap reached); else Claude's
  * message, redacted, never a token.
  */
-export function proveClaudeLogin(p: Pick<SetupProbe, 'run'>): Detected {
-  const r = p.run('claude', LOGIN_PROOF_ARGS);
+export function proveClaudeLogin(p: Pick<SetupProbe, 'claude'>): Detected {
+  const r = p.claude(LOGIN_PROOF);
   type Result = { subtype?: string; is_error?: boolean; result?: string; api_error_status?: number | null };
   let j: Result | null = null;
   try {
@@ -451,7 +478,7 @@ function runtimeFix(rt: AgentRuntime): string {
  * `memo` (the dashboard's) keeps the call's answer for the same login: a success for LOGIN_PROOF_OK_MS, a failure
  * for LOGIN_PROOF_FAILED_MS. `mismatch`: the detail says how to fix it.
  */
-export function detectClaudeLogin(p: Pick<SetupProbe, 'which' | 'run' | 'serviceManagerEnv'>, runtime: AgentRuntime | { error: string }, memo?: (identity: string, call: () => Detected) => Detected): Detected & { mismatch?: true } {
+export function detectClaudeLogin(p: Pick<SetupProbe, 'which' | 'run' | 'claude' | 'serviceManagerEnv'>, runtime: AgentRuntime | { error: string }, memo?: (identity: string, call: () => Detected) => Detected): Detected & { mismatch?: true } {
   if (!p.which('claude')) return no('claude is not installed (the tools step)');
   if ('error' in runtime) return no(runtime.error);
   // The service inherits its manager's environment (#738); unreadable means unknown: not done.
@@ -483,7 +510,7 @@ export function detectClaudeLogin(p: Pick<SetupProbe, 'which' | 'run' | 'service
   if (!RUNTIME_LOGINS[runtime.kind].includes(method)) return refuse(`${how}, but the agents would refuse it: ${needs}, so every run would stop with auth_mismatch`);
   // Never a key's value in the cache key. WHY (#786): the manager's own CLAUDE_CONFIG_DIR, never Object.prototype's.
   const identity = JSON.stringify([runtime.kind, method, parsed?.email ?? null, parsed?.orgId ?? null, fromManager, ownEnv(mgr.env).get('CLAUDE_CONFIG_DIR') ?? null]);
-  const prove = () => proveClaudeLogin({ run: (cmd, args) => p.run(cmd, args, as) });
+  const prove = () => proveClaudeLogin({ claude: (spec) => p.claude(spec, as) });
   const proof = memo ? memo(identity, prove) : prove();
   return fixed(proof.done ? ok(`${how}; ${proof.detail}`) : no(`${how}, but the API refused it: ${proof.detail}`));
 }

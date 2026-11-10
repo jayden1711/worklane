@@ -8,7 +8,7 @@
 // cases, run against the instructions at the base and at the head, with a cost cap, compared
 // case by case. The agent under test only ever sees the instructions and the situation (never
 // the rubric), in a neutrally named directory, and a judge on a different model grades it.
-import { launchClaude } from './claude-launch.js';
+import { launchClaude, NO_TOOLS } from './claude-launch.js';
 import { createHash } from 'node:crypto';
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -192,7 +192,6 @@ export function failedCost(e: unknown): number {
   return typeof usd === 'number' && Number.isFinite(usd) && usd > 0 ? usd : 0;
 }
 
-const NO_TOOLS = ['Bash', 'Edit', 'Write', 'MultiEdit', 'Read', 'Glob', 'Grep', 'WebFetch', 'WebSearch', 'NotebookEdit', 'Task'];
 
 /** Ask through the installed `claude` CLI on its own login (API keys stripped: never per-token billing). */
 export const cliAsk: Ask = (req) =>

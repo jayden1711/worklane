@@ -1,6 +1,7 @@
 // Instances: one per project, each with a home outside any repo: instance.yaml (its repo), policy.yaml (operator
 // policy), credentials.yaml (references, never values), state/. The repo's config folder may only tighten the policy.
 import { AutomationsPolicy } from './automations/schema.js';
+import { PermissionRule } from './config/permission-rule.js';
 import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { parseDocument } from 'yaml';
@@ -199,7 +200,7 @@ export const PolicyFile = z.strictObject({
     .refine((l) => 'default' in l, 'lanes must include default'),
   /** When set, the repo's network allowlist and pre-approved tools must be subsets of these. */
   network_allow: z.array(z.string()).optional(),
-  pre_approved: z.array(z.string()).optional(),
+  pre_approved: z.array(PermissionRule).optional(),
   /**
    * The value report's hours-saved estimate (src/value-report.ts, #708): its constants, in minutes, all three or none.
    * Absent: the engine's defaults, which the report says are guesses. Display only: read by GET /api/value alone, no
