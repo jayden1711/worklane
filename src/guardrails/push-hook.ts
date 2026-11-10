@@ -4,8 +4,10 @@
 // pushed can change. An agent that could set it, or point git at another hook, would choose the rules it is judged by.
 // Like the rest of the shell matcher this is best effort (shell.ts): the runner also drops the variable from every
 // agent's environment (runner.ts agentEnv), and the hook itself refuses the hatch inside an agent run.
+import { devNull } from 'node:os';
 import { resolve as resolvePath } from 'node:path';
-import { basename, envShort, envTakesNext, shortCluster, splitCommands, unwrap, type SimpleCommand } from './shell.js';
+import { foldName, gitGuarded } from '../os/git.js';
+import { basename, envShort, envTakesNext, programsIn, shortCluster, splitCommands, type SimpleCommand } from './shell.js';
 
 /** The hatch: set to 1 in a person's own shell, for one push. */
 export const PUSH_GATE_HATCH_ENV = 'PUSH_GATE_BOOTSTRAP';
@@ -116,118 +118,7 @@ function asGit(a: string[]): string[] {
 }
 const startsGit = (t: string) => isGit(t) || DASHED_GIT.test(basename(t));
 
-/** Options by their letters (`-x`, clustered) and long names (`--name`). */
-export interface Options {
-  short: string;
-  long: string[];
-}
-/**
- * A runner's command line: `[options] [operands] command ...`. `value`: the options that take the next word as
- * their value (test/runner-option-tables.test.ts checks them against each installed program). `operands`: words before the command (flock's lock file, taskset's mask, chrt's priority). `none`:
- * options with which the runner runs no command of these words (flock -c runs a command string, taskset -p).
- * `needs`: an option without which it runs none (runuser -u).
- */
-export interface Runner {
-  value: Options;
-  operands?: number;
-  none?: Options;
-  needs?: Options;
-}
-const opts = (short: string, ...long: string[]): Options => ({ short, long });
-/**
- * Programs that run a command from their words, after options and operands of their own (setsid git push).
- * INVARIANT: `value` lists exactly the options whose value may be the next word (getopt's `x:`, a long option's
- * required argument), as each program's own option table has them; an optional value (`x::`) is attached only.
- */
-export const RUNNERS: Readonly<Record<string, Runner>> = {
-  setsid: { value: opts('') },
-  stdbuf: { value: opts('ioe', 'input', 'output', 'error') },
-  strace: { value: opts('abeEIoOpPsSuUX', 'output', 'trace', 'signal', 'signals', 'status', 'env', 'user', 'attach', 'trace-path', 'string-limit', 'summary-sort-by', 'columns', 'abbrev', 'verbose', 'raw', 'read', 'write', 'fault', 'inject', 'kvm', 'decode-pids', 'argv0', 'trace-fds', 'detach-on', 'interruptible', 'const-print-style', 'summary-columns', 'summary-syscall-overhead', 'syscall-limit', 'stack-trace-frame-limit') },
-  ltrace: { value: opts('aADeFlnopsuwxX', 'output', 'library', 'align', 'indent', 'debug', 'where') },
-  chronic: { value: opts('') },
-  unbuffer: { value: opts('') },
-  flock: { value: opts('wE', 'wait', 'timeout', 'conflict-exit-code'), operands: 1, none: opts('c', 'command') },
-  taskset: { value: opts(''), operands: 1, none: opts('p', 'pid') },
-  chrt: { value: opts('TPD', 'sched-runtime', 'sched-period', 'sched-deadline'), operands: 1, none: opts('pm', 'pid', 'max') },
-  nsenter: { value: opts('tSG', 'target', 'setuid', 'setgid') },
-  unshare: { value: opts('SGRw', 'setuid', 'setgid', 'root', 'wd', 'map-user', 'map-group', 'map-users', 'map-groups', 'propagation', 'setgroups', 'monotonic', 'boottime') },
-  caffeinate: { value: opts('tw') },
-  fakeroot: { value: opts('lfisb', 'lib', 'faked', 'fd-base') },
-  firejail: { value: opts('') },
-  'systemd-run': { value: opts('HMEpu', 'unit', 'property', 'setenv', 'description', 'slice', 'uid', 'gid', 'working-directory', 'machine', 'host', 'nice', 'service-type', 'expand-environment', 'path-property', 'socket-property', 'on-active', 'on-boot', 'on-startup', 'on-unit-active', 'on-unit-inactive', 'on-calendar', 'timer-property') },
-  runuser: { value: opts('ugGcsw', 'user', 'group', 'supp-group', 'command', 'shell', 'session-command', 'whitelist-environment'), none: opts('cl', 'command', 'session-command', 'login'), needs: opts('u', 'user') },
-  'ssh-agent': { value: opts('atEPO') },
-  'dbus-run-session': { value: opts('', 'config-file', 'dbus-daemon') },
-};
-
-/** Whether option word `t` names one of `which`; in a cluster, only before the first letter that takes a value. */
-function names(t: string, which: Options, value: Options): boolean {
-  if (t.startsWith('--')) return which.long.includes(t.slice(2).split('=')[0]!);
-  for (const ch of t.slice(1)) {
-    if (which.short.includes(ch)) return true;
-    if (value.short.includes(ch)) return false;
-  }
-  return false;
-}
-
-/** Whether option word `t` takes the next word as its value (a cluster: only when its last letter does). */
-function takesValue(t: string, value: Options): boolean {
-  if (t.startsWith('--')) return !t.includes('=') && value.long.includes(t.slice(2));
-  for (let j = 1; j < t.length; j++) if (value.short.includes(t[j]!)) return j === t.length - 1;
-  return false;
-}
-
-/** Where a runner's command starts in its words, or -1 when it runs none of them. */
-function runnerCommand(r: Runner, a: string[]): number {
-  let i = 1;
-  let needed = !r.needs;
-  for (; i < a.length; i++) {
-    const t = a[i]!;
-    if (t === '--') {
-      i++;
-      break;
-    }
-    if (!t.startsWith('-') || t === '-') break;
-    if (r.none && names(t, r.none, r.value)) return -1;
-    if (r.needs && names(t, r.needs, r.value)) needed = true;
-    if (takesValue(t, r.value)) i++;
-  }
-  if (!needed) return -1;
-  i += r.operands ?? 0;
-  if (a[i] === '--') i++;
-  if (r.none && a[i]?.startsWith('-') && names(a[i]!, r.none, r.value)) return -1;
-  return i < a.length ? i : -1;
-}
-
-const FIND_EXEC = /^-(exec|execdir|ok|okdir)$/;
-
-type Program = Pick<SimpleCommand, 'argv' | 'envOptions'>;
-
-/**
- * Every program a command runs, in command position: itself (its wrappers removed by the shell matcher), each
- * find -exec/-execdir/-ok command, and a known runner's command (the first word after its options and operands).
- * A word that is only an argument (rm -rf vendor/git, grep env -i, setsid make -C vendor/git) runs nothing, and an
- * unknown program's words are not read.
- */
-function programsIn(c: Program, depth = 0): Program[] {
-  const out = [c];
-  const a = c.argv;
-  if (depth > 4 || !a.length) return out;
-  const base = basename(a[0]!);
-  const runs: string[][] = [];
-  if (base === 'find') {
-    for (let i = 1; i < a.length; i++) {
-      if (!FIND_EXEC.test(a[i]!)) continue;
-      const end = a.findIndex((t, j) => j > i && (t === ';' || t === '+'));
-      runs.push(a.slice(i + 1, end < 0 ? a.length : end));
-    }
-  } else if (Object.hasOwn(RUNNERS, base)) {
-    const k = runnerCommand(RUNNERS[base]!, a);
-    if (k > 0) runs.push(a.slice(k));
-  }
-  for (const r of runs) if (r.length) out.push(...programsIn(unwrap(r), depth + 1));
-  return out;
-}
+export { RUNNERS, type Options, type Runner } from './shell.js';
 
 /** git's words (`git` first) for every git program a command runs. */
 const gitWordsIn = (c: SimpleCommand) => programsIn(c).filter((p) => startsGit(p.argv[0] ?? '')).map((p) => asGit(p.argv));
@@ -302,6 +193,10 @@ function resolveGit(a: string[], look: Lookup | null, depth = 0): Resolved[] | s
   if (depth > 10) return `git ${sub}: an alias loop`;
   if (typeof look.dirs === 'string') return `git ${sub} ${look.dirs}`;
   if (look.env) return `git ${sub} in a line that ${look.env}`;
+  // R1124h 3: a name with a dot may be an alias in a subsection, which git matches whatever its case.
+  if (sub.includes('.')) return `git ${sub}: a name with a dot may be an alias in a subsection (alias.<sub>.<name>), which git matches whatever its case`;
+  // R1124h 4 (as R124d): a marked process's git reads no global config, so it can't say what this name runs.
+  if (gitGuarded()) return `git ${sub}: this process's git reads no global config (it runs for an instance), so it can't say whether the name is an alias or a correction`;
   const out: Resolved[] = [{ ...g, pushes: false }];
   for (const dir of look.dirs) {
     const query = (key: string) => look.git(dir, [...g.locate, 'config', '--get', key]);
@@ -372,7 +267,7 @@ const GIT_READERS = new Set(['grep', 'log', 'show', 'diff', 'blame', 'status', '
  * message may say it) that writes no file, sets no variable and takes no config or helper program of its own.
  */
 function onlyReads(c: SimpleCommand): boolean {
-  if (c.writes.length || Object.keys(c.assignments).length || !c.argv.length) return false;
+  if (c.writes.length || writeArgs(c).length || Object.keys(c.assignments).length || !c.argv.length) return false;
   const git = gitCall(c);
   if (git) return git.configs.length === 0 && GIT_READERS.has(git.sub ?? '');
   // WHY: rg --pre runs a program of the caller's choosing on every file.
@@ -385,9 +280,320 @@ const GIT_HOOKS_OR_CONFIG = [/(^|\/)\.git\/(.*\/)?hooks(\/|$)/, /(^|\/)\.git\/(.
 /** Files a later shell, tool or push reads its environment from. */
 const ENV_FILE = /(^|\/)(\.(bashrc|bash_profile|bash_login|bash_aliases|bash_logout|profile|zshrc|zshenv|zprofile|zlogin|kshrc|envrc|pam_environment|env(\.[^/]*)?)|[^/]*\.env|config\.fish|environment)$|(^|\/)(environment\.d|profile\.d|conf\.d)\/[^/]+$/i;
 
+/** Commands that put their sources at, or into, a destination they name (a move, a copy, a link). */
+const PLACES = new Set(['mv', 'cp', 'ln', 'install', 'rsync']);
+
+/**
+ * R1124h 5: what a move, copy or link may create besides its destination: `<destination>/<source's name>`, when the
+ * destination is a folder (`mv /tmp/.gitconfig ~` makes ~/.gitconfig). Its operands are its words that aren't options;
+ * `-t DIR`, `--target-directory=DIR` name the destination first.
+ */
+function placedInto(c: SimpleCommand): string[] {
+  if (!c.argv.length || !PLACES.has(basename(c.argv[0]!))) return [];
+  const args = c.argv.slice(1);
+  let target: string | null = null;
+  const operands: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === '-t' || a === '--target-directory') target = args[++i] ?? null;
+    else if (a.startsWith('--target-directory=')) target = a.slice('--target-directory='.length);
+    else if (!a.startsWith('-')) operands.push(a);
+  }
+  const dest = target ?? operands.pop();
+  if (!dest) return [];
+  return operands.map((s) => `${dest.replace(/\/+$/, '')}/${basename(s.replace(/\/+$/, ''))}`);
+}
+
+/** A path's shape is a git hooks dir or config file, compared folded: APFS reads ~/.GITCONFIG as ~/.gitconfig (R1124j). */
+const shaped = (p: string) => {
+  const f = foldName(slashes(p));
+  return GIT_HOOKS_OR_CONFIG.some((re) => re.test(f));
+};
+const clean = (p: string) => slashes(resolvePath(p)).replace(/(.)\/+$/, '$1');
+
+/** HOME, and the folders git reads the user's config from (XDG_CONFIG_HOME, else ~/.config; ~/.config always). */
+function configRoots(): { home: string | null; xdg: string | null; roots: string[] } {
+  const home = process.env.HOME ? clean(process.env.HOME) : null;
+  const xdg = process.env.XDG_CONFIG_HOME ? clean(process.env.XDG_CONFIG_HOME) : home ? `${home}/.config` : null;
+  return { home, xdg, roots: [...new Set([xdg, home && `${home}/.config`].filter((x): x is string => !!x))] };
+}
+
+/**
+ * R1124h 5: whether `resolved`, put in place as a folder, is one git reads config or hooks from: a git dir (a worktree's
+ * included), or the user's config folder or its git/ (HOME, XDG_CONFIG_HOME). `mkdir .config/gx`, write its config,
+ * then `mv .config/gx .config/git` wrote a git config no path test saw. Folded (R1124j: ~/.CONFIG/Git is that folder).
+ */
+function holdsGitConfig(resolved: string): boolean {
+  const p = foldName(clean(resolved));
+  if (/(^|\/)\.git(\/worktrees\/[^/]+)?$/.test(p)) return true;
+  return configRoots().roots.some((r) => p === foldName(r) || p === `${foldName(r)}/git`);
+}
+
 /** Whether writing `path` (as given, and as resolved against the call's directory) changes git's hooks or config. */
 export function isGitHooksOrConfigPath(path: string, resolved: string): boolean {
-  return [path, resolved].map(slashes).some((p) => GIT_HOOKS_OR_CONFIG.some((re) => re.test(p)));
+  return [path, resolved].some(shaped);
+}
+
+/** The words `{a,b}` brace expansion makes of `w` (bash's, innermost group first); null past `cap` words. */
+function braces(w: string, cap = 64): string[] | null {
+  const out = new Set<string>();
+  const todo = [w];
+  while (todo.length) {
+    const s = todo.pop()!;
+    const m = /\{([^{}]*,[^{}]*)\}/.exec(s);
+    if (!m) out.add(s);
+    else for (const alt of m[1]!.split(',')) todo.push(s.slice(0, m.index) + alt + s.slice(m.index + m[0].length));
+    if (out.size + todo.length > cap) return null;
+  }
+  return [...out];
+}
+
+const UNKNOWN = '\u0000';
+/**
+ * An expansion the guard doesn't model (R1124k F1): a command substitution or arithmetic (`$(…)`, backquotes), or a
+ * parameter expansion with an operator (`${F%x}`, `${F/x/}`, `${F:-x}`, `${#F}`, `${!F}`). Its value is unknown.
+ */
+const UNMODELLED = /\$\(|`|\$\{[#!]|\$\{[^}]*[^A-Za-z0-9_}][^}]*\}/;
+
+/**
+ * Every spelling a shell word may become as a path: `~` and `~user` as HOME, $HOME and $XDG_CONFIG_HOME as theirs, a
+ * variable set in the line as its value, and any other variable, substitution or operator expansion as each folder
+ * git reads user config from, or nothing (`unknown`). `unmodelled`: it holds an expansion the guard doesn't model
+ * (UNMODELLED, or a line variable whose value does). Null when it makes too many words to follow.
+ */
+function spellings(w: string, vars: Map<string, string | null>): { s: string; unknown: boolean; unmodelled: boolean }[] | null {
+  const { home, xdg } = configRoots();
+  const words = braces(w);
+  if (!words) return null;
+  const out: { s: string; unknown: boolean; unmodelled: boolean }[] = [];
+  for (const word of words) {
+    let unmodelled = UNMODELLED.test(word);
+    let s = home ? word.replace(/(^|[=:])~[^/:]*(?=\/|:|$)/g, `$1${home}`) : word;
+    s = s.replace(/\$\(([^()]|\([^()]*\))*\)|`[^`]*`|\$\{[#!][^}]*\}|\$\{[A-Za-z_][A-Za-z0-9_]*[^A-Za-z0-9_}][^}]*\}/g, UNKNOWN);
+    s = s.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g, (_, a?: string, b?: string) => {
+      const name = (a ?? b)!;
+      if (name === 'HOME' && home) return home;
+      if (name === 'XDG_CONFIG_HOME' && xdg) return xdg;
+      const v = vars.get(name);
+      if (v === null) unmodelled = true;
+      return v ?? UNKNOWN;
+    });
+    let alts = [s];
+    for (let i = 0; i < 3 && alts.some((x) => x.includes(UNKNOWN)); i++) alts = alts.flatMap((x) => [home ?? '', xdg ?? '', ''].map((v) => x.replace(UNKNOWN, v)));
+    if (alts.some((x) => x.includes(UNKNOWN))) return null;
+    out.push(...alts.map((x) => ({ s: x, unknown: s.includes(UNKNOWN), unmodelled })));
+  }
+  return out;
+}
+
+/**
+ * Variables the line sets (a prefix, `env`, export or a bare NAME=value), their values spelt as spellings reads them;
+ * null for a value holding an expansion the guard doesn't model (R1124k F1: `F=$(printf …)`).
+ */
+function lineVars(commands: SimpleCommand[]): Map<string, string | null> {
+  const { home } = configRoots();
+  const vars = new Map<string, string | null>();
+  for (const c of commands) for (const [n, v] of assigned(c)) vars.set(n, UNMODELLED.test(v) ? null : home ? v.replace(/^~(?=\/|$)/, home).replace(/\$\{?HOME\}?/g, home) : v);
+  return vars;
+}
+
+/**
+ * The directories a line's relative paths may resolve in (R1124i): `followed`, the call's and each `cd`/`pushd` target
+ * with ~, HOME and the line's variables spelt out; and after a change it can't follow (popd, an option, a substitution),
+ * `fallback`: HOME and the user's config folders, where a write destination is judged too (a move made after
+ * `cd ~/.config` is judged in ~/.config). Ordinary arguments are judged in `followed` only (R1124k F2: `make config`).
+ */
+function writeDirs(commands: SimpleCommand[], cwd: string, vars: Map<string, string | null>): { followed: string[]; fallback: string[] } {
+  const { home, roots } = configRoots();
+  let dirs = [clean(cwd)];
+  let lost = false;
+  for (const c of commands) {
+    const n = basename(c.argv[0] ?? '');
+    if (n === 'popd') lost = true;
+    if (n !== 'cd' && n !== 'pushd') continue;
+    const args = c.argv.slice(1);
+    if (!args.length) {
+      if (home) dirs = [...new Set([...dirs, home])];
+      continue;
+    }
+    if (args.length !== 1 || /^[-+]/.test(args[0]!)) {
+      lost = true;
+      continue;
+    }
+    const sp = spellings(args[0]!, vars);
+    if (!sp || sp.some((x) => x.unknown || x.unmodelled) || /[*?[]/.test(args[0]!)) lost = true;
+    dirs = [...new Set([...dirs, ...(sp ?? []).filter((x) => !x.unknown).flatMap((x) => dirs.map((d) => clean(resolvePath(d, x.s))))])];
+    if (dirs.length > 32) {
+      dirs = dirs.slice(0, 32);
+      lost = true;
+    }
+  }
+  return { followed: dirs, fallback: lost ? [...new Set([...(home ? [home] : []), ...roots, ...roots.map((r) => `${r}/git`)])] : [] };
+}
+
+/** Programs that only read the paths they are given (their redirects are judged as writes either way). */
+const PATH_READERS = new Set([...READERS, 'ls', 'stat', 'file', 'realpath', 'readlink', 'test', '[', 'du', 'tree', 'cd', 'pushd', 'popd']);
+const pathReader = (c: SimpleCommand) => {
+  const git = gitCall(c);
+  if (git) return git.configs.length === 0 && (GIT_READERS.has(git.sub ?? '') || (git.sub === 'config' && configUse(git.rest).use === 'read'));
+  return PATH_READERS.has(basename(c.argv[0] ?? '')) && !c.argv.some((t) => t.startsWith('--pre'));
+};
+/** A program that writes to paths it reads at run time (stdin, a find's results), so no word of the line names them. */
+const takesPathsFromInput = (c: SimpleCommand) =>
+  [{ argv: c.argv }, ...programsIn(c)].some((p) => {
+    const n = basename(p.argv[0] ?? '');
+    return n === 'xargs' || n === 'parallel' || (n === 'find' && p.argv.some((t) => /^-(exec|execdir|ok|okdir|delete|fprint0?|fprintf|fls)$/.test(t)));
+  });
+/** The same, in the line's text: the shell matcher reads `xargs cp x` as the `cp x` it runs, so its words show none. */
+const PATHS_FROM_INPUT = /(^|[\s|;&(`!{])(xargs|parallel)(\s|$)|(^|\s)-(exec|execdir|ok|okdir|delete|fprint0?|fprintf|fls)(\s|$)/;
+/**
+ * R1124o D5: a line that reads names into variables (`while read -r f`, mapfile). Only its commands that may write
+ * (not a reader, echo, printf or read itself) have their words judged as paths read at run time.
+ */
+const READS_NAMES = /(^|[\s|;&(`!{])(read|mapfile|readarray)(\s|$)/;
+const namesOnly = (c: SimpleCommand) => pathReader(c) || /^(echo|printf|read|mapfile|readarray|true|false|:|test|\[)$/.test(basename(c.argv[0] ?? ''));
+/** The path-like parts of a word: itself, the value of --opt=value or of=value, and a short option's attached value. */
+const pathParts = (t: string) => [t, ...(t.includes('=') ? [t.slice(t.indexOf('=') + 1)] : []), ...(/^-[A-Za-z]./.test(t) && !t.includes('=') ? [t.slice(2)] : [])].filter(Boolean);
+
+/**
+ * R1124k: the words a command writes to, besides its redirects: a move, copy or link's every operand (a link's source
+ * is what a write through the link reaches), tee's files, curl's and wget's output file, dd's of=, and the files of an
+ * in-place sed or perl.
+ */
+function writeArgs(c: SimpleCommand): string[] {
+  const out: string[] = [];
+  for (const p of [{ argv: c.argv }, ...programsIn(c)]) {
+    const n = basename(p.argv[0] ?? '');
+    const a = p.argv.slice(1);
+    if (PLACES.has(n) || n === 'tee') out.push(...a.filter((t) => !t.startsWith('-')), ...a.filter((t) => t.startsWith('--target-directory=')).map((t) => t.slice('--target-directory='.length)));
+    if (PLACES.has(n)) a.forEach((t, i) => t === '-t' && a[i + 1] && out.push(a[i + 1]!));
+    if (n === 'curl' || n === 'wget') {
+      a.forEach((t, i) => {
+        if (/^(-o|-O|--output|--output-document)$/.test(t) && a[i + 1]) out.push(a[i + 1]!);
+        else if (/^--output(-document)?=/.test(t)) out.push(t.slice(t.indexOf('=') + 1));
+        else if (/^-[oO]./.test(t)) out.push(t.slice(2));
+      });
+    }
+    if (n === 'dd') out.push(...a.filter((t) => t.startsWith('of=')).map((t) => t.slice(3)));
+    // R1124o D1, R1124p F2: sort and tree write an output file (-o, a cluster such as -uo, an abbreviation such as
+    // --outp= or --out), and uniq writes its second operand, after options that take values (-f N, -s N). The guard
+    // doesn't parse their options: every word, every value after `=`, and every tail of a short option cluster is a
+    // write destination.
+    if (n === 'sort' || n === 'uniq' || n === 'tree') {
+      out.push(...a.flatMap((t) => [...pathParts(t), ...(/^-[^-]/.test(t) ? [...t.slice(2)].map((_, i) => t.slice(i + 2)) : [])]));
+    }
+    // R1124o D2: a git command's --output (log, show, diff, blame, format-patch) writes a file of its choosing.
+    if (isGit(n)) {
+      a.forEach((t, i) => {
+        if ((t === '--output' || t === '--output-directory' || t === '-o') && a[i + 1]) out.push(a[i + 1]!);
+        else if (/^--output(-directory)?=/.test(t)) out.push(t.slice(t.indexOf('=') + 1));
+      });
+    }
+    if ((n === 'sed' || n === 'perl') && a.some((t) => /^-[A-Za-z]*i/.test(t) || t.startsWith('--in-place'))) out.push(...a.filter((t) => !t.startsWith('-')));
+  }
+  return out;
+}
+
+/**
+ * A glob as bash reads it, folded, as a regular expression, or null when it isn't one: `*`, `?` and a bracket match
+ * within a name, and none matches a name's leading dot (R1124k F2: `rm -rf *` names no .git). An unbalanced `[` is a
+ * plain character, as in bash.
+ */
+function globRe(p: string): RegExp | null {
+  const f = foldName(p);
+  let re = '^';
+  let start = true;
+  for (let i = 0; i < f.length; i++) {
+    const ch = f[i]!;
+    if (ch === '/') {
+      re += '/';
+      start = true;
+      continue;
+    }
+    const noDot = start ? '(?!\\.)' : '';
+    if (ch === '*') re += `${noDot}[^/]*`;
+    else if (ch === '?') re += `${noDot}[^/]`;
+    else if (ch === '[' && f.indexOf(']', i + 2) > 0 && !f.slice(i, f.indexOf(']', i + 2)).includes('/')) {
+      const j = f.indexOf(']', i + 2);
+      re += `${noDot}[${f.slice(i + 1, j).replace(/^!/, '^').replace(/\\/g, '\\\\')}]`;
+      i = j;
+    } else re += ch.replace(/[.+^${}()|[\]\\*?]/g, '\\$&');
+    start = false;
+  }
+  try {
+    return new RegExp(`${re}$`);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * R1124i, R1124j, R1124k: the word of the line that writes, or can reach, git's hooks or config, or why the guard can't
+ * tell; or null.
+ * - A write destination (writeArgs, redirects, placements; in a line that writes to paths it reads at run time, every
+ *   word) is spelt every way the shell may (braces, ~, HOME, the line's variables), resolved in every directory the
+ *   line may be in, and compared folded. One the guard can't spell out (an expansion it doesn't model, too many
+ *   variables, an unreadable glob) is refused: write it with a literal path.
+ * - Any other path-like word of a command that doesn't only read is judged the same way where it can be spelt out, in
+ *   the directories the line's `cd`s are followed to; one that can't be is left alone (R1124k F2).
+ * - A line that runs `eval`, or writes to paths it reads at run time (xargs, find -exec, read) with a word that reaches
+ *   HOME or a folder above it, is refused.
+ */
+function configWriteIn(command: string, commands: SimpleCommand[], cwd: string): string | null {
+  if (commands.some((c) => [{ argv: c.argv }, ...programsIn(c)].some((p) => basename(p.argv[0] ?? '') === 'eval'))) return "eval (it builds commands, and their writes, from text the guard can't read)";
+  const vars = lineVars(commands);
+  const { followed, fallback } = writeDirs(commands, cwd, vars);
+  const all = [...new Set([...followed, ...fallback])];
+  const { home, roots } = configRoots();
+  const anyInput = commands.some(takesPathsFromInput) || PATHS_FROM_INPUT.test(command);
+  const readsNames = READS_NAMES.test(command) || commands.some((c) => basename(c.argv[0] ?? '') === 'read');
+  /** Whether this command's words are paths it may write that it read at run time. */
+  const runtime = (c: SimpleCommand) => anyInput || (readsNames && !namesOnly(c));
+  const targetsIn = (dirs: string[]) => [...(home ? [`${home}/.gitconfig`] : []), ...roots, ...roots.flatMap((r) => [r + '/git', r + '/git/config']), ...dirs.flatMap((d) => [`${d}/.git`, `${d}/.git/config`, `${d}/.git/hooks`])].map(foldName);
+  const above = (p: string) => {
+    const f = foldName(p);
+    return [...(home ? [home] : []), ...roots].some((r) => foldName(r) === f || foldName(r).startsWith(f === '/' ? '/' : `${f}/`));
+  };
+  let atRuntime = false;
+  /** Why word `w` reaches git's config or hooks, judged in `dirs`; 'unreadable' when a glob in it isn't one. */
+  const reaches = (w: string, sp: { s: string; unknown: boolean }[], dirs: string[], dest: boolean): string | null => {
+    const targets = targetsIn(dirs);
+    for (const { s, unknown } of sp) {
+      const paths = s.startsWith('/') ? [clean(s)] : dirs.map((d) => clean(resolvePath(d, s)));
+      if (shaped(s) || paths.some(shaped)) return w;
+      // A destination put in place as a folder git reads config from. WHY: only a destination (an argument such as
+      // `apt-get install git` names no folder); a lone unknown variable stands for any folder, so shapes judge it.
+      if (dest && !(unknown && /^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$/.test(w)) && paths.some(holdsGitConfig)) return w;
+      if (/[*?[]/.test(s)) {
+        for (const p of paths) {
+          const re = globRe(p);
+          if (!re) return 'unreadable';
+          if (targets.some((t) => re.test(t))) return w;
+        }
+      }
+      if (atRuntime && paths.some(above)) return `${w} (a line that writes to paths it reads at run time reaches HOME there)`;
+    }
+    return null;
+  };
+  for (const c of commands) {
+    atRuntime = runtime(c);
+    const words = !pathReader(c) || atRuntime ? c.argv.slice(1).flatMap(pathParts) : [];
+    const dests = new Set([...c.writes, ...placedInto(c), ...writeArgs(c), ...(atRuntime ? words : [])]);
+    for (const w of dests) {
+      const sp = spellings(w, vars);
+      const why = sp && !sp.some((x) => x.unmodelled) ? reaches(w, sp, all, true) : 'unreadable';
+      if (why === 'unreadable') return `${w}: a write destination the guard can't spell out (a substitution, a parameter operator, too many variables or an unreadable glob); write to a literal path`;
+      if (why) return why;
+    }
+    for (const w of words) {
+      if (dests.has(w)) continue;
+      const sp = spellings(w, vars);
+      if (!sp) continue;
+      const why = reaches(w, sp, followed, false);
+      if (why && why !== 'unreadable') return why;
+    }
+  }
+  return null;
 }
 
 /**
@@ -408,6 +614,12 @@ export function pushHookShellRefusal(command: string, commands: SimpleCommand[],
   const look = lookup ? { git: lookup.git, dirs: lineDirs(commands, lookup.cwd), env: lineEnv(commands), own: ownCommands(lookup.git, lookup.cwd, commandLists(commands)) } : null;
   const calls: Resolved[] = [];
   for (const c of commands) {
+    // R1124o D4: `git` as an argument of a program the guard doesn't know as a runner (arch, xcrun, script, …), with
+    // a push or a config change after it, is refused: that program may run it, and the guard can't read how.
+    if (!gitWordsIn(c).length && !pathReader(c) && !/^(echo|printf)$/.test(basename(c.argv[0] ?? ''))) {
+      const g = c.argv.findIndex((t, i) => i > 0 && isGit(t));
+      if (g > 0 && c.argv.slice(g + 1).some((t) => /^(push|config|send-pack)$/.test(t) || NO_VERIFY.test(t))) return bypass(`git run through ${basename(c.argv[0] ?? '')}, a program the guard doesn't know as a runner; run git by its own name`);
+    }
     const hookless = programsIn(c).map((p) => basename(p.argv[0] ?? '')).find((n) => HOOKLESS_PUSH_PROGRAM.test(n));
     if (hookless) return bypass(`${hookless} pushes without git's pre-push hook`);
     for (const words of gitWordsIn(c)) {
@@ -420,12 +632,23 @@ export function pushHookShellRefusal(command: string, commands: SimpleCommand[],
   for (const c of commands) {
     for (const [name, value] of assigned(c)) {
       if (/^GIT_CONFIG/i.test(name) && HOOK_CONFIG_NAMED.test(value)) return bypass(`${name} sets ${HOOK_CONFIG_NAMED.exec(value)![0]}`);
+      // #983 (owner's 6c): an agent's git reads its config environment only as the runner set it (GIT_CONFIG_GLOBAL
+      // at the null device, src/runner.ts agentEnv), so no line sets any of it.
+      // Setting GIT_CONFIG_GLOBAL to the null device, as the runner already has it, changes nothing.
+      if (/^GIT_CONFIG/i.test(name) && !(/^GIT_CONFIG_GLOBAL$/i.test(name) && value === devNull)) return bypass(`${name} changes the git config every agent git reads (the runner sets it)`);
       if (pushes && PUSH_ENV.test(name)) return bypass(`${name} gives this push a git config or hooks of its own`);
     }
     if (pushes && unsets(c)) return bypass(`${c.argv[0]} in a push's line can take git's config away`);
-    const hit = c.writes.find((w) => isGitHooksOrConfigPath(w, resolve(w)));
-    if (hit) return bypass(`${hit} is a git hooks dir or config file`);
+    // #983 (6c): nor unsets it (unset, export -n, env -u), nor starts a program with an emptied environment (env -i),
+    // where a git would read the user's own config again.
+    if (unsets(c) && c.argv.slice(1).some((t) => /^GIT_CONFIG/i.test(t))) return bypass(`${c.argv[0]} ${c.argv.slice(1).join(' ')} takes away the git config the runner sets`);
+    const envOpts = envOptionsOf(c);
+    if (envOpts.some((t) => /^GIT_CONFIG/i.test(t)) || envOpts.some((t) => t === '-i' || t === '-' || t === '--ignore-environment' || /^-[^-]*i/.test(t))) return bypass("env clearing the environment, or GIT_CONFIG*, takes away the git config the runner sets");
   }
+  // INVARIANT (R1124i, R1124j): no command of the line writes, places or names a git hooks dir or config file, in any
+  // spelling or case the shell and the file system read as one.
+  const hit = configWriteIn(command, commands, lookup?.cwd ?? resolve('.'));
+  if (hit) return bypass(`${hit} is, or can reach, a git hooks dir or config file`);
   if (pushes && commands.some((c) => envOptionsOf(c).length)) return bypass("env with an option in a push's line can take git's config away");
   for (const git of calls) {
     if (git.sub && HOOKLESS_PUSH.test(git.sub)) return bypass(`git ${git.sub} pushes without git's pre-push hook`);
@@ -472,7 +695,7 @@ const configRewrites = (t: string) => CONFIG_REWRITE.test(t) || !!configShort(t)
  * place, only reads. Otherwise one operand reads the name and a second is a value. An option git config might take
  * that isn't listed as quiet is a write. `word`: the option or subcommand that rewrites config.
  */
-function configUse(rest: string[]): { use: 'read' | 'write' | 'rewrite'; word?: string } {
+function configUse(rest: string[]): { use: 'read' | 'write' | 'rewrite'; word?: string; at?: number } {
   const rewrite = rest.find(configRewrites);
   if (rewrite) return { use: 'rewrite', word: rewrite };
   let read = false;
@@ -496,17 +719,27 @@ function configUse(rest: string[]): { use: 'read' | 'write' | 'rewrite'; word?: 
   const first = rest[i];
   if (first !== undefined && CONFIG_REWRITE_SUB.test(first)) return { use: 'rewrite', word: first };
   if (read || (first !== undefined && CONFIG_READ_SUB.test(first))) return { use: 'read' };
-  return { use: rest.length - i > 1 ? 'write' : 'read' };
+  return { use: rest.length - i > 1 ? 'write' : 'read', at: i };
+}
+
+/** The config key a `git config` write names (after its options, or after `set`/`unset` and their options). */
+function configKey(rest: string[], at: number): string | undefined {
+  const words = rest.slice(at);
+  const sub = words[0] === 'set' || words[0] === 'unset';
+  return (sub ? words.slice(1) : words).find((t) => !t.startsWith('-'));
 }
 
 /** Why a `git config` with these words (after the subcommand) may change the hooks or a name git runs; or null. */
 function configRefusal(rest: string[]): string | null {
-  const { use, word } = configUse(rest);
+  const { use, word, at } = configUse(rest);
   if (use === 'rewrite') return `git config ${word} can rewrite core.hooksPath, an include or an alias`;
   if (use === 'read') return null;
+  // R1124o D3: a key the guard can't spell out (a variable, a substitution, braces, a glob) may be core.hooksPath.
+  const key = configKey(rest, at ?? 0);
+  if (key === undefined || /[$`{}\\*?[\]]/.test(key)) return `git config ${key ?? ''}: a key the guard can't spell out; write the key literally`;
   if (rest.some((t) => HOOKS_PATH_KEY.test(t))) return 'git config core.hooksPath points git at other hooks';
-  const key = rest.find((t) => NAME_OR_INCLUDE_KEY.test(t));
-  return key ? `git config ${key} can make git read other config or run another command` : null;
+  const named = rest.find((t) => NAME_OR_INCLUDE_KEY.test(t));
+  return named ? `git config ${named} can make git read other config or run another command` : null;
 }
 
 /**

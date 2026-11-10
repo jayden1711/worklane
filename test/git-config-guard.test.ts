@@ -23,6 +23,7 @@ import { EventLog } from '../src/events/log.js';
 import { Coordinator } from '../src/coordinator.js';
 import { DEFAULT_COMMIT_IDENTITY, FakeRunner } from '../src/runner.js';
 import { which } from '../src/os/index.js';
+import { pinCheckoutHooks } from '../src/install.js';
 import { repoRoot } from './helpers.js';
 
 /** What instanceEnv sets on an instance coordinator's process (and auto-config on its own). */
@@ -244,6 +245,34 @@ test('#926 the guard reads the listing git prints: each refused key, from a file
   const sh = readFileSync(join(repoRoot, 'scripts', 'setup', 'checkout.sh'), 'utf8');
   assert.match(sh, /^ {2}if ! check="\$\(worklane git-config-check "\$2" 2>&1\)"; then$/m);
   assert.doesNotMatch(sh, /refused=|--show-scope/);
+});
+
+test("#983: the hooks pin install --git-hooks-only writes passes the guard (checkout.sh's git-config-check); any other core.hooksPath in a repo's config is still refused", { skip: process.platform === 'win32' && 'POSIX paths' }, () => {
+  const d = mkdtempSync(join(tmpdir(), 'pin-'));
+  execFileSync('git', ['init', '-q', '-b', 'main', d]);
+  const cli = join(repoRoot, 'dist', 'src', 'cli.js');
+  const check = () => {
+    try {
+      return execFileSync(process.execPath, [cli, 'git-config-check', d], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch (e) {
+      return String((e as { stderr?: string }).stderr);
+    }
+  };
+  const hooks = pinCheckoutHooks(d);
+  assert.equal(execFileSync('git', ['-C', d, 'config', '--local', '--get', 'core.hooksPath'], { encoding: 'utf8' }).trim(), hooks);
+  assert.equal(check(), '', 'the pin: the repo\'s own hooks dir, by absolute path');
+  // Anything else stays refused: another dir, a relative path, a dir that isn't there.
+  const other = mkdtempSync(join(tmpdir(), 'other-hooks-'));
+  for (const v of [other, '.git/hooks', `${hooks}/../hooks-x`]) {
+    execFileSync('git', ['-C', d, 'config', '--local', 'core.hooksPath', v]);
+    assert.match(check(), /sets core\.hookspath/, v);
+  }
+  // The unit: a listing row with the base it was read in.
+  const row = (value: string) => `local\0file:.git/config\0core.hookspath\n${value}\0`;
+  assert.equal(configRefusal(row(hooks), d), null);
+  assert.match(configRefusal(row(other), d) ?? '', /core\.hookspath/);
+  assert.match(configRefusal(row(hooks)) ?? '', /core\.hookspath/, 'no base: refused as before');
+  assert.match(configRefusal(`worktree\0file:.git/config.worktree\0core.hookspath\n${hooks}\0`, d) ?? '', /core\.hookspath/, 'only from the common config');
 });
 
 test('#926 checkout.sh locks .git/ but what agents write, and refuses a symlink in it', { skip: process.platform === 'win32' && 'POSIX modes' }, () => {
