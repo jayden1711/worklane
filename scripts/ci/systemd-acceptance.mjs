@@ -87,13 +87,14 @@
 // minor 3: any call can end the process, as any can throw). #1250 tracks measuring the
 // alternative, the whole suite on the VM.
 //
-// Named limit (R1169ab D2, before the owner): a test that passes without checking on the VM's own answer (an early
+// A named limit pending the owner's choice (R1169ab D2; option (2), node's own count on the gates and coverage of
+// each sign test's body on the VM, would close it): a test that passes without checking on the VM's own answer (an early
 // return, or a subtest started only sometimes, on GITHUB_ACTIONS, the uid or PROJECT_SANDBOX_REQUIRED) runs and passes
 // here with no skip. The run sees that it ran and passed, not how much of it checked anything.
 //
 // Results come from node's test events (systemd-acceptance-reporter.mjs, R1169f), not from TAP text: each gate is
 // matched by its built file, the line and column its test() call is on, and its name, and the reporter writes to a
-// pipe (fd 3) no test process holds. Named limit (R1169ab D1, before the owner): those events are not out of a test
+// pipe (fd 3) no test process holds. A named limit pending the owner's threat-model answer (R1169ab D1): those events are not out of a test
 // file's reach. Node's runner reads them from each test file's own process, as frames on that process's stdout, which
 // the file's code holds: a test file that rewrites its own stdout (or its exit code) can turn a failure or a skip
 // into a pass. The run trusts the test files' code not to forge its own results.

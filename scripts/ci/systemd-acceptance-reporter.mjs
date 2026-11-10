@@ -1,6 +1,6 @@
 // node --test's own results for scripts/ci/systemd-acceptance.mjs, one JSON line per test (R1169f): what the runner
 // reports, read from its events, not from TAP text. Those events are not out of a test's reach (R1169ab D1, a named
-// limit before the owner): node's runner reads them from each test file's process, framed on that process's stdout,
+// limit pending the owner's threat-model answer): node's runner reads them from each test file's process, framed on that process's stdout,
 // which the file's own code holds, so a test file that rewrites its stdout can forge its results. Each line: the event (test:pass or test:fail),
 // the test's name, nesting, file, line and column (where test() was called), and its skip and todo (true, a reason,
 // or null). Test-runner events are delivered here in the order they finish, so a test's subtests come just before it.
