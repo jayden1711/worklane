@@ -39,7 +39,7 @@ The engine manages no Claude account (#736): it keeps no account profiles, fails
 
 ## How agents are billed
 
-There is one runtime: the locally installed, unmodified `claude` binary, headless (`claude -p --output-format stream-json`, `--setting-sources project`; a guarded run (an instance's agent settings) and a planner `--setting-sources ''`, so nothing in the checkout, its settings, hooks or any CLAUDE.md, is loaded (#958, #973)). There is no Agent SDK runtime. What differs is how that `claude` is billed:
+There is one runtime: the locally installed, unmodified `claude` binary, headless (`claude -p --output-format stream-json`, started only through `src/claude-launch.ts`, which ends every launch with `--settings`, `--setting-sources ''` and `--strict-mcp-config`: no run, whatever its role or lane, loads anything from the checkout, its settings, hooks or any CLAUDE.md (#958, #973); the setup wizard's login proof too). There is no Agent SDK runtime. What differs is how that `claude` is billed:
 
 | | Claude login (default) | API key (option) |
 |---|---|---|

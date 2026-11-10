@@ -373,7 +373,9 @@ test("issue #463: 'Signed in to Claude' proves the login with one minimal real c
   assert.match(refused.detail, /signed in \(claude\.ai\), per `claude auth status`, but the API refused it: claude's login was refused \(HTTP 401\): Invalid API key · Please run \/login/);
   assert.doesNotMatch(refused.detail, /sk-ant-oat01-A/, 'no token, even one claude printed');
   assert.equal(calls.length, 1, 'one call');
-  assert.match(calls[0]!, /^-p Reply with the single word: ok --model haiku --max-turns 1 --max-budget-usd 0\.05 --output-format json$/);
+  // Through the one launch (R1185z D1): the cheap model, one turn, the budget cap, every tool disallowed, the prompt on
+  // stdin (never the command line), and the launch's guards last.
+  assert.match(calls[0]!, /^-p --model haiku --output-format json --max-turns 1 --max-budget-usd 0\.05 --disallowedTools Bash Edit Write MultiEdit Read Glob Grep WebFetch WebSearch NotebookEdit Task --settings \{\} --setting-sources {2}--strict-mcp-config$/);
   w.claudeApi = 'ok';
   const works = stepIn(checkSetup(f.ctx('local'), probeFor(w)), 'claude-login')!;
   assert.equal(works.done, true);

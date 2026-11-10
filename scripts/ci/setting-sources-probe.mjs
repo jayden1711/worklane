@@ -48,6 +48,7 @@
 // Exit 0: the controls loaded the plants and the guarded run loaded none. Exit 1: a marker or a hook reached the
 // guarded run, the tool didn't run, or a control didn't load its plants. Exit 2: usage, or the binary can't start.
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -112,7 +113,7 @@ const { guardrailSettings } = await dist('agent-settings.js');
 const { BRAND } = await dist('brand.js');
 const { rolePrompt, WORKER_SCHEMA } = await dist('roles.js');
 const { sandboxSettings } = await dist('sandbox.js');
-const { launchClaude, LAUNCH_FIELDS, LAUNCH_ENV } = await dist('claude-launch.js');
+const { launchClaude, claudeArgv, launchGuards, LAUNCH_FIELDS, LAUNCH_ENV } = await dist('claude-launch.js');
 
 /**
  * Every field of src/claude-launch.ts's ClaudeLaunch, the one launch every session goes through (the owner's decision,
@@ -477,10 +478,13 @@ const leaks = (what, r, readOnly, bash = false) => {
  * The run came through the one launch (src/claude-launch.ts): `--settings` first, `--setting-sources ''`,
  * `--strict-mcp-config`, and the launch's own environment (CLAUDE_CODE_DISABLE_AUTO_MEMORY=1).
  */
+// The launch's guards end its argv, each once (R1185aa D1: Claude Code takes the last --settings and --setting-sources).
 const launched = (what, r) => {
   const a = r.given.args;
-  const ok = a[0] === '--settings' && a[a.indexOf('--setting-sources') + 1] === '' && a.includes('--strict-mcp-config') && Object.entries(LAUNCH_ENV).every(([k, v]) => r.given.env[k] === v);
-  if (!ok) problems.push(`${what} didn't come through launchClaude's guards: its argv lacks --settings first, --setting-sources '' or --strict-mcp-config, or its env the launch's own`);
+  const tail = a.slice(-5);
+  const once = (f) => a.filter((x) => x === f || x.startsWith(`${f}=`)).length === 1;
+  const ok = tail[0] === '--settings' && tail[2] === '--setting-sources' && tail[3] === '' && tail[4] === '--strict-mcp-config' && once('--settings') && once('--setting-sources') && Object.entries(LAUNCH_ENV).every(([k, v]) => r.given.env[k] === v);
+  if (!ok) problems.push(`${what} didn't come through launchClaude's guards: its argv doesn't end with --settings, --setting-sources '' and --strict-mcp-config, each once, or its env lacks the launch's own`);
 };
 const shaped = (what, r, noSandbox = false, task = true) => {
   launched(what, r);
@@ -653,6 +657,45 @@ for (const [what, control, noSandbox] of [['control', { sources: 'user,project,l
   if (!r.model.length) problems.push(`${what}: no model call reached the stand-in, so nothing is measured`);
   if (!given.args.includes('--output-format') || given.args[given.args.indexOf('--output-format') + 1] !== 'json') problems.push(`${what} isn't skill-eval's shape: its argv lacks --output-format json`);
   launched(what, r);
+  leaks(what, r, true, true);
+}
+
+// A flag in a list field (R1185aa D1: `pre_approved: ['Bash(npm test:*)', '--setting-sources=user,project,local']`
+// reaches allowedTools): the launch refuses it before anything starts, in every list field.
+for (const field of ['allowedTools', 'disallowedTools', 'pluginDirs']) {
+  const spec = { bin: '/nonexistent/claude', cwd: tmpdir(), env: {}, settings: {}, mode: 'stream', model: 'haiku', maxTurns: 1, maxBudgetUsd: 1, allowedTools: [], [field]: ['Read', '--setting-sources=user,project,local'] };
+  let threw = false;
+  try {
+    const c = launchClaude(spec);
+    c.on('error', () => {});
+    c.kill();
+  } catch (e) {
+    threw = /would be read as a flag/.test(String(e));
+  }
+  if (!threw) problems.push(`a launch with a flag in ${field} wasn't refused before it started`);
+}
+
+// And should a flag ever reach the argv before the guards (a field the refusal doesn't read), the guards still win:
+// the guards come last, and Claude Code takes the last --setting-sources (R1185aa D1). On the real binary, a one-shot
+// answer's argv with `--setting-sources=user,project,local` just before the guards loads nothing.
+{
+  const what = 'the smuggled-flag launch';
+  const p = plant();
+  const api = await standIn(p.repo, p.ran);
+  const ranBefore = new Set(readdirSync(p.ran));
+  const argv = claudeArgv({ settings: {}, mode: 'json', model: 'haiku', maxTurns: 3, maxBudgetUsd: 1, allowedTools: [] });
+  argv.splice(argv.length - launchGuards({}).length, 0, '--setting-sources=user,project,local');
+  const child = spawn(shim(p.root, api.url, null), argv, { cwd: p.repo, env: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: p.home, CLAUDE_CONFIG_DIR: p.cfg, ANTHROPIC_API_KEY: 'sk-ant-not-a-key', ...LAUNCH_ENV }, stdio: ['pipe', 'pipe', 'pipe'] });
+  child.stdout.resume();
+  child.stderr.resume();
+  child.stdin.end('Say ok.\n');
+  await new Promise((res) => child.on('close', res));
+  api.close();
+  const given = JSON.parse(readFileSync(join(p.root, 'given.json'), 'utf8'));
+  const text = api.seen.map((x) => `${JSON.stringify(x.headers)}\n${x.body}`).join('\n');
+  const r = { given, model: api.seen.filter((x) => x.url.startsWith('/v1/messages') && !x.url.includes('count_tokens')), toolRan: false, reached: Object.entries(MARKS).filter(([, m]) => text.includes(m)).map(([k]) => k), ran: readdirSync(p.ran).filter((f) => !ranBefore.has(f)) };
+  say(`${what} (--setting-sources=user,project,local before the guards)`, r);
+  if (!r.model.length) problems.push(`${what}: no model call reached the stand-in, so nothing is measured`);
   leaks(what, r, true, true);
 }
 
