@@ -951,7 +951,12 @@ test("R1169ab D2: a gate opens with node's own count; a sign test's own function
     return sa.planProblems(ts, file, text, sa.gatesOf(text));
   };
   assert.deepEqual(plan('(t) => { t.plan(2); t.assert.ok(1); t.assert.ok(2); }'), [], 'the shape');
-  assert.deepEqual(plan('async (ctx) => { ctx.plan(1); await ctx.test("s", () => {}); }'), [], 'any name for the context');
+  assert.deepEqual(plan('async (ctx) => { ctx.plan(1); await ctx.test("s", (s) => { s.plan(1); s.assert.ok(1); }); }'), [], 'any name for the context; a subtest with its own count');
+  // R1169ad D2, D6: a subtest without its own count, and a check in a try whose catch would swallow its failure.
+  assert.match(plan('async (t) => { t.plan(1); await t.test("s", () => {}); }').join('\n'), /the subtest at line 2 doesn't open with its own/, 'a subtest without its own count');
+  assert.match(plan("async (t) => { t.plan(1); await t['test']('s', (s) => { s.assert.ok(1); }); }").join('\n'), /doesn't open with its own/, "t['test'] too");
+  assert.match(plan('(t) => { t.plan(1); try { t.assert.ok(0); } catch {} }').join('\n'), /a t\.assert inside a try with a catch/, 'a swallowing catch');
+  assert.deepEqual(plan('(t) => { t.plan(1); try { t.assert.ok(1); } finally { void 0; } }'), [], 'a try with only a finally: its failure still fails the gate');
   for (const [fn, what] of [
     ['() => { assert.ok(1); }', 'no plan'],
     ['(t) => { t.assert.ok(1); t.plan(1); }', 'not first'],
@@ -969,7 +974,7 @@ test("R1169ab D2: a gate opens with node's own count; a sign test's own function
     '  await t.test(\'a\', () => {});',
     '  if (x) await t.test(\'b\', () => {});',
     '  try {',
-    `    run('${sd}ctl');`,
+    `    run('${sd.slice(0, 6)}ctl');`,
     '    two();',
     '  } finally {',
     '    three();',
@@ -984,7 +989,7 @@ test("R1169ab D2: a gate opens with node's own count; a sign test's own function
   const shapes = [
     "import { test } from 'node:test';",
     'function body(t) {',
-    `  t['test']('a', () => { run('${sd}ctl'); });`,
+    `  t['test']('a', () => { run('${sd.slice(0, 6)}ctl'); });`,
     '  const sub = t.test.bind(t);',
     "  sub('b', named);",
     '  const { test: other } = t;',
