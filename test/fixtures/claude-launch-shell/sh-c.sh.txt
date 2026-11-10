@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+sh -c 'cd /tmp && claude -p hi'

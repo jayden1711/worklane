@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+claude-account status
+bash scripts/setup/credentials.sh probe claude

@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+bin="$(command -v claude)"
+$bin -p hi

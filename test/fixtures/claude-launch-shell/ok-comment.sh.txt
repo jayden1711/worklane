@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# claude -p hi, as the docs say
+true # then claude -p again

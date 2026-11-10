@@ -1187,12 +1187,18 @@ agent_key_file_ok() { run_as_bounded "$1" "$AGENT_CHECK_SECONDS" /dev/null "$AGE
 # cap. A refused call costs nothing; an answered one about one short Haiku turn. Prints nothing and succeeds when
 # Claude answered; else prints Claude's message (token-shaped strings redacted, 500 characters at most) and fails.
 # With a Claude config dir: the call on that login.
+# It loads nothing from anywhere (#1262, #958): the engine's launch guards end its argv (Claude Code takes the last
+# --settings and --setting-sources), its auto memory is off, and it runs in an empty folder the user makes for it,
+# removed after (only that folder: its path must be the one mktemp made).
 #   claude_api_check <user> [<claude config dir>]
-CLAUDE_PROOF_ARGS=(-p "Reply with the single word: ok" --model haiku --max-turns 1 --max-budget-usd 0.05 --output-format json)
+CLAUDE_PROOF_ARGS=(-p "Reply with the single word: ok" --model haiku --max-turns 1 --max-budget-usd 0.05 --output-format json --settings '{}' --setting-sources '' --strict-mcp-config)
 claude_api_check() {
   command -v claude >/dev/null 2>&1 || { echo "claude is not installed"; return 1; }
-  local out
-  out="$( (cd / && sudo -H -u "$1" timeout 120 ${2:+env "CLAUDE_CONFIG_DIR=$2"} claude "${CLAUDE_PROOF_ARGS[@]}" 2>&1) || true)"
+  local out dir
+  dir="$(sudo -H -u "$1" mktemp -d /tmp/login-proof-XXXXXX)" || { echo "couldn't make an empty folder for the login's proof"; return 1; }
+  case "$dir" in /tmp/login-proof-??????) ;; *) echo "the login's proof folder isn't mktemp's ($dir)"; return 1 ;; esac
+  out="$( (cd "$dir" && sudo -H -u "$1" timeout 120 env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 ${2:+"CLAUDE_CONFIG_DIR=$2"} claude "${CLAUDE_PROOF_ARGS[@]}" 2>&1) || true)"
+  sudo -H -u "$1" rm -rf -- "$dir"
   printf '%s' "$out" | "$(command -v node)" -e '
 const text = require("node:fs").readFileSync(0, "utf8");
 let j = null;

@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+docker run --rm img sh -c 'gitleaks version && claude --version'

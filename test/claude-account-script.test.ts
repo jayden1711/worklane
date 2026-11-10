@@ -118,6 +118,8 @@ const ok = /^sk-ant-oat01-/.test(tok) && !fs.existsSync(T + '/fail-auth-' + proc
 let cached = null;
 try { cached = JSON.parse(fs.readFileSync((process.env.CLAUDE_CONFIG_DIR || process.env.HOME) + '/.claude.json', 'utf8')).oauthAccount || null; } catch {}
 if (process.argv[2] === '-p') {
+  // Where the proof ran and with what (#1262): its folder, whether that was empty, its auto memory.
+  fs.appendFileSync(T + '/claude-proof-seen', JSON.stringify({ user: process.env.USER, cwd: process.cwd(), empty: fs.readdirSync(process.cwd()).length === 0, memory: process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY ?? null }) + '\\n');
   const refused = !ok || (tok.includes('_new-') && fs.existsSync(T + '/refuse-new')) || fs.existsSync(T + '/refuse-api-' + process.env.USER);
   if (!refused) { process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'ok', total_cost_usd: 0.02 })); process.exit(0); }
   process.stderr.write('request with Authorization: Bearer ' + tok + '\\n');
@@ -326,7 +328,17 @@ test('status names each agent user\'s account, token id and expiry, and fails wh
   // claude auth status, as each user; and the login's proof, one minimal real call as each user (#463).
   const claudeCalls = readFileSync(join(m.T, 'claude-calls'), 'utf8').trim().split('\n');
   assert.deepEqual(claudeCalls.filter((c) => c.includes(' auth status')), AGENTS.map((u) => `${u} auth status --json`));
-  assert.deepEqual(claudeCalls.filter((c) => c.includes(' -p ')), AGENTS.map((u) => `${u} -p Reply with the single word: ok --model haiku --max-turns 1 --max-budget-usd 0.05 --output-format json`));
+  // The proof loads nothing (#1262, #958): the launch's guards last, its auto memory off, in an empty folder of its
+  // own that is gone afterwards.
+  assert.deepEqual(claudeCalls.filter((c) => c.includes(' -p ')), AGENTS.map((u) => `${u} -p Reply with the single word: ok --model haiku --max-turns 1 --max-budget-usd 0.05 --output-format json --settings {} --setting-sources  --strict-mcp-config`));
+  const seen = readFileSync(join(m.T, 'claude-proof-seen'), 'utf8').trim().split('\n').map((l) => JSON.parse(l) as { user: string; cwd: string; empty: boolean; memory: string | null });
+  assert.deepEqual(seen.map((s) => s.user), AGENTS);
+  for (const s of seen) {
+    assert.match(s.cwd, /^(?:\/private)?\/tmp\/login-proof-[A-Za-z0-9]{6}$/, `${s.user}: in a folder of its own, not /`);
+    assert.equal(s.empty, true, `${s.user}: an empty one`);
+    assert.equal(s.memory, '1', `${s.user}: its auto memory off`);
+    assert.equal(existsSync(s.cwd), false, `${s.user}: the folder is gone afterwards`);
+  }
   writeFileSync(join(m.T, 'fail-auth-wl-alpha-eval'), '');
   const j = m.run(['status', '--json']);
   assert.equal(j.status, 1);

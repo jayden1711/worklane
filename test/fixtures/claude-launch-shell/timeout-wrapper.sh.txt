@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+timeout 120 nice -n 5 claude -p hi
