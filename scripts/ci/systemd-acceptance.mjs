@@ -1501,39 +1501,137 @@ export function planProblems(ts, path, text, gates) {
       p && ts.isIdentifier(p) && c && ts.isCallExpression(c) && ts.isPropertyAccessExpression(c.expression) && ts.isIdentifier(c.expression.expression) &&
       c.expression.expression.text === p.text && c.expression.name.text === 'plan' && c.arguments.length === 1 && ts.isNumericLiteral(c.arguments[0]) &&
       /^[1-9]\d*$/.test(c.arguments[0].text);
-    return ok ? [] : [`${at}: its first statement isn't \`t.plan(<n>)\` (its context's own count, a literal of 1 or more, alone): node then fails it when it checks less, as an early return does`];
+    if (!ok) return [`${at}: its first statement isn't \`t.plan(<n>)\` (its context's own count, a literal of 1 or more, alone): node then fails it when it checks less, as an early return does`];
+    const out = [];
+    // A try whose catch swallows a failed check counts the check and passes (R1169ad D6): no t.assert in a try with a
+    // catch, in the gate or any function in it.
+    const assertsIn = (n) => {
+      let hit = false;
+      const v = (x) => {
+        if (hit) return;
+        if (ts.isCallExpression(x) && ts.isPropertyAccessExpression(x.expression) && ts.isPropertyAccessExpression(x.expression.expression) && x.expression.expression.name.text === 'assert') hit = true;
+        else ts.forEachChild(x, v);
+      };
+      v(n);
+      return hit;
+    };
+    const tries = (n) => {
+      if (ts.isTryStatement(n) && n.catchClause && assertsIn(n.tryBlock)) out.push(`${at}: a t.assert inside a try with a catch (line ${sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1}): a catch that swallows its failure passes the gate; check outside the try`);
+      ts.forEachChild(n, tries);
+    };
+    tries(fn.body);
+    // Each subtest opens with its own count (R1169ad D2): the gate's count sees a subtest start, not what it checked.
+    const plans = (f) => {
+      for (const c of subtestCalls(ts, f)) {
+        const sub = functionOf(ts, sf, c.arguments.at(-1));
+        const where = sf.getLineAndCharacterOfPosition(c.getStart(sf)).line + 1;
+        const q = sub?.parameters[0]?.name;
+        const s0 = sub?.body && ts.isBlock(sub.body) ? sub.body.statements[0] : null;
+        const e0 = s0 && ts.isExpressionStatement(s0) ? s0.expression : null;
+        const planned = q && ts.isIdentifier(q) && e0 && ts.isCallExpression(e0) && ts.isPropertyAccessExpression(e0.expression) && ts.isIdentifier(e0.expression.expression) && e0.expression.expression.text === q.text && e0.expression.name.text === 'plan' && e0.arguments.length === 1 && ts.isNumericLiteral(e0.arguments[0]) && /^[1-9]\d*$/.test(e0.arguments[0].text);
+        if (!planned) out.push(`${at}: the subtest at line ${where} doesn't open with its own \`t.plan(<n>)\` (an inline or same-file function): the gate's count sees it start, not what it checked`);
+        else plans(sub);
+      }
+    };
+    plans(fn);
+    return out;
   });
 }
 
 /**
- * What must have run of a sign test's own function, on the VM (R1169ab D2, the owner's decision of 2026-11-10), read
- * from `text` (a built test file) at the test's `line`:`column`: `end`, the line of its function's last statement (in a
- * trailing `try`, its block's last; an expression body's own line), which an early return never reaches; and
- * `subtests`, the line of each subtest it starts (`<t>.test(`, `<t>` its first parameter), which one started only
- * sometimes never reaches. Lines are the built file's, 1-based, as node's coverage reports them. null when its
- * function isn't inline.
+ * A test's or a subtest's function, from its registration's last argument (R1169ac D1): inline, or a function this
+ * file declares by that name (`function body(t) {}`, `const body = (t) => {}`). null when it is neither: a function
+ * from another module, or a value made at run time, isn't readable here.
+ */
+function functionOf(ts, sf, arg) {
+  if (!arg) return null;
+  if (ts.isArrowFunction(arg) || ts.isFunctionExpression(arg)) return arg;
+  if (!ts.isIdentifier(arg)) return null;
+  let hit = null;
+  const visit = (n) => {
+    if (hit) return;
+    if (ts.isFunctionDeclaration(n) && n.name?.text === arg.text && n.body) hit = n;
+    else if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.name.text === arg.text && n.initializer && (ts.isArrowFunction(n.initializer) || ts.isFunctionExpression(n.initializer))) hit = n.initializer;
+    else ts.forEachChild(n, visit);
+  };
+  visit(sf);
+  return hit;
+}
+
+/**
+ * The calls in `fn` that start a subtest of its context (R1169ac D2): `<t>.test(...)`, `<t>['test'](...)`, or a name
+ * bound to either (`const sub = t.test`, `t.test.bind(t)`, `const { test: sub } = t`), `<t>` its first parameter.
+ */
+function subtestCalls(ts, fn) {
+  const p = fn.parameters?.[0]?.name;
+  if (!p || !ts.isIdentifier(p)) return [];
+  const ctx = (x) => ts.isIdentifier(x) && x.text === p.text;
+  const isTestOf = (x) => (ts.isPropertyAccessExpression(x) && ctx(x.expression) && x.name.text === 'test') || (ts.isElementAccessExpression(x) && ctx(x.expression) && ts.isStringLiteralLike(x.argumentExpression) && x.argumentExpression.text === 'test');
+  const aliases = new Set();
+  const bind = (n) => {
+    if (ts.isVariableDeclaration(n) && n.initializer) {
+      const i = n.initializer;
+      const bound = isTestOf(i) || (ts.isCallExpression(i) && ts.isPropertyAccessExpression(i.expression) && i.expression.name.text === 'bind' && isTestOf(i.expression.expression));
+      if (bound && ts.isIdentifier(n.name)) aliases.add(n.name.text);
+      if (ts.isObjectBindingPattern(n.name) && ctx(i)) for (const e of n.name.elements) if ((e.propertyName ?? e.name).getText() === 'test' && ts.isIdentifier(e.name)) aliases.add(e.name.text);
+    }
+    ts.forEachChild(n, bind);
+  };
+  bind(fn.body);
+  const out = [];
+  const visit = (n) => {
+    if (ts.isCallExpression(n) && (isTestOf(n.expression) || (ts.isIdentifier(n.expression) && aliases.has(n.expression.text)))) out.push(n);
+    ts.forEachChild(n, visit);
+  };
+  visit(fn.body);
+  return out;
+}
+
+/**
+ * What must have run of a sign test, on the VM (R1169ab D2; R1169ac/ad, the owner's option (b) of 2026-11-10), read
+ * from `text` (a built test file) at the test's `line`:`column`, in its own function and, recursively, in the function
+ * of each subtest it starts:
+ * - `ends`: each function's last statement (in a trailing `try`, its block's last; an expression body: its own line),
+ *   which an early return never reaches;
+ * - `subtests`: the line of each subtest it starts, which one started only sometimes never reaches;
+ * - `sign`: each line that holds systemd's sign (the static pass's SIGN, in a string, a name or a regex), the
+ *   systemd work itself, which a branch, a loop over nothing or a catch that swallows can leave unrun.
+ * Lines are the built file's, 1-based, as node's coverage reports them. `refused`: a function given by a name this
+ * file doesn't declare (it can't be read, so what must run of it can't be said).
  */
 export function mustRun(ts, path, text, line, column) {
   const sf = parsed(ts, path, text);
-  const call = callAt(ts, sf, line, column);
-  const fn = call?.arguments.at(-1);
-  if (!fn || !(ts.isArrowFunction(fn) || ts.isFunctionExpression(fn))) return null;
   const lineOf = (n) => sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1;
-  let last = fn.body;
-  while (last && ts.isBlock(last) && last.statements.length) {
-    last = last.statements.at(-1);
-    if (ts.isTryStatement(last)) last = last.tryBlock;
-  }
-  const p = fn.parameters[0]?.name;
-  const subtests = [];
-  if (p && ts.isIdentifier(p)) {
-    const visit = (n) => {
-      if (ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression) && ts.isIdentifier(n.expression.expression) && n.expression.expression.text === p.text && n.expression.name.text === 'test') subtests.push(lineOf(n));
-      ts.forEachChild(n, visit);
+  const sign = new RegExp(SIGN.source);
+  const out = { ends: [], subtests: [], sign: [], refused: null };
+  const seen = new Set();
+  const walk = (fn, what) => {
+    if (seen.has(fn)) return;
+    seen.add(fn);
+    let last = fn.body;
+    while (last && ts.isBlock(last) && last.statements.length) {
+      last = last.statements.at(-1);
+      if (ts.isTryStatement(last)) last = last.tryBlock;
+    }
+    if (last) out.ends.push({ line: lineOf(last), what });
+    const signs = (n) => {
+      if ((ts.isStringLiteralLike(n) || ts.isTemplateHead(n) || ts.isTemplateMiddle(n) || ts.isTemplateTail(n) || ts.isIdentifier(n) || ts.isRegularExpressionLiteral(n)) && sign.test(ts.isIdentifier(n) ? n.text : n.getText(sf))) out.sign.push(lineOf(n));
+      ts.forEachChild(n, signs);
     };
-    visit(fn.body);
-  }
-  return { end: lineOf(last), subtests };
+    signs(fn.body);
+    for (const c of subtestCalls(ts, fn)) {
+      out.subtests.push(lineOf(c));
+      const sub = functionOf(ts, sf, c.arguments.at(-1));
+      if (!sub) out.refused ??= `the subtest at line ${lineOf(c)} is given a function this file doesn't declare`;
+      else walk(sub, `the subtest at line ${lineOf(c)}`);
+    }
+  };
+  const call = callAt(ts, sf, line, column);
+  const fn = functionOf(ts, sf, call?.arguments.at(-1));
+  if (!fn) return { ...out, refused: "its function is given by a name this file doesn't declare" };
+  walk(fn, 'its function');
+  out.sign = [...new Set(out.sign)].sort((a, b) => a - b);
+  return out;
 }
 
 /**
@@ -1620,9 +1718,11 @@ export function problems(runs) {
             continue;
           }
           const ran = (l) => (coverage.get(l) ?? 0) > 0;
-          if (!ran(t.mustRun.end)) out.push(`${at}: its function's last statement (line ${t.mustRun.end}) never ran: it returned early, having checked less`);
+          for (const e of t.mustRun.ends) if (!ran(e.line)) out.push(`${at}: ${e.what}'s last statement (line ${e.line}) never ran: it returned early, having checked less`);
           const notStarted = t.mustRun.subtests.filter((l) => !ran(l));
           if (notStarted.length) out.push(`${at}: the subtest at line ${notStarted.join(', ')} never started: started only sometimes, it checked less`);
+          const unrun = t.mustRun.sign.filter((l) => !ran(l));
+          if (unrun.length) out.push(`${at}: line ${unrun.join(', ')}, holding systemd's sign, never ran: a branch, a loop over nothing or a catch left the systemd work unchecked`);
         }
         for (let j = k - 1; j >= 0 && events[j].nesting > r.nesting; j--) {
           matched.add(j);
@@ -1754,7 +1854,11 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
       const unplanned = planProblems(ts, `test/${f.file}`, built, f.gates);
       if (unplanned.length) throw new Error(unplanned.join('\n'));
       // Each sign test: what of its own function must have run (R1169ab D2), read on the coverage of its run.
-      for (const t of f.signTests ?? []) t.mustRun = mustRun(ts, `test/${f.file}`, built, t.line, t.column);
+      for (const t of f.signTests ?? []) {
+        t.mustRun = mustRun(ts, `test/${f.file}`, built, t.line, t.column);
+        // What can't be read can't be judged (R1169ac D1): refused here, unless the allowlist excuses the test.
+        if (t.mustRun.refused && !excused[`test/${f.file}: ${t.name ?? t.label}`]) throw new Error(`test/${f.file}: ${t.name ?? t.label}: ${t.mustRun.refused}: inline it, or declare it in this file, so what of it must run on the VM can be read`);
+      }
     }
   } catch (e) {
     console.error(e.message);

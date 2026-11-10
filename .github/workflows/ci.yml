@@ -11,6 +11,9 @@ on:
     branches: [main]
   pull_request:
     types: [opened, synchronize, reopened]
+  # A manual run on a branch (the owner's rule for #1169, 2026-11-10): the systemd acceptance job runs once on a pull
+  # request's final head before it merges, so what only the VM answers is settled there, not first on main.
+  workflow_dispatch:
 # A new push to a PR cancels that PR's run in progress. Main's runs never share a group (one per run), so none is
 # ever cancelled, or replaced while pending: the updater refuses a main commit with a cancelled check.
 concurrency:
@@ -297,7 +300,7 @@ jobs:
   # test/systemd-acceptance.test.ts holds this shape.
   systemd-acceptance:
     name: systemd acceptance (real systemd)
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     # A hung test (or apt) fails the job within this, never holds the check pending for GitHub's six hours.
     timeout-minutes: 60

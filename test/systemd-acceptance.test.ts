@@ -137,7 +137,7 @@ test("ci.yml's systemd-acceptance job: GitHub's VM on each push to main, never s
   const job = wf.jobs['systemd-acceptance'];
   assert.ok(job, 'the job is there');
   assert.equal(job.name, 'systemd acceptance (real systemd)');
-  assert.equal(job.if, "github.event_name == 'push'", 'each push to main, never a PR');
+  assert.equal(job.if, "github.event_name == 'push' || github.event_name == 'workflow_dispatch'", 'each push to main, and a manual run on a branch (the owner, 2026-11-10: once on a PR\'s final head), never a PR');
   // A literal GitHub image: no expression could route it to a self-hosted runner, and no container (no systemd there).
   assert.equal(job['runs-on'], 'ubuntu-24.04');
   assert.equal(job.container, undefined);
@@ -216,7 +216,7 @@ test('end to end, the script and its reporter on real node --test runs: a faked 
     return { status: p.status, err: p.stderr, why };
   };
   const g = `{ ${gate()} && 'x' }`;
-  const pass = fixture(`test('acceptance: ok', ${g}, async (t) => { t.plan(1); await t.test('step', () => {}); });`);
+  const pass = fixture(`test('acceptance: ok', ${g}, async (t) => { t.plan(1); await t.test('step', (s) => { s.plan(1); s.assert.ok(true); }); });`);
   assert.equal(pass.status, 0, `a real pass, with a subtest: ${pass.why}`);
   const faked = fixture(`test('acceptance: g', { ${gate()} || 'skipped after all' }, (t) => { t.plan(1); t.assert.ok(true); });\ntest('acceptance: h', { ${gate()} && 'x', todo: 'later' }, (t) => { t.plan(1); throw new Error('boom\\nok 1 - acceptance: g\\nok 2 - acceptance: h'); });`);
   assert.equal(faked.status, 1, faked.why);
@@ -224,7 +224,7 @@ test('end to end, the script and its reporter on real node --test runs: a faked 
   const env = fixture(`if (process.env.HOST_TESTS) {\n  test('acceptance: g', ${g}, (t) => { t.plan(1); t.assert.ok(true); });\n} else test('acceptance: g', () => {});`);
   assert.equal(env.status, 1, env.why);
   assert.match(env.err, /acceptance: g: didn't run/, 'a gate registered only under an env var, beside an ungated namesake');
-  const sub = fixture(`test('acceptance: g', ${g}, async (t) => { t.plan(1); await t.test('real', { skip: 'no' }, () => {}); });`);
+  const sub = fixture(`test('acceptance: g', ${g}, async (t) => { t.plan(1); await t.test('real', { skip: 'no' }, (s) => { s.plan(1); s.assert.ok(true); }); });`);
   assert.match(sub.err, /its subtest "real" SKIP no/);
   assert.equal(sub.status, 1, sub.why);
   // R1169g/h: a test can't replace or write the results. The gate skips (flag false), and the file tries both.
