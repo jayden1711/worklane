@@ -72,8 +72,10 @@ test("the owner's load-site rule (2026-11-08): a removed or changed line that lo
   assert.equal(kinds(reasons({ 'src/x-read.ts': reader.replace('x-rules.tables', 'x-weak.tables') }, { 'src/x-read.ts': reader })).length, 1, 'a .tables.json name');
   const copy = '// BEGIN tables from x-copy.tables.json: generated, do not edit\nconst CHECKS = Object.freeze(["a", "b"]);\n// END tables from x-copy.tables.json\n';
   assert.equal(kinds(reasons({ 'scripts/x-copy.mjs': 'const CHECKS = Object.freeze(["a"]);\n' }, { 'scripts/x-copy.mjs': copy })).length, 1, "a copy's markers");
-  // A comment that names a tables file is no load; nor is a test's line (the test rules hold those).
-  assert.deepEqual(kinds(reasons({ 'src/x-rules.ts': RULES.replace("import {", "// see src/x-rules.tables.json\nimport {") }, { 'src/x-rules.ts': RULES.replace("import {", "// see x-rules.tables.json\nimport {") })), []);
+  // A comment that names a tables file reads as a load line too (R1184z, R1184aa D1: no line is skipped as a comment), so
+  // changing one waits: fail closed. A comment that names none passes.
+  assert.equal(kinds(reasons({ 'src/x-rules.ts': RULES.replace("import {", "// see src/x-rules.tables.json\nimport {") }, { 'src/x-rules.ts': RULES.replace("import {", "// see x-rules.tables.json\nimport {") })).length, 1, 'a comment naming a tables file');
+  assert.deepEqual(kinds(reasons({ 'src/x-rules.ts': RULES.replace("import {", "// see the rules\nimport {") }, { 'src/x-rules.ts': RULES.replace("import {", "// see these rules\nimport {") })), []);
 });
 
 test('control: a use added, an entry added, and an unrelated change give no reason (#941)', () => {
@@ -185,13 +187,31 @@ test("R1184q, R1184s D1: import.meta.url written as a pattern or for...of target
     ['W2b a write after a lone CR in a comment', `// note\rimport.meta.url = ${decoy};`],
   ] as const) assert.ok(has(reasons(above(line), base), ADDED), label);
   assert.ok(has(reasons({ 'src/zz.ts': "// note\u2029import { tablesOf as load } from './check-tables.js';\nvoid load;\n" }), ADDED), 'W2c an aliased import after U+2029 in a comment');
-  // Control: a JSDoc comment that names import.meta passes.
-  assert.deepEqual(reasons(above('/**\n * reads import.meta.url as its own\n * import\n */'), base), [], 'a JSDoc comment');
+  // A JSDoc comment that names import.meta waits too (R1184z, R1184aa D1: no line is skipped as a comment); one that
+  // names nothing passes.
+  assert.ok(has(reasons(above('/**\n * reads import.meta.url as its own\n * import\n */'), base), ADDED), 'a JSDoc comment naming import.meta');
+  assert.deepEqual(reasons(above('/**\n * reads its own url\n */'), base), [], 'a JSDoc comment');
   // R1184y Y2: a `//` or `/*` line inside a template literal is the template's text, so the code on it after the
-  // template closes is read. Control: a real comment that names the loader passes.
+  // template closes is read. No line is skipped as a comment (R1184z, R1184aa D1), so a real comment that names the
+  // loader or writes import.meta waits too: fail closed.
   assert.ok(has(reasons({ 'src/zz-y2.ts': "const pad = `\n// `; const L = await import('./check-tables.js'); void L; const pad2 = `\n`;\nvoid pad; void pad2;\n" }), ADDED), 'Y2a a // line in a template');
   assert.ok(has(reasons({ 'src/zz-y2.ts': "const pad = `\n/* `; Object.assign(import.meta, { url: 'file:///x.ts' }); const pad2 = `\n`;\nvoid pad; void pad2;\n" }), ADDED), 'Y2b a /* line in a template');
-  assert.deepEqual(reasons({ 'src/zz-y2.ts': "const pad = `a`;\n// see check-tables.js: Object.assign(import.meta, {}) is refused\n/* and import.meta.url = x */\nvoid pad;\n" }), [], 'real comments');
+  assert.ok(has(reasons({ 'src/zz-y2.ts': "const pad = `a`;\n// see check-tables.js: Object.assign(import.meta, {}) is refused\n/* and import.meta.url = x */\nvoid pad;\n" }), ADDED), 'real comments wait');
+  // A comment that names neither passes.
+  assert.deepEqual(reasons({ 'src/zz-y2.ts': "const pad = `a`;\n// a note on pad\n/* and another */\nvoid pad;\n" }), [], 'plain comments');
+  // R1184z Z1/Z2 and R1184aa D1: shapes a hand-written lexer read wrong (a regexp after `if (…)`, a division after
+  // `++` or a TS non-null `!`, a string continued over a line, an identifier ending in a \u escape). Each hides a loader
+  // import or an import.meta write on a line that starts like a comment but is a template's text.
+  const hidden = "// `; const L = await import('./check-tables.js'); void L; export const pad2 = `\n`;\n";
+  const shapes: [string, string][] = [
+    ['Z1 a regexp after if (…)', "const s = String(Date.now());\nexport const pad = `${(() => {\n  if (s) /[{]/.test(s);\n  return 1;\n})()}\n" + hidden],
+    ['Z2 a division after x!', "let n: number | undefined = Date.now();\nexport const v = n! / Number(`x/\n// `); Object.assign(import.meta, { url: 'file:///x.ts' }); export const w = `\n`.length;\n"],
+    ['D1a a string continued over a line', "const s = 'a\\\nb';\nconst pad = `\n" + hidden + "void s; void pad;\n"],
+    ['D1b a regexp after if (…) holding //', "const s = String(Date.now());\nexport const pad = `${(() => {\n  if (s) /\\//.test(s);\n  return 1;\n})()}\n" + hidden],
+    ['D1c a division after n++', "let n = 1;\nexport const v = n++ / +`1/\n" + hidden],
+    ['D1d an identifier ending in a \\u escape', "const ab = 2;\nexport const v = a\\u{62} / +`1/\n" + hidden],
+  ];
+  for (const [label, text] of shapes) assert.ok(has(reasons({ 'src/zz-z1.ts': text }), ADDED), label);
   // Q2a-c: a `//` inside a template literal, and a line that starts with an empty block comment.
   assert.ok(has(reasons(above("const sep = `//`; Object.assign(import.meta, { url: `${new URL(`./x-decoy.ts`, import.meta.url).href}` });"), base), ADDED), 'Q2a');
   assert.ok(has(reasons({ 'src/zz.ts': "const sep = `//`; const L = await import(`./check-tables.js`);\nvoid sep;\nvoid L;\n" }), ADDED), 'Q2b');
@@ -257,4 +277,14 @@ test('R1184y Y6a: a line of a generated copy changed without its data waits; cha
   assert.deepEqual(reasons({ 'scripts/x-gate.mjs': copy(['auto_merge', 'review', 'x']), 'scripts/x-gate.tables.json': data(['auto_merge', 'review', 'x']) }, base), []);
   // A line outside the copy's markers is the script's own code.
   assert.deepEqual(reasons({ 'scripts/x-gate.mjs': `${copy(['auto_merge', 'review'])}export const Q = 1;\n` }, base), []);
+  // R1184aa D2: the data file touched but its data the same (a blank line; its keys in another order) is no
+  // regeneration, so the drifted copy still waits.
+  const drifted = copy(['review']);
+  const blank = reasons({ 'scripts/x-gate.mjs': drifted, 'scripts/x-gate.tables.json': `${data(['auto_merge', 'review'])}\n` }, base);
+  assert.ok(blank.some((x) => x.includes('a generated copy changed without its data')), `Y6a2: ${blank.join(' | ')}`);
+  const reordered = `${JSON.stringify({ POLICY_ONLY: { value: ['auto_merge', 'review'], kind: 'never-shrink' } }, null, 2)}\n`;
+  const order = reasons({ 'scripts/x-gate.mjs': drifted, 'scripts/x-gate.tables.json': reordered }, base);
+  assert.ok(order.some((x) => x.includes('a generated copy changed without its data')), `Y6a3: ${order.join(' | ')}`);
+  // Control: the blank line alone passes.
+  assert.deepEqual(reasons({ 'scripts/x-gate.tables.json': `${data(['auto_merge', 'review'])}\n` }, base), []);
 });

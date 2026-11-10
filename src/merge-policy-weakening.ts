@@ -470,149 +470,6 @@ const META_URL_TARGET = new RegExp(
 const META_URL_SET = /\bimport\s*\.\s*meta\b(?!\s*\.\s*(?:url|dirname|filename)\b)|\bimport\s*\.\s*meta\s*\.\s*\w+\s*(?:[-+*/%&|^]|\*\*|<<|>>>?|&&|\|\||\?\?)?=(?!=)|\bdelete\s+import\s*\.\s*meta\b/;
 
 /**
- * Whether line `k` of `lines` (a `*` line) sits in a block comment: the lines above it up to a line that opens one
- * (`/*`, never closed on it) all start with `*`, and none of them closes it or holds a `${`.
- */
-export function blockCommentRun(lines: readonly string[], k: number): boolean {
-  for (let j = k; j >= 0; j--) {
-    const x = lines[j]!;
-    if (/\*\//.test(x) || x.includes('${')) return false;
-    if (/^\s*\/\*/.test(x)) return true;
-    if (!/^\s*\*/.test(x)) return false;
-  }
-  return false;
-}
-
-/** Where each line of a JS or TS text starts: in code, in a block comment, in a template's text, or not known. */
-export type LineStart = 'code' | 'block' | 'template' | 'unknown';
-
-/** Words after which a `/` starts a regexp, not a division. */
-const BEFORE_REGEXP = new Set(['return', 'typeof', 'case', 'do', 'else', 'in', 'of', 'void', 'yield', 'await', 'throw', 'delete', 'new', 'instanceof']);
-
-/**
- * Where each line of `text` starts (R1184y Y2: a `//` or `/*` line inside a template literal is template text, not a
- * comment). It reads strings, templates and their `${…}`, comments and regexps. Where it can't be sure (a string or a
- * regexp left open on its line, a string continued over a line, a `/` read as a division with a quote, a backtick or a
- * `/*` after it on the line), every later line is 'unknown': the caller reads it as code, fail closed.
- */
-export function lineStarts(text: string): LineStart[] {
-  const starts: LineStart[] = ['code'];
-  let mode: LineStart = 'code';
-  let depth = 0;
-  const opened: number[] = []; // the depth each open `${` was at
-  let prev = ''; // the last character of code that isn't space
-  const endOfLine = (i: number) => {
-    const n = text.indexOf('\n', i);
-    return n < 0 ? text.length : n;
-  };
-  for (let i = 0; i < text.length; ) {
-    const c = text[i]!;
-    if (c === '\n') {
-      starts.push(mode);
-      i++;
-      continue;
-    }
-    if (mode === 'unknown') {
-      i++;
-      continue;
-    }
-    if (mode === 'block') {
-      if (text.startsWith('*/', i)) {
-        mode = 'code';
-        i += 2;
-      } else i++;
-      continue;
-    }
-    if (mode === 'template') {
-      if (c === '\\') i += text[i + 1] === '\n' ? 1 : 2;
-      else if (c === '`') {
-        mode = 'code';
-        prev = '`';
-        i++;
-      } else if (c === '$' && text[i + 1] === '{') {
-        opened.push(depth++);
-        mode = 'code';
-        prev = '{';
-        i += 2;
-      } else i++;
-      continue;
-    }
-    if (text.startsWith('//', i)) {
-      // A `//` comment ends at any line terminator (R1184w): what follows a U+2028, a U+2029 or a CR is code.
-      const end = /[\n\r\u2028\u2029]/g;
-      end.lastIndex = i;
-      const at = end.exec(text);
-      i = at === null ? text.length : at[0] === '\n' ? at.index : at.index + 1;
-      continue;
-    }
-    if (text.startsWith('/*', i)) {
-      mode = 'block';
-      i += 2;
-      continue;
-    }
-    if (c === "'" || c === '"') {
-      let j = i + 1;
-      while (j < text.length && text[j] !== c && text[j] !== '\n') j += text[j] === '\\' ? 2 : 1;
-      if (text[j] !== c) {
-        mode = 'unknown';
-        continue;
-      }
-      prev = c;
-      i = j + 1;
-      continue;
-    }
-    if (c === '`') {
-      mode = 'template';
-      i++;
-      continue;
-    }
-    if (c === '/') {
-      const word = /([A-Za-z_$][\w$]*)\s*$/.exec(text.slice(Math.max(0, i - 40), i))?.[1];
-      const regexp = prev === '' || /[(,=:[!&|?{};+\-*%<>~^]/.test(prev) || (word !== undefined && BEFORE_REGEXP.has(word));
-      if (regexp) {
-        let j = i + 1;
-        let cls = false;
-        while (j < text.length && text[j] !== '\n' && (cls || text[j] !== '/')) {
-          if (text[j] === '\\') j++;
-          else if (text[j] === '[') cls = true;
-          else if (text[j] === ']') cls = false;
-          j++;
-        }
-        if (text[j] !== '/') {
-          mode = 'unknown';
-          continue;
-        }
-        i = j + 1;
-        while (/[a-z]/.test(text[i] ?? '')) i++;
-        prev = '/';
-        continue;
-      }
-      // A division: unless what follows on the line is plain code, it may have been a regexp after all.
-      if (/['"`]|\/\*/.test(text.slice(i + 1, endOfLine(i)))) {
-        mode = 'unknown';
-        continue;
-      }
-      prev = '/';
-      i++;
-      continue;
-    }
-    if (c === '{') depth++;
-    else if (c === '}') {
-      depth--;
-      if (opened.length && depth === opened[opened.length - 1]) {
-        opened.pop();
-        mode = 'template';
-        i++;
-        continue;
-      }
-    }
-    if (!/\s/.test(c)) prev = c;
-    i++;
-  }
-  return starts;
-}
-
-/**
  * A line terminator inside what git calls one line (R1184w D1): U+2028, U+2029, or a CR not at its end (CRLF's CR is).
  * JS and TS end a `//` comment there, so the text after it is code the line readers would take for comment. A line
  * holding one is never a comment to the hold, and an added REPLACERS line holding one waits.
@@ -1444,11 +1301,23 @@ function findings(i: WeakeningInput): Found {
   }
 
   // A script's generated copy of its tables (R1184y Y6a): a line between its BEGIN and END markers changed while the
-  // tables file it copies didn't is drift, never a regeneration, so it waits (main held the marked table so). With the
+  // data it copies didn't is drift, never a regeneration, so it waits (main held the marked table so). The data is
+  // judged as parsed (R1184aa D2: a blank line or keys reordered in the tables file is no change of data). With the
   // data changed too, the compare judges the data and test/table-copies.test.ts holds the copy to it.
+  const sameData = (own: string): boolean => {
+    if (!i.files.some((g) => g.path === own)) return true;
+    try {
+      const [b, a] = [i.before(own), i.after(own)];
+      if (b === null || a === null) return false;
+      const data = (text: string) => canonical([...parseTables(text, own)].map(([name, x]) => [name, x.kind, x.value]).sort((m, n) => (m[0] as string).localeCompare(n[0] as string)));
+      return data(b) === data(a);
+    } catch {
+      return false; // a tables file that can't be read is held by the compare (unreadable)
+    }
+  };
   for (const f of i.files) {
     const own = tablesFileFor(f.path);
-    if (!MARKABLE.test(f.path) || !i.tablesFiles?.has(own) || isTest(f.path) || !holds(f.path, i.scope) || i.files.some((g) => g.path === own)) continue;
+    if (!MARKABLE.test(f.path) || !i.tablesFiles?.has(own) || isTest(f.path) || !holds(f.path, i.scope) || !sameData(own)) continue;
     let was: Set<string>;
     let now: Set<string>;
     try {
@@ -1485,34 +1354,15 @@ function findings(i: WeakeningInput): Found {
   // line that starts with `*` is a comment's only inside one (R1184s D1: `a\n* (import.meta.url = …)` is code): every
   // place it stands in the file's text is in a run of `*` lines under a `/*` line, none of them closing it and none
   // holding a `${`.
-  const scanned = new Map<string, { lines: string[]; starts: LineStart[] }>();
-  const commentOnly = (l: string, text: () => string | null) => {
-    // A line terminator other than \n ends a comment, so what follows it is code (R1184w W2: `// note<U+2028>import.meta.url = …`).
-    if (/\/\/ (?:BEGIN|END) tables from /.test(l) || LINE_BREAK.test(l)) return false;
-    const slashes = /^\s*\/\//.test(l);
-    if (!slashes && (/\*\/\s*\S/.test(l) || l.includes('${'))) return false;
-    if (!slashes && !/^\s*\/?\*/.test(l)) return false;
-    // Every place the line stands in the file's text starts outside a string and a template (R1184y Y2: a `//` or `/*`
-    // line in a template literal is its text; lineStarts), and a `*` line also sits in a run of `*` lines under a `/*`.
-    let read: { lines: string[]; starts: LineStart[] };
-    try {
-      const t = text();
-      if (t === null) return false;
-      read = scanned.get(t) ?? { lines: t.split('\n'), starts: lineStarts(t) };
-      scanned.set(t, read);
-    } catch {
-      return false;
-    }
-    const at = read.lines.flatMap((x, k) => (x === l ? [k] : []));
-    const outside = (k: number) => read.starts[k] === 'code' || read.starts[k] === 'block';
-    return at.length > 0 && at.every((k) => outside(k) && (!/^\s*\*/.test(l) || blockCommentRun(read.lines, k)));
-  };
+  // No line is skipped as a comment (R1184z Z1/Z2, R1184aa D1): whether a line that starts like one (`//`, `/*`, `*`)
+  // is a comment or a template literal's text, a string's or a regexp's takes a full JS/TS lexer, and every hand-written
+  // reading of it was wrong in some valid shape. So a load rule reads every changed line, a comment's included: a
+  // comment that names the loader, a load line or an import.meta write waits for the owner, as code does (fail closed).
   for (const f of i.files) {
     if (!MARKABLE.test(f.path) || !holds(f.path, i.scope) || isTest(f.path)) continue;
-    for (const l of f.removedLines ?? []) if (TABLE_LOAD.test(l) && !commentOnly(l, () => i.before(f.path))) hit('table-load-gone', f.path, l.trim());
+    for (const l of f.removedLines ?? []) if (TABLE_LOAD.test(l)) hit('table-load-gone', f.path, l.trim());
     if (LOADER_CODE.has(f.path)) continue;
     for (const l of f.addedLines ?? []) {
-      if (commentOnly(l, () => i.after(f.path))) continue;
       // A trailing comment is forgiven only for the plain import (R1184o); the other rules read the whole line (R1184q 2: a
       // `//` inside a template literal would cut the rest of the line off).
       const plainImport = LOADER_IMPORT.test(l) || LOADER_IMPORT.test(l.replace(/\s*\/\/[^'"`]*$/, ''));
@@ -1723,12 +1573,6 @@ export function weakeningOf(cwd: string, base: string, head: string, files: Chan
  * With `at`, the default branch's tip and where `to` meets it: their marks are read as well as `from`'s (#869). With
  * `conflicts`, the paths a merge `to` is the tree of conflicts on (their marks at `from` are read too).
  */
-/**
- * A file with a changed line that starts like a comment (`*`, `//` or `/*`): the load rules read its text to tell a
- * comment's line from code or a template's text (R1184s D1, R1184y Y2).
- */
-const starLine = (f: ChangeFile) => MARKABLE.test(f.path) && [...(f.addedLines ?? []), ...(f.removedLines ?? [])].some((l) => /^\s*(?:\*|\/\/|\/\*)/.test(l));
-
 function measured(cwd: string, from: string, to: string, files: ChangeFile[], scope: LockScope | undefined, at?: { tip: string; meet: string }, conflicts?: string[]): WeakeningInput {
   const deleted = new Set(changedNames(cwd, ['--diff-filter=D', `${from}..${to}`]));
   const moved = exactMoves(cwd, from, to);
@@ -1742,7 +1586,7 @@ function measured(cwd: string, from: string, to: string, files: ChangeFile[], sc
   const tablesFiles = new Set([...presentNames(cwd, from)].filter((p) => TABLES_FILE.test(p)));
   // A file with a tables file of its own beside it is read too: a script's generated copy (R1184y Y6a).
   const ownData = (f: ChangeFile) => MARKABLE.test(f.path) && tablesFiles.has(tablesFileFor(f.path));
-  const paths = [...new Set([...CHECK_TABLES.map((t) => t.path), ...marked, ...tipMarked, ...files.filter((f) => TABLES_FILE.test(f.path) || REPLACER_FILES.test(f.path) || starLine(f) || ownData(f)).map((f) => f.path)])].filter((p) => files.some((f) => f.path === p) && !isNonUtf8Path(p));
+  const paths = [...new Set([...CHECK_TABLES.map((t) => t.path), ...marked, ...tipMarked, ...files.filter((f) => TABLES_FILE.test(f.path) || REPLACER_FILES.test(f.path) || ownData(f)).map((f) => f.path)])].filter((p) => files.some((f) => f.path === p) && !isNonUtf8Path(p));
   // A file over the cap isn't read at all: the change waits.
   const side = (rev: string) => {
     const { texts, tooBig } = filesAt(cwd, rev, paths, MAX_TABLE_FILE);
