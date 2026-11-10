@@ -1,0 +1,4 @@
+import { test } from 'node:test';
+const systemCi = true;
+test('base', { skip: !systemCi && 'needs systemd' }, () => {});
+test('w', (t) => { const unit = 'systemctl'; if (!process.env.NEVER) return t.skip('web: no UI here'); void unit; });

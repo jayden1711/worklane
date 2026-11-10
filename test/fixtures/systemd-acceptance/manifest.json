@@ -982,5 +982,17 @@
     1,
     "acceptance: the engine unit starts: SKIP not a booted host",
     "test/y\\.test\\.ts:\\d+: acceptance: the engine unit starts"
+  ],
+  "r1169aa-a2-excused-namesake": [
+    2,
+    "test/x\\.test\\.ts: w: named in the allowlist's runtime, but 2 tests have that name"
+  ],
+  "r1169aa-a6-template-namesake": [
+    2,
+    "test/x\\.test\\.ts: `w \\$\\{process\\.platform\\}`: named in the allowlist's runtime, but 2 tests have that name"
+  ],
+  "r1169aa-a1c-control-excused-alone": [
+    0,
+    "^$"
   ]
 }

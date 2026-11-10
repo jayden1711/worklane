@@ -85,12 +85,18 @@
 // throw); a module named at run time used other than through its calls (an alias of its test); and a process ending
 // not spelled `process.exit()` (or abort, kill), as `const { exit } = process` or `globalThis.process.exit()` (R1169y
 // minor 3: any call can end the process, as any can throw). #1250 tracks measuring the
-// alternative, the whole suite on the VM. A test that passes without checking (an early return on the VM's answer)
-// does run on the VM, where it checks for real.
+// alternative, the whole suite on the VM.
 //
-// Results come from node's own test events (systemd-acceptance-reporter.mjs, R1169f), never from TAP text a test
-// could print: each gate is matched by its built file, the line and column its test() call is on, and its name, and
-// the events arrive on a pipe (fd 3) no test process holds.
+// Named limit (R1169ab D2, before the owner): a test that passes without checking on the VM's own answer (an early
+// return, or a subtest started only sometimes, on GITHUB_ACTIONS, the uid or PROJECT_SANDBOX_REQUIRED) runs and passes
+// here with no skip. The run sees that it ran and passed, not how much of it checked anything.
+//
+// Results come from node's test events (systemd-acceptance-reporter.mjs, R1169f), not from TAP text: each gate is
+// matched by its built file, the line and column its test() call is on, and its name, and the reporter writes to a
+// pipe (fd 3) no test process holds. Named limit (R1169ab D1, before the owner): those events are not out of a test
+// file's reach. Node's runner reads them from each test file's own process, as frames on that process's stdout, which
+// the file's code holds: a test file that rewrites its own stdout (or its exit code) can turn a failure or a skip
+// into a pass. The run trusts the test files' code not to forge its own results.
 //
 //   node scripts/ci/systemd-acceptance.mjs            (after npm ci and the build: it runs dist/test/<file>.js)
 //   node scripts/ci/systemd-acceptance.mjs --signs    (each file's uses of the sign, by exact text, for the allowlist)
@@ -1178,8 +1184,11 @@ export function signProblems(ts, texts, allow = {}) {
   for (const [key, entry] of Object.entries(allow.runtime ?? {})) {
     const file = key.slice(0, key.indexOf(': '));
     const text = texts.get(file);
-    const item = text === undefined ? null : signTests(ts, file, text, source.select, true, { text: true }).find((t) => `${file}: ${t.name ?? t.label}` === key);
-    if (!item) out.push(`${key}: named in the allowlist's runtime, but no such test is in the build`);
+    const items = text === undefined ? [] : signTests(ts, file, text, source.select, true, { text: true }).filter((t) => `${file}: ${t.name ?? t.label}` === key);
+    const item = items[0];
+    // One excuse covers one test (R1169aa D1, R1169ab D3): a namesake placed after it would otherwise skip under it.
+    if (items.length > 1) out.push(`${key}: named in the allowlist's runtime, but ${items.length} tests have that name (at ${items.map((t) => `${t.line}:${t.column}`).join(', ')}): give the excused one its own name`);
+    else if (!item) out.push(`${key}: named in the allowlist's runtime, but no such test is in the build`);
     else if (entry?.pin !== item.text) out.push(`${key}: the allowlist's runtime excuses it, but its pin isn't the test's text (now: ${JSON.stringify(item.text).slice(0, 300)}): read the test again, and pin it again`);
   }
   return out;
@@ -1355,6 +1364,7 @@ export function signTests(ts, path, text, source, all = false, o = {}) {
     return code.some(carriesHere) && (code.some(mentions) || startsSubtests(fn));
   };
   const flat = (x) => x.getText(sf).replace(/\s+/g, ' ').trim();
+  const pinText = (x) => x.getText(sf).split('\n').map((l) => l.trim()).filter(Boolean).join('\n');
   const stmt = (x) => {
     let y = x;
     while (y.parent && !ts.isSourceFile(y.parent) && !ts.isBlock(y.parent) && !ts.isCaseClause(y.parent)) y = y.parent;
@@ -1399,8 +1409,9 @@ export function signTests(ts, path, text, source, all = false, o = {}) {
         // picking reads it (its function, the same-file functions it names, the hooks around it), each with its
         // statement and, for a name, its declaration; and its options' `skip`, with where that is declared.
         if (o.stops) Object.assign(item, stopsOf(n, fn));
-        // `o.text`: the whole call's text, its whitespace runs made one space: what a runtime excuse is pinned by.
-        if (o.text) item.text = flat(n);
+        // `o.text`: the whole call's text, each line trimmed and empty lines dropped, the line breaks kept (R1169ab
+        // D4: a line break is syntax, as a `//` comment's end and ASI after `return`): what a runtime excuse is pinned by.
+        if (o.text) item.text = pinText(n);
         out.push(item);
       }
       return;
@@ -1500,12 +1511,13 @@ export function problems(runs) {
       }
     }
     // The tests whose own function holds systemd's sign (signTests, R1169n): run here, where systemd is, each must
-    // have run, and passed with no skip or todo, all of it, unless the allowlist's `runtime` excuses it by name.
+    // have run, and passed with no skip or todo, all of it, unless the allowlist's `runtime` excuses it: by its place
+    // (R1169aa D1, R1169ab D3), the one test its key names, never a namesake.
     for (const t of signTests) {
       const at = `test/${file}: ${t.name ?? t.label}`;
       const ks = events.flatMap((e, k) => (inFile(e) && e.line === t.line && e.column === t.column && (t.name === null || e.name === t.name) ? [k] : []));
       ks.forEach((k) => matched.add(k));
-      const why = excused.has(t.name ?? t.label);
+      const why = excused.has(`${t.line}:${t.column}`);
       if (!ks.length) {
         if (!why) out.push(`${at}: didn't run (it reads systemd's sign: its function, a guarded stop or its name; so it must run here. Registered only sometimes, or under a skipped suite?)`);
         continue;
@@ -1626,8 +1638,14 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
       f.signTests = st;
     }
     signTotal = found.reduce((a, f) => a + (f.signTests?.length ?? 0), 0);
-    for (const k of Object.keys(excused)) if (!found.some((f) => (f.signTests ?? []).some((t) => `test/${f.file}: ${t.name ?? t.label}` === k))) throw new Error(`${k}: named in the allowlist's runtime, but no test whose own function holds systemd's sign has that name`);
-    for (const f of found) f.excused = new Set(Object.keys(excused).filter((k) => k.startsWith(`test/${f.file}: `)).map((k) => k.slice(`test/${f.file}: `.length)));
+    const keyed = (f, k) => (f.signTests ?? []).filter((t) => `test/${f.file}: ${t.name ?? t.label}` === k);
+    for (const k of Object.keys(excused)) {
+      const n = found.reduce((a, f) => a + keyed(f, k).length, 0);
+      if (!n) throw new Error(`${k}: named in the allowlist's runtime, but no test whose own function holds systemd's sign has that name`);
+      if (n > 1) throw new Error(`${k}: named in the allowlist's runtime, but ${n} tests have that name: give the excused one its own name`);
+    }
+    // Each excuse is the place of the one test it names (its built line and column, as node reports it).
+    for (const f of found) f.excused = new Set(Object.keys(excused).flatMap((k) => keyed(f, k).map((t) => `${t.line}:${t.column}`)));
     // Every other root the build compiles (tsconfig.json's include, read from it so a new root is never missed:
     // src/, scripts/bench/, R1169g) holds no gate: one there, re-exported through a test helper, would run nowhere.
     for (const r of roots.filter((x) => x !== 'test')) findAll(join(root, r), `${r}/`).forEach((f) => {

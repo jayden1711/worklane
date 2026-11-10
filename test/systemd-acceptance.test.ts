@@ -414,8 +414,11 @@ test('a test whose own function holds the sign runs on the VM: it fails the job 
   assert.deepEqual(run([ev('unit restarts', 5, { todo: 'later' })]), ["test/f.test.ts: unit restarts: TODO later (it reads systemd's sign: its function, a guarded stop or its name; so it must run here, where systemd is)"]);
   assert.deepEqual(run([ev('half', 6, { nesting: 1, todo: 'x' }), ev('unit restarts', 5)]), ['test/f.test.ts: unit restarts: its subtest "half" TODO x (all of it must run here)']);
   assert.deepEqual(run([ev('unit restarts', 5), ev('unit restarts', 5, { skip: 'x' })]).length, 1, 'each registration is judged (a loop)');
-  assert.deepEqual(run([ev('unit restarts', 5, { skip: 'needs root' })], ['unit restarts']), [], 'excused by name: it may skip');
-  assert.deepEqual(run([ev('unit restarts', 5, { type: 'test:fail' })], ['unit restarts']), ["test/f.test.ts: unit restarts: failed (it reads systemd's sign: its function, a guarded stop or its name; so it must run here, where systemd is)"], 'never a failure');
+  assert.deepEqual(run([ev('unit restarts', 5, { skip: 'needs root' })], ['5:1']), [], 'excused by its place: it may skip');
+  // R1169aa D1, R1169ab D3: an excuse is a place, never a name; a namesake elsewhere isn't covered.
+  assert.equal(run([ev('unit restarts', 5, { skip: 'needs root' })], ['unit restarts']).length, 1, 'a name is no excuse');
+  assert.equal(run([ev('unit restarts', 5, { skip: 'needs root' })], ['9:1']).length, 1, "another place's excuse is not this test's");
+  assert.deepEqual(run([ev('unit restarts', 5, { type: 'test:fail' })], ['5:1']), ["test/f.test.ts: unit restarts: failed (it reads systemd's sign: its function, a guarded stop or its name; so it must run here, where systemd is)"], 'never a failure');
   assert.deepEqual(sa.summaryProblems('# tests 3\n# pass 2\n# fail 0\n# cancelled 0\n# skipped 1\n# todo 0\n', 'f.test.ts', 1, true), [], 'a whole file may skip its other tests');
   assert.deepEqual(sa.summaryProblems('# tests 0\n# pass 0\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n', 'f.test.ts', 0, true), ['test/f.test.ts: its TAP summary counts no test at all']);
 });
@@ -631,15 +634,17 @@ function excusedProblems(file: string, text: string, key: string, runsIn: string
   const out: string[] = [];
   const name = key.slice(file.length + 2);
   const sf = T.createSourceFile(file, text, T.ScriptTarget.Latest, true);
-  let call: Node | null = null;
+  // Every call by that name, not the first (R1169aa D1, R1169ab D3): one excuse covers one test.
+  const calls: Node[] = [];
   const walk = (n: Node) => {
-    if (call) return;
     const first = T.isCallExpression(n) ? n.arguments?.[0] : undefined;
-    if (first && (first.getText() === `'${name}'` || first.getText() === `"${name}"` || (name.startsWith('`') && first.getText().startsWith(name)))) call = n;
-    else T.forEachChild(n, walk);
+    if (first && (first.getText() === `'${name}'` || first.getText() === `"${name}"` || (name.startsWith('`') && first.getText().startsWith(name)))) calls.push(n);
+    T.forEachChild(n, walk);
   };
   walk(sf);
-  if (!call) return [`${key}: no test by that name`];
+  if (!calls.length) return [`${key}: no test by that name`];
+  if (calls.length > 1) return [`${key}: ${calls.length} calls have that name`];
+  const call = calls[0]!;
   const c = call as Node;
   // Registered by node:test's own test(), as itself: not test.skip/test.todo/test.only, nor a local of that name.
   if (c.expression!.getText() !== 'test') out.push(`${key}: registered as ${c.expression!.getText()}(), not test()`);
@@ -650,7 +655,9 @@ function excusedProblems(file: string, text: string, key: string, runsIn: string
   const options = args.length === 3 ? args[1]! : null;
   const body = fn.getText();
   const items = sa.signTests(ts, file, text, { paths: new Set<string>(), carries: () => false }, true, { stops: true });
-  const item = items.find((x) => `${file}: ${x.name ?? x.label}` === key);
+  const named = items.filter((x) => `${file}: ${x.name ?? x.label}` === key);
+  if (named.length > 1) return [...out, `${key}: ${named.length} tests have that name`];
+  const item = named[0];
   if (!item) return [...out, `${key}: the script doesn't find it`];
   const stops = (item.stops ?? []).filter((m) => /\b(?:skip|todo)\b/i.test(m.text));
   if (runsIn === 'web') {
@@ -724,6 +731,8 @@ test('R1169z D3: what the runtime check refuses, on files of its own: a skip or 
   assert.deepEqual(sf('  void 0;\n'), [], 'the clean shape');
   assert.match(sf('', '', 'test.skip').join('\n'), /registered as test\.skip\(\)/, 'A7: test.skip');
   assert.match(sf('  bail(t);\n', "function bail(t) { t.skip('everywhere'); }\n").join('\n'), /the code it runs skips otherwise/, 'A3: a helper that skips');
+  // R1169aa D1, R1169ab D3: a namesake after the excused test, which skips; the excused one is unchanged.
+  assert.match(web(' await go(); ', '').concat(excusedProblems('test/w.test.ts', `${head}test('w', { skip, timeout: 1 }, async () => { await go(); });\ntest('w', (t) => { t.skip('planted'); });\n`, 'test/w.test.ts: w', 'web')).join('\n'), /2 calls have that name/, 'a namesake');
 });
 
 test('R1169w D1-D4: a test function passed by name is the test\'s own; node:test loaded where it can\'t be bound, or a registration in a method, is refused; a test with subtests in carrying code is picked', () => {
@@ -810,4 +819,14 @@ test("the owner's option (b): a runtime excuse is pinned by its test's whole tex
   assert.deepEqual(problems(text, item!.text!), [], 'pinned to its text');
   assert.match(problems(text.replace("run('", "if (process.env.X) return;\n  run('"), item!.text!).join('\n'), /its pin isn't the test's text/, 'the test edited');
   assert.match(problems(text.replace("test('w'", "test('v'"), item!.text!).join('\n'), /no such test is in the build/, 'the test gone');
+  // R1169aa D1, R1169ab D3: a namesake after the excused test (the original unchanged) isn't covered by its excuse.
+  const namesake = `${text}test('w', (t) => { const unit = '${sd}ctl'; void unit; t.skip('planted'); });\n`;
+  assert.match(problems(namesake, item!.text!).join('\n'), /2 tests have that name \(at 2:\d+, 3:\d+\): give the excused one its own name/, 'a namesake is refused');
+  // R1169ab D4: the pin keeps line breaks, which are syntax: a line joined onto a comment, or broken after return.
+  const lines = `import { test } from 'node:test';\ntest('w', { skip: process.env.NONE ? 'x' : false }, () => {\n  // a step\n  run('${sd}ctl');\n  return;\n});\n`;
+  const pin = (sa.signTests(ts, file, lines, { paths: new Set<string>(), carries: () => false }, true, { text: true } as never).find((t) => t.name === 'w') as unknown as { text: string }).text;
+  assert.equal(pin.split('\n').length, 5, 'one line of the pin per line of the test');
+  assert.deepEqual(problems(lines.replace(/\n {2}/g, '\n    '), pin), [], 'indentation alone is not a change');
+  assert.match(problems(lines.replace("// a step\n  run(", "// a step run("), pin).join('\n'), /its pin isn't the test's text/, 'a line joined onto a comment');
+  assert.match(problems(lines.replace('return;', 'return\n  void 0;'), pin).join('\n'), /its pin isn't the test's text/, 'a return broken onto two lines');
 });
