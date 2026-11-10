@@ -204,6 +204,7 @@ const STREAM_FLAGS = ['-p', '--input-format', 'stream-json', '--output-format', 
 const FIXED_FLAGS = ['--permission-mode', 'dontAsk'];
 // The launch's guards end every argv (R1185aa D1, intended: Claude Code takes the last --settings and --setting-sources,
 // so nothing earlier can stand in for them); the run's --settings come just before them.
+// check-table: never-shrink
 const GUARD_TAIL = ['--setting-sources', '', '--strict-mcp-config'];
 const PROMPT_LINE = '{"type":"user","message":{"role":"user","content":"do the task"}}';
 /** What every agent's environment starts from: the allowed variables of the engine's, then the fixed agent ones. */
