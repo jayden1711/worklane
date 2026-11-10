@@ -116,6 +116,7 @@ const exports = {};
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.CUT_MARGIN = exports.UNSCANNABLE = exports.MAX_PASSES = exports.UNSCANNABLE_KIND = exports.TRACKER = exports.REDACTION_PATTERNS = exports.isDashboardKey = exports.DASHBOARD_KEY_PREFIX = void 0;
+exports.markerProblem = markerProblem;
 exports.secretKinds = secretKinds;
 exports.fixedPoint = fixedPoint;
 exports.redactString = redactString;
@@ -176,6 +177,241 @@ function orphanEnd(m) {
     }
     return cut === -1 ? m : `[REDACTED PRIVATE KEY]${m.slice(cut)}`;
 }
+function markerProblem(re, rep) {
+    const refs = [];
+    for (let i = 0; i < rep.length; i++) {
+        if (rep[i] !== '$')
+            continue;
+        const c = rep[i + 1] ?? '';
+        if (c === '$') {
+            i++;
+            continue;
+        }
+        if (c === '&')
+            return '`$&` would put the whole match, the secret in it, in the marker';
+        if (c === '`' || c === "'" || c === '<')
+            return `\`$${c}\` isn't read alike by every replace path`;
+        if (c === '0')
+            return '`$0` names no group';
+        if (/[1-9]/.test(c)) {
+            if (/\d/.test(rep[i + 2] ?? ''))
+                return `\`$${c}${rep[i + 2]}\`: a two-digit group reference isn't read alike by every replace path`;
+            refs.push({ n: Number(c), at: i });
+            i++;
+        }
+    }
+    if (!refs.length)
+        return null;
+    const count = groupCount(re);
+    for (const r of refs)
+        if (r.n > count)
+            return `\`$${r.n}\` names a group the regex doesn't have (it has ${count})`;
+    const lead = [];
+    while (refs[lead.length]?.at === lead.length * 2)
+        lead.push(refs[lead.length].n);
+    const trail = [];
+    while (refs.length - trail.length > lead.length && refs[refs.length - 1 - trail.length]?.at === rep.length - 2 * (trail.length + 1))
+        trail.unshift(refs[refs.length - 1 - trail.length].n);
+    if (lead.length + trail.length !== refs.length)
+        return 'a group reference inside the marker would show what the group matched: a reference may only lead or trail it';
+    if (rep.length === 2 * refs.length)
+        return 'a marker of group references alone marks nothing';
+    let parsed;
+    try {
+        parsed = parseRegex(re.source);
+    }
+    catch (e) {
+        return `its regex can't be read for group references: ${e.message}`;
+    }
+    if (parsed.groups !== count)
+        return "its regex can't be read for group references: the groups don't count up";
+    const leading = leadingGroups(parsed.alternatives);
+    for (const [k, n] of lead.entries())
+        if (leading[k] !== n)
+            return `\`$${n}\` leads the marker, but group ${n} isn't what the match begins with (${these(leading)})`;
+    const trailing = trailingGroups(parsed.alternatives);
+    for (const [k, n] of trail.entries())
+        if (trailing[trailing.length - trail.length + k] !== n)
+            return `\`$${n}\` trails the marker, but group ${n} isn't what the match ends with (${these(trailing)})`;
+    return null;
+}
+const these = (groups) => (groups.length === 0 ? 'no group is' : groups.length === 1 ? `group ${groups[0]} is` : `groups ${groups.join(', ')} are`);
+const groupCount = (re) => new RegExp(`${re.source}|`, re.flags.replace(/[gy]/g, '')).exec('').length - 1;
+function markersChecked(rules, marker) {
+    for (const [re, rep, kind] of rules) {
+        const m = marker(rep);
+        const why = m === null ? null : markerProblem(re, m);
+        if (why !== null)
+            throw new Error(`redaction rule "${kind}" could show a secret (#1257): ${why}`);
+    }
+}
+function parseRegex(source) {
+    let i = 0;
+    let groups = 0;
+    const skipQuantifier = () => {
+        const c = source[i];
+        if (c === '*' || c === '+' || c === '?')
+            i++;
+        else {
+            const m = /^\{\d+(?:,\d*)?\}/.exec(source.slice(i));
+            if (!m)
+                return false;
+            i += m[0].length;
+        }
+        if (source[i] === '?')
+            i++;
+        return true;
+    };
+    const item = () => {
+        const c = source[i];
+        let it;
+        if (c === '(') {
+            i++;
+            let capture = null;
+            let look = null;
+            if (source.startsWith('?:', i))
+                i += 2;
+            else if (source.startsWith('?=', i) || source.startsWith('?!', i)) {
+                look = 'ahead';
+                i += 2;
+            }
+            else if (source.startsWith('?<=', i) || source.startsWith('?<!', i)) {
+                look = 'behind';
+                i += 3;
+            }
+            else if (source.startsWith('?<', i)) {
+                const close = source.indexOf('>', i);
+                if (close === -1)
+                    throw new Error(`an unclosed group name at ${i}`);
+                i = close + 1;
+                capture = ++groups;
+            }
+            else if (source[i] === '?')
+                throw new Error(`a group of an unknown kind at ${i}`);
+            else
+                capture = ++groups;
+            const alts = alternatives();
+            if (source[i] !== ')')
+                throw new Error(`an unclosed group at ${i}`);
+            i++;
+            it = { kind: 'group', capture, look, alternatives: alts, quantified: false };
+        }
+        else if (c === '[') {
+            for (i++; i < source.length && source[i] !== ']'; i++)
+                if (source[i] === '\\')
+                    i++;
+            if (source[i] !== ']')
+                throw new Error('an unclosed class');
+            i++;
+            it = { kind: 'atom', quantified: false };
+        }
+        else if (c === '\\') {
+            const n = source[i + 1] ?? '';
+            if (/[1-9]/.test(n)) {
+                const m = /^\d+/.exec(source.slice(i + 1));
+                i += 1 + m[0].length;
+                it = { kind: 'backref', n: Number(m[0]), quantified: false };
+            }
+            else {
+                if ((n === 'u' || n === 'p' || n === 'P') && source[i + 2] === '{') {
+                    const close = source.indexOf('}', i);
+                    if (close === -1)
+                        throw new Error(`an unclosed escape at ${i}`);
+                    i = close + 1;
+                }
+                else if (n === 'k' && source[i + 2] === '<') {
+                    const close = source.indexOf('>', i);
+                    if (close === -1)
+                        throw new Error(`an unclosed named backreference at ${i}`);
+                    i = close + 1;
+                }
+                else if (n === '')
+                    throw new Error('a trailing backslash');
+                else
+                    i += 2;
+                it = { kind: n === 'b' || n === 'B' ? 'zero' : 'atom', quantified: false };
+            }
+        }
+        else if (c === '^' || c === '$') {
+            i++;
+            it = { kind: 'zero', quantified: false };
+        }
+        else if (c === '*' || c === '+' || c === '?' || c === ')')
+            throw new Error(`a stray \`${c}\` at ${i}`);
+        else {
+            i++;
+            it = { kind: 'atom', quantified: false };
+        }
+        if (skipQuantifier())
+            it.quantified = true;
+        return it;
+    };
+    const alternatives = () => {
+        const alts = [[]];
+        while (i < source.length && source[i] !== ')') {
+            if (source[i] === '|') {
+                i++;
+                alts.push([]);
+            }
+            else
+                alts.at(-1).push(item());
+        }
+        return alts;
+    };
+    const alts = alternatives();
+    if (i < source.length)
+        throw new Error(`a stray \`)\` at ${i}`);
+    return { alternatives: alts, groups };
+}
+function leadingGroups(alternatives) {
+    if (alternatives.length !== 1)
+        return [];
+    const items = alternatives[0];
+    const out = [];
+    for (let k = 0; k < items.length; k++) {
+        const it = items[k];
+        if (it.quantified)
+            break;
+        if (it.kind === 'zero')
+            continue;
+        if (it.kind !== 'group')
+            break;
+        if (it.look === null) {
+            if (it.capture === null)
+                break;
+            out.push(it.capture);
+            continue;
+        }
+        const first = it.look === 'ahead' && it.alternatives.length === 1 ? it.alternatives[0][0] : undefined;
+        const next = items[k + 1];
+        if (first?.kind === 'group' && first.look === null && first.capture !== null && !first.quantified && next?.kind === 'backref' && next.n === first.capture && !next.quantified) {
+            out.push(first.capture);
+            k++;
+        }
+    }
+    return out;
+}
+function trailingGroups(alternatives) {
+    if (alternatives.length !== 1)
+        return [];
+    const items = alternatives[0];
+    const out = [];
+    for (let k = items.length - 1; k >= 0; k--) {
+        const it = items[k];
+        if (it.quantified)
+            break;
+        if (it.kind === 'zero')
+            continue;
+        if (it.kind !== 'group')
+            break;
+        if (it.look !== null)
+            continue;
+        if (it.capture === null)
+            break;
+        out.unshift(it.capture);
+    }
+    return out;
+}
 // check-table: never-shrink
 const PATTERNS = [
     [new RegExp(`${exports.DASHBOARD_KEY_PREFIX}${DASHBOARD_KEY_BODY}(?![A-Za-z0-9_-])`, 'g'), `${exports.DASHBOARD_KEY_PREFIX}[REDACTED]`, 'dashboard key'],
@@ -210,6 +446,8 @@ const PATTERNS = [
     ],
     [/(^|[^A-Za-z0-9])[A-Za-z0-9_-]{23,28}\.[A-Za-z0-9_-]{6,7}\.[A-Za-z0-9_-]{27,}\b/g, '$1[REDACTED]', 'Discord bot token'],
 ];
+const stringMarker = (rep) => (typeof rep === 'string' ? rep : null);
+markersChecked(PATTERNS, stringMarker);
 // check-table: never-shrink
 const BROAD = [
     [/(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{8,}/g, (k) => k, 'GitHub token, cut short'],
@@ -221,6 +459,7 @@ const BROAD = [
     [/([a-z0-9+.-]{1,32}:\/\/)[^\s/@]+@/gi, (k) => `$1${k}@`, 'user info in a URL'],
     [/\b([A-Za-z_]*(?:token|secret|password|passwd|api[_-]?key))(\s*[=:]\s*)("[^"]*"|'[^']*'|\S+)/gi, (k) => `$1$2${k}`, 'value after a secret name'],
 ];
+markersChecked(BROAD, (rep) => rep('[REDACTED]'));
 const CODE_HEADS = new Set(['this', 'self', 'super', 'opts', 'options', 'o', 'ctx', 'context', 'config', 'cfg', 'conf', 'settings', 'props', 'state', 'env', 'process', 'module', 'exports', 'window', 'document', 'globalThis', 'args', 'params', 'req', 'res', 'request', 'response', 'obj', 'result', 'item', 'e', 'err', 'x']);
 function internalHost(m, pre, name) {
     const lower = name.toLowerCase();
@@ -250,6 +489,7 @@ const IDENTIFIERS = [
     [new RegExp(`(^|[^\\w.])(?:${PRIVATE_V4})\\.${OCTET}\\.${OCTET}(?![\\w-]|\\.\\d)`, 'g'), '$1[private-ip]', 'private IP'],
     [/(^|[^\w:])f(?:[cd][0-9a-f]{2}|e[89ab][0-9a-f]):(?:[0-9a-f]{0,4}:){1,6}[0-9a-f]{0,4}(?![\w:])/gi, '$1[private-ip]', 'private IP'],
 ];
+markersChecked(IDENTIFIERS, stringMarker);
 exports.REDACTION_PATTERNS = [
     ...PATTERNS.map(([re, rep, kind]) => ({ kind, re, rep, group: 'secret' })),
     ...BROAD.map(([re, rep, kind]) => ({ kind, re, rep: rep('[REDACTED]'), group: 'broad' })),

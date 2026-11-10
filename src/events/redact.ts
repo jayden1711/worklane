@@ -96,7 +96,234 @@ function orphanEnd(m: string): string {
   return cut === -1 ? m : `[REDACTED PRIVATE KEY]${m.slice(cut)}`;
 }
 
-// Each pattern with what kind of secret it finds (secretKinds names the kind, never the value).
+/**
+ * Why a string marker `rep` for `re` could put part of what `re` found into the "redacted" text (#1257), or null when
+ * it can't. A marker may keep only what the match begins or ends with (a boundary, the scheme, a key's name), written
+ * as `$1$2…` at its very start or `…$8$9` at its very end, where those groups are the first or the last things the
+ * regex matches: a plain group (no quantifier, not inside another group, not after a top-level `|`), with only
+ * zero-width items (`^`, `$`, `\b`, a lookaround) between. Then the marker's own text is all the span (spansOf)
+ * becomes, and no group's text lies inside it. A reference anywhere else (`[REDACTED:$1_$2]`), `$&`, and a group that
+ * can match inside the span (`(a|b)+`, a group after the secret's) are refused: with `$1`/`$2` for the key's own
+ * groups, a rule added to PATTERNS gave `sk_[REDACTED:live_<key>]`, the key whole, and no test failed (R1184y's Y1).
+ * `$<name>`, `` $` ``, `$'`, `$0` and `$nn` are refused too: expand and String.prototype.replace don't read them
+ * alike. A regex this reader can't follow is refused as well (only a marker with a reference needs it read).
+ * markersChecked runs it on every table at load, so a rule that could show a secret stops the module instead
+ * (test/redact-markers.test.ts).
+ */
+export function markerProblem(re: RegExp, rep: string): string | null {
+  const refs: { n: number; at: number }[] = [];
+  for (let i = 0; i < rep.length; i++) {
+    if (rep[i] !== '$') continue;
+    const c = rep[i + 1] ?? '';
+    if (c === '$') {
+      i++;
+      continue;
+    }
+    if (c === '&') return '`$&` would put the whole match, the secret in it, in the marker';
+    if (c === '`' || c === "'" || c === '<') return `\`$${c}\` isn't read alike by every replace path`;
+    if (c === '0') return '`$0` names no group';
+    if (/[1-9]/.test(c)) {
+      if (/\d/.test(rep[i + 2] ?? '')) return `\`$${c}${rep[i + 2]}\`: a two-digit group reference isn't read alike by every replace path`;
+      refs.push({ n: Number(c), at: i });
+      i++;
+    }
+  }
+  if (!refs.length) return null;
+  const count = groupCount(re);
+  for (const r of refs) if (r.n > count) return `\`$${r.n}\` names a group the regex doesn't have (it has ${count})`;
+  const lead: number[] = [];
+  while (refs[lead.length]?.at === lead.length * 2) lead.push(refs[lead.length]!.n);
+  const trail: number[] = [];
+  while (refs.length - trail.length > lead.length && refs[refs.length - 1 - trail.length]?.at === rep.length - 2 * (trail.length + 1)) trail.unshift(refs[refs.length - 1 - trail.length]!.n);
+  if (lead.length + trail.length !== refs.length) return 'a group reference inside the marker would show what the group matched: a reference may only lead or trail it';
+  if (rep.length === 2 * refs.length) return 'a marker of group references alone marks nothing';
+  let parsed: ParsedRegex;
+  try {
+    parsed = parseRegex(re.source);
+  } catch (e) {
+    return `its regex can't be read for group references: ${(e as Error).message}`;
+  }
+  if (parsed.groups !== count) return "its regex can't be read for group references: the groups don't count up";
+  const leading = leadingGroups(parsed.alternatives);
+  for (const [k, n] of lead.entries()) if (leading[k] !== n) return `\`$${n}\` leads the marker, but group ${n} isn't what the match begins with (${these(leading)})`;
+  const trailing = trailingGroups(parsed.alternatives);
+  for (const [k, n] of trail.entries()) if (trailing[trailing.length - trail.length + k] !== n) return `\`$${n}\` trails the marker, but group ${n} isn't what the match ends with (${these(trailing)})`;
+  return null;
+}
+
+/** Which groups are, in words, for markerProblem's reasons. */
+const these = (groups: number[]) => (groups.length === 0 ? 'no group is' : groups.length === 1 ? `group ${groups[0]} is` : `groups ${groups.join(', ')} are`);
+
+/** How many capturing groups `re` has, as the engine counts them (an empty alternative matches with every group unset). */
+const groupCount = (re: RegExp) => new RegExp(`${re.source}|`, re.flags.replace(/[gy]/g, '')).exec('')!.length - 1;
+
+/**
+ * Every string marker of `rules` passed markerProblem (`marker` gives a rule's, or null for a function). It throws on
+ * the first that didn't, so the module doesn't load with it: a rule that could show a secret is refused at load, not
+ * found in a log.
+ */
+function markersChecked<R>(rules: readonly (readonly [RegExp, R, string])[], marker: (rep: R) => string | null): void {
+  for (const [re, rep, kind] of rules) {
+    const m = marker(rep);
+    const why = m === null ? null : markerProblem(re, m);
+    if (why !== null) throw new Error(`redaction rule "${kind}" could show a secret (#1257): ${why}`);
+  }
+}
+
+/** An item of a regex's sequence, as markerProblem reads it: a group (capturing, or a lookaround), a backreference, something zero-width (`^`, `$`, `\b`), or something that takes a character (parseRegex). */
+type Item =
+  | { kind: 'group'; capture: number | null; look: 'ahead' | 'behind' | null; alternatives: Item[][]; quantified: boolean }
+  | { kind: 'backref'; n: number; quantified: boolean }
+  | { kind: 'zero' | 'atom'; quantified: boolean };
+interface ParsedRegex {
+  alternatives: Item[][];
+  groups: number;
+}
+
+/**
+ * The structure of `source`, enough to tell which groups a match begins and ends with: groups (`(…)`, `(?:…)`,
+ * `(?<name>…)`, `(?=…)`, `(?!…)`, `(?<=…)`, `(?<!…)`), `|`, classes, escapes (`\1`, `\b`, `\u{…}`, `\p{…}`, `\k<…>`),
+ * `^`, `$`, quantifiers (`*`, `+`, `?`, `{n,m}`, lazy too). It throws on a shape it doesn't know (a modifier group).
+ */
+function parseRegex(source: string): ParsedRegex {
+  let i = 0;
+  let groups = 0;
+  const skipQuantifier = (): boolean => {
+    const c = source[i];
+    if (c === '*' || c === '+' || c === '?') i++;
+    else {
+      const m = /^\{\d+(?:,\d*)?\}/.exec(source.slice(i));
+      if (!m) return false;
+      i += m[0].length;
+    }
+    if (source[i] === '?') i++;
+    return true;
+  };
+  const item = (): Item => {
+    const c = source[i]!;
+    let it: Item;
+    if (c === '(') {
+      i++;
+      let capture: number | null = null;
+      let look: 'ahead' | 'behind' | null = null;
+      if (source.startsWith('?:', i)) i += 2;
+      else if (source.startsWith('?=', i) || source.startsWith('?!', i)) {
+        look = 'ahead';
+        i += 2;
+      } else if (source.startsWith('?<=', i) || source.startsWith('?<!', i)) {
+        look = 'behind';
+        i += 3;
+      } else if (source.startsWith('?<', i)) {
+        const close = source.indexOf('>', i);
+        if (close === -1) throw new Error(`an unclosed group name at ${i}`);
+        i = close + 1;
+        capture = ++groups;
+      } else if (source[i] === '?') throw new Error(`a group of an unknown kind at ${i}`);
+      else capture = ++groups;
+      const alts = alternatives();
+      if (source[i] !== ')') throw new Error(`an unclosed group at ${i}`);
+      i++;
+      it = { kind: 'group', capture, look, alternatives: alts, quantified: false };
+    } else if (c === '[') {
+      for (i++; i < source.length && source[i] !== ']'; i++) if (source[i] === '\\') i++;
+      if (source[i] !== ']') throw new Error('an unclosed class');
+      i++;
+      it = { kind: 'atom', quantified: false };
+    } else if (c === '\\') {
+      const n = source[i + 1] ?? '';
+      if (/[1-9]/.test(n)) {
+        const m = /^\d+/.exec(source.slice(i + 1))!;
+        i += 1 + m[0].length;
+        it = { kind: 'backref', n: Number(m[0]), quantified: false };
+      } else {
+        if ((n === 'u' || n === 'p' || n === 'P') && source[i + 2] === '{') {
+          const close = source.indexOf('}', i);
+          if (close === -1) throw new Error(`an unclosed escape at ${i}`);
+          i = close + 1;
+        } else if (n === 'k' && source[i + 2] === '<') {
+          const close = source.indexOf('>', i);
+          if (close === -1) throw new Error(`an unclosed named backreference at ${i}`);
+          i = close + 1;
+        } else if (n === '') throw new Error('a trailing backslash');
+        else i += 2;
+        it = { kind: n === 'b' || n === 'B' ? 'zero' : 'atom', quantified: false };
+      }
+    } else if (c === '^' || c === '$') {
+      i++;
+      it = { kind: 'zero', quantified: false };
+    } else if (c === '*' || c === '+' || c === '?' || c === ')') throw new Error(`a stray \`${c}\` at ${i}`);
+    else {
+      i++;
+      it = { kind: 'atom', quantified: false };
+    }
+    if (skipQuantifier()) it.quantified = true;
+    return it;
+  };
+  const alternatives = (): Item[][] => {
+    const alts: Item[][] = [[]];
+    while (i < source.length && source[i] !== ')') {
+      if (source[i] === '|') {
+        i++;
+        alts.push([]);
+      } else alts.at(-1)!.push(item());
+    }
+    return alts;
+  };
+  const alts = alternatives();
+  if (i < source.length) throw new Error(`a stray \`)\` at ${i}`);
+  return { alternatives: alts, groups };
+}
+
+/**
+ * The groups a match begins with, in order: plain groups (no quantifier) that are the first things the one top-level
+ * alternative matches, with only zero-width items between (a lookaround included: it takes nothing). A lookahead whose
+ * first item is a plain group, followed at once by a backreference to it (the JWT rule's `(?=(…)eyJ)\2`), counts as
+ * that group: the backreference takes exactly the text the group found, from the same place.
+ */
+function leadingGroups(alternatives: Item[][]): number[] {
+  if (alternatives.length !== 1) return [];
+  const items = alternatives[0]!;
+  const out: number[] = [];
+  for (let k = 0; k < items.length; k++) {
+    const it = items[k]!;
+    if (it.quantified) break;
+    if (it.kind === 'zero') continue;
+    if (it.kind !== 'group') break;
+    if (it.look === null) {
+      if (it.capture === null) break;
+      out.push(it.capture);
+      continue;
+    }
+    const first = it.look === 'ahead' && it.alternatives.length === 1 ? it.alternatives[0]![0] : undefined;
+    const next = items[k + 1];
+    if (first?.kind === 'group' && first.look === null && first.capture !== null && !first.quantified && next?.kind === 'backref' && next.n === first.capture && !next.quantified) {
+      out.push(first.capture);
+      k++;
+    }
+  }
+  return out;
+}
+
+/** The groups a match ends with, in order: plain groups (no quantifier) that are the last things the one top-level alternative matches, with only zero-width items between. */
+function trailingGroups(alternatives: Item[][]): number[] {
+  if (alternatives.length !== 1) return [];
+  const items = alternatives[0]!;
+  const out: number[] = [];
+  for (let k = items.length - 1; k >= 0; k--) {
+    const it = items[k]!;
+    if (it.quantified) break;
+    if (it.kind === 'zero') continue;
+    if (it.kind !== 'group') break;
+    if (it.look !== null) continue;
+    if (it.capture === null) break;
+    out.unshift(it.capture);
+  }
+  return out;
+}
+
+// Each pattern with what kind of secret it finds (secretKinds names the kind, never the value). A string marker keeps
+// only what the match begins or ends with (markerProblem, #1257): `$1[REDACTED]` for a boundary group, never
+// `[REDACTED:$1]`.
 // check-table: never-shrink
 const PATTERNS: [RegExp, Replacement, string][] = [
   // A dashboard key, wherever its prefix is (after a `-` or a letter too: `key-wld_...`): a match runs to the end of its
@@ -184,6 +411,9 @@ const PATTERNS: [RegExp, Replacement, string][] = [
   // is bounded (23 to 28 characters, then a dot), so each start reads a bounded stretch: linear (redact-shapes.test.ts).
   [/(^|[^A-Za-z0-9])[A-Za-z0-9_-]{23,28}\.[A-Za-z0-9_-]{6,7}\.[A-Za-z0-9_-]{27,}\b/g, '$1[REDACTED]', 'Discord bot token'],
 ];
+/** A rule's string marker, or null for a function (code, read as code). */
+const stringMarker = (rep: Replacement): string | null => (typeof rep === 'string' ? rep : null);
+markersChecked(PATTERNS, stringMarker);
 // Not covered: a bare 32-character string with no prefix (a dashboard key from before #889 among them): a commit
 // hash, a digest and the engine's own ids have the same shape. New dashboard keys carry DASHBOARD_KEY_PREFIX.
 
@@ -212,6 +442,8 @@ const BROAD: [RegExp, (mask: string) => string, string][] = [
   [/([a-z0-9+.-]{1,32}:\/\/)[^\s/@]+@/gi, (k) => `$1${k}@`, 'user info in a URL'],
   [/\b([A-Za-z_]*(?:token|secret|password|passwd|api[_-]?key))(\s*[=:]\s*)("[^"]*"|'[^']*'|\S+)/gi, (k) => `$1$2${k}`, 'value after a secret name'],
 ];
+// A broad rule's marker only places its span (spansOf); checked as shown with the default mask.
+markersChecked(BROAD, (rep) => rep('[REDACTED]'));
 
 /**
  * The first word of a dotted name that is code, not a host: `this.internal`, `opts.corp`, `config.lan.x`. Only
@@ -273,6 +505,7 @@ const IDENTIFIERS: [RegExp, Replacement, string][] = [
   // IPv6 unique-local (fc00::/7) and link-local (fe80::/10) addresses.
   [/(^|[^\w:])f(?:[cd][0-9a-f]{2}|e[89ab][0-9a-f]):(?:[0-9a-f]{0,4}:){1,6}[0-9a-f]{0,4}(?![\w:])/gi, '$1[private-ip]', 'private IP'],
 ];
+markersChecked(IDENTIFIERS, stringMarker);
 
 /**
  * Every pattern with its kind, for the linear-time test (test/redact.test.ts) and the shape tests
