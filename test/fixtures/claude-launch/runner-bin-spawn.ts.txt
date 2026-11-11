@@ -1,6 +1,6 @@
 // as src/runner.ts
 import { spawn } from './os/child-process.js';
 export class R {
-  constructor(private bin = 'claude') {}
+  constructor(private bin: string) {}
   go(argv: string[]) { return spawn(this.bin, argv); }
 }

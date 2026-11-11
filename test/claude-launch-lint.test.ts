@@ -146,6 +146,7 @@ test('#958: every way of naming claude outside the launch function is refused (f
     'object-file',
     'os-wrapper',
     'param-default',
+    'pinned-line-plus-launch',
     'promisify-exec',
     'reflect-apply',
     'renamed-import',
