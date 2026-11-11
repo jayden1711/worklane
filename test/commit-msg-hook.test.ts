@@ -218,12 +218,30 @@ const ROWS: Row[] = [
   ['cli-strip-comment', {}, 'subj\n#x\n\nbody\n', ['--cleanup=strip', '-F', 'MSG']],
   ['cli-semi-line2', { 'core.commentChar': ';' }, 'subj\n; a note\n\nbody\n', ['--cleanup=strip', '-F', 'MSG']],
   ['cli-verbatim-lead', {}, '\nsubj\n', ['--cleanup=verbatim', '-F', 'MSG']],
+  // R1260i D1, R1260j D1: `auto` in any case.
+  ['auto-Auto', { 'core.commentChar': 'Auto' }, '# Fix the thing\n\nLong explanation line one\nline two\n', ['-e', '-F', 'MSG']],
+  ['auto-AUTO', { 'core.commentChar': 'AUTO' }, '# Fix the thing\n\nLong explanation line one\nline two\n', ['-e', '-F', 'MSG']],
+  ['auto-aUtO-long', { 'core.commentChar': 'aUtO' }, `# Fix the thing\n\n${L}\n`, ['-e', '-F', 'MSG']],
+  // R1260i D2: a scissors line at the end with no newline after it isn't git's cut line.
+  ['sciss-noeol', { 'commit.cleanup': 'scissors' }, 'Subject\n# ------------------------ >8 ------------------------', ['-e', '-F', 'MSG']],
+  ['sciss-noeol-semi', { 'commit.cleanup': 'scissors', 'core.commentChar': ';' }, 'Subject\n; ------------------------ >8 ------------------------', ['-e', '-F', 'MSG']],
+  ['ctl-sciss-eol', { 'commit.cleanup': 'scissors' }, 'Subject\n# ------------------------ >8 ------------------------\n', ['-e', '-F', 'MSG']],
+  // R1260j D2: a commit encoding other than UTF-8, its log read as UTF-8: 100 two-byte characters are 200 to the gate.
+  ['enc-logout', { 'i18n.commitEncoding': 'ISO-8859-1', 'i18n.logOutputEncoding': 'UTF-8' }, `${'\u00e9'.repeat(100)}\n`, ['-F', 'MSG']],
+  ['enc-logout-e', { 'i18n.commitEncoding': 'ISO-8859-1', 'i18n.logOutputEncoding': 'UTF-8' }, `${'\u00e9'.repeat(100)}\n`, ['-e', '-F', 'MSG']],
+  ['enc-repo', { 'i18n.commitEncoding': 'ISO-8859-1' }, `${'\u00e9'.repeat(100)}\n`, ['-F', 'MSG']],
+  ['enc-utf8', {}, `${'\u00e9'.repeat(100)}\n`, ['-F', 'MSG']],
+  // R1260j D3: more --cleanup= on the command line, which no hook can see.
+  ['cli-strip-F', {}, `# c\n\n${L}\n`, ['--cleanup=strip', '-F', 'MSG']],
+  ['cli-strip-m', {}, null, ['--cleanup=strip', '-m', '# c', '-m', L]],
+  ['cli-scissors-e', {}, 'subj\n# note\n\nbody\n', ['-e', '--cleanup=scissors', '-F', 'MSG']],
+  ['cli-whitespace-e', {}, 'subj\n# note\n\nbody\n', ['-e', '--cleanup=whitespace', '-F', 'MSG']],
   // A GIT_EDITOR=':' the user set (R1260d D3): git edits (-e) and strips; the hook reads git's own "not edited" signal.
   ['user-editor-colon', {}, `# c\n\n${L}\n`, ['-e', '-F', 'MSG'], { GIT_EDITOR: ':' }],
   ['user-colon-l2', {}, 'subj\n# note\n\nbody\n', ['-e', '-F', 'MSG'], { GIT_EDITOR: ':' }],
 ];
 /** The rows the hook can't judge as the gate does: a --cleanup= on the command line (a fix shows up here). */
-const CLI_RESIDUAL: Record<string, string> = { 'cli-strip-comment': 'hook=refuse gate=pass', 'cli-semi-line2': 'hook=refuse gate=pass', 'cli-verbatim-lead': 'hook=pass gate=refuse', 'user-editor-colon': 'hook=pass gate=refuse', 'user-colon-l2': 'hook=refuse gate=pass' };
+const CLI_RESIDUAL: Record<string, string> = { 'cli-strip-comment': 'hook=refuse gate=pass', 'cli-semi-line2': 'hook=refuse gate=pass', 'cli-verbatim-lead': 'hook=pass gate=refuse', 'user-editor-colon': 'hook=pass gate=refuse', 'user-colon-l2': 'hook=refuse gate=pass', 'cli-strip-F': 'hook=pass gate=refuse', 'cli-strip-m': 'hook=pass gate=refuse', 'cli-scissors-e': 'hook=pass gate=refuse', 'cli-whitespace-e': 'hook=pass gate=refuse' };
 
 test("the commit-msg hook and the push gate agree on what git commits, by git's cleanup mode (#1260 R1260a/b D1: msg-mismatch.sh's rows)", { skip: !hasGitleaks && 'gitleaks not installed', timeout: 300_000 }, () => {
   const env = { ...process.env, GIT_AUTHOR_NAME: 'Ada', GIT_AUTHOR_EMAIL: 'ada@example.com', GIT_COMMITTER_NAME: 'Ada', GIT_COMMITTER_EMAIL: 'ada@example.com', GIT_EDITOR: 'true' };
@@ -248,9 +266,9 @@ test("the commit-msg hook and the push gate agree on what git commits, by git's 
     // R1260g/h: with core.commentChar=auto the hook can't know git's pick, so it judges every reading: it may refuse
     // what git would commit (fail-safe), never pass what the gate refuses.
     else if (hookOk && g.status !== 0) seen.push(`${name}: ${verdict}`);
-    else if (!hookOk && g.status === 0 && cfg['core.commentChar'] !== 'auto') seen.push(`${name}: ${verdict}`);
+    else if (!hookOk && g.status === 0 && (cfg['core.commentChar'] ?? '').toLowerCase() !== 'auto' && !cfg['i18n.commitEncoding']) seen.push(`${name}: ${verdict}`);
   }
-  assert.deepEqual(seen, [], "every row agrees with the gate, but auto's, which may only refuse more");
+  assert.deepEqual(seen, [], "every row agrees with the gate, but auto's and a commit encoding's, which may only refuse more");
 });
 
 test("core.commentChar=auto: the hook can't know git's pick (git takes it from the message before the editor ran), so it judges every reading and refuses when any fails (#1260 R1260g D1, R1260h D1-D3)", () => {
@@ -286,6 +304,31 @@ test("core.commentChar=auto: the hook can't know git's pick (git takes it from t
   // the uncut reading too, where x is line 2.
   r.git('config', 'core.commentChar', '#');
   assert.equal(judge('subj\n# ------------------------ >8 ------------------------\nx\n\n# ------------------------ >8 ------------------------\ndiff\n'), 1, 'a typed scissors line: x may be line 2');
+});
+
+test("git-independent: auto in any case, git's cut-line match, and a commit encoding's two decodings (#1260 R1260i D1, D2, R1260j D1, D2)", () => {
+  const r = repo();
+  const judge = (text: string | Buffer, env: Record<string, string> = {}) => {
+    const f = join(r.dir, '.git', 'COMMIT_EDITMSG');
+    writeFileSync(f, text);
+    return spawnSync(process.execPath, [installedGate, '--commit-msg', f], { cwd: r.dir, encoding: 'utf8', env: { ...process.env, PUSH_GATE_COMMIT_MSG: f, GIT_EDITOR: 'true', GIT_DIR: join(r.dir, '.git'), ...env } });
+  };
+  for (const v of ['Auto', 'AUTO', 'aUtO']) {
+    r.git('config', 'core.commentChar', v);
+    assert.equal(judge('# Fix the thing\n\nLong explanation line one\nline two\n').status, 1, `${v}: every reading, the heading stripped in one`);
+  }
+  r.git('config', '--unset', 'core.commentChar');
+  r.git('config', 'commit.cleanup', 'scissors');
+  assert.equal(judge('Subject\n# ------------------------ >8 ------------------------').status, 1, 'no newline after it: no cut, so line 2');
+  assert.equal(judge('Subject\n# ------------------------ >8 ------------------------\n').status, 0, 'with the newline: cut');
+  r.git('config', '--unset', 'commit.cleanup');
+  r.git('config', 'i18n.commitEncoding', 'ISO-8859-1');
+  assert.equal(judge(`${'é'.repeat(100)}\n`).status, 1, 'Latin-1: 200 characters to the gate');
+  assert.equal(judge(`${'e'.repeat(100)}\n`).status, 0, 'ASCII: the same in both');
+  r.git('config', 'i18n.commitEncoding', 'x-no-such-encoding');
+  const unknown = judge('ok\n');
+  assert.equal(unknown.status, 1);
+  assert.match(unknown.stderr, /i18n\.commitEncoding is x-no-such-encoding, which the commit-msg hook can't decode/);
 });
 
 test('a remote named --commit-msg is judged as a push, never as a message (#1260 R1260a D2)', () => {

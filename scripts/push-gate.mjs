@@ -243,7 +243,8 @@ const BLANK = /^[ \t\n\v\f\r]*$/;
  * the help lines read as text in one reading), and never passes one the gate refuses.
  */
 function commentPrefixes(text, setting) {
-  if (setting !== 'auto') return [setting];
+  // git reads `auto` in any case (strcasecmp, both keys: R1260i D1, R1260j D1).
+  if (setting.toLowerCase() !== 'auto') return [setting];
   const lines = text.split('\n');
   return [null, ...[...AUTO_COMMENT].filter((c) => lines.some((l) => l.startsWith(c)))];
 }
@@ -267,8 +268,10 @@ function asCommitted(text, mode = 'strip', comment = '#', cutAt = mode === 'scis
   if (mode === 'verbatim') return text;
   let lines = text.split('\n');
   if (cutAt !== 'none' && comment !== null) {
+    // git's cut line ends in a newline (wt_status_locate_end): the file's last line, with none after it, isn't one
+    // (R1260i D2).
     const cut = lines.indexOf(scissors(comment));
-    if (cut !== -1) lines = lines.slice(0, cut);
+    if (cut !== -1 && cut < lines.length - 1) lines = lines.slice(0, cut);
   }
   if (mode === 'strip' && comment !== null) lines = lines.filter((l) => !l.startsWith(comment));
   const out = [];
@@ -351,9 +354,21 @@ function gitleaks(commits) {
 const installedCopy = basename(dirname(dirname(fileURLToPath(import.meta.url)))) === 'commit-msg-gate';
 if (process.argv[2] === '--commit-msg' && installedCopy && process.argv.length === 4 && process.env.PUSH_GATE_COMMIT_MSG === process.argv[3]) {
   try {
-    const text = readFileSync(process.argv[3], 'utf8');
+    const raw = readFileSync(process.argv[3]);
+    // R1260j D2: git stores the bytes as typed and names i18n.commitEncoding in the commit; the gate reads git's log,
+    // re-encoded, so a subject's length depends on the decoding. Under any encoding but UTF-8, both are judged.
+    const texts = [raw.toString('utf8')];
+    const enc = gitConfig('i18n.commitEncoding');
+    if (enc && !/^utf-?8$/i.test(enc)) {
+      try {
+        texts.push(new TextDecoder(enc).decode(raw));
+      } catch {
+        console.error(`commit refused: i18n.commitEncoding is ${enc}, which the commit-msg hook can't decode, so the message's shape can't be judged as the push gate will read it.`);
+        process.exit(1);
+      }
+    }
     const mode = cleanupMode();
-    const readings = commentPrefixes(text, commentSetting()).flatMap((c) => cutReadings(mode).map((cut) => asCommitted(text, mode, c, cut)));
+    const readings = texts.flatMap((text) => commentPrefixes(text, commentSetting()).flatMap((c) => cutReadings(mode).map((cut) => asCommitted(text, mode, c, cut))));
     const why = [...new Set(readings.flatMap(messageShapeProblems))];
     if (why.length) {
       console.error(`commit refused, by the push gate's message-shape rule: ${why.join('; and ')}`);
