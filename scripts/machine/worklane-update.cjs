@@ -252,26 +252,63 @@ function boundaryGroup(g) {
 }
 const these = (groups) => (groups.length === 0 ? 'no group is' : groups.length === 1 ? `group ${groups[0]} is` : `groups ${groups.join(', ')} are`);
 const groupCount = (re) => new RegExp(`${re.source}|`, re.flags.replace(/[gy]/g, '')).exec('').length - 1;
-function markersChecked(rules, o = {}) {
-    for (const [re, rep, kind] of rules) {
-        const refuse = (why) => {
-            throw new Error(`redaction rule "${kind}" could show a secret (#1257): ${why}`);
-        };
-        if (!(re instanceof RegExp) || re.constructor !== RegExp || Object.getOwnPropertyNames(re).join() !== 'lastIndex')
-            refuse('its regex must be a plain RegExp with no own property (one could hide the pattern that runs)');
+function snapshot(table, o = {}) {
+    const refuse = (who, why) => {
+        throw new Error(`redaction rule ${who} could show a secret (#1257): ${why}`);
+    };
+    if (!Array.isArray(table))
+        refuse('table', 'a table must be a plain array');
+    const data = (who, o, k, what) => {
+        const d = Object.getOwnPropertyDescriptor(o, k);
+        if (!d)
+            refuse(who, `${what} is missing`);
+        if (!('value' in d))
+            refuse(who, `${what} must be a plain data property, not an accessor`);
+        return d.value;
+    };
+    const rows = [];
+    for (let i = 0; i < table.length; i++) {
+        let who = `#${i}`;
+        const entry = data(who, table, i, 'a table slot');
+        if (!Array.isArray(entry) || entry.constructor !== Array)
+            refuse(who, 'a rule must be a plain array [regex, marker, kind]');
+        const keys = Reflect.ownKeys(entry).map(String).join();
+        if (keys !== '0,1,2,length')
+            refuse(who, `a rule must be exactly [regex, marker, kind], with no other own property (own keys: ${keys})`);
+        const kind = data(who, entry, 2, 'the kind');
+        if (typeof kind !== 'string')
+            refuse(who, 'the kind must be a string');
+        who = `"${kind}"`;
+        const re = data(who, entry, 0, 'the regex');
+        if (!(re instanceof RegExp) || re.constructor !== RegExp || Reflect.ownKeys(re).map(String).join() !== 'lastIndex')
+            refuse(who, 'its regex must be a plain RegExp with no own property but lastIndex (one could hide the pattern that runs)');
+        const source = `${re.source}`;
+        const flags = `${re.flags}`;
+        const copy = new RegExp(source, flags);
+        const g = new RegExp(source, flags.includes('g') ? flags : `${flags}g`);
+        const rep = data(who, entry, 1, 'the marker');
         let marker = null;
+        let kept;
         if (typeof rep === 'string')
-            marker = rep;
-        else if (typeof rep === 'function')
-            marker = o.broad ? o.broad(rep) : null;
+            kept = marker = `${rep}`;
+        else if (typeof rep === 'function') {
+            if (o.broad) {
+                const shownAs = rep('[REDACTED]');
+                if (typeof shownAs !== 'string')
+                    refuse(who, 'a broad rule must give its marker as a string');
+                kept = marker = `${shownAs}`;
+            }
+            else
+                kept = rep;
+        }
         else
-            refuse(`a marker must be a string or a function, not ${rep === null ? 'null' : typeof rep !== 'object' ? `a ${typeof rep}` : rep instanceof String ? 'a String object' : 'an object'}`);
-        if (o.broad && typeof marker !== 'string')
-            refuse('a broad rule must give its marker as a string');
-        const why = marker === null ? null : markerProblem(re, marker, o.verbatim === true);
+            refuse(who, `a marker must be a string or a function, not ${rep === null ? 'null' : typeof rep !== 'object' ? `a ${typeof rep}` : rep instanceof String ? 'a String object' : 'an object'}`);
+        const why = marker === null ? null : markerProblem(copy, marker, o.verbatim === true);
         if (why !== null)
-            refuse(why);
+            refuse(who, why);
+        rows.push(Object.freeze({ re: copy, g, rep: kept, kind }));
     }
+    return Object.freeze(rows);
 }
 function parseRegex(source) {
     let i = 0;
@@ -483,7 +520,8 @@ const PATTERNS = [
     ],
     [/(^|[^A-Za-z0-9])[A-Za-z0-9_-]{23,28}\.[A-Za-z0-9_-]{6,7}\.[A-Za-z0-9_-]{27,}\b/g, '$1[REDACTED]', 'Discord bot token'],
 ];
-markersChecked(PATTERNS);
+const SHAPE_SNAPSHOT = snapshot(PATTERNS);
+Object.freeze(PATTERNS);
 // check-table: never-shrink
 const BROAD = [
     [/(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{8,}/g, (k) => k, 'GitHub token, cut short'],
@@ -495,7 +533,8 @@ const BROAD = [
     [/([a-z0-9+.-]{1,32}:\/\/)[^\s/@]+@/gi, (k) => `$1${k}@`, 'user info in a URL'],
     [/\b([A-Za-z_]*(?:token|secret|password|passwd|api[_-]?key))(\s*[=:]\s*)("[^"]*"|'[^']*'|\S+)/gi, (k) => `$1$2${k}`, 'value after a secret name'],
 ];
-markersChecked(BROAD, { broad: (rep) => rep('[REDACTED]') });
+const BROAD_SNAPSHOT = snapshot(BROAD, { broad: true });
+Object.freeze(BROAD);
 const CODE_HEADS = new Set(['this', 'self', 'super', 'opts', 'options', 'o', 'ctx', 'context', 'config', 'cfg', 'conf', 'settings', 'props', 'state', 'env', 'process', 'module', 'exports', 'window', 'document', 'globalThis', 'args', 'params', 'req', 'res', 'request', 'response', 'obj', 'result', 'item', 'e', 'err', 'x']);
 function internalHost(m, pre, name) {
     const lower = name.toLowerCase();
@@ -525,12 +564,13 @@ const IDENTIFIERS = [
     [new RegExp(`(^|[^\\w.])(?:${PRIVATE_V4})\\.${OCTET}\\.${OCTET}(?![\\w-]|\\.\\d)`, 'g'), '$1[private-ip]', 'private IP'],
     [/(^|[^\w:])f(?:[cd][0-9a-f]{2}|e[89ab][0-9a-f]):(?:[0-9a-f]{0,4}:){1,6}[0-9a-f]{0,4}(?![\w:])/gi, '$1[private-ip]', 'private IP'],
 ];
-markersChecked(IDENTIFIERS, { verbatim: true });
-exports.REDACTION_PATTERNS = [
-    ...PATTERNS.map(([re, rep, kind]) => ({ kind, re, rep, group: 'secret' })),
-    ...BROAD.map(([re, rep, kind]) => ({ kind, re, rep: rep('[REDACTED]'), group: 'broad' })),
-    ...IDENTIFIERS.map(([re, rep, kind]) => ({ kind, re, rep, group: 'identifier' })),
-];
+const IDENTIFIER_SNAPSHOT = snapshot(IDENTIFIERS, { verbatim: true });
+Object.freeze(IDENTIFIERS);
+exports.REDACTION_PATTERNS = Object.freeze([
+    ...SHAPE_SNAPSHOT.map((r) => Object.freeze({ kind: r.kind, re: r.re, rep: r.rep, group: 'secret' })),
+    ...BROAD_SNAPSHOT.map((r) => Object.freeze({ kind: r.kind, re: r.re, rep: r.rep, group: 'broad' })),
+    ...IDENTIFIER_SNAPSHOT.map((r) => Object.freeze({ kind: r.kind, re: r.re, rep: r.rep, group: 'identifier' })),
+]);
 // check-table: never-shrink
 const GLUED_PREFIXES = ['ghp_', 'gho_', 'ghu_', 'ghs_', 'ghr_', 'github_pat_', 'sk-', 'sk_live_', 'sk_test_', 'rk_live_', 'rk_test_', 'xoxa-', 'xoxb-', 'xoxe', 'xoxp-', 'xoxr-', 'xoxs-', 'xapp-', 'lin_api_', 'lin_oauth_', 'AKIA', 'ASIA', 'AIza', 'eyJ', '0x', 'Bearer', 'bearer', 'BEARER', 'Basic', 'basic', 'BASIC', exports.DASHBOARD_KEY_PREFIX];
 // check-table: never-shrink
@@ -570,9 +610,9 @@ function shown(whole, groups, r) {
     let b = 0;
     while (b < whole.length - a && b < r.length - a && whole[whole.length - 1 - b] === r[r.length - 1 - b])
         b++;
-    const taken = whole.slice(a, whole.length - b);
-    const put = r.slice(a, r.length - b);
-    if (!taken || (!put.includes(taken) && !groups.some((g) => g.length >= 4 && put.includes(g) && taken.includes(g))))
+    const taken = whole.slice(a, whole.length - b).toLowerCase();
+    const put = r.slice(a, r.length - b).toLowerCase();
+    if (!taken || (!put.includes(taken) && !groups.some((g) => g.length >= 4 && put.includes(g.toLowerCase()) && taken.includes(g.toLowerCase()))))
         return r;
     return `${whole.slice(0, a)}[REDACTED]${whole.slice(whole.length - b)}`;
 }
@@ -623,7 +663,7 @@ exports.UNSCANNABLE_KIND = 'text too large to scan';
 function secretKinds(s) {
     const kinds = new Set();
     try {
-        replaceUnion(s, false, (rank) => kinds.add(PATTERNS[rank][2]));
+        replaceUnion(s, false, (rank) => kinds.add(SHAPE_SNAPSHOT[rank].kind));
     }
     catch (e) {
         if (e instanceof RangeError)
@@ -632,15 +672,10 @@ function secretKinds(s) {
     }
     return [...kinds].sort();
 }
-const globals = new Map();
-const globalOf = (re) => {
-    let g = globals.get(re);
-    if (!g)
-        globals.set(re, (g = re.flags.includes('g') ? re : new RegExp(re.source, `${re.flags}g`)));
-    return g;
-};
 function spansOf(t, re, rep, rank, out) {
-    const g = globalOf(re);
+    if (!re.global)
+        throw new Error('spansOf needs the snapshot\'s global regex');
+    const g = re;
     g.lastIndex = 0;
     for (let m = g.exec(t); m; m = g.exec(t)) {
         const whole = m[0];
@@ -661,9 +696,9 @@ function spansOf(t, re, rep, rank, out) {
             out.push([m.index + a, m.index + whole.length - b, r.slice(a, r.length - b), rank]);
     }
 }
-const SHAPE_RULES = PATTERNS.map(([re, rep]) => [re, rep]);
+const SHAPE_RULES = Object.freeze(SHAPE_SNAPSHOT.map((r) => Object.freeze([r.g, r.rep])));
 // check-table: never-shrink
-const BROAD_RULES = [...SHAPE_RULES, ...BROAD.map(([re, rep]) => [re, rep('[REDACTED]')])];
+const BROAD_RULES = Object.freeze([...SHAPE_RULES, ...BROAD_SNAPSHOT.map((r) => Object.freeze([r.g, r.rep]))]);
 function allSpans(s, rules) {
     const spans = [];
     rules.forEach(([re, rep], i) => spansOf(s, re, rep, i, spans));
@@ -816,7 +851,7 @@ function redactOrThrow(s, o) {
     const put = o.keepLines ? applyKeepingLines : apply;
     let out = o.broad ? maskUnion(s, o.mask ?? '[REDACTED]', o.keepLines === true) : replaceUnion(s, o.keepLines === true);
     if (o.identifiers)
-        out = outsideMachineBlocks(out, (part) => IDENTIFIERS.reduce((t, [re, rep]) => put(t, re, rep), part));
+        out = outsideMachineBlocks(out, (part) => IDENTIFIER_SNAPSHOT.reduce((t, r) => put(t, r.re, r.rep), part));
     return out;
 }
 exports.CUT_MARGIN = 16 * 1024;
