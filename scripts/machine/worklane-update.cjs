@@ -257,7 +257,7 @@ function markersChecked(rules, o = {}) {
         const refuse = (why) => {
             throw new Error(`redaction rule "${kind}" could show a secret (#1257): ${why}`);
         };
-        if (!(re instanceof RegExp) || Object.getPrototypeOf(re) !== RegExp.prototype || Object.getOwnPropertyNames(re).join() !== 'lastIndex')
+        if (!(re instanceof RegExp) || re.constructor !== RegExp || Object.getOwnPropertyNames(re).join() !== 'lastIndex')
             refuse('its regex must be a plain RegExp with no own property (one could hide the pattern that runs)');
         let marker = null;
         if (typeof rep === 'string')
@@ -265,7 +265,7 @@ function markersChecked(rules, o = {}) {
         else if (typeof rep === 'function')
             marker = o.broad ? o.broad(rep) : null;
         else
-            refuse(`a marker must be a string or a function, not ${Object.prototype.toString.call(rep)}`);
+            refuse(`a marker must be a string or a function, not ${rep === null ? 'null' : typeof rep !== 'object' ? `a ${typeof rep}` : rep instanceof String ? 'a String object' : 'an object'}`);
         if (o.broad && typeof marker !== 'string')
             refuse('a broad rule must give its marker as a string');
         const why = marker === null ? null : markerProblem(re, marker, o.verbatim === true);

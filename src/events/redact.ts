@@ -194,11 +194,12 @@ function markersChecked(rules: readonly (readonly [RegExp, unknown, string])[], 
     const refuse = (why: string): never => {
       throw new Error(`redaction rule "${kind}" could show a secret (#1257): ${why}`);
     };
-    if (!(re instanceof RegExp) || Object.getPrototypeOf(re) !== RegExp.prototype || Object.getOwnPropertyNames(re).join() !== 'lastIndex') refuse('its regex must be a plain RegExp with no own property (one could hide the pattern that runs)');
+    // Plain: made by RegExp itself (a subclass could read `source` its own way), with no own property but lastIndex.
+    if (!(re instanceof RegExp) || re.constructor !== RegExp || Object.getOwnPropertyNames(re).join() !== 'lastIndex') refuse('its regex must be a plain RegExp with no own property (one could hide the pattern that runs)');
     let marker: string | null = null;
     if (typeof rep === 'string') marker = rep;
     else if (typeof rep === 'function') marker = o.broad ? o.broad(rep as (mask: string) => string) : null;
-    else refuse(`a marker must be a string or a function, not ${Object.prototype.toString.call(rep)}`);
+    else refuse(`a marker must be a string or a function, not ${rep === null ? 'null' : typeof rep !== 'object' ? `a ${typeof rep}` : rep instanceof String ? 'a String object' : 'an object'}`);
     if (o.broad && typeof marker !== 'string') refuse('a broad rule must give its marker as a string');
     const why = marker === null ? null : markerProblem(re, marker, o.verbatim === true);
     if (why !== null) refuse(why);

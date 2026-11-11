@@ -136,7 +136,7 @@ const identifiers = (m: Redact) => m.redactString(`contact ${EMAIL} please`, m.T
 
 test('B1: a marker that is neither a string nor a function (a String object, an object with toString) is refused at load', async () => {
   // String.prototype.replace reads such a value as a marker and expands its `$n`; the check read it as code.
-  const why = refused(/a marker must be a string or a function, not \[object (String|Object)\]/);
+  const why = refused(/a marker must be a string or a function, not (a String object|an object)/);
   await assert.rejects(import(moduleWith('IDENTIFIERS', `[${EMAIL_RE}, new String('$1[email:$2@$3-]'), 'email'],`)), why);
   await assert.rejects(import(moduleWith('IDENTIFIERS', `[${EMAIL_RE}, { toString: () => '$1[email:$2@$3-]' }, 'email'],`)), why);
   await assert.rejects(import(moduleWith('PATTERNS', `[${Y1_RE.toString()}, new String('${Y1_REP}'), 'Stripe key'],`)), why);
