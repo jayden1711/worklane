@@ -131,6 +131,19 @@ test('the gate spelled any other way, or the flag used anywhere but the gate, st
   assert.deepEqual(sa.findAll(dir), [{ file: 'ok.test.ts', names: ['acceptance: n'] }]);
 });
 
+test("ci.yml run by hand (workflow_dispatch, #1169): its push gate checks the branch's own commits, never an empty range", () => {
+  // A manual run has neither a pull request's base nor a push's `before`: the gate step names that case, and reads the
+  // range from main's merge base (the manual run at 46e68c3b, run 42927923754, refused with `--range ..<sha>`).
+  const wf = parse(readFileSync(join(repoRoot, '.github', 'workflows', 'ci.yml'), 'utf8')) as { on: Record<string, unknown>; jobs: Record<string, { steps: { name?: string; run?: string }[] }> };
+  assert.ok('workflow_dispatch' in wf.on, 'ci.yml runs by hand');
+  const step = wf.jobs['push-gate']!.steps.find((x) => x.name === 'gate the commits')!;
+  const branches = (step.run ?? '').split(/\n\s*(?=elif |else\b)/);
+  const manual = branches.find((b) => /\[ "\$EVENT" = workflow_dispatch \]/.test(b));
+  assert.ok(manual, 'a branch for workflow_dispatch, before the push branch');
+  assert.match(manual!, /BASE="\$\(git merge-base origin\/main "\$GITHUB_SHA"\)"\s*\n\s*node scripts\/push-gate\.mjs --range "\$\{BASE\}\.\.\$\{GITHUB_SHA\}"/);
+  assert.ok(branches.findIndex((b) => b === manual) < branches.findIndex((b) => /BEFORE/.test(b)), "it comes before the push's branch, which a manual run would reach with no `before`");
+});
+
 test("ci.yml's systemd-acceptance job: GitHub's VM on each push to main, never self-hosted, running the script last", () => {
   const wf = parse(readFileSync(join(repoRoot, '.github', 'workflows', 'ci.yml'), 'utf8')) as { on: { push?: { branches?: string[] } }; jobs: Record<string, Job> };
   assert.deepEqual(wf.on.push?.branches, ['main'], 'a push runs it on main only');
