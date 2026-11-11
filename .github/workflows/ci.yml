@@ -395,7 +395,8 @@ jobs:
         # A PR's own commits only: merge-base(base, head)..head, the PR head rather than the test merge,
         # so commits already on main are not rescanned. A push scans what it brought, as before. A run by hand
         # (workflow_dispatch, #1169) has neither: on a branch, its own commits, merge-base(main, head)..head; on main,
-        # where that range is empty, its tip commit (R1169af D6: never a green gate over nothing).
+        # where that range is empty, its tip commit only (R1169af D6: never a green gate over nothing). The push run
+        # gated the rest of what that push brought, and the updater reads that run's result, not this one's (R1169ah D5).
         env:
           EVENT: ${{ github.event_name }}
           PR_BASE: ${{ github.event.pull_request.base.sha }}
