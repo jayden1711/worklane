@@ -6,7 +6,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { appendFileSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, rmSync, statSync, statfsSync, watch, writeFileSync, writeSync } from 'node:fs';
+import { appendFileSync, closeSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, statfsSync, watch, writeFileSync, writeSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { EventLog } from '../src/events/log.js';
@@ -748,33 +748,77 @@ function countedDevs(paths: readonly (string | undefined)[]): Set<number> {
 }
 
 /**
- * The walked folders' files on a filesystem fsInodes counts (R1181aa AA2: a soak folder on a tmpfs is in no inode
- * count, so its files must not be taken out of one). Each folder whole, by the device it is on.
+ * The walked folders' inodes on a filesystem fsInodes counts (R1181aa AA2: a soak folder on a tmpfs is in no inode
+ * count, so its files must not be taken out of one). Each folder whole, by the device it is on. Inodes, not paths, as
+ * the filesystem counts (R1181ae D2: a hard link adds a path and no inode, so hard links in the walked folders hid
+ * inodes used outside them): a file with more links counts once, and only when all its links are in the walk.
  */
 export function walkedOnCounted(dirs: readonly (string | null | undefined)[], counted: readonly (string | undefined)[]): number {
   const devs = countedDevs(counted);
+  const links = new Map<string, { nlink: number; seen: number }>();
+  const inodes = (d: string): number => {
+    let k = 0;
+    for (const e of readdirSync(d)) {
+      const p = join(d, e);
+      let st;
+      try {
+        st = lstatSync(p);
+      } catch {
+        continue; // gone
+      }
+      if (st.isDirectory()) k += 1 + inodes(p);
+      else if (st.nlink <= 1) k += 1;
+      else {
+        const key = `${st.dev}:${st.ino}`;
+        const r = links.get(key) ?? { nlink: st.nlink, seen: 0 };
+        r.seen += 1;
+        links.set(key, r);
+      }
+    }
+    return k;
+  };
   let n = 0;
-  for (const d of dirs) if (d && existsSync(d) && devs.has(statSync(d).dev)) n += dirUsage(d).files;
+  for (const d of dirs) if (d && existsSync(d) && devs.has(statSync(d).dev)) n += inodes(d);
+  for (const r of links.values()) if (r.seen >= r.nlink) n += 1;
   return n;
 }
 
 /**
- * Files in the worktree folder that no checkout tracks (R1181aa AA1): in each git worktree, its untracked and ignored
- * files (`git status --porcelain --untracked-files=all --ignored`); in any other entry, all of it. A checkout's own
- * files are tracked, so one open at stop (R1181y Y1) adds none; what a shutdown leaves there does. A folder git lists
- * whole (a nested repository, `git init` or a `.git` file in it, which git never enters, or an ignored folder) counts
- * every file under it, not one line (R1181ac AC2).
+ * Files and folders in the worktree folder that no checkout tracks (R1181aa AA1, R1181ac AC2, R1181ae D1). A checkout
+ * is a worktree of the repo (`git worktree list`): in each, every entry on disk (files and folders, as dirUsage counts
+ * them) less the paths it tracks, their folders and its `.git` file, so an untracked or ignored file, an empty folder
+ * and a repository nested in it all count. Any other entry counts whole: a clone left there is no checkout. A
+ * checkout's own files are tracked, so one open at stop (R1181y Y1) adds none; what a shutdown leaves there does.
  */
-export function worktreeLeftovers(wtDir: string): number {
+export function worktreeLeftovers(wtDir: string, repo: string): number {
   if (!existsSync(wtDir)) return 0;
+  const listed = spawnSync('git', ['-C', repo, 'worktree', 'list', '--porcelain'], { encoding: 'utf8' });
+  const checkouts = new Set(listed.status === 0 ? listed.stdout.split('\n').filter((l) => l.startsWith('worktree ')).map((l) => realpathSync(l.slice(9))) : []);
   let n = 0;
   for (const e of readdirSync(wtDir, { withFileTypes: true })) {
     const p = join(wtDir, e.name);
-    if (e.isDirectory() && existsSync(join(p, '.git'))) {
-      const r = spawnSync('git', ['-C', p, 'status', '--porcelain', '--untracked-files=all', '--ignored'], { encoding: 'utf8' });
-      const listed = r.stdout.split('\n').filter((l) => /^(\?\?|!!) /.test(l)).map((l) => l.slice(3).replace(/^"(.*)"$/, '$1'));
-      n += r.status === 0 ? listed.reduce((k, x) => k + (x.endsWith('/') && existsSync(join(p, x)) ? dirUsage(join(p, x)).files + 1 : 1), 0) : dirUsage(p).files;
-    } else n += e.isDirectory() ? dirUsage(p).files + 1 : 1;
+    if (!e.isDirectory()) {
+      n += 1;
+      continue;
+    }
+    const whole = dirUsage(p).files + 1;
+    if (!checkouts.has(realpathSync(p))) {
+      n += whole;
+      continue;
+    }
+    const tracked = spawnSync('git', ['-C', p, 'ls-files', '-z'], { encoding: 'utf8', maxBuffer: 256 * 2 ** 20 });
+    if (tracked.status !== 0) {
+      n += whole;
+      continue;
+    }
+    const paths = new Set<string>();
+    for (const f of tracked.stdout.split('\0').filter(Boolean)) {
+      if (!existsSync(join(p, f))) continue;
+      paths.add(f);
+      for (let d = dirname(f); d !== '.'; d = dirname(d)) paths.add(d);
+    }
+    // Less the checkout's folder itself and its .git file.
+    n += Math.max(0, whole - 1 - paths.size - (existsSync(join(p, '.git')) ? 1 : 0));
   }
   return n;
 }
@@ -1006,7 +1050,7 @@ test('soak: the real coordinator works for a while with stand-in agents; nothing
       worktrees: worktreeCount(f.repo),
       worktreeDirs: entriesIn(wtDir),
       worktreeFiles: existsSync(wtDir) ? dirUsage(wtDir).files : 0,
-      worktreeLeftovers: worktreeLeftovers(wtDir),
+      worktreeLeftovers: worktreeLeftovers(wtDir, f.repo),
       diskBytes: usage.bytes,
       files: usage.files,
       children: kids?.length ?? null,
@@ -1232,7 +1276,7 @@ test("the soak driver's counts read what they claim: failures in a log, worktree
 
 test('the soak driver takes each count from those helpers (#1181 review R1181k D2: a constant in their place passed every test)', () => {
   const src = readFileSync(join(repoRoot, 'test', 'soak.test.ts'), 'utf8');
-  for (const line of ['...failureCounts(f.log),', 'worktrees: worktreeCount(f.repo),', 'worktreeDirs: entriesIn(wtDir),', 'worktreeFiles: existsSync(wtDir) ? dirUsage(wtDir).files : 0,', 'worktreeLeftovers: worktreeLeftovers(wtDir),', "levelWalked: hours > 0 && process.platform === 'linux' ? walkedOnCounted([f.base, process.env.XDG_CONFIG_HOME ? dirname(process.env.XDG_CONFIG_HOME) : null], [f.base, '/var/tmp']) : null,", 'diskBytes: usage.bytes,', 'files: usage.files,', 'children: kids?.length ?? null,', 'childRss: rssOf(kids ?? []),', 'watches: inotifyWatches(kids ?? []),', 'fullRunHeld: slotStatus(f.slotsDir).fullRun ? 1 : 0,', "levelBytes: hours > 0 && process.platform === 'linux' ? levelLessLog(fsLevels([f.base, '/var/tmp']), logBytes) : null,", 'eventsBytes: logBytes,', 'childFds: childFds(kids ?? []),', 'cgroupProcs: cg.procs,', 'cgroupKernelBytes: cg.kernelBytes,', "mqueues: hours > 0 && process.platform === 'linux' ? posixMqueues() : null,", "userKeys: hours > 0 && process.platform === 'linux' ? (userKeys()?.keys ?? null) : null,", "userKeyBytes: hours > 0 && process.platform === 'linux' ? (userKeys()?.bytes ?? null) : null,", "levelFiles: hours > 0 && process.platform === 'linux' ? fsInodes([f.base, '/var/tmp']) : null,", "sysvIpc: hours > 0 && process.platform === 'linux' ? sysvIpcCount() : null,"]) assert.ok(src.includes(`\n      ${line}\n`), line);
+  for (const line of ['...failureCounts(f.log),', 'worktrees: worktreeCount(f.repo),', 'worktreeDirs: entriesIn(wtDir),', 'worktreeFiles: existsSync(wtDir) ? dirUsage(wtDir).files : 0,', 'worktreeLeftovers: worktreeLeftovers(wtDir, f.repo),', "levelWalked: hours > 0 && process.platform === 'linux' ? walkedOnCounted([f.base, process.env.XDG_CONFIG_HOME ? dirname(process.env.XDG_CONFIG_HOME) : null], [f.base, '/var/tmp']) : null,", 'diskBytes: usage.bytes,', 'files: usage.files,', 'children: kids?.length ?? null,', 'childRss: rssOf(kids ?? []),', 'watches: inotifyWatches(kids ?? []),', 'fullRunHeld: slotStatus(f.slotsDir).fullRun ? 1 : 0,', "levelBytes: hours > 0 && process.platform === 'linux' ? levelLessLog(fsLevels([f.base, '/var/tmp']), logBytes) : null,", 'eventsBytes: logBytes,', 'childFds: childFds(kids ?? []),', 'cgroupProcs: cg.procs,', 'cgroupKernelBytes: cg.kernelBytes,', "mqueues: hours > 0 && process.platform === 'linux' ? posixMqueues() : null,", "userKeys: hours > 0 && process.platform === 'linux' ? (userKeys()?.keys ?? null) : null,", "userKeyBytes: hours > 0 && process.platform === 'linux' ? (userKeys()?.bytes ?? null) : null,", "levelFiles: hours > 0 && process.platform === 'linux' ? fsInodes([f.base, '/var/tmp']) : null,", "sysvIpc: hours > 0 && process.platform === 'linux' ? sysvIpcCount() : null,"]) assert.ok(src.includes(`\n      ${line}\n`), line);
   assert.match(src, /\n {4}const kids = childPids\(childMark, seenLeaders, startProcs, hours > 0\);\n {4}const logBytes = statSync\(f\.log\.path\)\.size \+ wal;\n {4}const inside = dirUsage\(f\.base\);\n {4}const outside = usageOutside\(f\.base, kids \?\? \[\]\);\n {4}const usage = \{ bytes: inside\.bytes \+ outside\.bytes \+ deletedOpenBytes\(kids \?\? \[\]\), files: inside\.files \+ outside\.files \};\n/);
   // R1181t D1, D4: the cgroup on a real Linux soak; D3: each sample from the one reader, the last after stop().
   assert.ok(src.includes("\n    const cg = hours > 0 && process.platform === 'linux' ? cgroupLevels() : { procs: null, kernelBytes: null };\n"), 'the cgroup read');
@@ -2073,31 +2117,59 @@ test('soak driver: the worktree folder\'s files no checkout tracks are read, and
     g(repo, 'init', '-q', '-b', 'main');
     writeFileSync(join(repo, 'a.js'), 'x\n');
     writeFileSync(join(repo, '.gitignore'), 'out/\n');
+    // A tracked folder (R1181ae D1: its folder is the checkout's, not a leftover).
+    mkdirSync(join(repo, 'src', 'lib'), { recursive: true });
+    writeFileSync(join(repo, 'src', 'lib', 'b.js'), 'y\n');
     g(repo, 'add', '-A');
     g(repo, '-c', 'user.name=t', '-c', 'user.email=t@example.com', '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'init');
     const wt = join(d, 'wt');
     mkdirSync(wt);
     assert.equal(g(repo, 'worktree', 'add', '-q', join(wt, 'task-1')).status, 0);
-    assert.equal(worktreeLeftovers(wt), 0, "a checkout's own files are tracked");
+    assert.equal(worktreeLeftovers(wt, repo), 0, "a checkout's own files are tracked");
     writeFileSync(join(wt, 'task-1', 'left.txt'), 'x');
     mkdirSync(join(wt, 'task-1', 'out'));
     writeFileSync(join(wt, 'task-1', 'out', 'build.js'), 'x');
-    assert.equal(worktreeLeftovers(wt), 2, 'an untracked and an ignored file');
+    assert.equal(worktreeLeftovers(wt, repo), 3, 'an untracked file, and an ignored folder with its file (R1181ae D1: folders count)');
     mkdirSync(join(wt, 'junk'));
     for (const n of ['1', '2', '3']) writeFileSync(join(wt, 'junk', n), '');
-    assert.equal(worktreeLeftovers(wt), 2 + 4, 'and a folder that is no checkout, whole');
+    assert.equal(worktreeLeftovers(wt, repo), 3 + 4, 'and a folder that is no checkout, whole');
     // R1181ac AC2: a nested repository in a checkout is one `?? dir/` line to git; every file under it counts.
     const nested = join(wt, 'task-1', 'cache');
     mkdirSync(nested);
     g(nested, 'init', '-q');
     for (let i = 0; i < 30; i++) writeFileSync(join(nested, `f${i}`), '');
-    assert.ok(worktreeLeftovers(wt) >= 2 + 4 + 30, `a nested git init folder's files: ${worktreeLeftovers(wt)}`);
+    assert.ok(worktreeLeftovers(wt, repo) >= 3 + 4 + 30, `a nested git init folder's files: ${worktreeLeftovers(wt, repo)}`);
     rmSync(nested, { recursive: true, force: true });
     mkdirSync(nested);
     writeFileSync(join(nested, '.git'), 'gitdir: /nowhere\n');
     for (let i = 0; i < 30; i++) writeFileSync(join(nested, `f${i}`), '');
-    assert.ok(worktreeLeftovers(wt) >= 2 + 4 + 30, `a folder with a .git file: ${worktreeLeftovers(wt)}`);
+    assert.ok(worktreeLeftovers(wt, repo) >= 3 + 4 + 30, `a folder with a .git file: ${worktreeLeftovers(wt, repo)}`);
     rmSync(nested, { recursive: true, force: true });
+    // R1181ae D1: empty folders left in a checkout count; a clone left as an entry is no checkout and counts whole.
+    const before = worktreeLeftovers(wt, repo);
+    for (let i = 0; i < 20; i++) mkdirSync(join(wt, 'task-1', `empty-${i}`));
+    assert.equal(worktreeLeftovers(wt, repo), before + 20, '20 empty folders');
+    for (let i = 0; i < 20; i++) rmSync(join(wt, 'task-1', `empty-${i}`), { recursive: true, force: true });
+    assert.equal(g(d, 'clone', '-q', repo, join(wt, 'scratch')).status, 0);
+    assert.equal(worktreeLeftovers(wt, repo), before + dirUsage(join(wt, 'scratch')).files + 1, 'a clone as an entry: whole');
+    rmSync(join(wt, 'scratch'), { recursive: true, force: true });
+    assert.equal(worktreeLeftovers(wt, repo), before, 'back to before');
+    // R1181ae D2: hard links in a walked folder add paths and no inodes: a link to a file outside the walk counts none,
+    // and two links inside count once.
+    const walked = join(d, 'walked');
+    mkdirSync(walked);
+    writeFileSync(join(walked, 'a'), 'x');
+    const w0 = walkedOnCounted([walked], [walked]);
+    const outside = join(d, 'outside-file');
+    writeFileSync(outside, 'y');
+    for (let i = 0; i < 10; i++) linkSync(outside, join(walked, `l${i}`));
+    assert.equal(walkedOnCounted([walked], [walked]), w0, '10 links to a file outside the walk: no inode inside');
+    linkSync(join(walked, 'a'), join(walked, 'a2'));
+    assert.equal(walkedOnCounted([walked], [walked]), w0, 'a second link inside: the same inode');
+    writeFileSync(join(walked, 'b'), 'z');
+    assert.equal(walkedOnCounted([walked], [walked]), w0 + 1, 'control: a new file is one more');
+    rmSync(walked, { recursive: true, force: true });
+    rmSync(outside, { force: true });
     // AA2: the walked files on a filesystem the inode count reads (this temp dir is counted where it isn't a tmpfs).
     const counted = statfsSync(d).type !== 0x01021994;
     assert.equal(walkedOnCounted([d], [d]), counted ? dirUsage(d).files : 0);
@@ -2183,5 +2255,17 @@ print(k if k > 0 else 'skip %d' % ctypes.get_errno())`, String(process.pid)], { 
       const un = spawnSync('python3', ['-c', `import ctypes, sys; sys.exit(0 if ctypes.CDLL(None, use_errno=True).syscall(250, 9, ${id}, -4) == 0 else 1)`]);
       assert.equal(un.status, 0, 'the test key unlinked from the user keyring');
     }
+  }
+});
+
+test('soak driver (Linux, R1181ae D4): the walked files on a tmpfs are in no inode count, so none are taken out of one', linuxOnly, (t) => {
+  if (!existsSync('/dev/shm') || statfsSync('/dev/shm').type !== 0x01021994) return t.skip('no tmpfs at /dev/shm');
+  const d = mkdtempSync(join('/dev/shm', 'soak-walked-'));
+  try {
+    for (let i = 0; i < 20; i++) writeFileSync(join(d, `f${i}`), '');
+    assert.equal(walkedOnCounted([d], ['/dev/shm']), 0, 'a tmpfs folder: none');
+    assert.equal(walkedOnCounted([d], [tmpdir()]), statfsSync(tmpdir()).type === 0x01021994 ? 0 : 0, 'not on a counted device: none');
+  } finally {
+    rmSync(d, { recursive: true, force: true });
   }
 });
