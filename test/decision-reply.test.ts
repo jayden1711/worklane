@@ -206,3 +206,20 @@ test('R1182ao D2, R1182ap AP1/AP2: every reading of the page, real tags only, al
   assert.equal(finds('see d-12-bbbbbb'), false);
   assert.ok(pageReadings('x').length >= 8, 'four readings, each reversed');
 });
+
+test("the tracker's rendering (body_text) is read too; missing or null is unknown, judged on the body alone", () => {
+  const body = `${c} approve ${ID}\nok`;
+  assert.deepEqual(idsElsewhere(readReply(body), [ID]), [], 'control: the body alone');
+  assert.deepEqual(idsElsewhere(readReply(body, `${c} approve ${ID}\nok`), [ID]), [], 'the slot id once in the rendering: fine');
+  assert.deepEqual(idsElsewhere(readReply(body, `${c} approve ${ID}\nok ${ID}`), [ID]), [ID], 'twice in the rendering');
+  assert.deepEqual(idsElsewhere(readReply(`${c} approve not yet ${ID}`, `${c} approve not yet ${ID}`), [ID]), [ID], 'no slot: once is elsewhere');
+  assert.deepEqual(idsElsewhere(readReply(`${c} approve not yet`, `${c} approve not yet ${ID}`), [ID]), [ID], 'no slot, the id only in the rendering, once: elsewhere');
+  assert.ok(readReply(body, `${c} approve ${ID}\n${c} reject ${ID}`).others.length > 0, 'a second command in the rendering');
+  assert.deepEqual(readReply(body, `${c} approve ${ID}\nok \u00E9`).notAscii, { code: 'U+00E9', line: 2 }, 'not ASCII in the rendering');
+  assert.equal(readReply(body, `${c} approve ${ID}\nok \u2019 \u2014`).notAscii, null, 'the six phone characters are mapped there too');
+  for (const missing of [null, undefined]) {
+    const r = readReply(body, missing);
+    assert.equal(r.rendered, null);
+    assert.deepEqual([r.notAscii, idsElsewhere(r, [ID]), r.others], [null, [], []]);
+  }
+});
