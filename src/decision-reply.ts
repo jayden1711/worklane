@@ -29,8 +29,13 @@ export interface Reply {
   first: CommandLine | null;
   /** The first line holds a character a reply can't (UNSAFE): it answers nothing. */
   unsafe: boolean;
-  /** Every other `/<cli> <word>` in the comment, on any line (a reply is one command: these void it). */
+  /** Every other `/<cli> <word>` in the comment, on any line (a reply is one command: these void it; extra defence). */
   others: CommandLine[];
+  /**
+   * The comment without line 1's id slot (the id right after the option), lower case: as typed, and as the page shows it
+   * (pageText). A live decision id found in either voids the comment (the owner, 2026-11-10, rule (c); idsElsewhere).
+   */
+  rest: { typed: string; shown: string };
 }
 
 /**
@@ -85,6 +90,49 @@ const noteOf = (raw: string) => {
     .trim();
 };
 
+/**
+ * The named HTML entities a page turns into a character a reply's text could use: the ASCII punctuation ones, the
+ * spaces, the six phone characters (then mapped as TYPED maps them) and the ones that print nothing. Letters, digits and
+ * the hyphen-minus have no named entity, so numeric entities (decoded below) cover the rest of an id.
+ */
+const NAMED: Readonly<Record<string, string>> = {
+  excl: '!', quot: '"', num: '#', dollar: '$', percnt: '%', amp: '&', apos: "'", lpar: '(', rpar: ')', ast: '*', midast: '*',
+  plus: '+', comma: ',', period: '.', sol: '/', colon: ':', semi: ';', lt: '<', equals: '=', gt: '>', quest: '?',
+  commat: '@', lsqb: '[', lbrack: '[', bsol: '\\', rsqb: ']', rbrack: ']', hat: '^', lowbar: '_', underbar: '_',
+  grave: '`', diacriticalgrave: '`', lcub: '{', lbrace: '{', verbar: '|', vert: '|', verticalline: '|', rcub: '}',
+  rbrace: '}', tab: '\t', newline: '\n', nbsp: ' ', nonbreakingspace: ' ', ensp: ' ', emsp: ' ', thinsp: ' ',
+  ndash: '-', mdash: '-', lsquo: "'", rsquo: "'", ldquo: '"', rdquo: '"', shy: '', zwj: '', zwnj: '',
+  zerowidthspace: '', nobreak: '', invisibletimes: '', invisiblecomma: '', applyfunction: '', ic: '', it: '', af: '',
+};
+
+/**
+ * Text as a page shows it, for finding an id in it (rule (c)): HTML entities decoded (numeric, and the named ones above),
+ * the six phone characters mapped, HTML comments and tags dropped, characters that print nothing dropped, and markdown's
+ * emphasis, code and escape marks (`* _ ~ \``, `\`) dropped. Lower case.
+ */
+export function pageText(s: string): string {
+  return s
+    .replace(/&#(x[0-9a-f]+|\d+);?/gi, (all, n: string) => {
+      const code = n[0] === 'x' || n[0] === 'X' ? parseInt(n.slice(1), 16) : parseInt(n, 10);
+      return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : all;
+    })
+    .replace(/&([a-z]+);?/gi, (all, n: string) => NAMED[n.toLowerCase()] ?? all)
+    .replace(/[\u2018\u2019\u201C\u201D\u2013\u2014]/g, (ch) => TYPED[ch]!)
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/<[^>]*>/g, '')
+    .replace(/[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu, '')
+    .replace(/[*_~`\\]/g, '')
+    .toLowerCase();
+}
+
+/**
+ * The live decision ids a comment names outside line 1's id slot (rule (c), the owner, 2026-11-10): found in the comment
+ * as typed or as the page shows it. Any one of them voids the comment; that, not the second-command scan, is what makes
+ * sure a comment can't show a second answer to a live decision. The cost: a reply can't name its id twice.
+ */
+export const idsElsewhere = (r: Reply, live: Iterable<string>): string[] =>
+  [...live].map((x) => x.toLowerCase()).filter((x) => r.rest.typed.includes(x) || r.rest.shown.includes(x));
+
 /** The first character in `body` that isn't plain ASCII, and its line. */
 function firstNotAscii(body: string): Reply['notAscii'] {
   const i = body.search(NOT_ASCII);
@@ -107,17 +155,24 @@ export function readReply(typed: string): Reply {
   const others: CommandLine[] = [];
   lines.forEach((raw, i) => {
     let skip = i === at && first !== null; // the first line's own command is `first`, not another
-    for (const o of replyText(raw).matchAll(ANYWHERE)) {
+    // As typed, and as the page shows it (entities, tags and emphasis undone), whichever finds more.
+    const typedHits = [...replyText(raw).matchAll(ANYWHERE)].length;
+    const shownLine = pageText(raw);
+    const scan = [...shownLine.matchAll(ANYWHERE)].length > typedHits ? shownLine : replyText(raw);
+    for (const o of scan.matchAll(ANYWHERE)) {
       if (skip) {
         skip = false;
         continue;
       }
       others.push({ option: o[1]!, ids: idsIn(`${o[1]} ${o[2]}`), note: '', idNext: false });
     }
-    for (const o of replyText(raw).matchAll(SHAPED)) {
+    for (const o of scan.matchAll(SHAPED)) {
       const ids = idsIn(`${o[2]} ${o[3]}`);
       if (o[1] !== BRAND.cli.toLowerCase() && ids.length > 0) others.push({ option: o[2]!, ids, note: '', idNext: false });
     }
   });
-  return { notAscii, ascii: replyText(text), first, unsafe: first !== null && UNSAFE.test(firstRaw), others };
+  // Line 1's id slot: the token right after the option, taken out once; every other place an id appears is "elsewhere".
+  const slotted = first?.idNext ? lines.map((l, i) => (i === at ? l.replace(/^(\s*\S+\s+\S+[ \t]+)\S+/, '$1') : l)) : lines;
+  const restTyped = replyText(slotted.join('\n'));
+  return { notAscii, ascii: replyText(text), first, unsafe: first !== null && UNSAFE.test(firstRaw), others, rest: { typed: restTyped, shown: pageText(slotted.join('\n')) } };
 }

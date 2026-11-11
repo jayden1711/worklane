@@ -9,7 +9,7 @@ import { type DoneWhenList, type Issue } from '../backlog/types.js';
 import { claim, release } from '../claims.js';
 import type { EventPayload } from '../events/types.js';
 import { mayAnswerKind, type Role } from '../dashboard-auth.js';
-import { idsIn, readReply, type CommandLine } from '../decision-reply.js';
+import { idsElsewhere, idsIn, readReply, type CommandLine } from '../decision-reply.js';
 import { defaultRolePrompt, issueBrief } from '../roles.js';
 import { checkedPush } from '../push-check.js';
 import { domainDecision, withAllowedHost, type DomainAnswer, type RefusedRequest } from '../domain-requests.js';
@@ -249,6 +249,9 @@ export abstract class Decisions extends Recovery {
    * - The whole comment must be plain ASCII (printable, tabs, line breaks; the owner, 2026-11-10, after R1182ak/al).
    * - That line answers nothing if it holds any of `` ` < > [ ] ( ) " ' \ & ! ~ $ % ``, if it names no id or two or more, or if
    *   the comment has another `/<cli> <word>` anywhere (a reply is one command). The latest reply that answers wins.
+   * - Rule (c), the owner, 2026-11-10: an open decision's id anywhere else in the comment (as typed, or as the page shows it:
+   *   entities decoded, tags and emphasis dropped) voids it, so a comment can never show a second answer to a live
+   *   decision. The second-command scan stays as extra defence; this is what holds the guarantee.
    * - A comment starting with `[<cli>]` is the coordinator's own and is never a reply.
    * A writer's comment that looks like a reply here but answers nothing says why once (one note per comment), with the
    * open ids to use.
@@ -302,7 +305,9 @@ export abstract class Decisions extends Recovery {
                     ? 'reply_without_id'
                     : !first.idNext
                       ? 'reply_id_not_after_option'
-                      : null;
+                      : idsElsewhere(r, live).length
+                        ? 'reply_id_elsewhere' // rule (c); a more specific note above wins, the answer is refused either way
+                        : null;
       if (!kind) continue;
       const key = `#${n}: reply ${c.id ?? createHash('sha256').update(`${c.author}\n${c.at ?? ''}\n${c.body}`).digest('hex').slice(0, 12)}`;
       if (said.has(key)) continue;
@@ -311,6 +316,7 @@ export abstract class Decisions extends Recovery {
         reply_not_ascii: `has a character outside plain ASCII (${r.notAscii?.code} on line ${r.notAscii?.line}: an accented letter, an emoji or another symbol; curly quotes and en or em dashes are read as plain ones, though the first line takes no quotes)`,
         reply_not_first_line: "has its command somewhere other than the start of the comment's first line, where it is not read",
         reply_unsafe_text: 'has a character a reply can\'t hold on its first line (` < > [ ] ( ) " \' \\ & ! ~ $ %; a curly quote or apostrophe counts as a quote)',
+        reply_id_elsewhere: `names ${idsElsewhere(r, live).slice(0, 3).join(', ')} somewhere other than right after the option on its first line (a reply names an open decision's id once, there: even "approve <id>, as in <id>'s plan" answers nothing)`,
         reply_id_not_after_option: `names ${first?.ids[0]}, but not right after the option (a reply is \`/${BRAND.cli} <option> <id> [note]\`)`,
         reply_more_than_one: `has more than one \`/${BRAND.cli}\` command (a reply is one command, on its first line)`,
         reply_several_ids: `names ${several?.ids.length} decisions (${several?.ids.slice(0, 5).join(', ')})`,
@@ -323,7 +329,7 @@ export abstract class Decisions extends Recovery {
     }
     const id = q.id.toLowerCase();
     const picks = parsed
-      .map(({ c, r }) => ({ c, line: !r.notAscii && r.first && !r.unsafe && r.others.length === 0 && r.first.idNext && r.first.ids.length === 1 && r.first.ids[0] === id && q.options.includes(r.first.option) ? r.first : undefined }))
+      .map(({ c, r }) => ({ c, line: !r.notAscii && r.first && !r.unsafe && idsElsewhere(r, live).length === 0 && r.others.length === 0 && r.first.idNext && r.first.ids.length === 1 && r.first.ids[0] === id && q.options.includes(r.first.option) ? r.first : undefined }))
       .filter((x) => x.line !== undefined);
     for (const r of picks.reverse()) {
       const role = await this.commenterRole(r.c.author);
