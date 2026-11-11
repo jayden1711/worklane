@@ -201,6 +201,27 @@ test("R1184q, R1184s D1: import.meta.url written as a pattern or for...of target
     ['AD3e', `({ url: (\nimport.meta.url) } = { url: ${R} });`],
     ['AB3b a comment between import and .meta', `import/**/.meta.url = ${R};`],
     ['AB3c a comment between import and .meta, spaced', `import /* x */ .meta.url = ${R};`],
+    // R1184af D1: a listed read's string can't span code; D2: a comparison can't hide a delete, ++ or --; D3, R1184ag D2:
+    // a use split over lines with a comment at the split.
+    ['AF1a', `const s = "new URL('"; [import.meta.url] = [r]; const t = "', import.meta.url)";`],
+    ['AF1b', `/* new URL(' */ [import.meta.url] = [r]; //', import.meta.url)`],
+    ['AF1c', `/* new URL(' */ Object.assign(import.meta, { url: r }); //', import.meta.url)`],
+    ['AF1d', `const s = \`new URL('\`; import.meta.url = r; const t = \`', import.meta.url)\`;`],
+    ['AF2a', 'delete import.meta.url !== 0;'],
+    ['AF2b', '++import.meta.url !== 0;'],
+    ['AF2c', '--import.meta.url === 0;'],
+    ['AF2d', 'delete\nimport.meta.url !== 0;'],
+    ['AF3a', `[import //x\n/**/.meta.url] = [${R}];`],
+    ['AF3b', `[import./**/\nmeta.url] = [${R}];`],
+    ['AF3c', `[import /*\n*/ .meta.url] = [${R}];`],
+    ['AF3d', `[import/**/\n.\nmeta.url] = [${R}];`],
+    ['AF3e a line that starts at .meta alone', `.meta.url = ${R};`],
+    ['AF3f a line that starts at meta. alone (its import. on an unchanged line above)', `meta.url = ${R};`],
+    ['AG2a', `import /*\n*/.meta.url = ${R};`],
+    ['AG2b', `import. // the module's own URL\n  meta.url = ${R};`],
+    ['AG2c', `import /**/ .\nmeta.url = ${R};`],
+    ['AG2d', `[import /*\n*/.meta.url] = [${R}];`],
+    ['AG2e', 'const zz = import. // c\n  meta.dirname; void zz;'],
     ['a read outside the list', 'export const here = import.meta.dirname;'],
     ['a require rooted at it (not listed)', 'export const req = createRequire(import.meta.url);'],
     ['a parenthesized read', "export const tail = (import.meta.url) + 'x';"],
@@ -216,6 +237,8 @@ test("R1184q, R1184s D1: import.meta.url written as a pattern or for...of target
           'export const d = dirname(fileURLToPath(import.meta.url));',
           'export const f = new URL(import.meta.url);',
           "export const g = import.meta.url === pathToFileURL(process.argv[1] ?? '').href;",
+          "export function isMain(x: string) { return import.meta.url !== x; }",
+          "if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) process.exitCode = 0;",
           "export const h = fileURLToPath(new URL('./z.ts', import.meta.url));",
         ].join('\n'),
       ),
@@ -346,5 +369,18 @@ test('R1184y Y6a: a line of a generated copy changed without its data waits; cha
   const order = reasons({ 'scripts/x-gate.mjs': drifted, 'scripts/x-gate.tables.json': reordered }, base);
   assert.ok(order.some((x) => x.includes('a generated copy changed without its data')), `Y6a3: ${order.join(' | ')}`);
   // Control: the blank line alone passes.
-  assert.deepEqual(reasons({ 'scripts/x-gate.tables.json': `${data(['auto_merge', 'review'])}\n` }, base), []);
+  assert.deepEqual(reasons({ 'scripts/x-gate.tables.json': `${data(['auto_merge', 'review'])}\n` }, base), []);  // R1184ag D1: the copy turned off by lines around it, so no line of the block changes: in a comment with a weaker
+  // table declared after it (AG1c), or in braces (AG1b), or its use pointed at another name.
+  const whole = copy(['auto_merge', 'review']);
+  const [head, tail] = [whole.slice(0, whole.indexOf('// BEGIN')), whole.slice(whole.indexOf('// BEGIN'))];
+  const [blockText, after] = [tail.slice(0, tail.indexOf('\n', tail.indexOf('// END')) + 1), tail.slice(tail.indexOf('\n', tail.indexOf('// END')) + 1)];
+  const around = (pre: string, post: string, rest = after) => ({ 'scripts/x-gate.mjs': `${head}${pre}${blockText}${post}${rest}` });
+  const ag1c = reasons(around('/*\n', '*/\nconst TABLES = Object.freeze({ POLICY_ONLY: Object.freeze(["review"]) });\n'), base);
+  assert.ok(ag1c.some((x) => x.includes('TABLES is declared 2 times')), `AG1c: ${ag1c.join(' | ')}`);
+  const ag1b = reasons(around('{\n', '}\nconst TABLES = Object.freeze({ POLICY_ONLY: Object.freeze(["review"]) });\n'), base);
+  assert.ok(ag1b.some((x) => x.includes('TABLES is declared 2 times')), `AG1b: ${ag1b.join(' | ')}`);
+  const moved = reasons(around('/*\n', '*/\nconst T2 = Object.freeze({ POLICY_ONLY: Object.freeze(["review"]) });\n', after.replace('TABLES.POLICY_ONLY', 'T2.POLICY_ONLY')), base);
+  assert.ok(moved.some((x) => x.includes("a copy's table named outside its block")), `a use pointed elsewhere: ${moved.join(' | ')}`);
+  // Control: braces around the block alone, no new table and no use changed, pass.
+  assert.deepEqual(reasons(around('{\n', '}\n'), base), []);
 });

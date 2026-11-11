@@ -439,12 +439,14 @@ export const LOADER_CODE: ReadonlySet<string> = new Set(['src/check-tables.ts', 
  * The reads of `import.meta` a line may hold (R1184ae: an allowlist, fail closed, in place of rules that named each way
  * of writing it, which a `!`, an `as`, a `satisfies`, a parenthesis or a line break got past each round). Each is a
  * whole expression that only reads `import.meta.url`: a URL resolved against it from a plain string, its path, the
- * module's own table load, and a comparison with it. A require rooted at it is not listed (R1184ae: the word is one
+ * module's own table load, and a comparison with it. The string is path characters only, so it can't be the ends of
+ * two strings or comments with code between them (R1184af D1); a comparison counts only after a token that can't make
+ * its left side a write, never at a line's start (R1184af D2: `delete import.meta.url !== 0`, `++import.meta.url`). A require rooted at it is not listed (R1184ae: the word is one
  * test/desktop-removed.test.ts LOADER_WORDS keeps out of the modules the backstop runs, this one among them), so such a
  * line waits when it changes.
  */
 const META_READS =
-  /new\s+URL\(\s*(?:(?:'[^'\\\n]*'|"[^"\\\n]*")\s*,\s*)?import\.meta\.url\s*\)|fileURLToPath\(\s*import\.meta\.url\s*\)|tablesOf\(\s*import\.meta\.url\s*\)|import\.meta\.url\s*[!=]==(?!=)/g;
+  /new\s+URL\(\s*(?:(?:'[\w./@-]*'|"[\w./@-]*")\s*,\s*)?import\.meta\.url\s*\)|fileURLToPath\(\s*import\.meta\.url\s*\)|tablesOf\(\s*import\.meta\.url\s*\)|(?<=(?:[(,=?:!&|]|\breturn)\s*)import\.meta\.url\s*[!=]==(?!=)/g;
 
 /**
  * Whether an added line uses `import.meta` other than in one of META_READS (R1184ae): once those reads are taken out,
@@ -454,8 +456,17 @@ const META_READS =
  * the loader (src/check-tables.ts callerScript) refuses a URL that isn't its caller's own file at run time.
  */
 export function metaUse(l: string): boolean {
-  const rest = l.replace(META_READS, ' R ');
-  return /\bimport\b[\s\S]*\bmeta\b/.test(rest) || /\bimport\s*(?:\.\s*(?:meta\b[\s\S]*)?)?$/.test(rest) || /^\s*\.\s*meta\b/.test(rest);
+  // Read twice: as written, and with its comments cut out (R1184af D3, R1184ag D2: `import /*` then `*/.meta.url = …`,
+  // `import. // c` then `meta.url = …`). Cutting can only join what a comment split, so a hit on either reading waits.
+  const bare = l
+    .replace(/\/\*.*?\*\//g, ' ')
+    .replace(/^.*?\*\//, ' ')
+    .replace(/\/\*.*$/, ' ')
+    .replace(/\/\/.*$/, ' ');
+  return [l, bare].some((x) => {
+    const rest = x.replace(META_READS, ' R ');
+    return /\bimport\b[\s\S]*\bmeta\b/.test(rest) || /\bimport\s*(?:\.\s*(?:meta\b[\s\S]*)?)?$/.test(rest) || /^\s*\.?\s*meta\s*\./.test(rest) || /^\s*\.\s*meta\b/.test(rest);
+  });
 }
 
 /**
@@ -544,6 +555,18 @@ export function topLevelParts(l: string): string[] | null {
 
 /** The tables file beside the module or script at `path` (`scripts/push-gate.mjs` → `scripts/push-gate.tables.json`). */
 export const tablesFileFor = (path: string): string => `${path.replace(/\.[cm]?[jt]s$/, '')}.tables.json`;
+
+/** The tables a generated copy in `text` declares: each `const NAME =` (or `export const`) line between its markers. */
+export function copyNames(text: string | null): string[] {
+  return [...copyLines(text)].flatMap((l) => /^(?:export\s+)?const\s+([A-Za-z_$][\w$]*)\s*=/.exec(l)?.[1] ?? []);
+}
+
+/** How many lines of `text` declare, import or assign `name` (R1184ag D1, main's "declared N times"). */
+export function declarations(text: string, name: string): number {
+  const n = name.replace(/\$/g, '\\$');
+  const decl = new RegExp(`(?<![\\w$])(?:const|let|var|function|class)\\s+${n}(?![\\w$])|(?<![\\w$])import\\b[^;]*[{,\\s]${n}(?![\\w$])|(?<![\\w$.])${n}\\s*=(?![=>])`);
+  return text.split('\n').filter((l) => decl.test(l)).length;
+}
 
 /** The lines of `text` between a generated copy's `// BEGIN tables from ` and `// END tables from ` markers. */
 export function copyLines(text: string | null): Set<string> {
@@ -1317,6 +1340,31 @@ function findings(i: WeakeningInput): Found {
     }
     for (const l of f.removedLines ?? []) if (was.has(l)) hit('table-shrunk', f.path, `a generated copy changed without its data: ${l.trim().slice(0, 120)}`);
     for (const l of f.addedLines ?? []) if (now.has(l)) hit('table-shrunk', f.path, `a generated copy changed without its data: ${l.trim().slice(0, 120)}`);
+  }
+  // R1184ag D1: a copy turned off by lines around it (the block in a comment or braces, a weaker table declared after
+  // it), so no line of the block changes. Each table the base's copy declares is declared once after the change, as
+  // main held for its marked tables ("declared N times"); and a changed line outside the block that names one of the
+  // copy's tables (a use pointed elsewhere, a second declaration) waits.
+  for (const f of i.files) {
+    if (!MARKABLE.test(f.path) || !i.tablesFiles?.has(tablesFileFor(f.path)) || isTest(f.path) || !holds(f.path, i.scope)) continue;
+    let b: string | null;
+    let a: string | null;
+    try {
+      [b, a] = [i.before(f.path), i.after(f.path)];
+    } catch (e) {
+      hit('unreadable', f.path, String((e as Error).message ?? e));
+      continue;
+    }
+    const names = [...new Set([...copyNames(b), ...copyNames(a)])];
+    if (!names.length) continue;
+    const [was, now] = [copyLines(b), copyLines(a)];
+    for (const name of copyNames(b)) {
+      const n = a === null ? 0 : declarations(a, name);
+      if (n !== 1) hit('table-shrunk', f.path, `${name} is declared ${n} times`);
+    }
+    const named = new RegExp(`(?<![\\w$])(?:${names.join('|')})(?![\\w$])`);
+    for (const l of f.removedLines ?? []) if (!was.has(l) && named.test(l)) hit('table-used', f.path, `a copy's table named outside its block: ${l.trim().slice(0, 120)}`);
+    for (const l of f.addedLines ?? []) if (!now.has(l) && named.test(l)) hit('table-used', f.path, `a copy's table named outside its block: ${l.trim().slice(0, 120)}`);
   }
 
   // The data tables (#941), compared before and after as parsed data.
