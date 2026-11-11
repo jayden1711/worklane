@@ -556,6 +556,95 @@ export function topLevelParts(l: string): string[] | null {
 /** The tables file beside the module or script at `path` (`scripts/push-gate.mjs` → `scripts/push-gate.tables.json`). */
 export const tablesFileFor = (path: string): string => `${path.replace(/\.[cm]?[jt]s$/, '')}.tables.json`;
 
+/** `s` with identifier escapes undone (`A`, `\u{41}` → `A`), so a name written with them is the same name (R1184ah D1). */
+export const unescapeIds = (s: string): string =>
+  s.replace(/\\u\{([0-9a-fA-F]{1,6})\}|\\u([0-9a-fA-F]{4})/g, (m, a: string | undefined, b: string | undefined) => {
+    const n = parseInt(a ?? b ?? '', 16);
+    return n <= 0x10ffff ? String.fromCodePoint(n) : m;
+  });
+
+/**
+ * A text's code, for the copy rules (R1184ai D2): comments, strings and templates blanked (line breaks kept), with
+ * where each line starts ('code', 'comment' or 'string') and the brace depth there. `sure` is false when the reading
+ * may be wrong: a template holding `${`, a string not closed on its line, or a `/` in code (a regexp or a division,
+ * which a quote or a brace after it could be read through). The caller fails closed on it.
+ */
+export function copyCodeOf(text: string): { code: string; starts: { state: 'code' | 'comment' | 'string'; depth: number }[]; slash: Set<number>; sure: boolean } {
+  let out = '';
+  let state: 'code' | 'comment' | 'string' = 'code';
+  let depth = 0;
+  let line = 0;
+  let sure = true;
+  const slash = new Set<number>();
+  const starts: { state: 'code' | 'comment' | 'string'; depth: number }[] = [{ state, depth }];
+  const blank = (c: string) => (c === '\n' ? '\n' : ' ');
+  for (let i = 0; i < text.length; ) {
+    const c = text[i]!;
+    if (c === '\n') {
+      out += '\n';
+      line++;
+      starts.push({ state, depth });
+      i++;
+      continue;
+    }
+    if (state === 'comment') {
+      if (text.startsWith('*/', i)) {
+        state = 'code';
+        out += '  ';
+        i += 2;
+      } else {
+        out += ' ';
+        i++;
+      }
+      continue;
+    }
+    if (text.startsWith('//', i)) {
+      while (i < text.length && text[i] !== '\n') {
+        out += ' ';
+        i++;
+      }
+      continue;
+    }
+    if (text.startsWith('/*', i)) {
+      state = 'comment';
+      out += '  ';
+      i += 2;
+      continue;
+    }
+    if (c === "'" || c === '"') {
+      let j = i + 1;
+      while (j < text.length && text[j] !== c && text[j] !== '\n') j += text[j] === '\\' ? 2 : 1;
+      if (text[j] !== c) sure = false;
+      for (let k = i; k <= Math.min(j, text.length - 1); k++) out += blank(text[k]!);
+      for (let k = i; k <= Math.min(j, text.length - 1); k++) if (text[k] === '\n') (line++, starts.push({ state: 'string', depth }));
+      i = j + 1;
+      continue;
+    }
+    if (c === '`') {
+      let j = i + 1;
+      while (j < text.length && text[j] !== '`') {
+        if (text.startsWith('${', j)) sure = false;
+        j += text[j] === '\\' ? 2 : 1;
+      }
+      for (let k = i; k <= Math.min(j, text.length - 1); k++) {
+        out += blank(text[k]!);
+        if (text[k] === '\n' && k > i) (line++, starts.push({ state: 'string', depth }));
+      }
+      i = j + 1;
+      continue;
+    }
+    if (c === '/') slash.add(line);
+    if (c === '{') depth++;
+    else if (c === '}') depth--;
+    out += c;
+    i++;
+  }
+  return { code: out, starts, slash, sure };
+}
+
+/** A global object reached, `with`, eval or Function (R1184ah D1: a weaker table bound where a copy's name resolves). */
+const GLOBAL_REACH = /(?<![\w$.])(?:globalThis|global|window|self)(?![\w$])|(?<![\w$.])with\s*\(|(?<![\w$.])(?:eval|Function)\s*\(/;
+
 /** The tables a generated copy in `text` declares: each `const NAME =` (or `export const`) line between its markers. */
 export function copyNames(text: string | null): string[] {
   return [...copyLines(text)].flatMap((l) => /^(?:export\s+)?const\s+([A-Za-z_$][\w$]*)\s*=/.exec(l)?.[1] ?? []);
@@ -563,6 +652,8 @@ export function copyNames(text: string | null): string[] {
 
 /** How many lines of `text` declare, import or assign `name` (R1184ag D1, main's "declared N times"). */
 export function declarations(text: string, name: string): number {
+  // In code only (R1184ai D2: a block in a comment is no declaration), names unescaped (R1184ah D1).
+  text = copyCodeOf(unescapeIds(text)).code;
   const n = name.replace(/\$/g, '\\$');
   const decl = new RegExp(`(?<![\\w$])(?:const|let|var|function|class)\\s+${n}(?![\\w$])|(?<![\\w$])import\\b[^;]*[{,\\s]${n}(?![\\w$])|(?<![\\w$.])${n}\\s*=(?![=>])`);
   return text.split('\n').filter((l) => decl.test(l)).length;
@@ -1363,8 +1454,29 @@ function findings(i: WeakeningInput): Found {
       if (n !== 1) hit('table-shrunk', f.path, `${name} is declared ${n} times`);
     }
     const named = new RegExp(`(?<![\\w$])(?:${names.join('|')})(?![\\w$])`);
-    for (const l of f.removedLines ?? []) if (!was.has(l) && named.test(l)) hit('table-used', f.path, `a copy's table named outside its block: ${l.trim().slice(0, 120)}`);
-    for (const l of f.addedLines ?? []) if (!now.has(l) && named.test(l)) hit('table-used', f.path, `a copy's table named outside its block: ${l.trim().slice(0, 120)}`);
+    // R1184ah D1, R1184ai D1: a name written with escapes is the same name; a global, `with`, eval or Function can
+    // answer a name the block no longer binds, so a changed line outside the block that uses one waits.
+    const outside = (l: string) => named.test(unescapeIds(l)) || GLOBAL_REACH.test(unescapeIds(l));
+    for (const l of f.removedLines ?? []) if (!was.has(l) && outside(l)) hit('table-used', f.path, `a copy's table named, or a global reached, outside its block: ${l.trim().slice(0, 120)}`);
+    for (const l of f.addedLines ?? []) if (!now.has(l) && outside(l)) hit('table-used', f.path, `a copy's table named, or a global reached, outside its block: ${l.trim().slice(0, 120)}`);
+    // R1184ai D2: the block is top-level code at the head as in the base (not put in a comment, a string or braces).
+    // Read fail closed: a changed line before the block that holds a `/` in code, or a text the reading isn't sure of,
+    // waits too.
+    if (b !== null && a !== null) {
+      const at = (text: string) => text.split('\n').findIndex((l) => l.startsWith('// BEGIN tables from '));
+      const [kb, ka] = [at(b), at(a)];
+      // Only the text before the block decides where it stands, so only that is read.
+      const prefix = (text: string, k: number) => unescapeIds(text.split('\n').slice(0, k + 1).join('\n'));
+      const [cb, ca] = [copyCodeOf(prefix(b, kb)), copyCodeOf(prefix(a, ka))];
+      const same = kb >= 0 && ka >= 0 && JSON.stringify(cb.starts[kb]) === JSON.stringify(ca.starts[ka]);
+      const before = a.split('\n').slice(0, Math.max(ka, 0));
+      const changed = (k: number) => (f.addedLines ?? []).includes(before[k]!);
+      const removedBefore = (f.removedLines ?? []).some((l) => b.split('\n').slice(0, Math.max(kb, 0)).includes(l) && !before.includes(l));
+      // Unsure of the head's reading, or a changed line before the block holding a `/` in code, or (where even the
+      // base's reading isn't sure) any changed line before it: it waits.
+      const unsure = !ca.sure || before.some((_, k) => changed(k) && ca.slash.has(k)) || (!cb.sure && (before.some((_, k) => changed(k)) || removedBefore));
+      if (!same || unsure) hit('table-shrunk', f.path, "the copy's block is not read as top-level code, as it is in the base");
+    }
   }
 
   // The data tables (#941), compared before and after as parsed data.

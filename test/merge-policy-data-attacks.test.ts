@@ -376,11 +376,29 @@ test('R1184y Y6a: a line of a generated copy changed without its data waits; cha
   const [blockText, after] = [tail.slice(0, tail.indexOf('\n', tail.indexOf('// END')) + 1), tail.slice(tail.indexOf('\n', tail.indexOf('// END')) + 1)];
   const around = (pre: string, post: string, rest = after) => ({ 'scripts/x-gate.mjs': `${head}${pre}${blockText}${post}${rest}` });
   const ag1c = reasons(around('/*\n', '*/\nconst TABLES = Object.freeze({ POLICY_ONLY: Object.freeze(["review"]) });\n'), base);
-  assert.ok(ag1c.some((x) => x.includes('TABLES is declared 2 times')), `AG1c: ${ag1c.join(' | ')}`);
+  assert.ok(ag1c.some((x) => x.includes('TABLES is declared') || x.includes('not read as top-level code')), `AG1c: ${ag1c.join(' | ')}`);
   const ag1b = reasons(around('{\n', '}\nconst TABLES = Object.freeze({ POLICY_ONLY: Object.freeze(["review"]) });\n'), base);
-  assert.ok(ag1b.some((x) => x.includes('TABLES is declared 2 times')), `AG1b: ${ag1b.join(' | ')}`);
+  assert.ok(ag1b.some((x) => x.includes('TABLES is declared') || x.includes('not read as top-level code')), `AG1b: ${ag1b.join(' | ')}`);
   const moved = reasons(around('/*\n', '*/\nconst T2 = Object.freeze({ POLICY_ONLY: Object.freeze(["review"]) });\n', after.replace('TABLES.POLICY_ONLY', 'T2.POLICY_ONLY')), base);
-  assert.ok(moved.some((x) => x.includes("a copy's table named outside its block")), `a use pointed elsewhere: ${moved.join(' | ')}`);
-  // Control: braces around the block alone, no new table and no use changed, pass.
-  assert.deepEqual(reasons(around('{\n', '}\n'), base), []);
+  assert.ok(moved.some((x) => x.includes("a copy's table named, or a global reached, outside its block")), `a use pointed elsewhere: ${moved.join(' | ')}`);
+  // R1184ah D1, R1184ai D1-D2: the name written with an escape, a global, Function, `with`, a shadow in a function, or
+  // the block left in braces or a comment for a global set elsewhere to answer.
+  const weak = 'Object.freeze({ POLICY_ONLY: Object.freeze(["review"]) })';
+  const held: [string, Record<string, string>][] = [
+    ['AH1a braces, then the name again', around('{\n', `}\nconst TABLES = ${weak};\n`)],
+    ['AH1b a comment, then an escaped name', around('/*\n', `*/\nconst \\u0054ABLES = ${weak};\n`)],
+    ['AH1c braces, then a computed global', around('{\n', `}\nglobalThis['TAB' + 'LES'] = ${weak};\n`)],
+    ['AH1d braces, then Object.assign(globalThis, …)', around('{\n', `}\nObject.assign(globalThis, { TABLES: ${weak} });\n`)],
+    ['AH1f a comment, then an escaped let over two lines', around('/*\n', `*/\nlet \\u{54}ABLES\n= ${weak};\n`)],
+    ['AH1g braces, then Function', around('{\n', `}\nFunction('TAB' + 'LES = 1')();\n`)],
+    ['AI1d a shadow in a function, escaped, its use escaped too', around('', '', `${after}export const Q = (() => { const \\u0054ABLES = { POLICY_ONLY: [] }; return \\u0054ABLES.POLICY_ONLY; })();\n`)],
+    ['AI2 braces alone', around('{\n', '}\n')],
+    ['AI2 a comment alone', around('/*\n', '*/\n')],
+    ['a with statement', around('', '', `with (x) {}\n${after}`)],
+    ['a global reached after the block, the block intact', around('', '', `${after}globalThis['TAB' + 'LES'] = ${weak};\n`)],
+    ['Function after the block, the block intact', around('', '', `${after}Function('return 1')();\n`)],
+  ];
+  for (const [label, files] of held) assert.ok(reasons(files, base).length > 0, label);
+  // Control: an unrelated line after the block, naming no table and no global, passes.
+  assert.deepEqual(reasons(around('', '', `${after}export const Q = 2;\n`), base), []);
 });
