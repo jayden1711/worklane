@@ -266,6 +266,11 @@ export function shellFileOf(w: readonly string[]): string | null {
     const t = w[i]!;
     // Redirections, anywhere after bash (R1228ao D1, R1228an D2: `bash -s -- a < f`, `bash -- < f`): read past, and a
     // file on stdin kept.
+    // A here-document or here-string (R1228aq D3: `bash << EOF`, `bash <<< "$x"`): its word is no file.
+    if (/^\d*<<[-<]?$/.test(t)) {
+      i++;
+      continue;
+    }
     if (/^\d*<</.test(t)) continue;
     if (/^\d*<$/.test(t)) {
       stdin = w[++i] ?? null;
@@ -338,18 +343,24 @@ const unread = (c: string) => `a shell file the download lint doesn't read (put 
  */
 function unreadShellFile(l: string, o: { wsFromEnvFile?: boolean; anchored?: boolean; name?: string } = {}): string | null {
   const ws = /^\$\{?(?:GITHUB_WORKSPACE|ws)\}?\//;
-  for (const c of commands(l)) {
-    const first = (words(c)[0] ?? '').replace(/^[@+-]+/, '');
+  for (const raw of commands(l)) {
+    // R1228as D2: `${{ github.workspace }}` is the checkout's root, as $GITHUB_WORKSPACE. R1228as D4: `bash<file`.
+    // R1228aq D1: a command opening with `(`, `{` or `!` before its program.
+    const c = raw.replace(/\$\{\{\s*github\.workspace\s*\}\}/g, '$GITHUB_WORKSPACE').replace(/(^|[\s;&|(])((?:\S*\/)?(?:ba)?sh)(<)/g, '$1$2 $3').replace(/^\s*(?:[({!]\s*)+/, '');
+    // R1228as D3: the program, past `NAME=value` assignments.
+    const w0 = words(c);
+    const first = (w0.find((x) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(x)) ?? '').replace(/^[@+-]+/, '');
     if (/^(?:\S*\/)?(?:shellcheck|shfmt)$/.test(first)) continue;
-    const anchored = o.anchored !== false && /^(?:\S*\/)?(?:bash|sh)$/.test(first) && c.trim().startsWith(words(c)[0]!);
+    const anchored = o.anchored !== false && /^(?:\S*\/)?(?:bash|sh)$/.test(first) && c.trim().startsWith(w0[0]!);
     if (anchored) {
-      const file = shellFileOf(words(c));
+      const file = shellFileOf(w0);
       if (file !== null) {
         const fromWs = WS_ENV_ROOT.test(file) && !!o.wsFromEnvFile;
         if (!fromWs && !(SHELL_FILE_ROOT.test(file) && !/(^|\/)\.\.(\/|$)/.test(file))) return unread(c);
       }
     }
-    const tokens = c.replace(/["']/g, '').split(/[\s()`{}]+/).filter(Boolean);
+    // R1228aq D2: a `;`, `&&` or `|` inside quotes with no space around it splits too (`sh -c 'x;bash tools/get'`).
+    const tokens = c.replace(/["']/g, '').split(/[\s()`{};&|]+/).filter(Boolean);
     for (let i = anchored ? 1 : 0; i < tokens.length; i++) {
       const word = tokens[i]!.replace(/^[@+-]+/, '');
       if (!/^(?:\S*\/)?(?:bash|sh)$/.test(word)) continue;
@@ -738,8 +749,10 @@ export function fileDownloadProblems(rel: string, text: string, probes: string[]
   // R1228ak D2: a package.json script, a Makefile recipe or a shell script running an unread shell file is refused, as
   // a workflow run is. A Dockerfile's RUN runs paths inside the image (a COPY's target), which the lint can't map: a
   // stated limit.
+  const cdSkipped = new RegExp(`(^|[\\s;&|(])cd\\s+["']?(?:[^\\s;&|"']*/)?(?:${[...SCAN_SKIP].map((x) => x.replace('.', '\\.')).join('|')})(/|["'\\s;&|]|$)`, 'm').test(t);
   if (!DOCKERFILE.test(n)) for (const l of logicalLines(t)) {
-    const why = /^\s*#/.test(l) ? null : unreadShellFile(l, { anchored: false, name: rel });
+    // R1228as D1: a file that `cd`s into a folder the walk skips runs its relative .sh from there: no sibling rule.
+    const why = /^\s*#/.test(l) ? null : unreadShellFile(l, cdSkipped ? { anchored: false } : { anchored: false, name: rel });
     if (why) problems.push(why);
   }
   const r = scriptProblems(t, probes);
@@ -1580,6 +1593,23 @@ test('R1228an, R1228ao: a command starting with bash anchored at the root again;
   assert.deepEqual(fileDownloadProblems('scripts/ci/a.sh', 'bash b.sh\nbash ../setup/c.sh\n').problems, [], 'read siblings kept');
 });
 
+test('R1228aq, R1228as: an opening ( { ! keeps the anchoring; unspaced ; && inside quotes split; a spaced here-doc is no file; a cd into a skipped folder ends the sibling rule; ${{ github.workspace }} is the root; an assignment before shellcheck; bash<file', () => {
+  const refused = (c: string) => /a shell file the download lint doesn't read/.test(runProblems(c).join());
+  for (const c of ['( bash "$SCRIPT" )', '{ bash $GET; }', '! bash "$X"', '(bash tools/get)']) assert.ok(refused(c), `aq D1 refused: ${c}`);
+  for (const c of ["sh -c 'x;bash tools/get'", 'sh -c "a&&bash tools/get"', "sh -c 'a|bash tools/get'"]) assert.ok(refused(c), `aq D2 refused: ${c}`);
+  for (const c of ['bash << EOF', 'bash <<- EOF', 'bash <<< "$x"']) assert.ok(!refused(c), `aq D3 kept: ${c}`);
+  for (const c of ['bash "${{ github.workspace }}/tools/get"', 'sudo bash ${{ github.workspace }}/tools/get']) assert.ok(refused(c), `as D2 refused: ${c}`);
+  for (const c of ['bash "${{ github.workspace }}/scripts/ci/x.sh"', 'bash ${{github.workspace}}/scripts/ci/x.sh']) assert.ok(!refused(c), `as D2 kept: ${c}`);
+  assert.ok(!refused('SHELLCHECK_OPTS=-x shellcheck -s bash test/fixtures/x.sh'), 'as D3 kept');
+  assert.ok(refused('bash<tools/get'), 'as D4 refused');
+  assert.ok(!refused('bash<scripts/ci/x'), 'as D4 kept');
+  // as D1: a cd into a folder the walk skips, then a relative .sh.
+  assert.match(fileDownloadProblems('package.json', JSON.stringify({ scripts: { get: 'cd node_modules/x && bash get.sh' } })).problems.join(), /a shell file/);
+  assert.match(fileDownloadProblems('scripts/ci/a.sh', 'cd .claude/hooks\nbash get.sh\n').problems.join(), /a shell file/);
+  assert.match(fileDownloadProblems('tools.mk', 'x:\n\tcd dist && bash get.sh\n').problems.join(), /a shell file/);
+  assert.deepEqual(fileDownloadProblems('scripts/ci/a.sh', 'cd "$(dirname "$0")"\nbash b.sh\n').problems, [], 'a cd elsewhere: the sibling rule holds');
+});
+
 // Limits (owner decision (c): stated, not closed; the helper's digest check holds for each download it handles):
 // - What the lint reads (R1228ai D1, closing R1228i L9-L11; R1228aj, R1228ak): workflow and action YAML, a shell
 //   script anywhere, every file under scripts/ whatever its name (a pinned URL, prose in a .md aside; the retry rule in
@@ -1598,8 +1628,13 @@ test('R1228an, R1228ao: a command starting with bash anchored at the root again;
 //   "run bash tools/x.sh") is refused; reword it or name the file another way. Not seen: elsewhere, a path that is
 //   absolute (an installed copy, `/opt/<engine>/current/scripts/…`) or built from a variable (`"$here/x.sh"`), which
 //   can't be mapped to the checkout; elsewhere, a bare name with no `/` and no `.sh` (`sudo bash get`); a file piped in
-//   (`cat tools/get | bash`); a Dockerfile RUN running a path inside the image (a COPY's target); and a file elsewhere
-//   that a workflow runs another way.
+//   (`cat tools/get | bash`); a Dockerfile RUN running a path inside the image (a COPY's target); a file elsewhere
+//   that a workflow runs another way; a `cd` into a folder by a variable or built name before a relative .sh in a read
+//   file (only a literal `cd` into a folder the walk skips ends the sibling rule, R1228as D1); a GitHub expression
+//   other than `${{ github.workspace }}` before a path (`${{ env.ROOT }}/x.sh`: a variable, so outside a command that
+//   starts with bash, a stated limit); and a shell keyword or builtin running a file we don't list (`eval`, `exec`
+//   after a redirection). This lint is a hint against accidents (R1228aq: round ~20 of new shell shapes); the
+//   helper's digest check is the guarantee.
 // - A download that never names a URL the lint knows (DOWNLOAD), through a tool it doesn't know (python, node, perl, a
 //   compiled binary, an action not in USES_ALLOWED once allowed: a node or Python file's own download), or built from
 //   pieces at run time, isn't seen.
