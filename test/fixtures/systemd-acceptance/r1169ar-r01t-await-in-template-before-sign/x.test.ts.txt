@@ -1,0 +1,20 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { setTimeout as delay } from 'node:timers/promises';
+import { EventEmitter, once } from 'node:events';
+// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.
+const VM = true;
+
+import { execSync } from 'node:child_process';
+class NoSudo extends Error {}
+const sudoPrefix = async () => { await delay(1); if (VM) throw new NoSudo('no sudo here'); return 'sudo -n'; };
+test('the runner unit is active under the real service manager', async (t) => {
+  const check = async () => {
+    assert.equal(execSync(`${await sudoPrefix()} systemctl is-active worklane-runner.service || true`, { encoding: 'utf8' }).trim(), 'never-this');
+  };
+  await check().catch((e) => {
+    assert.ok(e instanceof NoSudo, e);
+    t.diagnostic(e.message);
+  });
+});

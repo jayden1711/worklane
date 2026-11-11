@@ -1521,5 +1521,61 @@
   "r1169ap-p06-throw-caught-locally": [
     2,
     "'s throw leaves before its function's end"
+  ],
+  "r1169aq-q01-await-in-declaration-list": [
+    1,
+    "holding systemd's sign, never ran"
+  ],
+  "r1169aq-q02-await-parenthesized-member": [
+    1,
+    "holding systemd's sign, never ran"
+  ],
+  "r1169aq-q03-await-as-argument": [
+    1,
+    "holding systemd's sign, never ran"
+  ],
+  "r1169aq-q04-await-in-test-fn-caught-by-assert-rejects": [
+    1,
+    "holding systemd's sign, never ran"
+  ],
+  "r1169ar-r01-await-in-sign-call-args": [
+    2,
+    "holds systemd's sign and awaits after it in the same statement"
+  ],
+  "r1169ar-fp08-await-resolves-after-sign": [
+    2,
+    "holds systemd's sign and awaits after it in the same statement"
+  ],
+  "r1169ar-r01t-await-in-template-before-sign": [
+    1,
+    "holding systemd's sign, never ran"
+  ],
+  "r1169ar-r01p-call-throws-in-sign-call-args-plain": [
+    0,
+    "^$"
+  ],
+  "r1169ar-r03w-member-write-throws": [
+    0,
+    "^$"
+  ],
+  "r1169ar-r03s-spread-undefined": [
+    0,
+    "^$"
+  ],
+  "r1169ar-fp03-awaited-loop-then-sign": [
+    0,
+    "^$"
+  ],
+  "r1169ar-fp04-caught-rejection-earlier": [
+    0,
+    "^$"
+  ],
+  "r1169ar-fp06-try-await-rejected-caught-earlier": [
+    0,
+    "^$"
+  ],
+  "r1169ar-fp09-branch-not-taken-after-sign": [
+    0,
+    "^$"
   ]
 }

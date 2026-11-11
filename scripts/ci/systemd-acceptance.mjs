@@ -111,13 +111,16 @@
 // one rule, not per shape: in the test's function, each subtest's and every function inside them, any `return`,
 // `throw`, `break` or `continue`, labeled or not, that isn't its function's last statement, but `return <ctx>.skip(…)`
 // or `.todo(…)` whose `<ctx>` the checker binds to a parameter of a function around it. And at run time (R1169ap F3), a
-// sign also reads as never run when a count-0 range starts at the end of an earlier statement in a block around it:
-// the continuation after a jump there, a rejected `await` included, wherever V8 ended that range.
+// sign also reads as never run when a count-0 range starts at the end of an earlier statement in a block around it,
+// or at the end of an `await` before it in its own function (R1169aq D1): the continuation after a jump there or a
+// rejected await, wherever V8 ended that range. A statement that holds the sign and awaits after it is refused
+// (R1169ar D1: a rejection there leaves no range to place).
 // Named limits of that check, each measured on real block coverage (R1169ac-ap; the r1169ah-block-* fixtures):
-// - a call, a member read or a destructuring that throws before the sign (R1169ap D4), when something other than a
-//   `try` around the sign takes the throw without a jump of its own (a caller's try, assert.throws/rejects, a promise's
-//   catch, Promise.allSettled, an unawaited Promise): V8 starts no new count after it, so the rest of its block reads
-//   as run;
+// - any expression that throws (a call, a member read or write, a destructuring, a spread, an operator) before the
+//   systemd work runs (before the sign, or after it in the sign's own statement, as an argument of the call that holds
+//   it: R1169ap D4, R1169ar D2), when something other than a `try` around the sign takes the throw without a jump of
+//   its own (a caller's try, assert.throws/rejects, a promise's catch, Promise.allSettled, an unawaited Promise): V8
+//   starts no new count after it, so the rest of its block reads as run;
 // - a generator's body (`function*`, `async function*`) when the generator is made but never iterated;
 // - one function run for more than one test or subtest (a loop, a helper that registers, one function given to two
 //   subtests) shares its counts: a sign in a branch only some of its runs take reads as run (an early return in any
@@ -1659,10 +1662,27 @@ export function mustRun(ts, path, text, line, column) {
         // range that starts at one is the continuation after a jump there (a return, a throw, a rejected await): the
         // sign after it never ran, wherever V8 ended that range.
         const after = [];
+        let stmt = null;
         for (let x = n; x.parent && x !== fn; x = x.parent) {
           const list = ts.isBlock(x.parent) || ts.isCaseClause(x.parent) || ts.isDefaultClause(x.parent) ? x.parent.statements : null;
           if (list) for (const st of list) if (st.end <= x.pos) after.push(st.end);
+          if (list && !stmt) stmt = x;
         }
+        // R1169aq D1: and the end of every `await` before it in its own function (V8 starts the continuation of a
+        // rejected await at the await's end, which is a statement's end only when the await ends its statement).
+        let own = n.parent;
+        while (own && !ts.isFunctionLike(own)) own = own.parent;
+        const awaits = (x) => {
+          if (x !== own && ts.isFunctionLike(x)) return;
+          if (ts.isAwaitExpression(x)) {
+            if (x.end <= n.getStart(sf)) after.push(x.end);
+            // R1169ar D1: one after the sign, in the sign's own statement: a rejection there skips the rest of that
+            // statement with no range F3 can place. Refused (0 picked tests have one).
+            else if (stmt && x.pos >= n.end && x.end <= stmt.end) out.refused ??= `line ${lineOf(n)} holds systemd's sign and awaits after it in the same statement (a rejection there leaves the statement with no count of its own): await it in a statement of its own first`;
+          }
+          ts.forEachChild(x, awaits);
+        };
+        if (own?.body) awaits(own.body);
         out.sign.push({ ...at(n), after });
         // Where V8's block coverage counts the sign as run though it wasn't (measured, R1169ag/ah): after a call
         // that throws in a try whose catch takes it (V8 starts no counter after a call), and in the arguments of an
