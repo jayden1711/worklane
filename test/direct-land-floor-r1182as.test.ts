@@ -195,7 +195,7 @@ const plain: [string, (id: string) => string][] = [
 for (const [name, extra] of plain) {
   // changed by the character rule (R1182as/at): the entries holding ` < > $ & ~ (an autolink, an email autolink, a code span, a comparison, a quote, a tilde)
   // answered before; they now void with reply_markup, the rule's stated cost. The rest still answer.
-  const refused = /[`<>$&~]/.test(extra('d-1-x'));
+  const refused = /[`<>$&~]|#\d/.test(extra('d-1-x')); // changed by R1182au/av (no issue or PR reference anywhere; the look-alike scan after punctuation): '#123' now voids too
   test(`FV: ${name} ${refused ? 'voids now (reply_markup; was an answer)' : 'answers'}`, async () => {
     const { f, q } = await landT((id) => `/worklane approve ${id}\n\n${extra(id)}`, (id) => `/worklane approve ${id}\n${extra(id).replace(/[`#>|-]/g, '')}`);
     if (refused) {

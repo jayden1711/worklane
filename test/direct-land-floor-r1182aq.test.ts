@@ -121,8 +121,9 @@ test('AQ3: a reply with a quote, a mention, a markdown link, a bare URL, a code 
   );
   assert.deepEqual([answered(f).length, queued(f), kinds(f)], [0, 0, ['reply_markup']]);
   const ok = await landWith(
-    (id) => `/worklane approve ${id} ok to land\n\nThanks @example-writer, see [the run](https://github.com/o/r/actions/runs/1) and https://github.com/o/r/pull/2.\n\n- [x] checked the logs`,
-    (id) => `/worklane approve ${id} ok to land\nThanks @example-writer, see the run and #2.\n\nchecked the logs`,
+    // changed by R1182au/av (no issue or PR reference anywhere; the look-alike scan after punctuation): the PR link (pull/2) and the task-list item now void; without them the reply answers.
+    (id) => `/worklane approve ${id} ok to land\n\nThanks @example-writer, see [the run](https://github.com/o/r/actions/runs/1).\n\n- checked the logs`,
+    (id) => `/worklane approve ${id} ok to land\nThanks @example-writer, see the run.\n\nchecked the logs`,
   );
   assert.deepEqual([answered(ok.f)[0]?.answer, queued(ok.f), kinds(ok.f)], ['approve', 1, []]);
 });

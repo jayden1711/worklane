@@ -91,7 +91,9 @@ const ANYWHERE = new RegExp(`/${CLI}[ \\t]+(\\S+)(.*?)(?=/${CLI}[ \\t]|$)`, 'g')
  * Any other slash command that names a decision id (`/workIane reject d-1-…`, a capital I for the l, R1182ak K1d): a
  * command-shaped word after a space or at a line start, its rest up to the next one. It can only void a comment.
  */
-const SHAPED = /(?<!\S)\/([a-z][\w-]*)[ \t]+(\S+)(.*?)(?=(?<!\S)\/[a-z]|$)/g;
+// R1182av AV1: after any character that isn't a letter, digit, _ or / (so `(/x`, `.:/x` and `"/x` count, `and/or` and
+// `a/b/c` paths don't), not only after a space.
+const SHAPED = /(?<![\w/])\/([a-z][\w-]*)[ \t]+(\S+)(.*?)(?=(?<![\w/])\/[a-z]|$)/g;
 /** A decision id where it starts at a word boundary and ends at a word character (`d-12-a3f9c1`, not `xd-1` or `d-1-`). */
 const ID = /(?<![\w-])d-[\w-]*\w/g;
 
@@ -221,6 +223,12 @@ const MARKUP: [string, RegExp][] = [
   // Not a single character: an image's alt text can be drawn from links in its description, and GitHub's body_text
   // drops it (R1182ar AR3), so `![` stays refused too.
   ['an image (![)', /!\[/],
+  // R1182au AU1: GitHub expands a task-list item or an issue reference into text the comment doesn't hold (a task list
+  // naming an issue draws that issue's title), so neither is allowed: a task-list marker after a list marker, `#123`,
+  // `owner/repo#123`, `GH-123`, or a link to an issue or pull request.
+  ['a task-list item ([ ] or [x])', /^[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]+\[[ xX]\]/m],
+  ['an issue or PR reference (#N)', /#\d+|\bGH-\d+/i],
+  ['a link to an issue or pull request', /\bgithub\.com\/[\w.-]+\/[\w.-]+\/(?:issues|pull|discussions)\/\d+/i],
 ];
 function markupIn(body: string): Reply['markup'] {
   let best: { construct: string; index: number } | null = null;

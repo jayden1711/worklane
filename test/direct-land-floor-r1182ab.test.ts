@@ -318,7 +318,8 @@ test("Q text (not the review's): the question says the id is required", async ()
   assert.match(body, /nor any other slash command naming a decision id/, 'the R1182ak K1d rule, stated');
   assert.match(body, /with the id right after the option and nowhere else in the comment \(naming an open decision's id again/, 'rule (c), stated');
   assert.match(body, /quote or apostrophe \(curly ones too\)/, 'the owner, 2026-11-10: line 1 stays strict about quotes');
-  assert.match(body, /no backtick, <, >, \$, & or ~ and no image \(!\[\) anywhere in the comment \(each starts code, HTML, a quote, math, an entity or a fence on GitHub, so a reply can't quote, show code, use HTML or write \$5\)/, 'the character rule (R1182as/at) and its cost, stated');
+  assert.match(body, /no backtick, <, >, \$, & or ~, no image \(!\[\), no task-list item and no issue or PR reference \(#123, owner\/repo#123, an issue or PR link\) anywhere in the comment/, 'the character rule (R1182as/at, au) stated');
+  assert.match(body, /so a reply can't quote, show code, use HTML, write \$5 or mention #123\)/, 'and its cost');
   assert.match(body, /the whole comment must be plain ASCII \(no accented letters, emoji or other symbols; curly quotes and en or em dashes, which phone keyboards insert, are read as/);
   assert.ok(body.includes(`/worklane approve ${d.id}`), body);
   assert.doesNotMatch(body, /may leave out the id|only open question/);

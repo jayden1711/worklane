@@ -228,7 +228,16 @@ test("the tracker's rendering (body_text) is read too; missing or null is unknow
 test('R1182as/at: a reply holds none of ` < > $ & ~ and no image (![) anywhere; the first and its line (characters, not constructs)', () => {
   const mk = (body: string) => readReply(body).markup;
   // Changed by the character rule (was: constructs). A code span, a quote and "1 < 2" now refuse; plain text still passes.
-  assert.equal(mk(`${c} approve ${ID}\nlooks *good*, see https://example.com/a(b) [docs](https://e.x) and #2\n- [x] done`), null, 'plain text, emphasis, links, a task list');
+  assert.equal(mk(`${c} approve ${ID}\nlooks *good*, see https://example.com/a(b) [docs](https://e.x)\n- done`), null, 'plain text, emphasis, links, a list'); // changed by R1182au/av (no issue or PR reference anywhere; the look-alike scan after punctuation): '#2' and '- [x]' left out
+  for (const [body, construct] of [
+    [`${c} approve ${ID}\n- [x] done`, 'a task-list item ([ ] or [x])'],
+    [`${c} approve ${ID}\n1. [ ] #2`, 'a task-list item ([ ] or [x])'],
+    [`${c} approve ${ID}\ntracked in #2`, 'an issue or PR reference (#N)'],
+    [`${c} approve ${ID}\nsee owner/repo#45`, 'an issue or PR reference (#N)'],
+    [`${c} approve ${ID}\nsee GH-12`, 'an issue or PR reference (#N)'],
+    [`${c} approve ${ID}\nsee https://github.com/o/r/pull/7`, 'a link to an issue or pull request'],
+  ] as [string, string][]) assert.equal(readReply(body).markup?.construct, construct, body);
+  assert.equal(readReply(`${c} approve ${ID}\nsee https://github.com/o/r/blob/main/x.ts and section 2`).markup, null, 'a file link and a number are fine');
   for (const [body, construct, line] of [
     [`${c} approve ${ID}\nsee \`x\``, 'a backtick (`)', 2],
     [`${c} approve ${ID}\n> quoted`, 'a > (HTML or a quote)', 2],
