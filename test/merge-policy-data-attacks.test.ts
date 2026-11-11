@@ -130,7 +130,7 @@ test("R1184m P1d/P1e: a module's TABLES.get('NAME') line changed waits, as its l
   // A computed specifier is a named limit (R1184o 3): not followed by the hold or the backstop.
   assert.ok(!has(reasons({ 'src/zz.ts': "const L = await import('./check' + '-tables.js');\nvoid L;\n" }), ADDED), 'a computed dynamic import: a named limit');
   // Controls (R1184o's smaller notes): a type-only import of the loader and a trailing comment pass; so does reading import.meta.
-  assert.deepEqual(reasons({ 'src/zz.ts': "import type { TableKind } from './check-tables.js'; // the kinds\nexport type K = TableKind;\nexport const here = import.meta.dirname;\n" }), []);
+  assert.deepEqual(reasons({ 'src/zz.ts': "import type { TableKind } from './check-tables.js'; // the kinds\nexport type K = TableKind;\nexport const here = dirname(fileURLToPath(import.meta.url));\n" }), []);
   // Control: a new module's own load, imported the plain way, adds nothing to hold.
   assert.deepEqual(reasons({ 'src/x-new.ts': "import { tablesOf } from './check-tables.js';\nexport const NEW_RULES: readonly string[] = tablesOf(import.meta.url).get('NEW_RULES');\n", 'src/x-new.tables.json': '{ "NEW_RULES": { "kind": "never-shrink", "value": ["a"] } }\n' }), []);
 });
@@ -169,9 +169,47 @@ test("R1184q, R1184s D1: import.meta.url written as a pattern or for...of target
   assert.ok(has(reasons(above("({ url: (import.meta.url) } = { url: new URL('./x-decoy.ts', import.meta.url).href });"), base), ADDED), 'AB1b object pattern, parenthesized');
   assert.ok(has(reasons(above("for ((import.meta.url) of [new URL('./x-decoy.ts', import.meta.url).href]) break;"), base), ADDED), 'AB1c for...of head, parenthesized');
   assert.ok(has(reasons(above("import.\nmeta.url = new URL('./x-decoy.ts', import.meta.url).href;"), base), ADDED), 'AB2a split after import.');
-  // Controls: reads in parentheses or as a call's argument pass. (`{ a: (import.meta.url) }` alone waits: on one line it
-  // reads as the pattern `{ url: (import.meta.url) } = …` does, so it is held, fail closed.)
-  assert.deepEqual(reasons(above("export const here = [fileURLToPath(import.meta.url)];\nexport const tail = (import.meta.url) + 'x';\nexport const parts = { a: (import.meta.url) + 'x' };"), base), [], 'reads in parentheses');
+  // R1184ae: behind a TypeScript `!`, `as` or `satisfies`, and with the `(` on the line above. Every use of import.meta
+  // outside the listed reads waits (metaUse), so no spelling of a target needs a rule of its own.
+  const R = "new URL('./x-decoy.ts', import.meta.url).href";
+  for (const [label, line] of [
+    ['AE1a', `(import.meta.url)! = ${R};`],
+    ['AE1b', `[(import.meta.url)!] = [${R}];`],
+    ['AE1c', `for ((import.meta.url)! of [${R}]) break;`],
+    ['AE1d', `((import.meta.url) as string) = ${R};`],
+    ['AE1e', `[(import.meta.url) as string] = [${R}];`],
+    ['AE1f', `((import.meta.url) satisfies string) = ${R};`],
+    ['AE1g', `((import.meta.url)!) = ${R};`],
+    ['AE1h', `({ url: (import.meta.url)! } = { url: ${R} });`],
+    ['AE1i', `(import.meta.url)! += '#x';`],
+    ['AE2a', `[(\n  import.meta.url)] = [${R}];`],
+    ['AE2b', `for ((\n  import.meta.url) of [${R}]) break;`],
+    ['AE2c', `({ url: (\n  import.meta.url) } = { url: ${R} });`],
+    ['AB3b a comment between import and .meta', `import/**/.meta.url = ${R};`],
+    ['AB3c a comment between import and .meta, spaced', `import /* x */ .meta.url = ${R};`],
+    ['a read outside the list', 'export const here = import.meta.dirname;'],
+    ['a parenthesized read', "export const tail = (import.meta.url) + 'x';"],
+  ] as const) assert.ok(has(reasons(above(line), base), ADDED), label);
+  // Controls: the listed reads, each a whole expression, pass.
+  assert.deepEqual(
+    reasons(
+      above(
+        [
+          "export const a = new URL('./x.json', import.meta.url);",
+          'export const b = new URL("../y/", import.meta.url).href;',
+          'export const c = fileURLToPath(import.meta.url);',
+          'export const d = dirname(fileURLToPath(import.meta.url));',
+          'export const e = createRequire(import.meta.url);',
+          'export const f = new URL(import.meta.url);',
+          "export const g = import.meta.url === pathToFileURL(process.argv[1] ?? '').href;",
+          "export const h = fileURLToPath(new URL('./z.ts', import.meta.url));",
+        ].join('\n'),
+      ),
+      base,
+    ),
+    [],
+    'the listed reads',
+  );
   // R1184s D1: a write through a TypeScript wrapper tsc erases, a parenthesized target, a target split over lines, and a
   // code line that starts with `*` (each also refused by the loader at run time: test/check-tables.test.ts).
   const decoy = "new URL('./x-decoy.ts', import.meta.url).href";

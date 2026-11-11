@@ -425,7 +425,7 @@ export const TABLE_LOAD = /\btablesOf\s*\(\s*import\s*\.\s*meta\s*\.\s*url\b|\bT
  * The one way a module may import the loader (#941, R1184n N3): a plain named import of the names a load site uses
  * (`import type` too), none of them under another name, on one line. Any other added line naming the loader's module
  * (an alias, a namespace, a dynamic import, `tablesFrom` or `parseTables`, an import split over lines) waits; so does a
- * line that uses `import.meta` other than to read it (META_URL_SET). Lines are read as text, and the backstop
+ * line that uses `import.meta` other than in one of its listed reads (metaUse). Lines are read as text, and the backstop
  * (test/merge-policy.test.ts loadSiteProblems) reads them parsed: a specifier written with escapes is caught there.
  * Neither follows a specifier computed at run time (`import('./check' + '-tables.js')`): a named limit (R1184o 3), since
  * scripts/ci imports by computed URLs by design; a second load of a real tables file gets the same frozen data, and a
@@ -436,44 +436,25 @@ const LOADER_NAMED = /check-tables/;
 /** The loader, the parser, the copy generators and this hold: the only code that loads tables some other way. */
 export const LOADER_CODE: ReadonlySet<string> = new Set(['src/check-tables.ts', 'src/merge-policy-weakening.ts', 'scripts/lib/check-tables.mjs', 'scripts/lib/table-copies.mjs', 'scripts/gen-table-copies.mjs', 'scripts/lib/redact-vendor.mjs']);
 /**
- * `import.meta` other than a plain read of `.url`, `.dirname` or `.filename` (R1184o 2: `Object.assign(import.meta, …)`,
- * `Reflect.set(import.meta, 'url', …)`), or one of those written or deleted: a module's load reads its path from it.
+ * The reads of `import.meta` a line may hold (R1184ae: an allowlist, fail closed, in place of rules that named each way
+ * of writing it, which a `!`, an `as`, a `satisfies`, a parenthesis or a line break got past each round). Each is a
+ * whole expression that only reads `import.meta.url`: a URL resolved against it from a plain string, its path, the
+ * module's own table load, a require rooted at it, and a comparison with it.
  */
+const META_READS =
+  /new\s+URL\(\s*(?:(?:'[^'\\\n]*'|"[^"\\\n]*")\s*,\s*)?import\.meta\.url\s*\)|fileURLToPath\(\s*import\.meta\.url\s*\)|tablesOf\(\s*import\.meta\.url\s*\)|createRequire\(\s*import\.meta\.url\s*\)|import\.meta\.url\s*[!=]==(?!=)/g;
+
 /**
- * `import.meta.<x>` where an assignment target stands: inside an array or object pattern (`[import.meta.url] = …`,
- * `({ url: import.meta.url } = …)`), or as a `for…of`/`for…in` head (R1184q 1). No line of src/ or scripts/ reads one
- * that way today; a read in a literal written so (`{ url: import.meta.url }`) waits too, fail closed.
+ * Whether an added line uses `import.meta` other than in one of META_READS (R1184ae): once those reads are taken out,
+ * any `import` still followed on the line by `meta` (through spaces, comments, parentheses or a TypeScript wrapper),
+ * or a line that ends at `import`, `import.` or `import.meta…`, or starts at `.meta` (a use split over lines), waits.
+ * A string or a comment that names `import.meta` waits too. A module's load reads its path from `import.meta.url`, and
+ * the loader (src/check-tables.ts callerScript) refuses a URL that isn't its caller's own file at run time.
  */
-// R1184s D1, each fail closed: a TypeScript wrapper tsc erases to a plain write (`import.meta.url!`, `… as string`,
-// `… satisfies string`, `<string>import.meta.url`), a parenthesized target (`(import.meta.url) = …`), and a line that
-// ends at `import.meta.<x>` or `import`, or starts at `.meta` (a target split over lines). No line of src/ or scripts/
-// reads one so today. The loader is the real stop: tablesOf refuses a URL that isn't its caller's own file
-// (src/check-tables.ts callerScript), so a write in any spelling gets no other file's tables.
-const META_URL_TARGET = new RegExp(
-  [
-    /\bimport\s*\.\s*meta\s*\.\s*\w+\s*[\]},]/,
-    /\bimport\s*\.\s*meta\s*\.\s*\w+\s+(?:of|in)\b/,
-    /\bimport\s*\.\s*meta\s*\.\s*\w+\s*!(?!=)/,
-    /\bimport\s*\.\s*meta\s*\.\s*\w+\s+(?:as|satisfies)\b/,
-    />\s*import\s*\.\s*meta\b/,
-    /\bimport\s*\.\s*meta\s*\.\s*\w+\s*\)+\s*(?:[-+*/%&|^]|\*\*|<<|>>>?|&&|\|\||\?\?)?=(?!=)/,
-    // A parenthesized target in a pattern or a for…of head (R1184ab D2: `[(import.meta.url)] = …`,
-    // `({ url: (import.meta.url) } = …)`, `for ((import.meta.url) of …)`); a call's argument or a read in parentheses
-    // (`f(import.meta.url)`, `(import.meta.url) + 'x'`) is no target.
-    /(?<![\w$\])]\s*)\(\s*import\s*\.\s*meta\s*\.\s*\w+\s*\)+\s*(?:[\]},]|(?:of|in)\b|$)/,
-    // A line that ends at `import.` (a target split over lines, R1184ab AB2a).
-    /\bimport\s*\.\s*$/,
-    /\bimport\s*\.\s*meta(?:\s*\.\s*\w+)?\s*$/,
-    /\bimport\s*$/,
-    /^\s*\.\s*meta\b/,
-    /\bdelete\b[\s(]*(?:<[^>]*>\s*)?import\s*\.\s*meta\b/,
-    /(?:\+\+|--)[\s(]*(?:<[^>]*>\s*)?import\s*\.\s*meta\b/,
-    /\bimport\s*\.\s*meta\s*\.\s*\w+[\s)!]*(?:\+\+|--)/,
-  ]
-    .map((r) => r.source)
-    .join('|'),
-);
-const META_URL_SET = /\bimport\s*\.\s*meta\b(?!\s*\.\s*(?:url|dirname|filename)\b)|\bimport\s*\.\s*meta\s*\.\s*\w+\s*(?:[-+*/%&|^]|\*\*|<<|>>>?|&&|\|\||\?\?)?=(?!=)|\bdelete\s+import\s*\.\s*meta\b/;
+export function metaUse(l: string): boolean {
+  const rest = l.replace(META_READS, ' R ');
+  return /\bimport\b[\s\S]*\bmeta\b/.test(rest) || /\bimport\s*(?:\.\s*(?:meta\b[\s\S]*)?)?$/.test(rest) || /^\s*\.\s*meta\b/.test(rest);
+}
 
 /**
  * A line terminator inside what git calls one line (R1184w D1): U+2028, U+2029, or a CR not at its end (CRLF's CR is).
@@ -1367,7 +1348,7 @@ function findings(i: WeakeningInput): Found {
       // A trailing comment is forgiven only for the plain import (R1184o); the other rules read the whole line (R1184q 2: a
       // `//` inside a template literal would cut the rest of the line off).
       const plainImport = LOADER_IMPORT.test(l) || LOADER_IMPORT.test(l.replace(/\s*\/\/[^'"`]*$/, ''));
-      if ((LOADER_NAMED.test(l) && !plainImport) || META_URL_SET.test(l) || META_URL_TARGET.test(l)) hit('table-load-added', f.path, l.trim());
+      if ((LOADER_NAMED.test(l) && !plainImport) || metaUse(l)) hit('table-load-added', f.path, l.trim());
     }
   }
 
