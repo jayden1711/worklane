@@ -164,6 +164,14 @@ test("R1184q, R1184s D1: import.meta.url written as a pattern or for...of target
   assert.ok(has(reasons(above("[import.meta.url] = [new URL('./x-decoy.ts', import.meta.url).href];"), base), ADDED), 'Q1a array pattern');
   assert.ok(has(reasons(above("({ url: import.meta.url } = { url: new URL('./x-decoy.ts', import.meta.url).href });"), base), ADDED), 'Q1b object pattern');
   assert.ok(has(reasons(above("for (import.meta.url of [new URL('./x-decoy.ts', import.meta.url).href]) break;"), base), ADDED), 'Q1c for...of head');
+  // R1184ab D2: the same targets in parentheses, and a target split after `import.`.
+  assert.ok(has(reasons(above("[(import.meta.url)] = [new URL('./x-decoy.ts', import.meta.url).href];"), base), ADDED), 'AB1a array pattern, parenthesized');
+  assert.ok(has(reasons(above("({ url: (import.meta.url) } = { url: new URL('./x-decoy.ts', import.meta.url).href });"), base), ADDED), 'AB1b object pattern, parenthesized');
+  assert.ok(has(reasons(above("for ((import.meta.url) of [new URL('./x-decoy.ts', import.meta.url).href]) break;"), base), ADDED), 'AB1c for...of head, parenthesized');
+  assert.ok(has(reasons(above("import.\nmeta.url = new URL('./x-decoy.ts', import.meta.url).href;"), base), ADDED), 'AB2a split after import.');
+  // Controls: reads in parentheses or as a call's argument pass. (`{ a: (import.meta.url) }` alone waits: on one line it
+  // reads as the pattern `{ url: (import.meta.url) } = …` does, so it is held, fail closed.)
+  assert.deepEqual(reasons(above("export const here = [fileURLToPath(import.meta.url)];\nexport const tail = (import.meta.url) + 'x';\nexport const parts = { a: (import.meta.url) + 'x' };"), base), [], 'reads in parentheses');
   // R1184s D1: a write through a TypeScript wrapper tsc erases, a parenthesized target, a target split over lines, and a
   // code line that starts with `*` (each also refused by the loader at run time: test/check-tables.test.ts).
   const decoy = "new URL('./x-decoy.ts', import.meta.url).href";

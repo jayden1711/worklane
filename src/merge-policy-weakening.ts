@@ -457,6 +457,12 @@ const META_URL_TARGET = new RegExp(
     /\bimport\s*\.\s*meta\s*\.\s*\w+\s+(?:as|satisfies)\b/,
     />\s*import\s*\.\s*meta\b/,
     /\bimport\s*\.\s*meta\s*\.\s*\w+\s*\)+\s*(?:[-+*/%&|^]|\*\*|<<|>>>?|&&|\|\||\?\?)?=(?!=)/,
+    // A parenthesized target in a pattern or a for…of head (R1184ab D2: `[(import.meta.url)] = …`,
+    // `({ url: (import.meta.url) } = …)`, `for ((import.meta.url) of …)`); a call's argument or a read in parentheses
+    // (`f(import.meta.url)`, `(import.meta.url) + 'x'`) is no target.
+    /(?<![\w$\])]\s*)\(\s*import\s*\.\s*meta\s*\.\s*\w+\s*\)+\s*(?:[\]},]|(?:of|in)\b|$)/,
+    // A line that ends at `import.` (a target split over lines, R1184ab AB2a).
+    /\bimport\s*\.\s*$/,
     /\bimport\s*\.\s*meta(?:\s*\.\s*\w+)?\s*$/,
     /\bimport\s*$/,
     /^\s*\.\s*meta\b/,
@@ -1348,12 +1354,7 @@ function findings(i: WeakeningInput): Found {
   // A line that loads a table, removed or changed (#941, the owner's rule of 2026-11-08): the module's load
   // (`tablesOf(import.meta.url)`), any `.tables.json` name (an import, a require, a read), or a generated copy's marker.
   // It waits whatever replaces it: what the code reads after may not be the table the compare reads.
-  // A comment that only names a tables file is no load (a generated copy's marker is); a test's lines are held by the
-  // test rules.
-  // All comment: a `//` line, or a block comment's line with no code after its close (R1184q 2: `/**/ code` is code). A
-  // line that starts with `*` is a comment's only inside one (R1184s D1: `a\n* (import.meta.url = …)` is code): every
-  // place it stands in the file's text is in a run of `*` lines under a `/*` line, none of them closing it and none
-  // holding a `${`.
+  // A test's lines are held by the test rules.
   // No line is skipped as a comment (R1184z Z1/Z2, R1184aa D1): whether a line that starts like one (`//`, `/*`, `*`)
   // is a comment or a template literal's text, a string's or a regexp's takes a full JS/TS lexer, and every hand-written
   // reading of it was wrong in some valid shape. So a load rule reads every changed line, a comment's included: a
