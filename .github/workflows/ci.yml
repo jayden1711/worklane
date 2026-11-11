@@ -393,7 +393,8 @@ jobs:
           tar -xzf "$f" gitleaks && echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: gate the commits
         # A PR's own commits only: merge-base(base, head)..head, the PR head rather than the test merge,
-        # so commits already on main are not rescanned. A push scans what it brought, as before.
+        # so commits already on main are not rescanned. A push scans what it brought, as before. A run by hand on a
+        # branch (workflow_dispatch, #1169) has neither: the branch's own commits, merge-base(main, head)..head.
         env:
           EVENT: ${{ github.event_name }}
           PR_BASE: ${{ github.event.pull_request.base.sha }}
@@ -403,6 +404,9 @@ jobs:
           if [ "$EVENT" = pull_request ]; then
             BASE="$(git merge-base "$PR_BASE" "$PR_HEAD")"
             node scripts/push-gate.mjs --range "${BASE}..${PR_HEAD}"
+          elif [ "$EVENT" = workflow_dispatch ]; then
+            BASE="$(git merge-base origin/main "$GITHUB_SHA")"
+            node scripts/push-gate.mjs --range "${BASE}..${GITHUB_SHA}"
           else
             node scripts/push-gate.mjs --range "${BEFORE}..${GITHUB_SHA}"
           fi
