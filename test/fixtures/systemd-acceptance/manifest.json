@@ -1152,20 +1152,20 @@
     "the watchdog reads unit states from the real service manager: failed"
   ],
   "r1169ah-block-s13-nullish-assign": [
-    0,
-    "^$"
+    2,
+    "in the right side of `\\?\\?=`, `\\|\\|=` or `&&=`, where V8 keeps no count of its own"
   ],
   "r1169ah-block-s14-or-assign": [
-    0,
-    "^$"
+    2,
+    "in the right side of `\\?\\?=`, `\\|\\|=` or `&&=`, where V8 keeps no count of its own"
   ],
   "r1169ah-block-s15-and-assign": [
-    0,
-    "^$"
+    2,
+    "in the right side of `\\?\\?=`, `\\|\\|=` or `&&=`, where V8 keeps no count of its own"
   ],
   "r1169ah-block-s16-default-param": [
-    0,
-    "^$"
+    2,
+    "in a parameter's default value, where V8 keeps no count of its own"
   ],
   "r1169ah-block-s17-ternary-operand": [
     1,
@@ -1254,5 +1254,65 @@
   "r1169ah-block-s38-ran-control": [
     1,
     "the watchdog reads unit states from the real service manager: failed"
+  ],
+  "r1169ai-i1-child-process-same-file": [
+    1,
+    "its file was loaded by 2 processes"
+  ],
+  "r1169ai-i4-worker-same-file": [
+    1,
+    "its file was loaded by 2 processes"
+  ],
+  "r1169aj-j02-helper-registers-twice": [
+    1,
+    "last statement \\(line \\d+\\) never ran: it returned early"
+  ],
+  "r1169aj-j04-shared-subtest-fn": [
+    1,
+    "the subtest at line \\d+'s last statement \\(line \\d+\\) never ran: it returned early"
+  ],
+  "r1169aj-j05-trailing-hoisted-helper": [
+    1,
+    "the watchdog reads unit states from the real service manager: .*last statement \\(line \\d+\\) never ran: it returned early"
+  ],
+  "r1169aj-j05f-trailing-helper-subtest": [
+    1,
+    "the subtest at line \\d+'s last statement \\(line \\d+\\) never ran: it returned early"
+  ],
+  "r1169aj-j16-trailing-async-helper": [
+    1,
+    "the watchdog reads unit states from the real service manager: .*last statement \\(line \\d+\\) never ran: it returned early"
+  ],
+  "r1169aj-j17b-return-in-later-iteration-last": [
+    1,
+    "the watchdog reads unit states from the real service manager: .*last statement \\(line \\d+\\) never ran: it returned early"
+  ],
+  "r1169aj-j19-object-destructuring-default": [
+    2,
+    "holds systemd's sign in a destructuring default, where V8 keeps no count of its own"
+  ],
+  "r1169aj-j19b-array-destructuring-default": [
+    2,
+    "holds systemd's sign in a destructuring default, where V8 keeps no count of its own"
+  ],
+  "r1169aj-j19c-for-of-destructuring-default": [
+    2,
+    "holds systemd's sign in a destructuring default, where V8 keeps no count of its own"
+  ],
+  "r1169aj-j19d-assignment-destructuring-default": [
+    2,
+    "holds systemd's sign in a destructuring default, where V8 keeps no count of its own"
+  ],
+  "r1169aj-j20-for-update": [
+    2,
+    "holds systemd's sign in a for loop's update, where V8 keeps no count of its own"
+  ],
+  "r1169aj-j05e-trailing-uncalled-helper": [
+    0,
+    "^$"
+  ],
+  "r1169aj-j17d-legit-loop-last-control": [
+    0,
+    "^$"
   ]
 }

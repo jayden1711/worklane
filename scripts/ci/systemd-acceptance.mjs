@@ -94,21 +94,27 @@
 // opens with its own count. Each sign test's file runs with V8's block coverage (NODE_V8_COVERAGE; mustRun, the
 // owner's option (b) of 2026-11-10, judged by position since R1169ag/ah): in the test's own function and, recursively,
 // each subtest's (`t.test`, `t['test']`, an alias; a function given by name is read when this file declares it once,
-// else refused), every use of the sign must have run, each function must have reached its last statement, and each
-// subtest must have started. Each is judged by the innermost range around its own position, never by its line: a
-// branch not taken, braced or not, a loop body never entered, an operand of `?:` `&&` `||` `??` never evaluated, a
-// function never called and the code after a `return`, `throw`, `break` or `continue` are ranges of their own.
-// Refused before the run (exit 2), where V8 keeps no count of its own (measured, R1169ae/af): a sign in a `try` that
-// has a `catch` (a throwing call before it), a sign in an optional call's arguments (a short-circuit), and a test or
-// subtest function given by a name the file declares more than once (which one is meant can't be read without scope).
-// Named limits of that check, each measured on real block coverage (R1169ac-ah; the r1169ah-block-* fixtures):
+// else refused), every use of the sign must have run, each function must have run to its end every time it ran
+// (the count just before its closing brace equals its own call count, R1169aj D1), and each subtest must have
+// started. Each is judged by the innermost range around its own position, never by its line: a branch not taken,
+// braced or not, a loop body never entered, an operand of `?:` `&&` `||` `??` never evaluated, a function never called
+// that holds the sign, and the code after a `return`, `throw`, `break` or `continue` are ranges of their own. The
+// file's coverage must come from one process, its own run (R1169ai D1): a child process or a worker that loads it
+// again fails the run.
+// Refused before the run (exit 2), where V8 keeps no count of its own (measured, R1169ae/af/ah/aj): a sign in a `try`
+// that has a `catch` (a throwing call before it), in an optional call's arguments (a short-circuit), in a default
+// value (a parameter's or a destructuring's), on the right of `??=`, `||=` or `&&=`, or in a for loop's update; a
+// function whose last statement ends at its closing brace (where it ended can't be read); and a test or subtest
+// function given by a name the file declares more than once (which one is meant can't be read without scope).
+// Named limits of that check, each measured on real block coverage (R1169ac-aj; the r1169ah-block-* fixtures):
 // - a call that throws before the sign, when something other than a `try` around the sign takes the throw (a caller's
 //   try, assert.throws/rejects, a promise's catch, Promise.allSettled, a `finally` that returns, an unawaited
 //   Promise): V8 starts no new count after a call, so the rest of its block reads as run;
 // - a generator's body (`function*`, `async function*`) when the generator is made but never iterated;
-// - the right side of `??=`, `||=` and `&&=`, and a default parameter's value: V8 counts neither on its own;
-// - tests registered by one loop share one function's counts: one registration's run covers another's early return;
-// - a branch, loop or catch around assertions alone (no sign in it);
+// - one function run for more than one test or subtest (a loop, a helper that registers, one function given to two
+//   subtests) shares its counts: a sign in a branch only some of its runs take reads as run (an early return in any
+//   of them doesn't: the end count is per call);
+// - a branch, loop, catch or never-called callback around assertions alone (no sign in it);
 // - code in a helper the test calls in another function; and an excused test (it skips here) isn't judged on it.
 //
 // Results come from node's test events (systemd-acceptance-reporter.mjs, R1169f), not from TAP text: each gate is
@@ -1628,12 +1634,15 @@ export function mustRun(ts, path, text, line, column) {
   const walk = (fn, what) => {
     if (seen.has(fn)) return;
     seen.add(fn);
-    let last = fn.body;
-    while (last && ts.isBlock(last) && last.statements.length) {
-      last = last.statements.at(-1);
-      if (ts.isTryStatement(last)) last = last.tryBlock;
-    }
-    if (last) out.ends.push({ ...at(last), what });
+    // Whether it ran to its end (R1169aj D1): read just before its body's closing brace, where only a run that got
+    // there counts (a trailing helper's own range, or a loop that returned in a later turn, isn't that point), and
+    // judged against the function's own call count, read at the brace that opens its body. An expression body: its
+    // own position, as it has no early return.
+    if (fn.body && ts.isBlock(fn.body)) {
+      const last = fn.body.statements.at(-1);
+      if (last && last.end >= fn.body.end - 1) out.refused ??= `${what}'s last statement (line ${lineOf(last)}) ends at its closing brace, so whether it was reached can't be read: put the brace after it, apart`;
+      out.ends.push({ line: last ? lineOf(last) : lineOf(fn.body), pos: fn.body.end - 2, calls: fn.body.getStart(sf), what });
+    } else if (fn.body) out.ends.push({ ...at(fn.body), what });
     const signs = (n) => {
       if ((ts.isStringLiteralLike(n) || ts.isTemplateHead(n) || ts.isTemplateMiddle(n) || ts.isTemplateTail(n) || ts.isIdentifier(n) || ts.isRegularExpressionLiteral(n)) && sign.test(ts.isIdentifier(n) ? n.text : n.getText(sf))) {
         out.sign.push(at(n));
@@ -1642,6 +1651,13 @@ export function mustRun(ts, path, text, line, column) {
         // optional call that short-circuits (V8 has no counter there). Refused, not judged: 0 picked tests have either.
         for (let x = n; x.parent && x !== fn; x = x.parent) {
           const p = x.parent;
+          // Where V8 keeps no count of its own (measured, R1169ag/ah/aj): a default value (a parameter's, a
+          // destructuring's), the right side of a logical assignment, a for loop's update. 0 picked tests have one.
+          const noCount = (ts.isParameter(p) && x === p.initializer) ? "a parameter's default value"
+            : (ts.isBindingElement(p) && x === p.initializer) || (ts.isShorthandPropertyAssignment(p) && x === p.objectAssignmentInitializer) || (ts.isBinaryExpression(p) && x === p.right && p.operatorToken.kind === ts.SyntaxKind.EqualsToken && assignedPattern(ts, p)) ? 'a destructuring default'
+            : ts.isBinaryExpression(p) && x === p.right && [ts.SyntaxKind.QuestionQuestionEqualsToken, ts.SyntaxKind.BarBarEqualsToken, ts.SyntaxKind.AmpersandAmpersandEqualsToken].includes(p.operatorToken.kind) ? 'the right side of `??=`, `||=` or `&&=`'
+            : ts.isForStatement(p) && x === p.incrementor ? "a for loop's update" : null;
+          if (noCount) out.refused ??= `line ${lineOf(n)} holds systemd's sign in ${noCount}, where V8 keeps no count of its own: do the systemd work in a statement of its own`;
           if (ts.isTryStatement(p) && x === p.tryBlock && p.catchClause) out.refused ??= `line ${lineOf(n)} holds systemd's sign in a try whose catch would take a throw before it (coverage would count it as run): keep the systemd work out of the try`;
           if ((ts.isCallExpression(p) || ts.isElementAccessExpression(p)) && (p.questionDotToken || ts.isOptionalChain(p)) && x !== p.expression) out.refused ??= `line ${lineOf(n)} holds systemd's sign in an optional call's arguments (a short-circuit leaves no count): call it plainly`;
         }
@@ -1664,6 +1680,16 @@ export function mustRun(ts, path, text, line, column) {
   return out;
 }
 
+/** Whether `e`, an `a = b`, is a default inside a destructuring assignment's pattern (`[a = b] = x`, `({ k: a = b } = x)`). */
+function assignedPattern(ts, e) {
+  let lit = e.parent;
+  if (ts.isPropertyAssignment(lit)) lit = lit.parent;
+  if (!ts.isArrayLiteralExpression(lit) && !ts.isObjectLiteralExpression(lit)) return false;
+  while (lit.parent && (ts.isArrayLiteralExpression(lit.parent) || ts.isObjectLiteralExpression(lit.parent) || ts.isPropertyAssignment(lit.parent) || ts.isSpreadElement(lit.parent) || ts.isParenthesizedExpression(lit.parent))) lit = lit.parent;
+  const q = lit.parent;
+  return !!q && ((ts.isBinaryExpression(q) && q.operatorToken.kind === ts.SyntaxKind.EqualsToken && q.left === lit) || ((ts.isForOfStatement(q) || ts.isForInStatement(q)) && q.initializer === lit));
+}
+
 /**
  * V8's block coverage of one built file (`url`), from a NODE_V8_COVERAGE folder (the owner's direction on R1169ag/ah,
  * 2026-11-11): for each process that loaded it, its ranges (function ranges and the block ranges nested in them, each
@@ -1680,19 +1706,15 @@ export function blockCoverage(dir, url) {
 }
 
 /**
- * How many times the code at character offset `pos` ran: the count of the innermost range around it, in the process
- * where it ran most. A branch not taken, a loop body never entered, a function never called and the code after a
+ * How many times the code at character offset `pos` ran: the count of the innermost range around it, in the one
+ * process that reported the file (problems() judges no other: R1169ai D1). A branch not taken, a loop body never entered, a function never called and the code after a
  * `return`, `throw`, `break` or `continue` are each a range of their own, braced or not (the precision line coverage
  * lacked: R1169ah D1).
  */
-export function countAt(coverage, pos) {
-  let most = 0;
-  for (const ranges of coverage) {
-    let best = null;
-    for (const r of ranges) if (r.startOffset <= pos && pos < r.endOffset && (!best || r.endOffset - r.startOffset <= best.endOffset - best.startOffset)) best = r;
-    if (best && best.count > most) most = best.count;
-  }
-  return most;
+export function countAt(ranges, pos) {
+  let best = null;
+  for (const r of ranges) if (r.startOffset <= pos && pos < r.endOffset && (!best || r.endOffset - r.startOffset <= best.endOffset - best.startOffset)) best = r;
+  return best ? best.count : 0;
 }
 
 /**
@@ -1779,9 +1801,18 @@ export function problems(runs) {
             out.push(`${at}: no coverage of its file came back, so what of it ran can't be read`);
             continue;
           }
-          const ran = (p) => countAt(coverage, p.pos) > 0;
+          // One process's run, the test's own (R1169ai D1): a child process or a worker that loads the file again
+          // reports it too, and its run would count as this one's.
+          if (coverage.length !== 1) {
+            out.push(`${at}: its file was loaded by ${coverage.length} processes (a child process or a worker running it again), so whose run counts can't be read`);
+            continue;
+          }
+          const ranges = coverage[0];
+          const ran = (p) => countAt(ranges, p.pos) > 0;
           const lines = (ps) => [...new Set(ps.map((p) => p.line))].join(', ');
-          for (const e of t.mustRun.ends) if (!ran(e)) out.push(`${at}: ${e.what}'s last statement (line ${e.line}) never ran: it returned early, having checked less`);
+          // Ran to its end every time it ran (R1169aj D1, D2: a function run for two tests, or two subtests, too).
+          const ended = (e) => (e.calls === undefined ? ran(e) : countAt(ranges, e.calls) > 0 && countAt(ranges, e.pos) === countAt(ranges, e.calls));
+          for (const e of t.mustRun.ends) if (!ended(e)) out.push(`${at}: ${e.what}'s last statement (line ${e.line}) never ran: it returned early, having checked less`);
           const notStarted = t.mustRun.subtests.filter((p) => !ran(p));
           if (notStarted.length) out.push(`${at}: the subtest at line ${lines(notStarted)} never started: started only sometimes, it checked less`);
           const unrun = t.mustRun.sign.filter((p) => !ran(p));

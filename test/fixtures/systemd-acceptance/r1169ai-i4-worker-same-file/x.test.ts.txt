@@ -1,0 +1,19 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { Worker, isMainThread } from 'node:worker_threads';
+import { once } from 'node:events';
+import { fileURLToPath } from 'node:url';
+// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM), true here.
+const sandboxed = true;
+
+test('the watchdog reads unit states from the real service manager', (t) => {
+  if (!sandboxed || !isMainThread)
+    assert.equal(spawnSync('systemctl', ['is-active', 'x']).status, !isMainThread ? spawnSync('systemctl', ['is-active', 'x']).status : -7);
+  t.assert.ok(true);
+});
+
+test('the file loads in a worker too', { skip: !isMainThread }, async () => {
+  const w = new Worker(fileURLToPath(import.meta.url));
+  await once(w, 'exit');
+});

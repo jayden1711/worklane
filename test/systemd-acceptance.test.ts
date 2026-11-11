@@ -29,9 +29,9 @@ type Script = {
   signUseList: (ts: unknown, path: string, text: string) => { at: string; pin: string }[];
   signProblems: (ts: unknown, texts: Map<string, string>, allow?: Allow) => string[];
   planProblems: (ts: unknown, path: string, text: string, gates: { name: string; line: number; column: number }[]) => string[];
-  mustRun: (ts: unknown, path: string, text: string, line: number, column: number) => { ends: { line: number; pos: number; what: string }[]; subtests: Point[]; sign: Point[]; refused: string | null } | null;
+  mustRun: (ts: unknown, path: string, text: string, line: number, column: number) => { ends: { line: number; pos: number; calls?: number; what: string }[]; subtests: Point[]; sign: Point[]; refused: string | null } | null;
   blockCoverage: (dir: string, url: string) => Range[][] | null;
-  countAt: (coverage: Range[][], pos: number) => number;
+  countAt: (ranges: Range[], pos: number) => number;
 };
 type Point = { line: number; pos: number };
 type Range = { startOffset: number; endOffset: number; count: number };
@@ -986,7 +986,7 @@ test("R1169ab D2: a gate opens with node's own count; a sign test's own function
     ['(t) => t.plan(1)', 'an expression body'],
     ['body', 'not inline'],
   ] as const) assert.match(plan(fn).join('\n'), /its first statement isn't|isn't inline/, what);
-  // mustRun: the line of the last statement (a trailing try's block's last), and each subtest's line.
+  // mustRun: the line of the last statement, judged just before the closing brace (R1169aj D1), and each subtest's line.
   const text = [
     "import { test } from 'node:test';",
     'test(\'s\', async (t) => {',
@@ -1004,10 +1004,11 @@ test("R1169ab D2: a gate opens with node's own count; a sign test's own function
   const its = (line: number, what = 'its function') => ({ line, what });
   // Each point's line, for reading; its position (a character offset of the built file) is what's judged (R1169ag/ah).
   const lines = (m: ReturnType<Script['mustRun']>) => m && { ends: m.ends.map((e) => ({ line: e.line, what: e.what })), subtests: m.subtests.map((p) => p.line), sign: m.sign.map((p) => p.line), refused: m.refused };
-  assert.deepEqual(lines(sa.mustRun(ts, file, text, 2, 1)), { ends: [its(7), its(3, 'the subtest at line 3'), its(4, 'the subtest at line 4')], subtests: [3, 4], sign: [6], refused: null });
+  assert.deepEqual(lines(sa.mustRun(ts, file, text, 2, 1)), { ends: [its(5), its(3, 'the subtest at line 3'), its(4, 'the subtest at line 4')], subtests: [3, 4], sign: [6], refused: null });
   assert.deepEqual(lines(sa.mustRun(ts, file, text, 12, 1)), { ends: [its(12)], subtests: [], sign: [], refused: null }, 'an expression body: its own line');
   const m = sa.mustRun(ts, file, text, 2, 1)!;
-  assert.deepEqual([m.sign[0]!.pos, m.ends[0]!.pos, m.subtests[1]!.pos], [text.indexOf(`'${sd.slice(0, 6)}ctl'`), text.indexOf('two();'), text.indexOf("await t.test('b'") + 'await '.length], 'each point at its own position: the sign itself, the statement, the subtest call');
+  const close = text.indexOf('\n});') + 1;
+  assert.deepEqual([m.sign[0]!.pos, m.ends[0]!.pos, m.ends[0]!.calls, m.subtests[1]!.pos], [text.indexOf(`'${sd.slice(0, 6)}ctl'`), close - 1, text.indexOf('{\n  await'), text.indexOf("await t.test('b'") + 'await '.length], 'each point at its own position: the sign, just before the closing brace (and the opening one, for the call count), the subtest call');
   // Every way to start a subtest of the context (R1169ac D2), and a function given by name (R1169ac D1).
   const shapes = [
     "import { test } from 'node:test';",
@@ -1032,7 +1033,20 @@ test("R1169ab D2: a gate opens with node's own count; a sign test's own function
   assert.equal(refused(`  try {\n    load();\n  } finally {}\n  ${unit};`), null, 'a try with only a finally, the sign after it: read');
   assert.match(String(refused(`  units?.expect(\n    ${unit},\n  );`)), /in an optional call's arguments/, "a sign line in an optional call's arguments");
   assert.match(String(refused(`  const sub = () => ${unit};\n  await t.test('a', sub);`, `function sub() {}\n`)), /doesn't declare once/, 'a subtest function named twice in the file');
-  // problems(): judged on the run's block coverage of the file, each point by the innermost range around it.
+  // R1169aj D3, R1169ah D4: where V8 keeps no count of its own.
+  for (const [body, what] of [
+    [`  function u(r =\n    ${unit}) {\n    return r;\n  }\n  u(1);`, "a parameter's default value"],
+    [`  const { s =\n    ${unit} } = {};`, 'a destructuring default'],
+    [`  const [r =\n    ${unit}] = [];`, 'a destructuring default'],
+    [`  let s;\n  ({ s =\n    ${unit} } = {});`, 'a destructuring default'],
+    [`  let a, b;\n  [a = 1, b =\n    ${unit}] = [];`, 'a destructuring default'],
+    [`  let s = 0;\n  s ||=\n    ${unit};`, 'the right side of'],
+    [`  for (let i = 0; i < 0; ${unit}) {\n    void i;\n  }`, "a for loop's update"],
+  ] as const) assert.match(String(refused(body)), new RegExp(`in ${what.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}.*where V8 keeps no count`), what);
+  assert.equal(refused(`  let a = 1;\n  a = ${unit};`), null, 'a plain assignment: read');
+  assert.match(String(sa.mustRun(ts, file, `import { test } from 'node:test';\ntest('s', () => { ${unit};});\n`, 2, 1)!.refused), /ends at its closing brace/, "a last statement touching its function's closing brace");
+  assert.equal(sa.mustRun(ts, file, `import { test } from 'node:test';\ntest('s', () => { ${unit}; });\n`, 2, 1)!.refused, null, 'a space before the brace: read');
+  // problems(): judged on the run's block coverage of the file (one process), each point by the innermost range around it.
   const at = (line: number) => ({ line, pos: line * 100 + 5 });
   const t = { name: 's', line: 2, column: 1, label: "'s'", subtests: true, mustRun: { ends: [{ ...at(7), what: 'its function' }, { ...at(3), what: 'the subtest at line 3' }], subtests: [at(3), at(4)], sign: [at(6)], refused: null } };
   const ev = (name: string, line: number, nesting = 0) => ({ type: 'test:pass', name, nesting, file: '/r/dist/test/g.test.js', line, column: 1, skip: null, todo: null });
@@ -1049,11 +1063,15 @@ test("R1169ab D2: a gate opens with node's own count; a sign test's own function
   assert.deepEqual(run([[{ startOffset: 0, endOffset: 1000, count: 1 }, { startOffset: 606, endOffset: 650, count: 0 }]]), [], "a block on the sign's line that doesn't hold it");
   assert.match(run([[{ startOffset: 0, endOffset: 1000, count: 1 }, { startOffset: 600, endOffset: 610, count: 0 }]]).join('\n'), /line 6, holding systemd's sign, never ran/, 'the innermost range around the sign, however short');
   assert.match(run(null).join('\n'), /no coverage of its file came back/, 'no coverage is never a pass');
+  assert.match(run([...all(), ...all()]).join('\n'), /its file was loaded by 2 processes/, 'R1169ai D1: a child process or a worker that loads it again: never a pass');
+  // R1169aj D1/D2: the end, just before the closing brace, counted as often as the function was called.
+  const twice = (endCount: number) => sa.problems([{ file: 'g.test.ts', gates: [], events, signTests: [{ ...t, mustRun: { ...t.mustRun, ends: [{ line: 7, pos: 705, calls: 205, what: 'its function' }] } }], excused: new Set(), coverage: [[{ startOffset: 0, endOffset: 1000, count: 2 }, { startOffset: 700, endOffset: 750, count: endCount }]] } as never]);
+  assert.deepEqual(twice(2), [], 'run twice, ended twice');
+  assert.match(twice(1).join('\n'), /its function's last statement \(line 7\) never ran: it returned early/, 'run twice, ended once: one run returned early');
   assert.deepEqual(run(all([7]), ['2:1']), [], 'an excused test (it skips here) is not judged on its coverage');
-  // countAt: the innermost range around the position; across processes, where it ran most; outside every range, 0.
+  // countAt: the innermost range around the position, in one process's ranges; outside every range, 0.
   const cov: Range[][] = [[{ startOffset: 0, endOffset: 100, count: 2 }, { startOffset: 10, endOffset: 50, count: 0 }, { startOffset: 20, endOffset: 30, count: 3 }], [{ startOffset: 0, endOffset: 100, count: 1 }]];
-  assert.deepEqual([5, 15, 25, 50, 150].map((p) => sa.countAt([cov[0]!], p)), [2, 0, 3, 2, 0], 'innermost; an end offset is outside its range');
-  assert.equal(sa.countAt(cov, 15), 1, 'another process that ran it counts');
+  assert.deepEqual([5, 15, 25, 50, 150].map((p) => sa.countAt(cov[0]!, p)), [2, 0, 3, 2, 0], 'innermost; an end offset is outside its range');
   // blockCoverage: only the named file's ranges, one list per process that loaded it; none, null.
   const dir = tmp();
   const fn = (startOffset: number, endOffset: number, count: number) => ({ functionName: '', isBlockCoverage: true, ranges: [{ startOffset, endOffset, count }] });

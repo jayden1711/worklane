@@ -1,0 +1,12 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+const VM = true;
+
+test('the watchdog reads unit states from the real service manager', async () => {
+  for (const u of ['worklane.service', 'worklane-update.timer']) {
+    const r = spawnSync('systemctl', ['is-active', u]);
+    if (u.endsWith('.timer') && VM) return;
+    assert.equal(r.status, u.endsWith('.timer') ? -7 : r.status);
+  }
+});
