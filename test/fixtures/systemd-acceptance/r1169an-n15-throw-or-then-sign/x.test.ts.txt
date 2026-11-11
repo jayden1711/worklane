@@ -1,0 +1,21 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { once, EventEmitter } from 'node:events';
+import { setTimeout as delay } from 'node:timers/promises';
+// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.
+const VM = true;
+
+class Unavailable extends Error {}
+test('the unit starts under the real service manager', (t) => {
+  const probe = (unit) => {
+    if (VM) throw new Unavailable('no unit here');
+    unit = unit || 'worklane-runner.service';
+    assert.equal(spawnSync('systemctl', ['is-active', unit]).status, -7);
+  };
+  try {
+    probe();
+  } catch (e) {
+    if (!(e instanceof Unavailable)) throw e;
+  }
+});

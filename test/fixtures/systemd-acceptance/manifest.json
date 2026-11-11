@@ -1118,8 +1118,8 @@
     "the watchdog reads unit states from the real service manager: line \\d+, holding systemd's sign, never ran"
   ],
   "r1169ah-block-s09-throw-statement-before-sign": [
-    1,
-    "the watchdog reads unit states from the real service manager: line \\d+, holding systemd's sign, never ran"
+    2,
+    "throws before systemd's sign or a subtest that comes after it"
   ],
   "r1169ah-block-s10-generator-not-iterated": [
     0,
@@ -1388,5 +1388,53 @@
   "r1169al-l12-final-return": [
     0,
     "^$"
+  ],
+  "r1169am-m01-switch-break-nullish-then-sign": [
+    2,
+    "break leaves its case early in a switch that holds systemd's sign"
+  ],
+  "r1169am-m02-switch-break-after-sign-or": [
+    2,
+    "break leaves its case early in a switch that holds systemd's sign"
+  ],
+  "r1169am-m03-switch-break-try-finally": [
+    2,
+    "break leaves its case early in a switch that holds systemd's sign"
+  ],
+  "r1169am-m04-callback-switch-break": [
+    2,
+    "break leaves its case early in a switch that holds systemd's sign"
+  ],
+  "r1169am-m07-return-nonctx-skip": [
+    2,
+    "returns before its function's end"
+  ],
+  "r1169am-m06-subtest-returns-parent-skip": [
+    1,
+    "SKIP no unit"
+  ],
+  "r1169an-n01-throw-sentinel-nullish": [
+    2,
+    "throws before systemd's sign or a subtest"
+  ],
+  "r1169an-n01b-throw-sentinel-plain": [
+    2,
+    "throws before systemd's sign or a subtest"
+  ],
+  "r1169an-n02-throw-try-finally": [
+    2,
+    "throws before systemd's sign or a subtest"
+  ],
+  "r1169an-n15-throw-or-then-sign": [
+    2,
+    "throws before systemd's sign or a subtest"
+  ],
+  "r1169an-n03-switch-break-nullish": [
+    2,
+    "break leaves its case early in a switch that holds systemd's sign"
+  ],
+  "r1169an-n03t-switch-break-ternary": [
+    2,
+    "break leaves its case early in a switch that holds systemd's sign"
   ]
 }

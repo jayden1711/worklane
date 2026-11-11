@@ -1054,11 +1054,17 @@ test("R1169ab D2: a gate opens with node's own count; a sign test's own function
     [`  for (const u of us) {\n    if (x) continue;\n    ${unit};\n  }`, /line 4's continue can skip/, 'a continue'],
     [`  bus?.journal.${sd.slice(0, 6)}ctl('x');`, /in an optional chain past its receiver/, 'an optional chain past its receiver'],
     [`  do {\n    wait();\n  } while (!${unit});`, /in a do…while condition/, 'a do…while condition'],
+    [`  switch (k) {\n    case 1:\n      if (x) break;\n      ${unit};\n      break;\n  }`, /line 5's break leaves its case early in a switch that holds/, "R1169am D1: a switch's early break"],
+    [`  const probe = () => {\n    if (x) throw new Error('no');\n    ${unit};\n  };\n  try {\n    probe();\n  } catch {}`, /line 4 throws before systemd's sign/, 'R1169an D1: a throw before the sign'],
+    [`  const c = { skip: () => 0 };\n  if (x) return c.skip(1);\n  ${unit};`, /line 4 returns before/, "R1169am D2: a skip that isn't a test context's"],
   ] as const) assert.match(String(refused(body)), why, what);
   for (const [body, what] of [
     [`  if (x) return t.skip('not here');\n  ${unit};`, 'return <ctx>.skip(…): the run reads the skip'],
     [`  ${unit};\n  return done();`, 'the last statement may return'],
     [`  switch (k) {\n    case 1:\n      ${unit};\n      break;\n  }`, "a switch's break"],
+    [`  switch (k) {\n    case 1: {\n      ${unit};\n      break;\n    }\n  }`, "a switch's break, last in its case's block"],
+    [`  try {\n    if (x) throw new Error('caught here');\n  } catch {}\n  ${unit};`, 'a throw its own function catches, then carries on'],
+    [`  ${unit};\n  if (bad) throw new Error('fails the test');`, 'a throw with no sign after it'],
     [`  for (const u of us) {\n    if (x) break;\n  }\n  ${unit};`, 'a break in a loop without the sign'],
     [`  const f = (u) => (u ? 1 : 2);\n  ${unit};`, 'an expression body'],
   ] as const) assert.equal(refused(body), null, what);

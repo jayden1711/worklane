@@ -109,7 +109,10 @@
 // (which one is meant can't be read without scope). Control flow is read before the run, not from coverage (the
 // organizer's direction on R1169ak/al: V8 gives a taken `return` no count before an operand or a `try … finally`):
 // in the test's function, each subtest's and every function inside them, a `return` that isn't its function's last
-// statement (but `return <ctx>.skip(…)`/`.todo(…)`), and a `break` or `continue` whose loop or label holds the sign.
+// statement (but `return <ctx>.skip(…)`/`.todo(…)`, its receiver a parameter of a function around it), a `throw` with
+// the sign or a subtest after it in its function that no try with a catch in that function takes, a `break` or
+// `continue` whose loop or label holds the sign, and a switch's `break` before the end of its case when the switch
+// holds the sign (R1169am, R1169an).
 // Named limits of that check, each measured on real block coverage (R1169ac-aj; the r1169ah-block-* fixtures):
 // - a call that throws before the sign, when something other than a `try` around the sign takes the throw (a caller's
 //   try, assert.throws/rejects, a promise's catch, Promise.allSettled, a `finally` that returns, an unawaited
@@ -1712,6 +1715,17 @@ function holdsSign(ts, sf, node, sign) {
  */
 function flowProblem(ts, sf, fn, hasSign) {
   const lineOf = (n) => sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1;
+  // Whether `f` holds systemd's sign, or starts a subtest (`<x>.test(…)`, `<x>['test'](…)`), after `n` ends.
+  const laterWork = (n, f) => {
+    let hit = false;
+    const v = (x) => {
+      if (hit) return;
+      if (x.getStart(sf) >= n.getEnd() && ((ts.isCallExpression(x) && ((ts.isPropertyAccessExpression(x.expression) && x.expression.name.text === 'test') || (ts.isElementAccessExpression(x.expression) && ts.isStringLiteralLike(x.expression.argumentExpression) && x.expression.argumentExpression.text === 'test'))) || hasSign(x) && (ts.isStringLiteralLike(x) || ts.isIdentifier(x) || ts.isTemplateHead(x) || ts.isRegularExpressionLiteral(x)))) hit = true;
+      else ts.forEachChild(x, v);
+    };
+    v(f.body);
+    return hit;
+  };
   const fns = [fn];
   const nested = (n) => {
     if (n !== fn && ts.isFunctionLike(n) && n.body) fns.push(n);
@@ -1726,9 +1740,18 @@ function flowProblem(ts, sf, fn, hasSign) {
       if (found || (n !== f && ts.isFunctionLike(n))) return;
       if (ts.isReturnStatement(n) && n !== last) {
         const e = n.expression;
-        const skip = e && ts.isCallExpression(e) && ts.isPropertyAccessExpression(e.expression) && ['skip', 'todo'].includes(e.expression.name.text);
+        // Only a test context's skip or todo (R1169am D2): its receiver a parameter of a function around it.
+        const recv = e && ts.isCallExpression(e) && ts.isPropertyAccessExpression(e.expression) && ['skip', 'todo'].includes(e.expression.name.text) && ts.isIdentifier(e.expression.expression) ? e.expression.expression.text : null;
+        let skip = false;
+        for (let p = n.parent; recv && p && !skip; p = p.parent) if (ts.isFunctionLike(p) && p.parameters.some((q) => ts.isIdentifier(q.name) && q.name.text === recv)) skip = true;
         if (!skip) found = `line ${lineOf(n)} returns before its function's end (only its last statement may: an early return skips what follows, which coverage can't always see), so make the rest conditional instead`;
       }
+      // A throw with the sign, or a subtest, after it in its function (R1169an D1): an exit as early as a return, when
+      // something catches it (a sentinel the test catches). A rethrow after the sign is no early exit.
+      // One its own function catches (in a try with a catch, around it, in this function) carries on after the try.
+      let caught = false;
+      for (let x = n; x.parent && x !== f && !caught; x = x.parent) if (ts.isTryStatement(x.parent) && x.parent.catchClause && x === x.parent.tryBlock) caught = true;
+      if (ts.isThrowStatement(n) && !found && !caught && laterWork(n, f)) found = `line ${lineOf(n)} throws before systemd's sign or a subtest that comes after it (an early exit when something catches it, which coverage can't always see), so make the rest conditional instead`;
       if ((ts.isBreakStatement(n) || ts.isContinueStatement(n)) && !found) {
         let target = null;
         for (let p = n.parent; p && p !== f; p = p.parent) {
@@ -1737,7 +1760,15 @@ function flowProblem(ts, sf, fn, hasSign) {
             break;
           }
         }
-        if (target && !ts.isSwitchStatement(target) && hasSign(target)) found = `line ${lineOf(n)}'s ${ts.isBreakStatement(n) ? 'break' : 'continue'} can skip systemd's sign in its ${ts.isIterationStatement(target, false) ? 'loop' : 'block'} (coverage can't always see that), so make the rest conditional instead`;
+        // A switch's break skips the rest of its case (R1169am D1, R1169an D2): refused when the switch holds the sign,
+        // unless it is its clause's last statement (or the last of a block that is the clause's last).
+        const closing = (b) => {
+          const c = b.parent;
+          if ((ts.isCaseClause(c) || ts.isDefaultClause(c)) && c.statements.at(-1) === b) return true;
+          return ts.isBlock(c) && c.statements.at(-1) === b && (ts.isCaseClause(c.parent) || ts.isDefaultClause(c.parent)) && c.parent.statements.at(-1) === c;
+        };
+        if (target && ts.isSwitchStatement(target) && !n.label && hasSign(target) && !closing(n)) found = `line ${lineOf(n)}'s break leaves its case early in a switch that holds systemd's sign (coverage can't always see that), so make the rest conditional instead`;
+        else if (target && !ts.isSwitchStatement(target) && hasSign(target)) found = `line ${lineOf(n)}'s ${ts.isBreakStatement(n) ? 'break' : 'continue'} can skip systemd's sign in its ${ts.isIterationStatement(target, false) ? 'loop' : 'block'} (coverage can't always see that), so make the rest conditional instead`;
       }
       ts.forEachChild(n, visit);
     };

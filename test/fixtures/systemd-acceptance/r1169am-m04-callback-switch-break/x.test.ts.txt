@@ -1,0 +1,18 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { setTimeout as delay } from 'node:timers/promises';
+// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.
+const VM = true;
+
+test('each unit is active under the real service manager', () => {
+  ['worklane-runner.service'].forEach((unit) => {
+    switch (process.platform) {
+      case 'linux': {
+        if (VM) break;
+        const u = process.env.WL_PROBE_UNIT ?? unit;
+        assert.equal(spawnSync('systemctl', ['is-active', u]).status, -7);
+      }
+    }
+  });
+});
