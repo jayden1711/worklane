@@ -88,6 +88,10 @@ export interface SoakSample {
   levelFiles?: number | null;
   /** Files and folders under the worktree folder, part of `files` (R1181y Y1: a task's checkout open at the stop sample). */
   worktreeFiles?: number;
+  /** Files in the worktree folder no checkout tracks: untracked or ignored in a worktree, or in another entry (R1181aa AA1). */
+  worktreeLeftovers?: number;
+  /** The walked folders' files on a filesystem levelFiles counts (a real soak on Linux, R1181aa AA2). */
+  levelWalked?: number | null;
   /** SysV IPC objects alive (a real soak on Linux, R1181z D2): they outlive every process. */
   sysvIpc?: number | null;
 }
@@ -460,12 +464,15 @@ export function soakVerdict(input: readonly SoakSample[], limits: SoakLimits = S
     const unchecked = (s: SoakSample) => (typeof s.files === 'number' ? s.files - (s.worktreeFiles ?? 0) : null);
     const filesEnd = unchecked(end);
     const filesStop = unchecked(stop);
+    // R1181aa AA1: inside the worktree folder, the files no checkout tracks (a checkout open at stop adds none of its own).
+    if (typeof end.worktreeLeftovers === 'number' && typeof stop.worktreeLeftovers === 'number' && stop.worktreeLeftovers - end.worktreeLeftovers > STOP_FILES) failures.push(`left at stop: ${stop.worktreeLeftovers - end.worktreeLeftovers} more files in the worktree folder that no checkout tracks after stop() and idle() (limit ${STOP_FILES})`);
     if (filesEnd !== null && filesStop !== null && filesStop - filesEnd > STOP_FILES) failures.push(`left at stop: ${filesStop - filesEnd} more files and folders outside the worktree folder after stop() and idle() (limit ${STOP_FILES})`);
     if (stop.eventsBytes - end.eventsBytes > STOP_LOG_BYTES) failures.push(`left at stop: the event log grew ${MB(stop.eventsBytes - end.eventsBytes)} during stop() and idle() (limit ${MB(STOP_LOG_BYTES)})`);
     // R1181z D3: inodes used outside the walked folders (empty files cost no block), and L3: the level's bytes, against
     // the last run sample.
     if (typeof end.levelFiles === 'number' && typeof stop.levelFiles === 'number') {
-      const walked = typeof end.files === 'number' && typeof stop.files === 'number' ? stop.files - end.files : 0;
+      // R1181aa AA2: only the walked files on a filesystem the inode count reads (a tmpfs soak folder is in none).
+      const walked = typeof end.levelWalked === 'number' && typeof stop.levelWalked === 'number' ? stop.levelWalked - end.levelWalked : typeof end.files === 'number' && typeof stop.files === 'number' ? stop.files - end.files : 0;
       const outside = stop.levelFiles - end.levelFiles - walked;
       if (outside > STOP_FILES) failures.push(`left at stop: ${outside} more files outside the soak's folders after stop() and idle() (used inodes; limit ${STOP_FILES})`);
     }
