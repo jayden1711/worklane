@@ -29,6 +29,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
@@ -37,6 +38,16 @@ import { repoRoot } from './helpers.js';
 
 /** The claude binary as a word: its name, a path to it, its package (with a version), or its cli.js. */
 const BINARY = /^(?:\S*\/)?claude$|^@anthropic-ai\/claude-code(?:@\S*)?$|\/claude-code\/cli\.js$/;
+/**
+ * Fail closed (R1264d D3/D4): a word that ends in the binary however it is spelled, quoted or not, in any position: a
+ * path to it, a default (`${X:-claude}`), `.exe`/`.cmd`; or that names its package or cli.js. One token only (no
+ * whitespace once unquoted): a quoted string with spaces is a command (read where `-c` or eval runs it) or prose.
+ */
+const CLAUDE_WORD = /^\S+$/;
+const ENDS_CLAUDE = /(?:^|[^A-Za-z0-9._-]|:[-=])claude(?:\.exe|\.cmd)?[}"')\]]*$|@anthropic-ai\/claude-code|claude-code\/cli\.js/;
+const isClaudeToken = (u: string) => CLAUDE_WORD.test(u) && ENDS_CLAUDE.test(u);
+/** A variable's value that is the binary (R1264d D4): its first token is, or a default or lookup of it is anywhere. */
+const VALUE_CLAUDE = (v: string) => isClaudeToken(v.split(/\s+/)[0] ?? '') || /\$\{\w+:[-=](?:[^}\s]*\/)?claude\}|\$\((?:command -v|which|type -P) claude\)/.test(v);
 /** Commands that name claude without starting it: their words are data. */
 // check-table: never-grow
 const NON_LAUNCHERS = new Set([
@@ -72,15 +83,27 @@ const NON_LAUNCHERS = new Set([
 ]);
 /** An argv that starts no session: a call whose argument words begin so is exempt anywhere. */
 const EXEMPT_ARGV = /^(?:--version|auth status|auth login)(?:\s|$)/;
-/** Pinned exceptions: file, then text the command holds, each with why. */
+/**
+ * Pinned exceptions, as the spike's pins are (R1264c D4): file, the exact text (trimmed) of the physical line that holds
+ * the call, and why. Each covers exactly one call.
+ */
 // check-table: never-grow
 export const SHELL_EXCEPTIONS: [string, string, string][] = [
   [
     '.github/workflows/ci-slow.yml',
-    '-p --output-format stream-json --verbose --max-turns 1 --setting-sources project --strict-mcp-config',
+    "init() { echo hi | sudo -u wl-ci-agent env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=\"$h\" CLAUDE_CONFIG_DIR=\"$h/.claude\" ANTHROPIC_API_KEY=sk-ant-not-a-key sh -c 'cd \"$HOME\" && { \"$0\"/bin/claude -p --output-format stream-json --verbose --max-turns 1 --setting-sources project --strict-mcp-config --mcp-config \"$HOME/mcp.json\" --settings \"$1\" || true; }' \"$cc\" \"$1\" 2>/dev/null | jq -c 'select(.type == \"system\" and .subtype == \"init\") | .mcp_servers'; }",
     "a CI probe of Claude Code's own MCP policy (managed allowedMcpServers): the real CLI in a throwaway HOME with a stand-in key, its project source on purpose; no session gets past its init event",
   ],
-  ['.github/workflows/ci-slow.yml', 'scripts/setup/credentials.sh probe claude', "credentials.sh's `probe claude` names the login to check: the script, not claude, runs"],
+  [
+    '.github/workflows/ci-slow.yml',
+    "if printf '%s\\n' \"$bad\" | sudo bash scripts/setup/credentials.sh probe claude > \"$RUNNER_TEMP/bad.out\" 2>&1; then echo \"a bad token was accepted\"; exit 1; fi",
+    "credentials.sh's `probe claude` names the login to check: the script, not claude, runs (a bad token)",
+  ],
+  [
+    '.github/workflows/ci-slow.yml',
+    "printf '%s\\n' \"$t\" | sudo bash scripts/setup/credentials.sh probe claude > \"$RUNNER_TEMP/good.out\" 2>&1",
+    "credentials.sh's `probe claude` names the login to check: the script, not claude, runs (a good token)",
+  ],
 ];
 
 /**
@@ -113,6 +136,8 @@ const KEYWORDS = new Set([
 export function guardsLast(argv: string[]): boolean {
   const tail = argv.slice(-5);
   const si = tail.indexOf('--settings');
+  // Its value: `{}`, or the one setting an API-key login needs (R1264d D5: a settings file's hooks run; R1264c D3).
+  if (si < 0 || !SETTINGS_VALUE.test((tail[si + 1] ?? '').replace(/\\"/g, '"'))) return false;
   const ss = tail.indexOf('--setting-sources');
   const sm = tail.indexOf('--strict-mcp-config');
   const once = (f: string) => argv.filter((a) => a === f || a.startsWith(`${f}=`)).length === 1;
@@ -121,6 +146,12 @@ export function guardsLast(argv: string[]): boolean {
     once('--settings') && once('--setting-sources') && once('--strict-mcp-config') && !argv.some((a) => a === '--mcp-config' || a.startsWith('--mcp-config='))
   );
 }
+
+/**
+ * The only `--settings` values a script's call may give (R1264d D5): none at all (`{}`), or an API-key login's
+ * apiKeyHelper as the engine writes it (`cat -- <plain absolute path>`, or one variable holding that path).
+ */
+const SETTINGS_VALUE = /^\{\s*\}$|^\{\s*"apiKeyHelper"\s*:\s*"cat -- (?:\$\{?[A-Za-z_]\w*\}?|\/[A-Za-z0-9._\/-]+)"\s*\}$/;
 
 /** Joins continued lines and drops comments (a `#` at a word's start outside quotes) and blank lines. */
 function logicalLines(text: string): { line: number; end: number; text: string }[] {
@@ -236,36 +267,35 @@ function wordsOf(cmd: string): Word[] {
 const unquote = (w: string) => w.replace(/^(['"])(.*)\1$/s, '$2');
 
 /** Each claude call a shell text starts without the guards at its end, as `<path>:<line>: <why>`. */
-export function shellLaunchProblems(path: string, text: string): string[] {
+export function shellLaunchProblems(path: string, text: string, pinned = new Map<[string, string, string], number>()): string[] {
   const lines = logicalLines(text);
   // Variables this file sets to claude; arrays' words (with `+=` appends).
   const vars = new Set<string>();
   const arrays = new Map<string, string[]>();
   for (const { text: t } of lines) {
     for (const part of t.split(/;\s*/)) {
-      const v = /^(?:export\s+|local\s+|readonly\s+|declare\s+(?:-\w+\s+)?)?([A-Za-z_]\w*)(\+?)=(.*)$/.exec(part.trim());
+      const v = /^(?:(?:export|local|readonly|declare|typeset)(?:\s+-\w+)*\s+)?([A-Za-z_]\w*)(\+?)=(.*)$/.exec(part.trim());
       if (!v) continue;
       const val = v[3]!.trim();
       if (val.startsWith('(')) {
         const inner = val.replace(/^\(|\)\s*$/g, '');
         arrays.set(v[1]!, [...(v[2] ? (arrays.get(v[1]!) ?? []) : []), ...wordsOf(inner).map((w) => w.text)]);
       } else {
-        const u = unquote(val);
-        if (BINARY.test(u) || /^\$\{\w+:-(?:\S*\/)?claude\}$/.test(u) || /^\$\((?:command -v|which|type -P) claude\)$/.test(u)) vars.add(v[1]!);
+        // Fail closed (R1264d D4): a variable whose value names the binary anywhere is the binary.
+        if (VALUE_CLAUDE(unquote(val))) vars.add(v[1]!);
       }
     }
   }
-  const isClaude = (w: Word, first: boolean) => {
-    const m = /^\$\{?([A-Za-z_]\w*)\}?$/.exec(unquote(w.text));
+  const isClaude = (w: Word) => {
+    const u = unquote(w.text);
+    const m = /^\$\{?([A-Za-z_]\w*)(?:[:-][^}]*)?\}?$/.exec(u);
     if (m && vars.has(m[1]!)) return true;
-    if (w.quoted) return first && BINARY.test(unquote(w.text));
-    return BINARY.test(w.text);
+    return BINARY.test(u) || isClaudeToken(u);
   };
   const out: string[] = [];
   // The physical lines of the logical line being judged, and the lines each pin has covered so far.
   const raw = text.split('\n');
   let phys: number[] = [];
-  const pinned = new Map<(typeof SHELL_PINS)[number], Set<number>>();
   const judge = (line: number, cmd: string) => {
     const words = wordsOf(cmd);
     // Strings run as commands: after `-c` (`bash -c`, `bash -lc`, `su -c`) or `eval`, recursively.
@@ -280,7 +310,7 @@ export function shellLaunchProblems(path: string, text: string): string[] {
     // data; `command` is one only as `command -v`/`-V`.
     const dataFrom = (i: number) => words.slice(k, i).some((w, j, a) => !w.quoted && (NON_LAUNCHERS.has(w.text) ? w.text !== 'command' || /^-[vV]$/.test(a[j + 1]?.text ?? '') : false));
     for (let i = k; i < words.length; i++) {
-      if (!isClaude(words[i]!, i === k) || dataFrom(i)) continue;
+      if (!isClaude(words[i]!) || dataFrom(i)) continue;
       // Its argument words: arrays expanded, trailing redirections and `&` dropped.
       const args: string[] = [];
       for (const w of words.slice(i + 1)) {
@@ -295,15 +325,15 @@ export function shellLaunchProblems(path: string, text: string): string[] {
       }
       const plain = args.map(unquote);
       const joined = plain.join(' ');
-      if (EXEMPT_ARGV.test(joined) || SHELL_EXCEPTIONS.some(([f, a]) => f === path && cmd.includes(a))) return;
+      if (EXEMPT_ARGV.test(joined)) return;
       const guarded = guardsLast(plain);
-      const pin = guarded ? undefined : SHELL_PINS.find(([f, l]) => f === path && phys.some((n) => raw[n - 1]?.trim() === l));
+      // A pin (the spike's, or an exception) covers exactly one call (R1264c D2, R1264d D1): a second call on its
+      // line, on the lines continued into it, or a copy of the line anywhere in the file, is refused.
+      const pin = guarded ? undefined : [...SHELL_PINS, ...SHELL_EXCEPTIONS].find(([f, l]) => f === path && phys.some((n) => raw[n - 1]?.trim() === l));
       if (pin) {
-        const at = phys.find((n) => raw[n - 1]?.trim() === pin[1])!;
-        const seen = pinned.get(pin) ?? new Set<number>();
-        seen.add(at);
-        pinned.set(pin, seen);
-        if (seen.size > 1) out.push(`${path}:${at}: a copy of a pinned line (\`${pin[1].slice(0, 100)}\`): its pin covers one line; end it with the launch's guards`);
+        const n = (pinned.get(pin) ?? 0) + 1;
+        pinned.set(pin, n);
+        if (n > 1) out.push(`${path}:${line}: a second claude call under a pinned line (\`${pin[1].slice(0, 100)}\`): a pin covers one call; end it with the launch's guards`);
         return;
       }
       if (!guarded) out.push(`${path}:${line}: starts claude (\`${cmd.slice(0, 140)}\`) without the launch's guards at its end (--settings <json> --setting-sources '' --strict-mcp-config, nothing after them)`);
@@ -333,10 +363,12 @@ export function workflowLaunchProblems(path: string, text: string): string[] {
     }
   };
   walk(parse(text) as unknown);
+  // One count of each pin's calls for the whole file, across its steps (a pin covers one call).
+  const pinned = new Map<[string, string, string], number>();
   for (const s of steps) {
     const where = `${path} (step ${typeof s.name === 'string' ? JSON.stringify(s.name.slice(0, 60)) : '(unnamed)'})`;
     if (typeof s.uses === 'string' && /claude/i.test(s.uses)) out.push(`${where}: uses ${s.uses}, which starts claude with the repo's own settings: not allowed`);
-    if (typeof s.run === 'string') out.push(...shellLaunchProblems(path, s.run).map((p) => p.replace(`${path}:`, `${where}:`)));
+    if (typeof s.run === 'string') out.push(...shellLaunchProblems(path, s.run, pinned).map((p) => p.replace(`${path}:`, `${where}:`)));
   }
   return out;
 }
@@ -345,7 +377,8 @@ export function workflowLaunchProblems(path: string, text: string): string[] {
 export function otherLaunchProblems(path: string, text: string): string[] {
   if (/(^|\/)package\.json$/.test(path)) {
     const scripts = (JSON.parse(text) as { scripts?: Record<string, string> }).scripts ?? {};
-    return Object.entries(scripts).flatMap(([k, v]) => shellLaunchProblems(`${path} (scripts.${k})`, v));
+    const pinned = new Map<[string, string, string], number>();
+    return Object.entries(scripts).flatMap(([k, v]) => shellLaunchProblems(`${path} (scripts.${k})`, v, pinned));
   }
   if (/(^|\/)Dockerfile[^/]*$/.test(path)) return shellLaunchProblems(path, text.split('\n').map((l) => (/^\s*RUN\s/.test(l) ? l.replace(/^\s*RUN\s+/, '') : '')).join('\n'));
   if (/(^|\/)(?:GNU)?[Mm]akefile$|\.mk$/.test(path)) return shellLaunchProblems(path, text.split('\n').map((l) => (l.startsWith('\t') ? l.slice(1).replace(/^[@-]+/, '') : '')).join('\n'));
@@ -456,7 +489,10 @@ test('#1262 (R1264a/b): the places a script can live are all read', () => {
 
 const asPath = (as: string | undefined) => (as === undefined ? undefined : /^<pin (\d+)>$/.test(as) ? SHELL_PINS[Number(/\d+/.exec(as)![0]) - 1]![0] : as);
 
-test('#1262: the pinned exceptions are the owner\'s one, by its exact line (a new pin is a change to this test)', () => {
+test('#1262: the pinned exceptions are the owner\'s one, by its exact file, line and reason (a new or moved pin is a change to this test)', () => {
+  // R1264c D1, R1264d D2: the whole list by its digest (no spike path named here, #673): its file, its exact line and
+  // its reason. Moving, widening or adding a pin changes the digest, so the change shows in this test in review.
+  assert.equal(createHash('sha256').update(JSON.stringify(SHELL_PINS)).digest('hex'), 'a02f5896ff8e1f6a824eca06cd83f6aa1c8c6ada0d24a6563b1e2458b8dcffb5');
   assert.deepEqual(SHELL_PINS.map(([f, , why]) => [f.split('/').at(-1), why]), [['worktree-commit.sh', 'a sandbox probe whose project-settings load is the point (the owner, 2026-11-11, "spikes: b")']]);
 });
 
@@ -474,7 +510,22 @@ test('#1262: every way a script can start claude without the guards at its end i
     'bash-lc',
     'command-builtin',
     'command-v-variable',
+    'assigning-default',
     'continued-line',
+    'default-expansion',
+    'exception-copied',
+    'exception-in-prompt',
+    'exception-widened',
+    'local-array-override',
+    'lookup-in-default',
+    'pin-second-call',
+    'quoted-cli-js',
+    'quoted-npx-package',
+    'quoted-path-after-sudo',
+    'quoted-path-after-timeout',
+    'settings-file',
+    'settings-hooks',
+    'variable-with-flags',
     'copied-spike-pin',
     'spike-pin-other-file',
     'spike-unguarded',
@@ -517,7 +568,7 @@ test('#1262: every way a script can start claude without the guards at its end i
     'xargs',
   ];
   // check-table: never-shrink
-  const CONTROLS = ['ok-auth-status', 'ok-case-label', 'ok-comment', 'ok-continued-guards', 'ok-for-list', 'ok-grep-regex', 'ok-guarded', 'ok-guarded-array', 'ok-install-path', 'ok-js-auth-status', 'ok-js-guarded', 'ok-other-tool', 'ok-prose', 'ok-spike-pin', 'ok-version', 'ok-workflow-block-guarded'];
+  const CONTROLS = ['ok-api-key-helper', 'ok-auth-status', 'ok-case-label', 'ok-comment', 'ok-continued-guards', 'ok-for-list', 'ok-grep-regex', 'ok-guarded', 'ok-guarded-array', 'ok-install-path', 'ok-js-auth-status', 'ok-js-guarded', 'ok-other-tool', 'ok-prose', 'ok-spike-pin', 'ok-version', 'ok-workflow-block-guarded'];
   assert.deepEqual(all.map(nameOf).sort(), [...MUST_FAIL, ...CONTROLS].sort(), 'every fixture, by name');
   for (const f of all) {
     const n = nameOf(f);

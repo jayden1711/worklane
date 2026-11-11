@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# An API-key login's helper, as the engine writes it (R1264c D3), and the empty settings.
+key=/home/user/.config/key
+claude -p hi --settings "{\"apiKeyHelper\":\"cat -- $key\"}" --setting-sources '' --strict-mcp-config
+claude -p hi --settings "{\"apiKeyHelper\":\"cat -- /home/user/.config/key\"}" --setting-sources '' --strict-mcp-config
+claude -p hi --settings '{}' --setting-sources '' --strict-mcp-config

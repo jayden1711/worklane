@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# R1264d D4: a guarded global array, overridden by local -a.
+ARGS=(-p hi --settings '{}' --setting-sources '' --strict-mcp-config)
+run() {
+  local -a ARGS=(-p hi --setting-sources user)
+  claude "${ARGS[@]}"
+}

@@ -117,6 +117,19 @@ try { tok = JSON.parse(fs.readFileSync((process.env.CLAUDE_CONFIG_DIR || process
 const ok = /^sk-ant-oat01-/.test(tok) && !fs.existsSync(T + '/fail-auth-' + process.env.USER);
 let cached = null;
 try { cached = JSON.parse(fs.readFileSync((process.env.CLAUDE_CONFIG_DIR || process.env.HOME) + '/.claude.json', 'utf8')).oauthAccount || null; } catch {}
+// An API-key login (api-key-<user>, R1264c D3): signed in by its key, which reaches claude only through apiKeyHelper
+// in the settings it was given (no setting source is loaded): without one naming a readable key, "Not logged in".
+if (fs.existsSync(T + '/api-key-' + process.env.USER)) {
+  if (process.argv[2] !== '-p') { process.stdout.write(JSON.stringify({ loggedIn: true, authMethod: 'api_key' })); process.exit(0); }
+  let s = {};
+  try { s = JSON.parse(process.argv[process.argv.lastIndexOf('--settings') + 1]); } catch {}
+  const m = /^cat -- (\\/\\S+)$/.exec(typeof s.apiKeyHelper === 'string' ? s.apiKeyHelper : '');
+  let key = '';
+  try { key = m ? fs.readFileSync(m[1], 'utf8').trim() : ''; } catch {}
+  if (key.startsWith('sk-ant-api')) { process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'ok', total_cost_usd: 0.01 })); process.exit(0); }
+  process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: true, result: 'Not logged in · Please run /login' }));
+  process.exit(1);
+}
 if (process.argv[2] === '-p') {
   // Where the proof ran and with what (#1262): its folder, whether that was empty, its auto memory.
   fs.appendFileSync(T + '/claude-proof-seen', JSON.stringify({ user: process.env.USER, cwd: process.cwd(), empty: fs.readdirSync(process.cwd()).length === 0, memory: process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY ?? null }) + '\\n');
@@ -515,3 +528,37 @@ function lstatExists(p: string): boolean {
     return false;
   }
 }
+
+test("R1264c D3: an API-key agent's login proof passes its apiKeyHelper (cat -- <key file>, from its own settings) and nothing else; any other helper isn't taken", { skip: !posix }, () => {
+  const m = machine();
+  const u = 'wl-beta-agent';
+  const cfg = join(m.T, 'homes', u, '.claude');
+  const key = join(m.T, 'beta-api-key');
+  writeFileSync(key, 'sk-ant-api03-STANDIN\n');
+  writeFileSync(join(m.T, `api-key-${u}`), '');
+  const beta = () => {
+    writeFileSync(join(m.T, 'claude-calls'), '');
+    const r = m.run(['status', '--json'], '');
+    const rec = (JSON.parse(r.stdout) as { users: { user: string; api_ok: boolean | null; api_error: string | null }[] }).users.find((x) => x.user === u)!;
+    const proof = readFileSync(join(m.T, 'claude-calls'), 'utf8').trim().split('\n').find((c) => c.startsWith(`${u} -p `))!;
+    return { rec, proof };
+  };
+  // No settings: the proof's own '{}', and the key never reaches claude.
+  let b = beta();
+  assert.equal(b.rec.api_ok, false);
+  assert.match(String(b.rec.api_error), /Not logged in/);
+  assert.match(b.proof, / --settings \{\} --setting-sources  --strict-mcp-config$/);
+  // Its settings name the key file as credentials.sh writes it: that one setting, sources still ''.
+  writeFileSync(join(cfg, 'settings.json'), JSON.stringify({ apiKeyHelper: `cat -- ${key}`, hooks: { SessionStart: [{ hooks: [{ type: 'command', command: 'touch /tmp/planted' }] }] } }));
+  b = beta();
+  assert.equal(b.rec.api_ok, true, `${String(b.rec.api_error)} | ${b.proof}`);
+  assert.ok(b.proof.endsWith(` --settings {"apiKeyHelper":"cat -- ${key}"} --setting-sources  --strict-mcp-config`), b.proof);
+  assert.ok(!b.proof.includes('hooks'), 'only the helper: none of its other settings');
+  // A helper in any other form is not taken: the proof keeps '{}'.
+  for (const h of [`cat -- ${key}; touch /tmp/x`, `sh -c 'cat ${key}'`, `cat -- relative/key`, `cat -- ${key}/../x`]) {
+    writeFileSync(join(cfg, 'settings.json'), JSON.stringify({ apiKeyHelper: h }));
+    b = beta();
+    assert.match(b.proof, / --settings \{\} --setting-sources  --strict-mcp-config$/, h);
+    assert.equal(b.rec.api_ok, false, h);
+  }
+});

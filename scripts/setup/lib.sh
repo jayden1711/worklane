@@ -1189,15 +1189,35 @@ agent_key_file_ok() { run_as_bounded "$1" "$AGENT_CHECK_SECONDS" /dev/null "$AGE
 # With a Claude config dir: the call on that login.
 # It loads nothing from anywhere (#1262, #958): the engine's launch guards end its argv (Claude Code takes the last
 # --settings and --setting-sources), its auto memory is off, and it runs in an empty folder the user makes for it,
-# removed after (only that folder: its path must be the one mktemp made).
+# removed after (only that folder: its path must be the one mktemp made). An API-key login's key reaches claude only
+# through apiKeyHelper (R1264c D3): with no setting source loaded, the proof passes that one setting, as the engine does
+# (src/runner.ts: `cat -- <agent_api_key>`), read from the user's own settings (credentials.sh writes it) and only in
+# that exact form; else its settings are `{}`.
 #   claude_api_check <user> [<claude config dir>]
-CLAUDE_PROOF_ARGS=(-p "Reply with the single word: ok" --model haiku --max-turns 1 --max-budget-usd 0.05 --output-format json --settings '{}' --setting-sources '' --strict-mcp-config)
+CLAUDE_PROOF_ARGS=(-p "Reply with the single word: ok" --model haiku --max-turns 1 --max-budget-usd 0.05 --output-format json)
+# The key file a user's Claude settings name as apiKeyHelper (`cat -- <path>`), read as that user under a timeout, as
+# the proof itself runs (the file opened without following a link or blocking, a regular file of at most 64 KiB);
+# nothing when they name none, or anything but a plain absolute path in that form.
+#   claude_key_file <user> <settings file>
+CLAUDE_KEY_HELPER_JS='const fs=require("fs"),c=fs.constants,MAX=65536;try{const fd=fs.openSync(process.argv[1],c.O_RDONLY|c.O_NONBLOCK|c.O_NOFOLLOW);try{const st=fs.fstatSync(fd);if(st.isFile()&&st.size<=MAX){const b=Buffer.alloc(MAX+1);let n=0,r=0;while(n<b.length&&(r=fs.readSync(fd,b,n,b.length-n,null))>0)n+=r;if(n<=MAX){const s=JSON.parse(b.subarray(0,n).toString("utf8"));if(s&&typeof s==="object"&&typeof s.apiKeyHelper==="string")process.stdout.write(s.apiKeyHelper.slice(0,4096))}}}finally{fs.closeSync(fd)}}catch{}'
+claude_key_file() {
+  local h k
+  h="$(sudo -H -u "$1" timeout -k 5 "$AGENT_CHECK_SECONDS" "$(command -v node)" -e "$CLAUDE_KEY_HELPER_JS" "$2" </dev/null 2>/dev/null | head -c 4096)" || h=""
+  k="${h#cat -- }"
+  [ "$h" = "cat -- $k" ] && [[ "$k" =~ ^/[A-Za-z0-9._/-]+$ ]] && [[ "$k/" != *//* && "$k/" != */./* && "$k/" != */../* ]] && printf '%s' "$k"
+  return 0
+}
 claude_api_check() {
   command -v claude >/dev/null 2>&1 || { echo "claude is not installed"; return 1; }
-  local out dir
+  local out dir key=""
+  [ -n "${2:-}" ] && key="$(claude_key_file "$1" "$2/settings.json")"
   dir="$(sudo -H -u "$1" mktemp -d /tmp/login-proof-XXXXXX)" || { echo "couldn't make an empty folder for the login's proof"; return 1; }
   case "$dir" in /tmp/login-proof-??????) ;; *) echo "the login's proof folder isn't mktemp's ($dir)"; return 1 ;; esac
-  out="$( (cd "$dir" && sudo -H -u "$1" timeout 120 env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 ${2:+"CLAUDE_CONFIG_DIR=$2"} claude "${CLAUDE_PROOF_ARGS[@]}" 2>&1) || true)"
+  if [ -n "$key" ]; then
+    out="$( (cd "$dir" && sudo -H -u "$1" timeout 120 env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 ${2:+"CLAUDE_CONFIG_DIR=$2"} claude "${CLAUDE_PROOF_ARGS[@]}" --settings "{\"apiKeyHelper\":\"cat -- $key\"}" --setting-sources '' --strict-mcp-config 2>&1) || true)"
+  else
+    out="$( (cd "$dir" && sudo -H -u "$1" timeout 120 env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 ${2:+"CLAUDE_CONFIG_DIR=$2"} claude "${CLAUDE_PROOF_ARGS[@]}" --settings '{}' --setting-sources '' --strict-mcp-config 2>&1) || true)"
+  fi
   sudo -H -u "$1" rm -rf -- "$dir"
   printf '%s' "$out" | "$(command -v node)" -e '
 const text = require("node:fs").readFileSync(0, "utf8");

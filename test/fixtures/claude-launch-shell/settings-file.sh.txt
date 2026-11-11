@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# R1264d D5: --settings naming a settings file (its hooks run).
+claude -p hi --settings .claude/settings.json --setting-sources '' --strict-mcp-config
