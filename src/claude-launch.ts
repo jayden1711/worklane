@@ -40,10 +40,16 @@ export type ClaudeLaunch = {
   resume?: string;
   pluginDirs?: readonly string[];
   mcpConfigFile?: string;
+  /**
+   * Where Claude Code keeps installed plugins (CLAUDE_CODE_PLUGIN_CACHE_DIR): the instance's empty, root-owned plugins
+   * root, which the runner gives. The launch sets the variable from this field alone: a caller's environment never
+   * names it (launchEnv drops it). Absent: no such variable.
+   */
+  pluginCacheDir?: string;
 };
 
 /** Every field of ClaudeLaunch: the probe names each, so a field it doesn't drive can't be added unseen. */
-export const LAUNCH_FIELDS = ['bin', 'cwd', 'env', 'asUser', 'detached', 'settings', 'mode', 'model', 'maxTurns', 'maxBudgetUsd', 'allowedTools', 'disallowedTools', 'appendSystemPromptFile', 'appendSystemPrompt', 'jsonSchema', 'effort', 'resume', 'pluginDirs', 'mcpConfigFile'] as const satisfies readonly (keyof ClaudeLaunch)[];
+export const LAUNCH_FIELDS = ['bin', 'cwd', 'env', 'asUser', 'detached', 'settings', 'mode', 'model', 'maxTurns', 'maxBudgetUsd', 'allowedTools', 'disallowedTools', 'appendSystemPromptFile', 'appendSystemPrompt', 'jsonSchema', 'effort', 'resume', 'pluginDirs', 'mcpConfigFile', 'pluginCacheDir'] as const satisfies readonly (keyof ClaudeLaunch)[];
 
 /** Every tool Claude Code has, for a launch that may use none (skill-eval's answer, the login proof). */
 export const NO_TOOLS = ['Bash', 'Edit', 'Write', 'MultiEdit', 'Read', 'Glob', 'Grep', 'WebFetch', 'WebSearch', 'NotebookEdit', 'Task'];
@@ -53,12 +59,12 @@ export const LAUNCH_ENV = { CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' } as const;
 
 /**
  * The only CLAUDE_* and ANTHROPIC_* variables a launch passes on (R1185ac D1): the login (its config dir, a key or a
- * token, as the runtime and the login proof give them), a provider's endpoint, the runner's own plugin root, and
- * Windows' git bash. Every other one is dropped, whoever put it in the environment: Claude Code reads some to load
+ * token, as the runtime and the login proof give them), a provider's endpoint, and Windows' git bash. The plugin
+ * cache folder is the launch's own (ClaudeLaunch.pluginCacheDir), never a caller's. Every other one is dropped, whoever put it in the environment: Claude Code reads some to load
  * content outside its setting sources (CLAUDE_CODE_PLUGIN_DIRS loads a plugin's hooks and skills, measured on 2.1.296).
  */
 // check-table: never-grow
-export const LAUNCH_ENV_KEEP = ['CLAUDE_CONFIG_DIR', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'CLAUDE_CODE_PLUGIN_CACHE_DIR', 'CLAUDE_CODE_GIT_BASH_PATH'] as const;
+export const LAUNCH_ENV_KEEP = ['CLAUDE_CONFIG_DIR', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'CLAUDE_CODE_GIT_BASH_PATH'] as const;
 
 /**
  * The environment a launch gives claude: the caller's, less every CLAUDE_* and ANTHROPIC_* variable LAUNCH_ENV_KEEP
@@ -66,7 +72,8 @@ export const LAUNCH_ENV_KEEP = ['CLAUDE_CONFIG_DIR', 'ANTHROPIC_API_KEY', 'ANTHR
  * empty entry is the working directory: a bare `claude` would then run the checkout's own file, R1185ac D3), and
  * LAUNCH_ENV over it.
  */
-export function launchEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+export function launchEnv(env: NodeJS.ProcessEnv, pluginCacheDir?: string): NodeJS.ProcessEnv {
+  if (pluginCacheDir !== undefined && !isAbsolute(pluginCacheDir)) throw new Error(`launchClaude: the plugin cache folder ${JSON.stringify(pluginCacheDir)} isn't an absolute path`);
   const keep = new Set<string>(LAUNCH_ENV_KEEP);
   const out: NodeJS.ProcessEnv = {};
   for (const [k, v] of Object.entries(env)) {
@@ -74,7 +81,7 @@ export function launchEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
     if (/^(?:CLAUDE|ANTHROPIC)_/i.test(k) && !keep.has(k.toUpperCase())) continue;
     out[k] = /^path$/i.test(k) ? v.split(delimiter).filter((d) => d !== '' && isAbsolute(d)).join(delimiter) : v;
   }
-  return { ...out, ...LAUNCH_ENV };
+  return { ...out, ...(pluginCacheDir !== undefined ? { CLAUDE_CODE_PLUGIN_CACHE_DIR: pluginCacheDir } : {}), ...LAUNCH_ENV };
 }
 
 /** The binary a launch starts: a bare name (found on its PATH, as launchEnv leaves it), or an absolute path. */
@@ -96,7 +103,7 @@ export const launchGuards = (settings: object): string[] => ['--settings', JSON.
  * is free text (a skill's own instructions, which may start with `---`): it goes as `--append-system-prompt=<text>`,
  * one argument a flag can't be read out of. Throws naming the field.
  */
-function flagFree(spec: Omit<ClaudeLaunch, 'bin' | 'cwd' | 'env' | 'asUser' | 'detached'>): void {
+function flagFree(spec: Omit<ClaudeLaunch, 'bin' | 'cwd' | 'env' | 'asUser' | 'detached' | 'pluginCacheDir'>): void {
   const bad = (v: unknown) => typeof v !== 'string' || v.startsWith('-');
   for (const k of ['allowedTools', 'disallowedTools', 'pluginDirs'] as const) {
     const list: unknown = spec[k] ?? [];
@@ -114,7 +121,7 @@ function flagFree(spec: Omit<ClaudeLaunch, 'bin' | 'cwd' | 'env' | 'asUser' | 'd
  * one-shot answer's for `json`, then always `--settings`, `--setting-sources ''` and `--strict-mcp-config`, last, so
  * no earlier argument can stand in for them (R1185aa D1). A spec value that would be read as a flag is refused.
  */
-export function claudeArgv(spec: Omit<ClaudeLaunch, 'bin' | 'cwd' | 'env' | 'asUser' | 'detached'>): string[] {
+export function claudeArgv(spec: Omit<ClaudeLaunch, 'bin' | 'cwd' | 'env' | 'asUser' | 'detached' | 'pluginCacheDir'>): string[] {
   flagFree(spec);
   const args: string[] = [];
   if (spec.mode === 'stream') args.push('-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--model', spec.model, '--permission-mode', 'dontAsk', '--max-turns', String(spec.maxTurns), '--max-budget-usd', String(spec.maxBudgetUsd));
@@ -139,14 +146,14 @@ export function claudeArgv(spec: Omit<ClaudeLaunch, 'bin' | 'cwd' | 'env' | 'asU
  * proves.
  */
 export function launchClaudeSync(spec: Omit<ClaudeLaunch, 'asUser' | 'detached'>, o: { timeoutMs: number; input?: string }): { status: number | null; stdout: string; stderr: string; error?: Error } {
-  const r = spawnSync(launchBin(spec.bin), claudeArgv(spec), { cwd: spec.cwd, env: launchEnv(spec.env), encoding: 'utf8', timeout: o.timeoutMs, input: o.input ?? '' });
+  const r = spawnSync(launchBin(spec.bin), claudeArgv(spec), { cwd: spec.cwd, env: launchEnv(spec.env, spec.pluginCacheDir), encoding: 'utf8', timeout: o.timeoutMs, input: o.input ?? '' });
   return { status: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '', ...(r.error ? { error: r.error } : {}) };
 }
 
 /** Start a Claude Code session: the only way the engine does (see the top of this file). */
 export function launchClaude(spec: ClaudeLaunch): ChildProcessWithoutNullStreams {
   const argv = claudeArgv(spec);
-  const env = launchEnv(spec.env);
+  const env = launchEnv(spec.env, spec.pluginCacheDir);
   const w = spec.asUser ? spec.asUser(launchBin(spec.bin), argv, env) : { file: launchBin(spec.bin), args: argv, env };
   return spawn(w.file, w.args, { cwd: spec.cwd, env: w.env, stdio: ['pipe', 'pipe', 'pipe'], ...(spec.detached ? { detached: true } : {}) }) as ChildProcessWithoutNullStreams;
 }

@@ -142,6 +142,7 @@ const AXES = {
   resume: 'the fix run resumed, with every source (a control) and guarded, both lane shapes',
   pluginDirs: 'limit: an approved plugin needs a reviewed store; every guarded run gets the plugin locks and the plugin cache folder instead',
   mcpConfigFile: 'limit: an approved MCP server needs the broker; every run gets --strict-mcp-config, and the planted .mcp.json is refused',
+  pluginCacheDir: "the instance's plugins root, on every guarded run (shaped() reads it in the run's environment)",
 };
 for (const f of LAUNCH_FIELDS) if (!(f in AXES)) {
   console.error(`the launch's field ${f} isn't one this probe names (AXES): drive it, or name it a limit`);

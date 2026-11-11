@@ -718,9 +718,7 @@ export class CliRunner implements AgentRunner {
       }
     }
     const mcpArgs = mcpRun && mcpRun.servers.length ? mcpRunArgs(this.mcp!.instance, mcpRun, process.execPath, fileURLToPath(new URL('./cli.js', import.meta.url))) : null;
-    // The plugins root moved to root's empty directory: the agent user's own installs never load, and it can't install.
-    const pluginEnv: Record<string, string> = plugins?.pluginRoot ? { CLAUDE_CODE_PLUGIN_CACHE_DIR: plugins.pluginRoot } : {};
-    const runEnv = runAs ? { ...runAsEnv(env, runAs), ...endpoint, ...pluginEnv } : { ...env, ...pluginEnv };
+    const runEnv = runAs ? { ...runAsEnv(env, runAs), ...endpoint } : env;
     // The instance's guardrails, or no run: never an agent run without its hooks, or with a project file that
     // could loosen them.
     let guard: Settings | null = null;
@@ -832,7 +830,9 @@ export class CliRunner implements AgentRunner {
         const [file, args] = asUser(runAs.user, bin, argv, e);
         return { file, args, env: { PATH: ownEnv(env).get('PATH') ?? '' } };
       } : undefined;
-      const child = launchClaude({ bin: this.bin, cwd: req.cwd, env: runEnv, detached: spawnDetached, ...fields, ...(viaUser ? { asUser: viaUser } : {}) });
+      // The plugins root moved to root's empty directory: the agent user's own installs never load, and it can't
+      // install. The launch sets it from this field alone (a caller's environment never names it).
+      const child = launchClaude({ bin: this.bin, cwd: req.cwd, env: runEnv, detached: spawnDetached, ...fields, ...(plugins?.pluginRoot ? { pluginCacheDir: plugins.pluginRoot } : {}), ...(viaUser ? { asUser: viaUser } : {}) });
       child.stdin.on('error', () => {}); // a run that exits before reading its prompt reports that itself
       child.on('error', cleanup);
       // The prompt is the first user message; the input stays open for console messages until a turn

@@ -105,3 +105,23 @@ test('R1185ac D1/D3: the launch owns its environment: no CLAUDE_*/ANTHROPIC_* it
   // A relative binary path is refused.
   assert.throws(() => launchClaudeSync({ ...LOGIN_PROOF, bin: './claude', cwd: checkout, env }, { timeoutMs: 30_000 }), /relative path/);
 });
+
+test('R1185ac (the organizer, 2026-11-11): the plugin cache folder is the launch\'s own field; a caller\'s environment never names it', { skip: !posix && 'a POSIX stand-in claude' }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'launch-cache-'));
+  const log = join(dir, 'seen.json');
+  const bin = join(dir, 'claude');
+  writeFileSync(bin, `#!/usr/bin/env node\nrequire('node:fs').writeFileSync(${JSON.stringify(log)}, JSON.stringify(process.env));\nconsole.log(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'ok' }));\n`);
+  chmodSync(bin, 0o755);
+  const env = { PATH: process.env.PATH ?? '', HOME: dir, CLAUDE_CODE_PLUGIN_CACHE_DIR: join(dir, 'planted-cache') };
+  const seen = () => JSON.parse(readFileSync(log, 'utf8')) as Record<string, string>;
+  // A caller's value (the login proof's process environment, a planted one) never reaches the child.
+  assert.equal(launchClaudeSync({ ...LOGIN_PROOF, bin, cwd: dir, env }, { timeoutMs: 30_000 }).status, 0);
+  assert.equal(seen().CLAUDE_CODE_PLUGIN_CACHE_DIR, undefined, "a caller's CLAUDE_CODE_PLUGIN_CACHE_DIR is dropped");
+  assert.equal(claudeProbeRun(LOGIN_PROOF, env, 30_000, bin).status, 0);
+  assert.equal(seen().CLAUDE_CODE_PLUGIN_CACHE_DIR, undefined, 'the login proof passes none');
+  // The field sets it, over a caller's.
+  const root = join(dir, 'plugins-root');
+  assert.equal(launchClaudeSync({ ...LOGIN_PROOF, bin, cwd: dir, env, pluginCacheDir: root }, { timeoutMs: 30_000 }).status, 0);
+  assert.equal(seen().CLAUDE_CODE_PLUGIN_CACHE_DIR, root, "the launch's own field");
+  assert.throws(() => launchEnv(env, 'relative/root'), /isn't an absolute path/);
+});
