@@ -204,7 +204,8 @@ test('R1182ao D2, R1182ap AP1/AP2: every reading of the page, real tags only, al
   // No false voids: a < b > c with nothing hidden, and another id.
   assert.equal(finds('ok if latency < 5ms and > 1ms'), false);
   assert.equal(finds('see d-12-bbbbbb'), false);
-  assert.ok(pageReadings('x').length >= 8, 'four readings, each reversed');
+  // R1182aq D2: three readings, each reversed (the attribute reading was a substring of the first, so it is gone).
+  assert.ok(pageReadings('x').length >= 6, 'three readings, each reversed');
 });
 
 test("the tracker's rendering (body_text) is read too; missing or null is unknown, judged on the body alone", () => {
@@ -215,11 +216,30 @@ test("the tracker's rendering (body_text) is read too; missing or null is unknow
   assert.deepEqual(idsElsewhere(readReply(`${c} approve not yet ${ID}`, `${c} approve not yet ${ID}`), [ID]), [ID], 'no slot: once is elsewhere');
   assert.deepEqual(idsElsewhere(readReply(`${c} approve not yet`, `${c} approve not yet ${ID}`), [ID]), [ID], 'no slot, the id only in the rendering, once: elsewhere');
   assert.ok(readReply(body, `${c} approve ${ID}\n${c} reject ${ID}`).others.length > 0, 'a second command in the rendering');
-  assert.deepEqual(readReply(body, `${c} approve ${ID}\nok \u00E9`).notAscii, { code: 'U+00E9', line: 2 }, 'not ASCII in the rendering');
+  assert.deepEqual(readReply(body, `${c} approve ${ID}\nok \u00E9`).notAscii, { code: 'U+00E9', line: 2, rendering: 'rendering' }, 'not ASCII in the rendering');
   assert.equal(readReply(body, `${c} approve ${ID}\nok \u2019 \u2014`).notAscii, null, 'the six phone characters are mapped there too');
   for (const missing of [null, undefined]) {
     const r = readReply(body, missing);
     assert.equal(r.rendered, null);
     assert.deepEqual([r.notAscii, idsElsewhere(r, [ID]), r.others], [null, [], []]);
   }
+});
+
+test('R1182ar: a reply holds no fenced code block, $, image or HTML tag or comment anywhere; the first one and its line', () => {
+  const mk = (body: string) => readReply(body).markup;
+  assert.equal(mk(`${c} approve ${ID}\nlooks *good*, see \`x\` and https://example.com/a(b) [docs](https://e.x)\n- [x] done\n> quoted`), null, 'plain text and inline markdown are fine');
+  assert.deepEqual(mk(`${c} approve ${ID}\n\n\`\`\`mermaid\nA\n\`\`\``), { construct: 'a fenced code block', line: 3 });
+  assert.deepEqual(mk(`${c} approve ${ID}\n   ~~~\nx\n~~~`), { construct: 'a fenced code block', line: 2 });
+  assert.deepEqual(mk(`${c} approve ${ID}\ncosts 5 dollars, or $5`), { construct: 'a $ (GitHub math)', line: 2 });
+  assert.deepEqual(mk(`${c} approve ${ID}\n\n\n![x](https://e.x/a.png)`), { construct: 'an image (![)', line: 4 });
+  assert.deepEqual(mk(`${c} approve ${ID}\nok <br>`), { construct: 'an HTML tag', line: 2 });
+  assert.deepEqual(mk(`${c} approve ${ID}\nok <!-- x -->`), { construct: 'an HTML comment', line: 2 });
+  assert.deepEqual(mk(`${c} approve ${ID}\n<b>x</b> then $y$`), { construct: 'an HTML tag', line: 2 }, 'the first by position');
+  assert.equal(mk(`${c} approve ${ID}\nif 1 < 2 and 3 > 2`), null, 'a < that is no tag');
+});
+
+test("R1182aq D1: a not-ASCII character only in GitHub's rendering is marked so, with the comment's line of its first emoji shortcode", () => {
+  assert.deepEqual(readReply(`${c} approve ${ID}\r\n\r\nthanks :tada:`, `${c} approve ${ID}\nthanks \u{1F389}`).notAscii, { code: 'U+1F389', line: 3, rendering: 'shortcode' });
+  assert.deepEqual(readReply(`${c} approve ${ID}\nok`, `${c} approve ${ID}\nok \u202E`).notAscii, { code: 'U+202E', line: 2, rendering: 'rendering' }, 'no shortcode: the rendering line');
+  assert.equal(readReply(`${c} approve ${ID} \u00E9`, `${c} approve ${ID}`).notAscii?.rendering, undefined, 'typed: not from the rendering');
 });

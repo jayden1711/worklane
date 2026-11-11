@@ -293,6 +293,8 @@ export abstract class Decisions extends Recovery {
           : null
         : r.unsafe
           ? 'reply_unsafe_text'
+          : r.markup
+            ? 'reply_markup'
           : r.others.length
             ? 'reply_more_than_one'
             : several
@@ -313,7 +315,10 @@ export abstract class Decisions extends Recovery {
       if (said.has(key)) continue;
       said.add(key);
       const why = {
-        reply_not_ascii: `has a character outside plain ASCII, typed or drawn by an HTML entity or bidi markup (${r.notAscii?.code} on line ${r.notAscii?.line}: an accented letter, an emoji, an invisible character or another symbol; curly quotes and en or em dashes are read as plain ones, though the first line takes no quotes)`,
+        reply_not_ascii: r.notAscii?.rendering
+          ? `has a character outside plain ASCII in GitHub's rendering of it (${r.notAscii.code} on line ${r.notAscii.line}${r.notAscii.rendering === 'shortcode' ? ', the line of its first emoji shortcode' : ' of the rendering'}; an emoji shortcode such as :+1: is drawn as an emoji)`
+          : `has a character outside plain ASCII, typed or drawn by an HTML entity or bidi markup (${r.notAscii?.code} on line ${r.notAscii?.line}: an accented letter, an emoji, an invisible character or another symbol; curly quotes and en or em dashes are read as plain ones, though the first line takes no quotes)`,
+        reply_markup: `has ${r.markup?.construct} on line ${r.markup?.line}; a reply is plain text, with no code block, $, image or HTML anywhere in it`,
         reply_not_first_line: "has its command somewhere other than the start of the comment's first line, where it is not read",
         reply_unsafe_text: 'has a character a reply can\'t hold on its first line (` < > [ ] ( ) " \' \\ & ! ~ $ %; a curly quote or apostrophe counts as a quote)',
         reply_id_elsewhere: `names ${idsElsewhere(r, live).slice(0, 3).join(', ')} somewhere other than right after the option on its first line (a reply names an open decision's id once, there: even "approve <id>, as in <id>'s plan" answers nothing)`,
@@ -329,7 +334,7 @@ export abstract class Decisions extends Recovery {
     }
     const id = q.id.toLowerCase();
     const picks = parsed
-      .map(({ c, r }) => ({ c, line: !r.notAscii && r.first && !r.unsafe && idsElsewhere(r, live).length === 0 && r.others.length === 0 && r.first.idNext && r.first.ids.length === 1 && r.first.ids[0] === id && q.options.includes(r.first.option) ? r.first : undefined }))
+      .map(({ c, r }) => ({ c, line: !r.notAscii && !r.markup && r.first && !r.unsafe && idsElsewhere(r, live).length === 0 && r.others.length === 0 && r.first.idNext && r.first.ids.length === 1 && r.first.ids[0] === id && q.options.includes(r.first.option) ? r.first : undefined }))
       .filter((x) => x.line !== undefined);
     for (const r of picks.reverse()) {
       const role = await this.commenterRole(r.c.author);

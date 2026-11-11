@@ -21,8 +21,19 @@ export interface CommandLine {
 
 /** A comment read as a reply. */
 export interface Reply {
-  /** The first character that isn't plain ASCII, as `U+XXXX`, and its line (from 1): the comment answers nothing. */
-  notAscii: { code: string; line: number } | null;
+  /**
+   * The first character that isn't plain ASCII, as `U+XXXX`, and its line (from 1): the comment answers nothing.
+   * `rendering`: found only in the tracker's rendering (GitHub's body_text), not as typed or in an entity; then `line` is
+   * the comment's line of its first emoji shortcode (`:tada:`, which GitHub draws as an emoji) when it has one, else the
+   * line in the rendering (R1182aq D1).
+   */
+  notAscii: { code: string; line: number; rendering?: 'shortcode' | 'rendering' } | null;
+  /**
+   * Markup a decision reply can't hold anywhere (the organizer, 2026-11-11, after R1182ar): a fenced code block (mermaid
+   * and math fences draw text from codes), a `$` (GitHub math), an image (`![`: its alt text can be built from links), or
+   * an HTML tag or comment. A reply is plain text; the construct and its line, or null.
+   */
+  markup: { construct: string; line: number } | null;
   /** The comment's ASCII characters, lower case (what a note about a non-ASCII comment is decided on). */
   ascii: string;
   /** The command on the comment's first non-blank line, or null. */
@@ -141,8 +152,6 @@ const decode = (s: string) =>
  */
 const COMMENT = /<!--(?:>|->|[\s\S]*?-->)/g;
 const TAG = /<\/?[a-z][a-z0-9-]*(?:[ \t/][^<>\n]*)?>/gi;
-/** Attribute text a page shows (an image's alt when it fails to load, a title on hover). */
-const SHOWN_ATTR = /\b(?:alt|title)[ \t]*=[ \t]*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/gi;
 /** Characters that print nothing dropped, markdown's emphasis, code and escape marks dropped, lower case. */
 const unmark = (s: string) => s.replace(/[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu, '').replace(/[*_~`\\]/g, '').toLowerCase();
 const untag = (s: string) => s.replace(COMMENT, '').replace(TAG, '');
@@ -152,13 +161,12 @@ const untag = (s: string) => s.replace(COMMENT, '').replace(TAG, '');
  * reading that contains one counts, so more readings only void more comments:
  * - decoded with tags kept (`<` and `>` left in place);
  * - real tags and comments dropped first, then decoded (CommonMark's order);
- * - decoded, then real tags and comments dropped;
- * - the text of `alt` and `title` attributes, decoded;
+ * - decoded, then real tags and comments dropped (the first reading already holds every attribute's text, such as an
+ *   image's alt, so there is no separate attribute reading: R1182aq D2);
  * - each of these reversed, for text a bidi override would draw backwards (R1182ap AP2; such text also voids as not ASCII).
  */
 export function pageReadings(s: string): string[] {
-  const attrs = [...s.matchAll(SHOWN_ATTR)].map((m) => m[1] ?? m[2] ?? m[3] ?? '').join('\n');
-  const forwards = [unmark(decode(s)), unmark(decode(untag(s))), unmark(untag(decode(s))), unmark(decode(attrs))];
+  const forwards = [unmark(decode(s)), unmark(decode(untag(s))), unmark(untag(decode(s)))];
   return [...forwards, ...forwards.map((t) => [...t].reverse().join(''))];
 }
 
@@ -197,6 +205,23 @@ function renderedElsewhere(r: Reply, x: string): boolean {
   if (!r.rendered) return false;
   const times = r.rendered.text.split(x).length - 1;
   return times > (r.rendered.slot === x ? 1 : 0);
+}
+
+/** The markup a reply can't hold, first by position (Reply.markup). */
+const MARKUP: [string, RegExp][] = [
+  ['a fenced code block', /^ {0,3}(?:`{3,}|~{3,})/m],
+  ['a $ (GitHub math)', /\$/],
+  ['an image (![)', /!\[/],
+  ['an HTML comment', /<!--/],
+  ['an HTML tag', /<\/?[a-z][a-z0-9-]*(?:[ \t/][^<>\n]*)?>/i],
+];
+function markupIn(body: string): Reply['markup'] {
+  let best: { construct: string; index: number } | null = null;
+  for (const [construct, re] of MARKUP) {
+    const m = re.exec(body);
+    if (m && (best === null || m.index < best.index)) best = { construct, index: m.index };
+  }
+  return best ? { construct: best.construct, line: body.slice(0, best.index).split(/\r\n|\r|\n/).length } : null;
 }
 
 /** The first character in `body` that isn't plain ASCII, and its line. */
@@ -240,7 +265,12 @@ export function readReply(typed: string, rendered?: string | null): Reply {
   const shownText = typeof rendered === 'string' ? rendered.replace(/[\u2018\u2019\u201C\u201D\u2013\u2014]/g, (ch) => TYPED[ch]!) : null;
   // Rule (1) as typed, then on the page (entities and bidi markup, R1182ap), then in the tracker's own rendering.
   const typedNotAscii = firstNotAscii(body);
-  const notAscii = typedNotAscii ?? pageNotAscii(body) ?? (shownText === null ? null : firstNotAscii(shownText));
+  const inRendering = typedNotAscii || shownText === null ? null : firstNotAscii(shownText);
+  const shortcode = /:[a-z0-9_+-]+:/i.exec(body);
+  const notAscii =
+    typedNotAscii ??
+    pageNotAscii(body) ??
+    (inRendering ? { code: inRendering.code, line: shortcode ? body.slice(0, shortcode.index).split(/\r\n|\r|\n/).length : inRendering.line, rendering: shortcode ? ('shortcode' as const) : ('rendering' as const) } : null);
   // A comment that isn't plain ASCII answers nothing; its ASCII characters are still read, to decide whether to say so.
   const text = typedNotAscii ? body.replace(new RegExp(NOT_ASCII.source, 'gu'), '') : body;
   const lines = text.split(/\r\n|\r|\n/);
@@ -257,5 +287,5 @@ export function readReply(typed: string, rendered?: string | null): Reply {
   }
   // Line 1's id slot: the token right after the option, taken out once; every other place an id appears is "elsewhere".
   const slotted = (first?.idNext ? lines.map((l, i) => (i === at ? l.replace(/^(\s*\S+\s+\S+[ \t]+)\S+/, '$1') : l)) : lines).join('\n');
-  return { notAscii, ascii: replyText(text), first, unsafe: first !== null && UNSAFE.test(firstRaw), others, rest: { typed: replyText(slotted), shown: pageReadings(slotted) }, rendered: shownText === null ? null : { text: replyText(shownText), slot: first?.idNext ? (first.ids[0] ?? null) : null } };
+  return { notAscii, markup: markupIn(body), ascii: replyText(text), first, unsafe: first !== null && UNSAFE.test(firstRaw), others, rest: { typed: replyText(slotted), shown: pageReadings(slotted) }, rendered: shownText === null ? null : { text: replyText(shownText), slot: first?.idNext ? (first.ids[0] ?? null) : null } };
 }

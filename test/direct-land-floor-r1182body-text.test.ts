@@ -108,7 +108,8 @@ test('body_text that shows a second command voids (reply_more_than_one)', async 
 test('body_text holding a character outside plain ASCII voids (reply_not_ascii, naming it)', async () => {
   const { f } = await landWith((id) => `/worklane approve ${id}\nok`, (id) => `/worklane approve ${id}\nok \u202E`);
   assert.deepEqual([answered(f).length, kinds(f)], [0, ['reply_not_ascii']]);
-  assert.match(notes(f)[0]!.message, /U\+202E on line 2/);
+  // R1182aq D1: a rendering-only character is named as such, with its line in the rendering (no shortcode here).
+  assert.match(notes(f)[0]!.message, /in GitHub's rendering of it \(U\+202E on line 2 of the rendering;/);
 });
 test('body_text that matches the body (the id once, in the slot) answers', async () => {
   const { f } = await landWith((id) => `/worklane approve ${id}\nlooks *good*`, (id) => `/worklane approve ${id}\nlooks good`);

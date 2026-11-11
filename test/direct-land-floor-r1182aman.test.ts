@@ -189,6 +189,11 @@ for (const [name, body] of ELSEWHERE) {
     const { f } = await land(body);
     assert.deepEqual([answered(f).length, queued(f), kinds(f).length], [0, 0, 1], JSON.stringify(answered(f)));
     // R1182ap: an entity the page draws outside ASCII (&nbsp;, &shy;) voids first, as reply_not_ascii.
+    // changed by the markup rule (R1182ar, the organizer, 2026-11-11: a reply holds no code block, $, image or HTML anywhere): a tag or comment in the probe gives reply_markup first.
+    if (/<[a-z!/]/i.test(body('d-1-x'))) {
+      assert.deepEqual(kinds(f), ['reply_markup']);
+      return;
+    }
     const want = /^the id spelt/.test(name) ? ['reply_id_elsewhere'] : /&(nbsp|shy);/.test(name) ? ['reply_not_ascii'] : ['reply_id_elsewhere', 'reply_more_than_one'];
     assert.ok(want.includes(kinds(f)[0]!), `${kinds(f)[0]} not in ${want}`);
   });
