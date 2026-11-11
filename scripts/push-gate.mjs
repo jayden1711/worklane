@@ -292,8 +292,12 @@ function autoCharFromGit(text) {
     runGit(['init', '-q', join(dir, 'r')], opts);
     runGit(['-C', join(dir, 'r'), '-c', 'core.commentChar=auto', '-c', 'commit.status=false', '-c', 'user.name=probe', '-c', 'user.email=probe@example.com', '-c', 'commit.gpgsign=false', '-c', `core.hooksPath=${devNull}`, 'commit', '-q', '--allow-empty', '--no-verify', '--cleanup=strip', '-e', '-F', msg], opts);
     const committed = runGit(['-C', join(dir, 'r'), 'log', '-1', '--format=%B'], opts).replace(/\n+$/, '');
-    return [...AUTO_COMMENT].find((c) => asCommitted(text, 'strip', c, false) === committed) ?? null;
-  } catch {
+    const c = [...AUTO_COMMENT].find((x) => asCommitted(text, 'strip', x, false) === committed) ?? null;
+    if (c === null) console.error("commit-msg hook: note: git's commit of the message matches no comment character it may pick; both readings are judged");
+    return c;
+  } catch (e) {
+    // Said, so a refusal from the strict readings is never a mystery (an empty message aborts git's commit too).
+    console.error(`commit-msg hook: note: git couldn't be asked which character core.commentChar=auto picks (${String(e.stderr || e.message).trim().split('\n')[0]}); both readings are judged`);
     return null;
   } finally {
     rmSync(dir, { recursive: true, force: true });
