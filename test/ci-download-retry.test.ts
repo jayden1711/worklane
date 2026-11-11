@@ -308,7 +308,11 @@ export function runProblems(run: string, rootStep = false): string[] {
     for (const c of commands(l)) {
       // Owner decision (c): anchored, from the checkout's root (`/tmp/x/scripts/y.sh` named scripts/ and passed), with no
       // `..` (scripts/../../tmp/y.sh), and with bash's options before the file read past (`bash -x y.sh`).
-      const m = /^(?:bash|sh|source|\.)(?:\s+-[A-Za-z]+)*\s+("?)([^\s"]+\.(?:sh|bash))\1(?:\s|$)/.exec(c) ?? /^("?)(\.\/[^\s"]+\.(?:sh|bash))\1(?:\s|$)/.exec(c);
+      // R1228ai D1 (T3): any file bash or sh runs, whatever its name (`bash scripts/ci/get-gitleaks`), not only `.sh`; a
+      // `-c` or `-s` takes its script from the line or stdin, not a file.
+      // `source` and `.` as before (a `.sh` or `.bash` file: `. /etc/wl-ci.env` reads an env file root wrote).
+      const shOpts = /^(?:bash|sh)((?:\s+-[A-Za-z]+)*)\s+/.exec(c);
+      const m = (shOpts && !/\s-[A-Za-z]*[cs]/.test(shOpts[1]!) ? /^(?:bash|sh)(?:\s+-[A-Za-z]+)*\s+("?)([^\s"'<>|;&]+)\1(?:\s|$)/.exec(c) : null) ?? /^(?:source|\.)(?:\s+-[A-Za-z]+)*\s+("?)([^\s"]+\.(?:sh|bash))\1(?:\s|$)/.exec(c) ?? /^("?)(\.\/[^\s"]+\.(?:sh|bash))\1(?:\s|$)/.exec(c);
       const fromWs = WS_ENV_ROOT.test(m?.[2] ?? '') && wsFromEnvFile;
       if (m && ((!SHELL_FILE_ROOT.test(m[2]!) && !fromWs) || /(^|\/)\.\.(\/|$)/.test(m[2]!))) out.push(`a shell file the download lint doesn't read (put it under scripts/ or .github/): ${c}`);
     }
@@ -578,6 +582,44 @@ function lookAlikes(names: readonly string[]): string[] {
 /** A shell script by name or shebang. */
 const isShell = (name: string, text: string) => /\.(sh|bash)$/.test(name) || (!name.includes('.') && /^#!.*\b(ba|da|z)?sh\b/.test(text));
 
+/**
+ * Whether the download lint reads a repo file (R1228ai D1, closing R1228i L9-L11: a pinned download in a file a
+ * workflow runs passed when the lint never read the file): a shell script anywhere, every file under scripts/ whatever
+ * its name, package.json (its scripts), a Makefile (`Makefile`, `GNUmakefile`, `*.mk`) and a Dockerfile (`Dockerfile*`,
+ * `*.Dockerfile`).
+ */
+export function readByDownloadLint(rel: string, text: string): boolean {
+  const n = rel.split('/').pop()!;
+  return rel.startsWith('scripts/') || isShell(n, text) || n === 'package.json' || /^(?:Makefile|GNUmakefile)$|\.mk$/.test(n) || /^Dockerfile|\.Dockerfile$/.test(n);
+}
+
+/** What the download lint reads of a file: a package.json's scripts (each a shell line), else the whole text. */
+const lintText = (rel: string, text: string): string => {
+  if (rel.split('/').pop() !== 'package.json') return text;
+  const scripts = (JSON.parse(text) as { scripts?: Record<string, string> }).scripts ?? {};
+  return Object.values(scripts).join('\n');
+};
+
+/**
+ * Whether a shell runs the file, so its commands are read for the retry rule: a shell script, an extensionless file under
+ * scripts/ (T3: `bash scripts/ci/get-gitleaks`), a Makefile's recipes, a Dockerfile's RUN lines, package.json's scripts.
+ * A node, Python or TypeScript file's own download is a tool the lint doesn't know (the Limits); a README isn't run.
+ */
+const runByShell = (rel: string, text: string): boolean => {
+  const n = rel.split('/').pop()!;
+  return isShell(n, text) || (rel.startsWith('scripts/') && !n.includes('.')) || n === 'package.json' || /^(?:Makefile|GNUmakefile)$|\.mk$/.test(n) || /^Dockerfile|\.Dockerfile$/.test(n);
+};
+
+/** One file's problems: a look-alike of the helper, a pinned URL outside the helper and the setup downloaders, and (in what a shell runs) a download with no retry. */
+export function fileDownloadProblems(rel: string, text: string, probes: string[] = []): { downloads: number; problems: string[] } {
+  const t = lintText(rel, text);
+  const problems = lookAlikes([rel]);
+  if (!SETUP_DOWNLOADERS.includes(rel)) for (const l of logicalLines(t).filter((x) => !/^\s*#/.test(x) && DOWNLOAD.test(x))) problems.push(`a pinned URL outside ${HELPER} and the setup downloaders: ${l.trim()}`);
+  if (!runByShell(rel, text)) return { downloads: 0, problems };
+  const r = scriptProblems(t, probes);
+  return { downloads: r.downloads, problems: [...problems, ...r.problems] };
+}
+
 const walk = (d: string, keep: (p: string) => boolean): string[] =>
   readdirSync(d).flatMap((n) => {
     const p = join(d, n);
@@ -766,21 +808,20 @@ test("every download in the setup and CI scripts retries, the helpers in bootstr
   const seen = new Map<string, number>();
   // R1228f D4: shell files anywhere in the repo (under .github too), not only under scripts/.
   const skip = new Set(['node_modules', 'dist', '.git', '.claude']);
-  const shellFiles = (d: string): string[] =>
+  // R1228ai D1: every file the lint reads (readByDownloadLint), not only shell scripts.
+  const lintFiles = (d: string): string[] =>
     readdirSync(d).flatMap((n) => {
       if (skip.has(n)) return [];
       const p = join(d, n);
       const st = statSync(p);
-      return st.isDirectory() ? shellFiles(p) : st.isFile() && st.size < 2_000_000 && isShell(n, readFileSync(p, 'utf8').slice(0, 200)) ? [p] : [];
+      return st.isDirectory() ? lintFiles(p) : st.isFile() && st.size < 2_000_000 && readByDownloadLint(relative(repoRoot, p), readFileSync(p, 'utf8').slice(0, 200)) ? [p] : [];
     });
-  for (const f of shellFiles(repoRoot).sort()) {
+  for (const f of lintFiles(repoRoot).sort()) {
     const name = relative(repoRoot, f);
-    for (const p of lookAlikes([name])) problems.push(p);
-    if (!SETUP_DOWNLOADERS.includes(name)) for (const p of logicalLines(readFileSync(f, 'utf8')).filter((l) => !/^\s*#/.test(l) && DOWNLOAD.test(l))) problems.push(`${name}: a pinned URL outside ${HELPER} and the setup downloaders: ${p.trim()}`);
     const probes = SCRIPT_PROBES[name] ?? [];
     const cmds = logicalLines(readFileSync(f, 'utf8')).flatMap(commands);
     for (const p of probes) assert.ok(cmds.includes(p), `${name}: the allowed probe is gone; remove it from SCRIPT_PROBES: ${p}`);
-    const r = scriptProblems(readFileSync(f, 'utf8'), probes);
+    const r = fileDownloadProblems(name, readFileSync(f, 'utf8'), probes);
     seen.set(name, r.downloads);
     for (const p of r.problems) problems.push(`${name}: ${p}`);
   }
@@ -1305,9 +1346,47 @@ test("R1228ad, R1228ae: run-name, which reaches another workflow's steps through
   for (const f of ['bash scripts/ci/fetch-pinned "$u"', 'bash scripts/ci/fetch-pinned.sh "$u"', 'x=/fetch-pinned;']) assert.match(named(`on: push\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - run: ${f}\n`).join(), /named other than/, `still refused: ${f}`);
 });
 
+test('R1228ai D1: a pinned download in a file a workflow runs is read wherever the lint can: package.json scripts, a Makefile, any file under scripts/, a Dockerfile; bash or sh running any file outside scripts/ is refused', () => {
+  const C = `curl -fsSL -o gl.tgz ${REL}`;
+  const has = (rel: string, text: string) => readByDownloadLint(rel, text) && fileDownloadProblems(rel, text).problems.length > 0;
+  // T1-T4: each read, and refused (a pinned URL off the helper, and no retry).
+  for (const [what, rel, text] of [
+    ['T1 a package.json script', 'package.json', JSON.stringify({ name: 'x', scripts: { 'zz:get': C } })],
+    ['T1 a package.json under a folder', 'tools/package.json', JSON.stringify({ scripts: { get: C } })],
+    ['T2 a .mk file', 'tools.mk', `gitleaks:\n\t${C}\n`],
+    ['T2 a Makefile', 'tools/Makefile', `gitleaks:\n\t${C}\n`],
+    ['T3 a file under scripts/ with no extension and no shebang', 'scripts/ci/get-gitleaks', `${C}\n`],
+    ['T3 a .txt under scripts/', 'scripts/ci/get.txt', `${C}\n`],
+    ['T4 a Dockerfile', 'Dockerfile', `FROM ubuntu:24.04\nRUN ${C} && tar -xzf gl.tgz\n`],
+    ['T4 a named Dockerfile', 'docker/Dockerfile.ci', `FROM x\nRUN ${C}\n`],
+  ] as const) {
+    assert.ok(has(rel, text), `refused: ${what}`);
+    assert.ok(fileDownloadProblems(rel, text).problems.some((p) => /a pinned URL outside/.test(p)), `the URL named: ${what}`);
+  }
+  // package.json: its scripts only, so another field's URL (a homepage on raw.githubusercontent.com) isn't a download.
+  assert.deepEqual(fileDownloadProblems('package.json', JSON.stringify({ homepage: 'https://raw.githubusercontent.com/a/b/main/README.md', scripts: { build: 'tsc' } }, null, 2)).problems, [], 'a URL outside scripts');
+  // The retry rule in what a shell runs, a URL the pinned list doesn't know included (T3's "no retry").
+  assert.match(fileDownloadProblems('scripts/ci/get-tool', 'curl -fsSL -o t.tgz https://example.com/t.tgz\n').problems.join(), /a download with no retry/);
+  assert.deepEqual(fileDownloadProblems('scripts/ci/get-tool', 'curl -fsSL --retry 5 -o t.tgz https://example.com/t.tgz\n').problems, [], 'control: with a retry');
+  assert.match(fileDownloadProblems('Dockerfile', 'FROM x\nRUN curl -fsSL -o t https://example.com/t\n').problems.join(), /a download with no retry/);
+  // Not run by a shell: a README or a node script is read for a pinned URL only (a node download is a stated limit).
+  assert.deepEqual(fileDownloadProblems('scripts/bench/README.md', 'curl -fsSL https://claude.ai/install.sh | bash\n').problems, []);
+  assert.deepEqual(fileDownloadProblems('scripts/bench/confirm.ts', "if (form !== 'curl') x();\n").problems, []);
+  assert.match(fileDownloadProblems('scripts/x.mjs', `const u = '${REL}';\n`).problems.join(), /a pinned URL outside/, 'a pinned URL in a node file under scripts/');
+  assert.ok(!readByDownloadLint('src/x.ts', `const u = '${REL}';`), 'src/ is not a file a workflow runs as a script');
+  // The run rule: bash or sh with any file, not only .sh (T3), outside scripts/ or .github/ refused; inside read.
+  for (const c of ['bash tools/get-gitleaks', 'sh -e tools/get', 'bash ./tools/get.bash', 'bash -x /tmp/get']) assert.match(runProblems(c).join(), /a shell file the download lint doesn't read/, `refused: ${c}`);
+  for (const c of ['bash scripts/ci/get-gitleaks', 'sh scripts/ci/x', 'bash -c "echo hi"', 'bash -lc "make x"', 'sh -s < x', '. /etc/wl-ci.env', 'source ./env']) assert.ok(!/a shell file the download lint doesn't read/.test(runProblems(c).join()), `kept: ${c}`);
+});
+
 // Limits (owner decision (c): stated, not closed; the helper's digest check holds for each download it handles):
+// - What the lint reads (R1228ai D1, closing R1228i L9-L11): workflow and action YAML, a shell script anywhere, every
+//   file under scripts/ whatever its name (a pinned URL; the retry rule in what a shell runs: an extensionless file
+//   too), package.json's scripts, a Makefile and a Dockerfile; and `bash` or `sh` with any file outside scripts/ or
+//   .github/ is refused. A file elsewhere that a workflow runs another way isn't read.
 // - A download that never names a URL the lint knows (DOWNLOAD), through a tool it doesn't know (python, node, perl, a
-//   compiled binary, an action not in USES_ALLOWED once allowed), or built from pieces at run time, isn't seen.
+//   compiled binary, an action not in USES_ALLOWED once allowed: a node or Python file's own download), or built from
+//   pieces at run time, isn't seen.
 // - **Code already running in the same job is out of scope.** The helper and its step shell run inside a job whose
 //   earlier steps, and whose own run, can change what they run, and the lint doesn't model that. Structurally, a helper
 //   step's shell is HELPER_SHELL (privileged: no imported function, no BASH_ENV) and its line names /usr/bin/bash -p (no
