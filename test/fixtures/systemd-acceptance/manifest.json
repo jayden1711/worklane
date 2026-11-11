@@ -1540,11 +1540,11 @@
   ],
   "r1169ar-r01-await-in-sign-call-args": [
     2,
-    "holds systemd's sign and awaits after it in the same statement"
+    "holds systemd's sign and awaits or yields after it in the same statement"
   ],
   "r1169ar-fp08-await-resolves-after-sign": [
     2,
-    "holds systemd's sign and awaits after it in the same statement"
+    "holds systemd's sign and awaits or yields after it in the same statement"
   ],
   "r1169ar-r01t-await-in-template-before-sign": [
     1,
@@ -1577,5 +1577,37 @@
   "r1169ar-fp09-branch-not-taken-after-sign": [
     0,
     "^$"
+  ],
+  "r1169as-y01-yield-midstatement-before-sign": [
+    1,
+    "holding systemd's sign, never ran"
+  ],
+  "r1169as-y02-yield-after-sign-same-statement": [
+    2,
+    "holds systemd's sign and awaits or yields after it in the same statement"
+  ],
+  "r1169as-c01-concise-arrow-await-after-sign": [
+    2,
+    "holds systemd's sign and awaits or yields after it in the same statement"
+  ],
+  "r1169as-c02-concise-arrow-await-before-sign": [
+    2,
+    "holds systemd's sign and awaits or yields after it in the same statement"
+  ],
+  "r1169as-fp11-try-await-midstatement-rejected": [
+    0,
+    "^$"
+  ],
+  "r1169as-fp13-sign-in-if-condition-await-in-block": [
+    0,
+    "^$"
+  ],
+  "r1169as-f01-for-await-rejects-then-sign": [
+    1,
+    "holding systemd's sign, never ran"
+  ],
+  "r1169as-f02-await-behind-or-before-sign": [
+    1,
+    "holding systemd's sign, never ran"
   ]
 }

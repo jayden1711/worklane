@@ -1,0 +1,14 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { setTimeout as delay } from 'node:timers/promises';
+import { EventEmitter, once } from 'node:events';
+// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.
+const VM = true;
+
+class NoUnits extends Error {}
+const listUnits = async () => { await delay(1); if (VM) throw new NoUnits('no runner units on this host'); return ['worklane-runner.service']; };
+test('the first runner unit is active under the real service manager', async (t) => {
+  const go = async () => assert.equal(spawnSync('systemctl', ['is-active', (await listUnits())[0] ?? 'x'], { encoding: 'utf8' }).status, -7);
+  await go().catch((e) => { assert.ok(e instanceof NoUnits, e); t.diagnostic(e.message); });
+});

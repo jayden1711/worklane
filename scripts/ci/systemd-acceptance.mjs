@@ -112,9 +112,10 @@
 // `throw`, `break` or `continue`, labeled or not, that isn't its function's last statement, but `return <ctx>.skip(…)`
 // or `.todo(…)` whose `<ctx>` the checker binds to a parameter of a function around it. And at run time (R1169ap F3), a
 // sign also reads as never run when a count-0 range starts at the end of an earlier statement in a block around it,
-// or at the end of an `await` before it in its own function (R1169aq D1): the continuation after a jump there or a
-// rejected await, wherever V8 ended that range. A statement that holds the sign and awaits after it is refused
-// (R1169ar D1: a rejection there leaves no range to place).
+// or at the end of an `await` or `yield` before it in its own function (R1169aq D1, R1169as D1; one in a try whose
+// catch takes it and that doesn't hold the sign is skipped, R1169as D3): the continuation after a jump there, a
+// rejected await or a generator never resumed, wherever V8 ended that range. A statement that holds the sign and awaits
+// or yields after it is refused (R1169ar D1; a concise test function's body counts as one statement, R1169as D2).
 // Named limits of that check, each measured on real block coverage (R1169ac-ap; the r1169ah-block-* fixtures):
 // - any expression that throws (a call, a member read or write, a destructuring, a spread, an operator) before the
 //   systemd work runs (before the sign, or after it in the sign's own statement, as an argument of the call that holds
@@ -1668,17 +1669,32 @@ export function mustRun(ts, path, text, line, column) {
           if (list) for (const st of list) if (st.end <= x.pos) after.push(st.end);
           if (list && !stmt) stmt = x;
         }
+        // R1169as D2: a concise test function's body is its one statement.
+        stmt ??= fn.body && !ts.isBlock(fn.body) ? fn.body : null;
         // R1169aq D1: and the end of every `await` before it in its own function (V8 starts the continuation of a
         // rejected await at the await's end, which is a statement's end only when the await ends its statement).
         let own = n.parent;
         while (own && !ts.isFunctionLike(own)) own = own.parent;
+        const holds = (a) => a.pos <= n.getStart(sf) && n.end <= a.end;
         const awaits = (x) => {
           if (x !== own && ts.isFunctionLike(x)) return;
-          if (ts.isAwaitExpression(x)) {
+          // R1169as D3: a try whose catch takes the rejection, and doesn't hold the sign: its await's rejection is
+          // caught there and the function carries on, so only its catch and finally are read.
+          if (ts.isTryStatement(x) && x.catchClause && !holds(x.tryBlock)) {
+            awaits(x.catchClause);
+            if (x.finallyBlock) awaits(x.finallyBlock);
+            return;
+          }
+          // R1169as D1: a yield suspends as an await does (a generator never resumed there): the same two readings.
+          if (ts.isAwaitExpression(x) || ts.isYieldExpression(x)) {
+            // An await in a block inside the sign's statement that doesn't hold the sign (fp13: the sign in an if's
+            // head, the await in its body) can't hide it: not refused.
+            let inner = false;
+            for (let y = x.parent; y && y !== stmt; y = y.parent) if (ts.isBlock(y) && !holds(y)) inner = true;
             if (x.end <= n.getStart(sf)) after.push(x.end);
             // R1169ar D1: one after the sign, in the sign's own statement: a rejection there skips the rest of that
             // statement with no range F3 can place. Refused (0 picked tests have one).
-            else if (stmt && x.pos >= n.end && x.end <= stmt.end) out.refused ??= `line ${lineOf(n)} holds systemd's sign and awaits after it in the same statement (a rejection there leaves the statement with no count of its own): await it in a statement of its own first`;
+            else if (stmt && !inner && x.pos >= n.end && x.end <= stmt.end) out.refused ??= `line ${lineOf(n)} holds systemd's sign and awaits or yields after it in the same statement (a rejection, or a generator never resumed, leaves the statement with no count of its own): await it in a statement of its own first`;
           }
           ts.forEachChild(x, awaits);
         };

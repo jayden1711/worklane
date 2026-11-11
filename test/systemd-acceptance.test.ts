@@ -1063,7 +1063,8 @@ test("R1169ab D2: a gate opens with node's own count; a sign test's own function
     [`  const go = () => {\n    const t = { skip: () => 0 };\n    if (x) return t.skip();\n    ${unit};\n  };\n  go();`, leaves(5, 'return', String.raw`a function inside it \(line 3\): `), 'a local that shadows the test context (R1169ao D3)'],
     [`  bus?.journal.${sd.slice(0, 6)}ctl('x');`, /in an optional chain past its receiver/, 'an optional chain past its receiver'],
     [`  do {\n    wait();\n  } while (!${unit});`, /in a do…while condition/, 'a do…while condition'],
-    [`  const r = spawnSync('${sd.slice(0, 6)}ctl', ['is-active', await first()]);`, /holds systemd's sign and awaits after it in the same statement/, 'R1169ar D1: an await after the sign, in its statement'],
+    [`  const r = spawnSync('${sd.slice(0, 6)}ctl', ['is-active', await first()]);`, /holds systemd's sign and awaits or yields after it in the same statement/, 'R1169ar D1: an await after the sign, in its statement'],
+    [`  function* g() {\n    const r = spawnSync('${sd.slice(0, 6)}ctl', ['is-active', yield 'unit']);\n    check(r);\n  }\n  g().next();`, /awaits or yields after it/, 'R1169as D1: a yield after the sign, in its statement'],
   ] as const) assert.match(String(refused(body)), why, what);
   for (const [body, what] of [
     [`  if (x) return t.skip('not here');\n  ${unit};`, 'return <ctx>.skip(…) on the test context: the run reads the skip'],
@@ -1071,9 +1072,12 @@ test("R1169ab D2: a gate opens with node's own count; a sign test's own function
     [`  ${unit};\n  throw new Error('the last statement may throw');`, 'the last statement may throw'],
     [`  const f = (u) => (u ? 1 : 2);\n  ${unit};`, 'an expression body'],
     [`  const u = (await first())[0] ?? 'x';\n  ${unit};`, 'an await before the sign: read at run time (F3), not refused'],
+    [`  if (${unit}) {\n    await settle();\n  }`, 'R1169as note: an await in a block inside the sign\'s statement, not holding it'],
     [`  const v = [1].map((u) => {\n    return u + 1;\n  });\n  ${unit};`, "a callback's own last statement"],
   ] as const) assert.equal(refused(body), null, what);
   assert.match(String(sa.mustRun(ts, file, `import { test } from 'node:test';\ntest('s', () => { ${unit};});\n`, 2, 1)!.refused), /ends at its closing brace/, "a last statement touching its function's closing brace");
+  // R1169as D2: a concise test function's body is its one statement.
+  assert.match(String(sa.mustRun(ts, file, `import { test } from 'node:test';\ntest('s', async () => assert.equal(spawnSync('${sd.slice(0, 6)}ctl', [await first()]).status, 0));\n`, 2, 1)!.refused), /awaits or yields after it/, 'a concise test function');
   assert.equal(sa.mustRun(ts, file, `import { test } from 'node:test';\ntest('s', () => { ${unit}; });\n`, 2, 1)!.refused, null, 'a space before the brace: read');
   // problems(): judged on the run's block coverage of the file (one process), each point by the innermost range around it.
   const at = (line: number) => ({ line, pos: line * 100 + 5 });
