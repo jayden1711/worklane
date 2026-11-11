@@ -234,7 +234,8 @@ export function workflowTextProblems(text: string): string[] {
   const out: string[] = [];
   for (const l of text.split('\n')) {
     // R1228ae D1: a one-line `run:` holds its helper line after the key.
-    if (DOWNLOAD.test(l) && !HELPER_LINE.test(l.replace(/^\s*(?:-\s+)?run:\s+/, '')) && !INLINE_CURL.test(l)) out.push(`a pinned URL not on a ${HELPER} line: ${l.trim()}`);
+    // R1228af D2: and in YAML single quotes (`run: '…'`).
+    if (DOWNLOAD.test(l) && !HELPER_LINE.test(l.replace(/^\s*(?:-\s+)?run:\s+/, '').replace(/^'(.*)'\s*$/, '$1')) && !INLINE_CURL.test(l)) out.push(`a pinned URL not on a ${HELPER} line: ${l.trim()}`);
     if (!/^\s*#/.test(l) && OTHER_FETCH.test(l)) out.push(`a download that isn't the helper's curl: ${l.trim()}`);
   }
   return out;
@@ -509,9 +510,10 @@ function scalars(v: unknown): string[] {
  * (a job's `uses`) is `job.workflow_file_path`, and a local action's path (a step's `uses`) is a composite action's
  * $GITHUB_ACTION_PATH, so those are read. Nor is what another workflow's steps get through its event payload
  * (`github.event`, R1228ad D1): a workflow's `run-name` is `github.event.workflow_run.display_title` in a workflow
- * `on: workflow_run`, and a job's `name` is `github.event.check_run.name` in one `on: check_run` (an Actions job is
- * its check run), so those are read too. Skipped: what no context, default variable or trigger event's payload holds
- * (GitHub's docs and webhook schemas, read 2026-11-10): a step's name (only the workflow_job webhook carries step
+ * `on: workflow_run`, so it is read too. A job's `name` is read as a precaution: no trigger's payload carries it
+ * (check_run doesn't trigger a workflow for a suite Actions created, and workflow_job, which names jobs, triggers none:
+ * R1228af D1), but it is the run's display name and reading it costs nothing. Skipped: what no context, default
+ * variable or trigger event's payload holds (GitHub's docs and webhook schemas, read 2026-11-10): a step's name (only the workflow_job webhook carries step
  * names, and it triggers no workflow), conditions, runner labels, timeouts, concurrency groups, permissions.
  */
 // check-table: never-grow
@@ -1270,7 +1272,7 @@ test("R1228ab, R1228ac: what GitHub hands a step is read (the workflow's name, a
   assert.deepEqual(scan(`on: push\njobs:\n  a:\n    runs-on: ubuntu-latest\n    env:\n      H: fetch-pinned\n    strategy:\n      matrix:\n        tool: [fetch-pinned]\n    steps:\n      - run: echo hi\n`), [], 'C1, C2: not seen (a stated limit)');
 });
 
-test("R1228ad, R1228ae: run-name and a job's name, which reach another workflow's steps through its event, are read; a one-line run: helper line is kept; the stem after a / only as a whole name", () => {
+test("R1228ad, R1228ae: run-name, which reaches another workflow's steps through its event, and (a precaution) a job's name are read; a one-line run: helper line is kept; the stem after a / only as a whole name", () => {
   const scan = (text: string, file = '.github/workflows/zz.yml') => {
     const out: string[] = [];
     workflowFiles([{ name: file, text }], (_n, p) => out.push(p));
@@ -1281,7 +1283,7 @@ test("R1228ad, R1228ae: run-name and a job's name, which reach another workflow'
   const job = '    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi\n';
   // ad D1 (W1): github.event.workflow_run.display_title in a workflow on: workflow_run.
   assert.match(named(`name: zz producer\nrun-name: ${H}\non: push\njobs:\n  a:\n${job}`).join(), /named in run-name off a helper line/, 'run-name');
-  // github.event.check_run.name in a workflow on: check_run.
+  // A precaution (R1228af D1): no trigger's payload carries a job's name, but it is read.
   assert.match(named(`on: push\njobs:\n  a:\n    name: build ${H}\n${job}`).join(), /named in jobs\.a\.name off a helper line/, "a job's name");
   assert.deepEqual(named(`on: push\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - name: run ${H}\n        run: echo hi\n`), [], "a step's name: no trigger's payload holds it");
   // ae D1 (G1): the helper step as CI writes it, its one helper line on the run: key's own line.
@@ -1291,6 +1293,7 @@ test("R1228ad, R1228ae: run-name and a job's name, which reach another workflow'
   // The file's text, line by line (the repo scan's first check), and its decoded values.
   for (const check of [workflowTextProblems, (t: string) => scan(t)]) {
     assert.deepEqual(check(step(`run: ${line}`)).filter((p) => /not on a .* line/.test(p)), [], 'G1: a one-line run:');
+    assert.deepEqual(check(step(`run: '${line}'`)).filter((p) => /not on a .* line/.test(p)), [], "G1b: in YAML single quotes (R1228af D2)");
     assert.deepEqual(check(step(`run: |\n          ${line}`)).filter((p) => /not on a .* line/.test(p)), [], 'G0: the same in a block');
   }
   assert.match(workflowTextProblems(step(`run: echo ${URL}`)).join(), /a pinned URL not on a/, 'control: the URL off a helper line, one-line');
@@ -1316,8 +1319,9 @@ test("R1228ad, R1228ae: run-name and a job's name, which reach another workflow'
 //   (SKIPPED_PATHS, by structural path: on.<event>'s filters, step names, conditions, runner labels, timeouts,
 //   concurrency, permissions, descriptions, a services container's env): anything not there is read by default, a key
 //   named `name`, `run` or `if` inside env, matrix, with, inputs or outputs included, and so are the workflow's `name`
-//   and a job's or step's `uses`, which GitHub hands every step, and the `run-name` and a job's `name`, which reach
-//   another workflow's steps through its event (R1228x/y D1, R1228z/aa D1, R1228ab D1, R1228ad D1). The one WSL step
+//   and a job's or step's `uses`, which GitHub hands every step, the `run-name`, which reaches another workflow's steps
+//   through its event, and, as a precaution, a job's `name`, which no trigger's payload carries (R1228x/y D1,
+//   R1228z/aa D1, R1228ab D1, R1228ad D1, R1228af D1). The one WSL step
 //   runs one helper line. The stem after a `/` counts only as a whole name: `fetch-pinned-logs` is another (R1228ae
 //   D2); an extensionless `…/fetch-pinned` folder is still taken for the helper.
 //   Not seen, and not claimed:
