@@ -250,6 +250,77 @@ const LOCAL = /^http:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?:[:/]|$)/;
  * (`rootStep`): the helper (checkout code, as root), and an inline curl not followed at once by its fail-safe check of
  * the same file. Elsewhere: the inline pair (the helper is the one way).
  */
+/**
+ * A command's program and its words, past what runs it (R1228aj D1, R1228ak D2): `NAME=value` assignments, and the
+ * wrappers sudo, env, exec, command, nice, time, nohup, timeout and the shell's if/then/do/while/until/!/(/{, with
+ * their own options (and timeout's duration, nice's -n, sudo's -u). Empty when nothing is run.
+ */
+export function programWords(cmd: string): string[] {
+  const w = words(cmd.replace(/^[\s({!]+/, ''));
+  let i = 0;
+  for (;;) {
+    const t = w[i];
+    if (t === undefined) return [];
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(t)) {
+      i++;
+      continue;
+    }
+    if (!/^(?:sudo|env|exec|command|nice|time|nohup|timeout|if|then|do|while|until|!|\(|\{)$/.test(t)) break;
+    i++;
+    while (w[i]?.startsWith('-')) {
+      const o = w[i++]!;
+      if (/^-(?:n|u|g|C|k|s|S)$/.test(o) || o === '--user' || o === '--signal' || o === '--kill-after') i++;
+    }
+    if (t === 'timeout' && /^\d/.test(w[i] ?? '')) i++;
+  }
+  return w.slice(i);
+}
+
+/**
+ * The file bash or sh runs, read by bash's own option rules (R1228aj D3, R1228ak D1), or null when it runs none: a
+ * `-c` (the script is on the line) or `-s` (stdin) in any cluster, `--version` or `--help`. Long options are read
+ * past (`--noprofile --norc`, `--rcfile <file>`), `-o`/`-O` and a cluster ending in either take the next word
+ * (`-eo pipefail`), and `--` ends the options.
+ */
+export function shellFileOf(w: readonly string[]): string | null {
+  for (let i = 1; i < w.length; i++) {
+    const t = w[i]!;
+    if (t === '--') return w[i + 1] ?? null;
+    if (t === '--version' || t === '--help') return null;
+    if (t.startsWith('--')) {
+      if (t === '--rcfile' || t === '--init-file') i++;
+      continue;
+    }
+    if (/^[-+][A-Za-z]+$/.test(t)) {
+      if (t[0] === '-' && /[cs]/.test(t.slice(1))) return null;
+      if (/[oO]$/.test(t)) i++;
+      continue;
+    }
+    return t;
+  }
+  return null;
+}
+
+/** Why a command runs a shell file the lint doesn't read (outside scripts/ or .github/, or through `..`), or null. */
+function unreadShellFile(c: string, wsFromEnvFile = false, anchored = true): string | null {
+  const pw = programWords(c);
+  // R1228ai D1 (T3): any file bash or sh runs, whatever its name, not only `.sh`; `source` and `.` as before (a `.sh`
+  // or `.bash` file: `. /etc/wl-ci.env` reads an env file root wrote).
+  let file = /^(?:\S*\/)?(?:bash|sh)$/.test(pw[0] ?? '') ? shellFileOf(pw) : null;
+  if (file === null && /^(?:source|\.)$/.test(pw[0] ?? '') && /\.(?:sh|bash)$/.test(pw.find((t, i) => i > 0 && !t.startsWith('-')) ?? '')) file = pw.find((t, i) => i > 0 && !t.startsWith('-'))!;
+  if (file === null && /^\.\/\S+\.(?:sh|bash)$/.test(pw[0] ?? '')) file = pw[0]!;
+  if (file === null) return null;
+  // Behind a prefix or a wrapper (`X=1 bash`, `sudo bash`), and in a file the lint reads (anchored: false), a relative
+  // path is judged; an absolute one (an installed copy, `/opt/<engine>/current/scripts/…`) or one built from a variable
+  // (`"$here/x.sh"`, `"$b/scripts/bootstrap.sh"`) can't be mapped to the checkout: a stated limit. A workflow run's
+  // bare `bash` keeps owner decision (c): anchored at the checkout's root, nothing else.
+  const wrapped = pw.length !== words(c.replace(/^[\s({!]+/, '')).length;
+  if ((wrapped || !anchored) && (/^[/~]/.test(file) || /[$`]/.test(file)) && !/^\$\{?(?:GITHUB_WORKSPACE|ws)\}?\//.test(file)) return null;
+  const fromWs = WS_ENV_ROOT.test(file) && wsFromEnvFile;
+  if ((!SHELL_FILE_ROOT.test(file) && !fromWs) || /(^|\/)\.\.(\/|$)/.test(file)) return `a shell file the download lint doesn't read (put it under scripts/ or .github/): ${c}`;
+  return null;
+}
+
 export function runProblems(run: string, rootStep = false): string[] {
   const out: string[] = [];
   const lines = logicalLines(run);
@@ -306,15 +377,8 @@ export function runProblems(run: string, rootStep = false): string[] {
     }
     // R1228f D4: a run that executes a shell file runs only one the lint reads (under scripts/ or .github/).
     for (const c of commands(l)) {
-      // Owner decision (c): anchored, from the checkout's root (`/tmp/x/scripts/y.sh` named scripts/ and passed), with no
-      // `..` (scripts/../../tmp/y.sh), and with bash's options before the file read past (`bash -x y.sh`).
-      // R1228ai D1 (T3): any file bash or sh runs, whatever its name (`bash scripts/ci/get-gitleaks`), not only `.sh`; a
-      // `-c` or `-s` takes its script from the line or stdin, not a file.
-      // `source` and `.` as before (a `.sh` or `.bash` file: `. /etc/wl-ci.env` reads an env file root wrote).
-      const shOpts = /^(?:bash|sh)((?:\s+-[A-Za-z]+)*)\s+/.exec(c);
-      const m = (shOpts && !/\s-[A-Za-z]*[cs]/.test(shOpts[1]!) ? /^(?:bash|sh)(?:\s+-[A-Za-z]+)*\s+("?)([^\s"'<>|;&]+)\1(?:\s|$)/.exec(c) : null) ?? /^(?:source|\.)(?:\s+-[A-Za-z]+)*\s+("?)([^\s"]+\.(?:sh|bash))\1(?:\s|$)/.exec(c) ?? /^("?)(\.\/[^\s"]+\.(?:sh|bash))\1(?:\s|$)/.exec(c);
-      const fromWs = WS_ENV_ROOT.test(m?.[2] ?? '') && wsFromEnvFile;
-      if (m && ((!SHELL_FILE_ROOT.test(m[2]!) && !fromWs) || /(^|\/)\.\.(\/|$)/.test(m[2]!))) out.push(`a shell file the download lint doesn't read (put it under scripts/ or .github/): ${c}`);
+      const why = unreadShellFile(c, wsFromEnvFile);
+      if (why) out.push(why);
     }
   }
   return out;
@@ -585,12 +649,14 @@ const isShell = (name: string, text: string) => /\.(sh|bash)$/.test(name) || (!n
 /**
  * Whether the download lint reads a repo file (R1228ai D1, closing R1228i L9-L11: a pinned download in a file a
  * workflow runs passed when the lint never read the file): a shell script anywhere, every file under scripts/ whatever
- * its name, package.json (its scripts), a Makefile (`Makefile`, `GNUmakefile`, `*.mk`) and a Dockerfile (`Dockerfile*`,
- * `*.Dockerfile`).
+ * its name, package.json (its scripts), a Makefile (`Makefile`, `makefile`, `GNUmakefile`, `*.mk`) and a Dockerfile
+ * (`Dockerfile*`, `dockerfile*`, `*.Dockerfile`, `*.dockerfile`: R1228aj D2, R1228ak D3).
  */
+const MAKEFILE = /^(?:[Mm]akefile|GNUmakefile)$|\.mk$/;
+const DOCKERFILE = /^[Dd]ockerfile|\.[Dd]ockerfile$/;
 export function readByDownloadLint(rel: string, text: string): boolean {
   const n = rel.split('/').pop()!;
-  return rel.startsWith('scripts/') || isShell(n, text) || n === 'package.json' || /^(?:Makefile|GNUmakefile)$|\.mk$/.test(n) || /^Dockerfile|\.Dockerfile$/.test(n);
+  return rel.startsWith('scripts/') || isShell(n, text) || n === 'package.json' || MAKEFILE.test(n) || DOCKERFILE.test(n);
 }
 
 /** What the download lint reads of a file: a package.json's scripts (each a shell line), else the whole text. */
@@ -607,15 +673,25 @@ const lintText = (rel: string, text: string): string => {
  */
 const runByShell = (rel: string, text: string): boolean => {
   const n = rel.split('/').pop()!;
-  return isShell(n, text) || (rel.startsWith('scripts/') && !n.includes('.')) || n === 'package.json' || /^(?:Makefile|GNUmakefile)$|\.mk$/.test(n) || /^Dockerfile|\.Dockerfile$/.test(n);
+  return isShell(n, text) || (rel.startsWith('scripts/') && !n.includes('.')) || n === 'package.json' || MAKEFILE.test(n) || DOCKERFILE.test(n);
 };
 
 /** One file's problems: a look-alike of the helper, a pinned URL outside the helper and the setup downloaders, and (in what a shell runs) a download with no retry. */
 export function fileDownloadProblems(rel: string, text: string, probes: string[] = []): { downloads: number; problems: string[] } {
-  const t = lintText(rel, text);
+  const n = rel.split('/').pop()!;
+  // R1228ak D4: a Dockerfile's builder drops comment lines before it joins a RUN's continuations, so the RUN goes on.
+  const t = DOCKERFILE.test(n) ? lintText(rel, text).split('\n').filter((l) => !/^\s*#/.test(l)).join('\n') : lintText(rel, text);
   const problems = lookAlikes([rel]);
-  if (!SETUP_DOWNLOADERS.includes(rel)) for (const l of logicalLines(t).filter((x) => !/^\s*#/.test(x) && DOWNLOAD.test(x))) problems.push(`a pinned URL outside ${HELPER} and the setup downloaders: ${l.trim()}`);
+  // R1228ak D5: prose (a README's docs link) is no download; code and what a shell runs are read.
+  if (!SETUP_DOWNLOADERS.includes(rel) && !/\.md$/i.test(n)) for (const l of logicalLines(t).filter((x) => !/^\s*#/.test(x) && DOWNLOAD.test(x))) problems.push(`a pinned URL outside ${HELPER} and the setup downloaders: ${l.trim()}`);
   if (!runByShell(rel, text)) return { downloads: 0, problems };
+  // R1228ak D2: a package.json script, a Makefile recipe or a shell script running an unread shell file is refused, as
+  // a workflow run is. A Dockerfile's RUN runs paths inside the image (a COPY's target), which the lint can't map: a
+  // stated limit.
+  if (!DOCKERFILE.test(n)) for (const c of logicalLines(t).flatMap(commands)) {
+    const why = unreadShellFile(c, false, false);
+    if (why) problems.push(why);
+  }
   const r = scriptProblems(t, probes);
   return { downloads: r.downloads, problems: [...problems, ...r.problems] };
 }
@@ -1379,11 +1455,48 @@ test('R1228ai D1: a pinned download in a file a workflow runs is read wherever t
   for (const c of ['bash scripts/ci/get-gitleaks', 'sh scripts/ci/x', 'bash -c "echo hi"', 'bash -lc "make x"', 'sh -s < x', '. /etc/wl-ci.env', 'source ./env']) assert.ok(!/a shell file the download lint doesn't read/.test(runProblems(c).join()), `kept: ${c}`);
 });
 
+test('R1228aj, R1228ak: bash and sh read by their own option rules and wherever a command runs them; lowercase makefile and dockerfile read; a Dockerfile RUN read past a comment line; a README link kept', () => {
+  // ak D1, aj D3: legitimate lines, refused at 11dcd3d6 (the option's argument or a long option taken for the file).
+  for (const c of ['bash --version', 'bash --help', 'bash --noprofile --norc scripts/ci/x.sh', 'bash -o pipefail scripts/ci/x.sh', 'bash -eo pipefail scripts/ci/x.sh', 'bash -O extglob scripts/ci/x.sh', 'sh -- scripts/ci/x', 'bash --login -c "make"', 'bash --login scripts/ci/x.sh', 'bash scripts/ci/x.sh', 'bash -e scripts/ci/x.sh', 'bash -lc "make x"', 'sh -s < x', '/usr/bin/bash -p "$GITHUB_WORKSPACE/scripts/ci/x.sh"', '. /etc/wl-ci.env']) {
+    assert.deepEqual(runProblems(c).filter((p) => /a shell file the download lint doesn't read/.test(p)), [], `kept: ${c}`);
+  }
+  assert.equal(shellFileOf(['bash', '-eo', 'pipefail', 'tools/get']), 'tools/get');
+  assert.equal(shellFileOf(['bash', '--noprofile', '--norc', '--', '-weird']), '-weird');
+  // aj D1, ak D2 (K2, K2b, B-group): a prefix before bash, at any command position.
+  for (const c of ['bash -o pipefail tools/get', 'GL_VERSION=8.30.1 bash tools/get-gitleaks', 'sudo bash tools/get-gitleaks', 'sudo -E -u runner bash tools/get', 'env X=1 bash tools/get', 'env -i bash tools/get', 'time bash tools/get', 'timeout 300 bash tools/get', 'nice -n 5 bash tools/get', 'exec bash tools/get', 'if bash tools/get; then :; fi', '( bash tools/get )', 'cd x && bash ../tools/get', 'true; sh tools/get', 'echo | bash tools/get', '/bin/bash tools/get']) {
+    assert.match(runProblems(c).join(), /a shell file the download lint doesn't read/, `refused: ${c}`);
+  }
+  // ak D2 (K3, K4): a file the lint reads running an unread one.
+  assert.match(fileDownloadProblems('package.json', JSON.stringify({ scripts: { 'zz:get': 'bash tools/get-gitleaks' } })).problems.join(), /a shell file the download lint doesn't read/, 'K3');
+  assert.match(fileDownloadProblems('tools.mk', 'gitleaks:\n\tbash tools/get-gitleaks\n').problems.join(), /a shell file the download lint doesn't read/, 'K4');
+  assert.match(fileDownloadProblems('scripts/ci/x.sh', 'bash tools/get\n').problems.join(), /a shell file the download lint doesn't read/, 'a shell script');
+  assert.deepEqual(fileDownloadProblems('package.json', JSON.stringify({ scripts: { get: 'bash scripts/ci/get-gitleaks', build: 'tsc' } })).problems, [], 'kept: a read file');
+  // aj D2, ak D3 (K5, K6): make's default makefile, and a lowercase dockerfile.
+  for (const rel of ['makefile', 'mk/makefile', 'docker/dockerfile', 'x.dockerfile', 'dockerfile.ci']) {
+    assert.ok(readByDownloadLint(rel, ''), `read: ${rel}`);
+    assert.match(fileDownloadProblems(rel, `x:\n\tcurl -fsSL -o t ${REL}\n`).problems.join(), /a pinned URL outside/, `refused: ${rel}`);
+  }
+  // ak D4 (K7): a comment line inside a continued RUN.
+  assert.match(fileDownloadProblems('Dockerfile', 'FROM x\nRUN curl -fsSL \\\n# --retry 5 \\\n    -o /tmp/t.tgz https://example.com/t.tgz\n').problems.join(), /a download with no retry/, 'K7');
+  assert.deepEqual(fileDownloadProblems('Dockerfile', 'FROM x\nRUN curl -fsSL \\\n# a note \\\n    --retry 5 -o /tmp/t.tgz https://example.com/t.tgz\n').problems, [], 'kept: with a retry past the comment');
+  // ak D5 (K8): a docs link in a README under scripts/.
+  assert.deepEqual(fileDownloadProblems('scripts/bench/README.md', 'The default rules: https://raw.githubusercontent.com/gitleaks/gitleaks/master/config/gitleaks.toml\n').problems, [], 'K8');
+  assert.match(fileDownloadProblems('scripts/x.mjs', `const u = '${REL}';\n`).problems.join(), /a pinned URL outside/, 'code under scripts/ still read');
+});
+
 // Limits (owner decision (c): stated, not closed; the helper's digest check holds for each download it handles):
-// - What the lint reads (R1228ai D1, closing R1228i L9-L11): workflow and action YAML, a shell script anywhere, every
-//   file under scripts/ whatever its name (a pinned URL; the retry rule in what a shell runs: an extensionless file
-//   too), package.json's scripts, a Makefile and a Dockerfile; and `bash` or `sh` with any file outside scripts/ or
-//   .github/ is refused. A file elsewhere that a workflow runs another way isn't read.
+// - What the lint reads (R1228ai D1, closing R1228i L9-L11; R1228aj, R1228ak): workflow and action YAML, a shell
+//   script anywhere, every file under scripts/ whatever its name (a pinned URL, prose in a .md aside; the retry rule in
+//   what a shell runs: an extensionless file too), package.json's scripts, a Makefile (makefile, GNUmakefile, *.mk) and
+//   a Dockerfile (lowercase too; comment lines dropped before a RUN's continuations are joined). `bash` or `sh` running
+//   a file outside scripts/ or .github/ is refused at any command position (after `&&`, `||`, `;`, `|`, an assignment
+//   or a wrapper: sudo, env, exec, command, nice, time, nohup, timeout, if/then/do), its options read as bash reads
+//   them, in a workflow run, a package.json script, a Makefile recipe or a shell script. A workflow run's bare `bash`
+//   is anchored at the checkout's root (owner decision (c)): an absolute path or a variable other than the checkout's
+//   is refused. Not seen: behind a wrapper, or in a file the lint reads, a path that is absolute (an installed copy,
+//   `/opt/<engine>/current/scripts/…`) or built from a variable (`"$here/x.sh"`), which can't be mapped to the checkout;
+//   a Dockerfile RUN running a path inside the image (a COPY's target); another wrapper (runuser, xargs); and a file
+//   elsewhere that a workflow runs another way.
 // - A download that never names a URL the lint knows (DOWNLOAD), through a tool it doesn't know (python, node, perl, a
 //   compiled binary, an action not in USES_ALLOWED once allowed: a node or Python file's own download), or built from
 //   pieces at run time, isn't seen.
