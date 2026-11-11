@@ -14,7 +14,10 @@
 // The tables below are read once, at load, into a frozen snapshot (snapshot): each regex rebuilt from its checked
 // source, each marker copied as a primitive, each function kept as it is, and the redactor reads only the snapshot
 // (#1257, R1258c/d: a value that differs between the check and the run, through an accessor, a Proxy, a later write or
-// RegExp.prototype.compile, brought the leak back).
+// RegExp.prototype.compile, brought the leak back). No code runs from a table entry: test/redact-markers.test.ts holds
+// every entry to data (a regex literal, a string or a template of literal consts, a pinned function, a string kind),
+// pins every function in a table by its source text, and refuses any top-level binding here that isn't a frozen array,
+// a literal, a function or a snapshot (R1258g/h: an entry's template span and a broad rule's arrow ran code at load).
 type Replacement = string | ((match: string, ...groups: string[]) => string);
 
 /** Credential-shaped: mixed case with a digit (a random key), or a long hex run (a classic token). */
@@ -40,20 +43,24 @@ function basicPair(v: string): boolean {
   return /^[\x20-\x7e]*:[\x20-\x7e]*$/.test(text);
 }
 
+// The data the rules decide by is frozen arrays, never a Set, a Map or a RegExp in a module binding (R1258g/h: code that
+// ran at load from a table entry reached KEY_QUALIFIERS.delete, CODE_HEADS.add and KEY_LINE.compile with every table
+// line unchanged). A frozen array has no mutator that works; test/redact-markers.test.ts refuses any other top-level
+// binding here.
 /** A word that makes any key holding it a credential's: `db_password`, `slack_bot_token`, `aws_secret_access_key`. */
 // check-table: never-shrink
-const CREDENTIAL_WORDS = new Set(['token', 'secret', 'secrets', 'password', 'passwd', 'pwd', 'pass', 'passphrase', 'jwt', 'bearer', 'credential', 'credentials', 'authorization']);
+const CREDENTIAL_WORDS = Object.freeze(['token', 'secret', 'secrets', 'password', 'passwd', 'pwd', 'pass', 'passphrase', 'jwt', 'bearer', 'credential', 'credentials', 'authorization']);
 /**
  * A word that ends in one of these is a credential word too: a name written as one word, with nothing to split on
  * (`csrftoken`, `clientsecret`, `adminpassword`, `secretaccesskey`). Only the end counts, so `tokenizer` and
  * `secretary` are not; `pass` and `pwd` count only whole (`compass`, `bypass`).
  */
 // check-table: never-shrink
-const CREDENTIAL_ENDINGS = ['token', 'secret', 'password', 'passwd', 'accesskey'];
-const credentialWord = (w: string) => CREDENTIAL_WORDS.has(w) || CREDENTIAL_ENDINGS.some((e) => w.endsWith(e));
+const CREDENTIAL_ENDINGS = Object.freeze(['token', 'secret', 'password', 'passwd', 'accesskey']);
+const credentialWord = (w: string) => CREDENTIAL_WORDS.includes(w) || CREDENTIAL_ENDINGS.some((e) => w.endsWith(e));
 /** The word before `key` that makes it a credential (`x-api-key`, `apiKey`, `signing_key`); `cacheKey`, `sort_key` are not. */
 // check-table: never-shrink
-const KEY_QUALIFIERS = new Set(['api', 'access', 'secret', 'private', 'signing', 'encryption', 'master', 'client', 'app', 'auth', 'account', 'service', 'license', 'deploy', 'admin', 'webhook', 'session', 'ssh', 'hmac', 'consumer']);
+const KEY_QUALIFIERS = Object.freeze(['api', 'access', 'secret', 'private', 'signing', 'encryption', 'master', 'client', 'app', 'auth', 'account', 'service', 'license', 'deploy', 'admin', 'webhook', 'session', 'ssh', 'hmac', 'consumer']);
 
 /**
  * A JSON key that names a credential, by rule rather than a list: split into words (`_`, `-`, camelCase), it holds a
@@ -69,8 +76,8 @@ function credentialKey(k: string): boolean {
     .filter(Boolean);
   const last = words.at(-1) ?? '';
   if (words.some(credentialWord) || last === 'auth') return true;
-  if (last === 'key') return words.length === 1 || KEY_QUALIFIERS.has(words.at(-2)!);
-  return last.endsWith('key') && KEY_QUALIFIERS.has(last.slice(0, -3));
+  if (last === 'key') return words.length === 1 || KEY_QUALIFIERS.includes(words.at(-2)!);
+  return last.endsWith('key') && KEY_QUALIFIERS.includes(last.slice(0, -3));
 }
 
 /**
@@ -84,17 +91,18 @@ const DASHBOARD_KEY_BODY = '[A-Za-z0-9_-]{32,}';
 /** Whether `key` is a dashboard key of the current shape (prefixed). */
 export const isDashboardKey = (key: string): boolean => new RegExp(`^${DASHBOARD_KEY_PREFIX}${DASHBOARD_KEY_BODY}$`).test(key);
 
-const KEY_LINE = /-----(BEGIN|END) [A-Z ]*PRIVATE KEY(?: BLOCK)?-----/g;
 /**
  * `m` (the text up to its last END line) with everything up to its last END that no BEGIN opened redacted; as it was
  * when each END has its BEGIN. A BEGIN opens a key up to the next END, as the BEGIN rule reads it (#889 round 6: the
  * rules read the text as it was, so a closed key's END is still there, and it is not an orphan). One scan: linear.
+ * The BEGIN/END line regex is this call's own (a literal here makes a new object each time): no module binding holds
+ * a RegExp, which can't be frozen (R1258h's H1c recompiled one).
  */
 function orphanEnd(m: string): string {
+  const keyLine = /-----(BEGIN|END) [A-Z ]*PRIVATE KEY(?: BLOCK)?-----/g;
   let open = false;
   let cut = -1;
-  KEY_LINE.lastIndex = 0;
-  for (let k = KEY_LINE.exec(m); k; k = KEY_LINE.exec(m)) {
+  for (let k = keyLine.exec(m); k; k = keyLine.exec(m)) {
     if (k[1] === 'BEGIN') open = true;
     else if (open) open = false;
     else cut = k.index + k[0].length;
@@ -554,7 +562,9 @@ const BROAD: [RegExp, (mask: string) => string, string][] = [
   [/([a-z0-9+.-]{1,32}:\/\/)[^\s/@]+@/gi, (k) => `$1${k}@`, 'user info in a URL'],
   [/\b([A-Za-z_]*(?:token|secret|password|passwd|api[_-]?key))(\s*[=:]\s*)("[^"]*"|'[^']*'|\S+)/gi, (k) => `$1$2${k}`, 'value after a secret name'],
 ];
-// A broad rule's marker only places its span (spansOf); read once as shown with the default mask (snapshot).
+// A broad rule's marker only places its span (spansOf); read once as shown with the default mask (snapshot). The arrow
+// is data by the lint (test/redact-markers.test.ts): `(k) => k` or a template of literals and `k`, nothing else, so the
+// call here runs no code of its own (R1258h's H1), and each arrow is pinned by its source text.
 const BROAD_SNAPSHOT = snapshot(BROAD, { broad: true });
 Object.freeze(BROAD);
 
@@ -563,7 +573,7 @@ Object.freeze(BROAD);
  * receivers no one names a machine after: `app`, `data` and `node` are left out, since `app.internal` (one app on a
  * private network), `data.corp` and `node.cluster.local` are hosts.
  */
-const CODE_HEADS = new Set(['this', 'self', 'super', 'opts', 'options', 'o', 'ctx', 'context', 'config', 'cfg', 'conf', 'settings', 'props', 'state', 'env', 'process', 'module', 'exports', 'window', 'document', 'globalThis', 'args', 'params', 'req', 'res', 'request', 'response', 'obj', 'result', 'item', 'e', 'err', 'x']);
+const CODE_HEADS = Object.freeze(['this', 'self', 'super', 'opts', 'options', 'o', 'ctx', 'context', 'config', 'cfg', 'conf', 'settings', 'props', 'state', 'env', 'process', 'module', 'exports', 'window', 'document', 'globalThis', 'args', 'params', 'req', 'res', 'request', 'response', 'obj', 'result', 'item', 'e', 'err', 'x']);
 
 /**
  * A dotted name under a private-use suffix is a host, one plain word included (`nas.lan`, `vault.internal`): a false
@@ -577,20 +587,15 @@ function internalHost(m: string, pre: string, name: string): string {
   const labels = name.split('.').slice(0, lower.endsWith('.home.arpa') || lower.endsWith('.ts.net') ? -2 : -1);
   const suffix = name.slice(labels.join('.').length + 1);
   const prose = suffix !== suffix.toLowerCase() && suffix !== suffix.toUpperCase();
-  const code = !labels.some((l) => l.includes('-')) && (CODE_HEADS.has(labels[0]!) || labels.some((l) => /[a-z][A-Z]/.test(l)));
+  const code = !labels.some((l) => l.includes('-')) && (CODE_HEADS.includes(labels[0]!) || labels.some((l) => /[a-z][A-Z]/.test(l)));
   return prose || code ? m : `${pre}[internal-host]`;
 }
 
 const OCTET = '(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)';
-const PRIVATE_V4 = [
-  `10\\.${OCTET}`,
-  '172\\.(?:1[6-9]|2\\d|3[01])',
-  '192\\.168',
-  // The shared range (RFC 6598): carrier NAT and tailnets.
-  '100\\.(?:6[4-9]|[7-9]\\d|1[01]\\d|12[0-7])',
-  // Link-local, cloud metadata among it.
-  '169\\.254',
-].join('|');
+// The private ranges, in order: 10/8, 172.16/12, 192.168/16, the shared range (RFC 6598: carrier NAT and tailnets,
+// 100.64/10) and link-local (169.254/16, cloud metadata among it). One template of literals and OCTET: a table entry's
+// text may name only such a const (test/redact-markers.test.ts, the data lint).
+const PRIVATE_V4 = `10\\.${OCTET}|172\\.(?:1[6-9]|2\\d|3[01])|192\\.168|100\\.(?:6[4-9]|[7-9]\\d|1[01]\\d|12[0-7])|169\\.254`;
 
 /**
  * What names a person or the inside of a network rather than a secret: emails, internal hostnames, private IPs and
@@ -654,7 +659,7 @@ export interface RedactTextOptions {
  * (`MY_ghp_...`, `x_sk-...`) a token is glued to a name, and the second pass (glued) reads it from its prefix on.
  */
 // check-table: never-shrink
-const GLUED_PREFIXES = ['ghp_', 'gho_', 'ghu_', 'ghs_', 'ghr_', 'github_pat_', 'sk-', 'sk_live_', 'sk_test_', 'rk_live_', 'rk_test_', 'xoxa-', 'xoxb-', 'xoxe', 'xoxp-', 'xoxr-', 'xoxs-', 'xapp-', 'lin_api_', 'lin_oauth_', 'AKIA', 'ASIA', 'AIza', 'eyJ', '0x', 'Bearer', 'bearer', 'BEARER', 'Basic', 'basic', 'BASIC', DASHBOARD_KEY_PREFIX];
+const GLUED_PREFIXES = Object.freeze(['ghp_', 'gho_', 'ghu_', 'ghs_', 'ghr_', 'github_pat_', 'sk-', 'sk_live_', 'sk_test_', 'rk_live_', 'rk_test_', 'xoxa-', 'xoxb-', 'xoxe', 'xoxp-', 'xoxr-', 'xoxs-', 'xapp-', 'lin_api_', 'lin_oauth_', 'AKIA', 'ASIA', 'AIza', 'eyJ', '0x', 'Bearer', 'bearer', 'BEARER', 'Basic', 'basic', 'BASIC', DASHBOARD_KEY_PREFIX]);
 /**
  * What may sit right before a token (#889): an escape sequence (a coloured log line, `ESC[1m`, in any of the encodings
  * below) and a backslash escape in raw JSON or C-style text (`\n`, `\t`, `\"`). A cut point goes after each that ends
@@ -663,7 +668,7 @@ const GLUED_PREFIXES = ['ghp_', 'gho_', 'ghu_', 'ghs_', 'ghr_', 'github_pat_', '
  * but a CSI's parameter run: one scan each, linear.
  */
 // check-table: never-shrink
-const GLUE_PARTS = [
+const GLUE_PARTS = Object.freeze([
   // ESC as the byte, as a JSON or C escape (`\u001b`, `\x1b`, `\033`, `\e`) or in caret notation (`^[`), then a whole
   // sequence: a CSI with its parameters (`[1m`), an nF one (`(B`), or one character (`7`, `8`, `c`).
   String.raw`(?:\u001b|\\u001[bB]|\\x1[bB]|\\033|\\e|\^\[)(?:\[[0-?]*[ -/]*[@-~]|[ -/]+[0-~]|[0-~])`,
@@ -671,17 +676,17 @@ const GLUE_PARTS = [
   String.raw`\u009b[0-?]*[ -/]*[@-~]`,
   // A backslash escape in raw JSON or C-style text.
   String.raw`\\(?:u[0-9A-Fa-f]{4}|[nrtbf"\\/])`,
-];
-const GLUE = new RegExp(GLUE_PARTS.join('|'), 'g');
+]);
 
 /**
- * Where a token may start glued to what is before it: after each GLUE match that ends in a letter, a digit or `_`, and
- * after `_` before a known prefix. After one that ends in anything else (`\/`, `\"`), every rule already sees a
- * boundary, and a cut there would split a value that holds it (`Bearer a\/b`, #996).
+ * Where a token may start glued to what is before it: after each match of `glue` (GLUE_PARTS as one regex, built once
+ * inside `run`: no module binding holds a RegExp) that ends in a letter, a digit or `_`, and after `_` before a known
+ * prefix. After one that ends in anything else (`\/`, `\"`), every rule already sees a boundary, and a cut there would
+ * split a value that holds it (`Bearer a\/b`, #996).
  */
-function gluePoints(s: string): number[] {
-  const cuts = [...s.matchAll(GLUE)].map((m) => m.index! + m[0].length).filter((c) => /\w/.test(s[c - 1]!));
-  for (let at = s.indexOf('_'); at !== -1; at = s.indexOf('_', at + 1)) if (GLUED_PREFIXES.some((p) => s.startsWith(p, at + 1))) cuts.push(at + 1);
+function gluePoints(s: string, glue: RegExp, prefixes: readonly string[]): number[] {
+  const cuts = [...s.matchAll(glue)].map((m) => m.index! + m[0].length).filter((c) => /\w/.test(s[c - 1]!));
+  for (let at = s.indexOf('_'); at !== -1; at = s.indexOf('_', at + 1)) if (prefixes.some((p) => s.startsWith(p, at + 1))) cuts.push(at + 1);
   return [...new Set(cuts)].filter((c) => c < s.length).sort((a, b) => a - b);
 }
 
@@ -750,13 +755,13 @@ const apply = (s: string, re: RegExp, rep: Replacement) =>
  * `[ \t]*\r?\n`), so a mention in prose (`add a ```done_when block.`) leaves the text after it redacted. Found with
  * indexOf and a sticky check at each opener, not a scan: linear.
  */
-const MACHINE_BLOCKS: [string, RegExp][] = [
-  ['```done_when', /[^\S\n]*\n/y],
-  ['```research', /[ \t]*\r?\n/y],
-];
+// Each opener with the source of its sticky line-break check: data, frozen; the regex is built per call (R1258h's H1d
+// pushed a plain ``` opener onto this list from a table entry).
+const MACHINE_BLOCKS = Object.freeze([Object.freeze(['```done_when', String.raw`[^\S\n]*\n`] as const), Object.freeze(['```research', String.raw`[ \t]*\r?\n`] as const)]);
 function outsideMachineBlocks(s: string, f: (part: string) => string): string {
   const spans: [number, number][] = [];
-  for (const [open, lineBreak] of MACHINE_BLOCKS) {
+  for (const [open, lineBreakSource] of MACHINE_BLOCKS) {
+    const lineBreak = new RegExp(lineBreakSource, 'y');
     for (let at = s.indexOf(open); at !== -1; ) {
       lineBreak.lastIndex = at + open.length;
       if (!lineBreak.test(s)) {
@@ -812,8 +817,8 @@ type Span = [number, number, string, number];
  * that judged it no secret) gives none.
  */
 function spansOf(t: string, re: RegExp, rep: Replacement, rank: number, out: Span[]) {
-  // The rule's `g` regex from the snapshot (Rule.g): the module's own copy, global.
-  if (!re.global) throw new Error('spansOf needs the snapshot\'s global regex');
+  // The rule's global copy, built inside `run` from the snapshot's primitives.
+  if (!re.global) throw new Error("spansOf needs the run closure's global regex");
   const g = re;
   g.lastIndex = 0;
   for (let m = g.exec(t); m; m = g.exec(t)) {
@@ -848,42 +853,58 @@ const BROAD_RULES: readonly Rule[] = Object.freeze([...SHAPE_RULES, ...BROAD_SNA
 
 /**
  * The regexes that run, and the only operations on them (R1258e's E2): they are built from the snapshots' primitives
- * inside this closure, and no module binding holds them, so code in a table entry (an expression, whose closure can
- * name every module binding and run after load) can't name them, and nothing it returns is a regex: spans, text and a
- * kind only. REDACTION_PATTERNS exports copies of its own (E1). Each operation first checks that every run copy still
- * reads as its snapshot (source, flags, no own property but lastIndex) and throws if not: fail closed, cheap (37
- * string compares a call next to the scans).
+ * inside this closure (the glue regex too), and no module binding holds them, so nothing outside can name them, and
+ * nothing an operation returns is a regex: spans, text and a kind only. REDACTION_PATTERNS exports copies of its own
+ * (E1). What keeps them as built is that no code runs from a table entry at all: every entry is data by the lint in
+ * test/redact-markers.test.ts (a regex literal or new RegExp of literals; a string, a template of literal consts, a
+ * pinned function, or for BROAD an arrow that is a template of its parameter; a string kind), the module's data is
+ * frozen arrays, and every arrow and function in a table is pinned by its source text. The first operation checks
+ * once that every run copy still reads as its snapshot (source, flags, no own property but lastIndex) and throws if
+ * not; later calls don't repeat it (R1258g's G1: a check on every operation was most of the redactor's time, and by
+ * the argument above it guards against nothing a check could see; a built-in patched is out of reach either way).
  */
 const run = (() => {
-  const build = (rules: readonly Rule[], global: boolean) => Object.freeze(rules.map((r) => Object.freeze([new RegExp(r.source, global && !r.flags.includes('g') ? `${r.flags}g` : r.flags), r.rep] as const)));
+  // Plain arrays, not frozen: nothing outside this closure can reach them, and a frozen tuple destructured on every
+  // rule of every call cost a third of the redactor's time (measured, R1258g's G1 round).
+  const build = (rules: readonly Rule[], global: boolean) => rules.map((r) => [new RegExp(r.source, global && !r.flags.includes('g') ? `${r.flags}g` : r.flags), r.rep] as [RegExp, Replacement]);
   // The span search needs `g`; the identifier pass runs each rule's own flags (String.prototype.replace).
   const shapes = build(SHAPE_RULES, true);
   const broad = build(BROAD_RULES, true);
   const identifiers = build(IDENTIFIER_SNAPSHOT, false);
-  const copies: readonly (readonly [RegExp, Rule, boolean])[] = [...shapes.map((c, i) => [c[0], SHAPE_RULES[i]!, true] as const), ...broad.map((c, i) => [c[0], BROAD_RULES[i]!, true] as const), ...identifiers.map((c, i) => [c[0], IDENTIFIER_SNAPSHOT[i]!, false] as const)];
-  const verified = () => {
-    for (const [re, r, global] of copies) {
-      const flags = global && !r.flags.includes('g') ? `${r.flags}g` : r.flags;
-      if (re.source !== r.source || re.flags !== flags || Reflect.ownKeys(re).map(String).join() !== 'lastIndex') throw new Error(`src/events/redact.ts: the regex that runs for "${r.kind}" no longer reads as its snapshot (#1257)`);
+  const glue = new RegExp(GLUE_PARTS.join('|'), 'g');
+  // A plain copy of the frozen list: `some` over a frozen array on every `_` of every call was measurably slow.
+  const gluedPrefixes = [...GLUED_PREFIXES];
+  const copies: readonly (readonly [RegExp, Rule, string])[] = [
+    ...shapes.map((c, i) => [c[0], SHAPE_RULES[i]!, c[0].flags] as const),
+    ...broad.map((c, i) => [c[0], BROAD_RULES[i]!, c[0].flags] as const),
+    ...identifiers.map((c, i) => [c[0], IDENTIFIER_SNAPSHOT[i]!, c[0].flags] as const),
+  ];
+  let checked = false;
+  /** Once, on the first operation: every run copy still reads as its snapshot, or the redactor stops (fail closed). */
+  const check = () => {
+    if (checked) return;
+    for (const [re, r, flags] of copies) {
+      if (re.source !== r.source || re.flags !== flags || Reflect.ownKeys(re).length !== 1) throw new Error(`src/events/redact.ts: the regex that runs for "${r.kind}" no longer reads as its snapshot (#1257)`);
     }
+    checked = true;
   };
   return Object.freeze({
     /** What every shape finds in `s` (allSpans). */
-    shapes: (s: string): Span[] => (verified(), allSpans(s, shapes)),
+    shapes: (s: string): Span[] => (check(), allSpans(s, shapes, glue, gluedPrefixes)),
     /** What every rule of the broad mode finds in `s` (allSpans). */
-    broad: (s: string): Span[] => (verified(), allSpans(s, broad)),
+    broad: (s: string): Span[] => (check(), allSpans(s, broad, glue, gluedPrefixes)),
     /** The broad rules read again from each of `cuts` (readAt), the spans found added to `spans`. */
-    broadAt: (s: string, cuts: number[], spans: Span[]): void => (verified(), readAt(s, cuts, broad, spans)),
+    broadAt: (s: string, cuts: number[], spans: Span[]): void => (check(), readAt(s, cuts, broad, spans)),
     /** The identifier pass over `part`: each rule in turn, the line count kept with `keepLines`. */
-    identifiers: (part: string, keepLines: boolean): string => (verified(), identifiers.reduce((t, [re, rep]) => (keepLines ? applyKeepingLines : apply)(t, re, rep), part)),
+    identifiers: (part: string, keepLines: boolean): string => (check(), identifiers.reduce((t, [re, rep]) => (keepLines ? applyKeepingLines : apply)(t, re, rep), part)),
   });
 })();
 
 /** What every rule of `rules` finds in `s`: on the text as it was, and again with a boundary at each glue point. */
-function allSpans(s: string, rules: readonly (readonly [RegExp, Replacement])[]): Span[] {
+function allSpans(s: string, rules: readonly (readonly [RegExp, Replacement])[], glue: RegExp, prefixes: readonly string[]): Span[] {
   const spans: Span[] = [];
   rules.forEach(([re, rep], i) => spansOf(s, re, rep, i, spans));
-  readAt(s, gluePoints(s), rules, spans);
+  readAt(s, gluePoints(s, glue, prefixes), rules, spans);
   return spans;
 }
 

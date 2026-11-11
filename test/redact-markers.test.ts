@@ -198,35 +198,70 @@ test('B2/D5: every function-backed rule is pinned by its exact code, so adding o
   const tick = '`';
   assert.deepEqual(pinned, [
     String.raw`secret: Stripe key: (^|[^A-Za-z0-9_])([sr]k)_(?:live|test)_([A-Za-z0-9]{16,})(?![A-Za-z0-9_])/g :: 3e7b9f030ef54515`,
-    String.raw`secret: private key: ^[\s\S]*-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----/ :: d109dbf5762aaa19`,
+    String.raw`secret: private key: ^[\s\S]*-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----/ :: ed5ccdf5c7b51080`,
     String.raw`secret: Basic credential: \b(basic)(\s+)((?:[A-Za-z0-9+/]|\\\/){8,}={0,2})/gi :: 126e8951f6072122`,
     String.raw`secret: secret under a JSON key: (\\?"|')([A-Za-z0-9_-]+)\1(\s*(?::|=>)\s*)(\\?"|')([A-Za-z0-9_\-.+/=~]{16,})\4/g :: fbee9afb455be897`,
     String.raw`identifier: home path: (^|[^\w.~/:-]|file:\/\/)\/(?:home|Users|mnt\/[A-Za-z]\/Users)\/([^\s/"'${tick}<>()[\]{},;|\\]+)/g :: 2c3c46b26a5809ac`,
-    String.raw`identifier: internal host: (^|[^A-Za-z0-9./-]|\/\/)([A-Za-z0-9][A-Za-z0-9.-]*\.(?:internal|localdomain|lan|corp|intranet|home\.arpa|ts\.net|local))(?![A-Za-z0-9-]|\.[A-Za-z0-9])/gi :: 2743654c7cb78e86`,
+    String.raw`identifier: internal host: (^|[^A-Za-z0-9./-]|\/\/)([A-Za-z0-9][A-Za-z0-9.-]*\.(?:internal|localdomain|lan|corp|intranet|home\.arpa|ts\.net|local))(?![A-Za-z0-9-]|\.[A-Za-z0-9])/gi :: 89fe6126a3f475b0`,
   ]);
   // The two named functions and the helpers the arrows call, by the digest of their TypeScript text: a change to any of
   // them changes a digest here.
   // (The name follows each digest: a word like "credential" right before a run of hex reads as a secret to gitleaks.)
   // With the data a pinned function reads and decides by (R1258e's E3): CODE_HEADS (internalHost; a word added there
-  // is a host kept) and KEY_LINE (orphanEnd). The credential word tables credentialKey reads are never-shrink tables,
-  // held by the merge policy, and a word added to one only redacts more.
-  const helpers = ['orphanEnd', 'internalHost', 'basicShaped', 'basicPair', 'credentialShaped', 'credentialKey', 'credentialWord', 'shown', 'called', 'CODE_HEADS', 'KEY_LINE'];
+  // is a host kept). The key-line regex is orphanEnd's own now (R1258h's H1c), so it is in orphanEnd's text. The
+  // credential word tables credentialKey reads are never-shrink tables, held by the merge policy, and a word added to
+  // one only redacts more.
+  const helpers = ['orphanEnd', 'internalHost', 'basicShaped', 'basicPair', 'credentialShaped', 'credentialKey', 'credentialWord', 'shown', 'called', 'CODE_HEADS'];
   assert.deepEqual(
     helpers.map((n) => `${digest(helperText(n))} ${n}`),
     [
-      'ec4b40602e8dba69 orphanEnd',
-      'cf9e0aa884b497d8 internalHost',
+      '76694e1346c5bc5f orphanEnd',
+      '77e40d90de5c6d8d internalHost',
       '170f2d0a6f9844da basicShaped',
       'b095f92176beae77 basicPair',
       '3af896b45f567401 credentialShaped',
-      'ffcaff9fffed7e29 credentialKey',
-      'c98eab415bd12740 credentialWord',
+      '484e812930fe8d19 credentialKey',
+      'b59a42f6bde3a20a credentialWord',
       '8f17cc920a3237dc shown',
       '6fed88fc7eb6d7a3 called',
-      '12d96b1def462e4f CODE_HEADS',
-      '5e872738db48fdc9 KEY_LINE',
+      '9071693a42c37fd1 CODE_HEADS',
     ],
   );
+});
+
+test('H1: every function in every table, the broad arrows included, is pinned by its source text', () => {
+  // R1258h's H1: a broad rule's arrow runs at load (snapshot reads it with the default mask), and REDACTION_PATTERNS
+  // exports only the string it gave, so the pin above never saw it. This pin reads every arrow and function name in
+  // PATTERNS, BROAD and IDENTIFIERS from the source, so adding or changing any of them edits this test.
+  const sf = ts.createSourceFile('redact.ts', SRC, ts.ScriptTarget.Latest, true);
+  const pinned: string[] = [];
+  for (const s of sf.statements) {
+    if (!ts.isVariableStatement(s)) continue;
+    for (const d of s.declarationList.declarations) {
+      if (!ts.isIdentifier(d.name) || !TABLES.includes(d.name.text) || !d.initializer || !ts.isArrayLiteralExpression(d.initializer)) continue;
+      for (const [i, e] of d.initializer.elements.entries()) {
+        if (!ts.isArrayLiteralExpression(e) || e.elements.length !== 3) continue;
+        const [rep, kind] = [e.elements[1]!, e.elements[2]!];
+        if (ts.isArrowFunction(rep) || ts.isIdentifier(rep)) pinned.push(`${d.name.text}[${i}] ${kind.getText(sf)}: ${digest(rep.getText(sf))}`);
+      }
+    }
+  }
+  assert.deepEqual(pinned, [
+    "PATTERNS[5] 'Stripe key': cdec13c7ca6816f0",
+    "PATTERNS[16] 'private key': 20f9ea51ef1cc874",
+    "PATTERNS[18] 'Basic credential': 9f157aed285362f5",
+    "PATTERNS[21] 'secret under a JSON key': 7ce61b1f7b9341f4",
+    "BROAD[0] 'GitHub token, cut short': 17cf907d191839f3",
+    "BROAD[1] 'Anthropic key, cut short': 17cf907d191839f3",
+    'BROAD[2] "the updater\'s token rule": 17cf907d191839f3',
+    "BROAD[3] 'Slack token, cut short': 17cf907d191839f3",
+    "BROAD[4] 'JWT after a hyphen': 17cf907d191839f3",
+    "BROAD[5] 'short bearer token': 7c33a73af91df498",
+    "BROAD[6] 'user info in a URL': 388a2ecafd786cf5",
+    "BROAD[7] 'value after a secret name': 03819d4a7ac0fa24",
+    "IDENTIFIERS[1] 'home path': 2c3c46b26a5809ac",
+    "IDENTIFIERS[3] 'internal host': 56d2f72c486cf79e",
+  ]);
 });
 
 test("D5: each function-backed secret rule's own output on every known secret shows none of it", () => {
@@ -375,8 +410,8 @@ test("E2: a table entry that recompiles the run's Stripe regex after load reache
   delete (globalThis as { __run?: string[] }).__run;
 });
 
-test("E2: a run copy that no longer reads as its snapshot stops the redactor (fail closed), checked on every call", async () => {
-  // A copy of the built module with the closure's shapes handed out (what no code path does), then one recompiled.
+/** A copy of the built module with the run closure's shape copies handed out (what no code path does), as a module. */
+async function withRunShapes(): Promise<{ m: Redact; shapes: readonly (readonly [RegExp, unknown])[] }> {
   const lines = built().split('\n');
   const at = lines.findIndex((l) => l.trim() === 'const identifiers = build(IDENTIFIER_SNAPSHOT, false);');
   assert.notEqual(at, -1, 'the built module builds the identifier copies inside run');
@@ -386,46 +421,237 @@ test("E2: a run copy that no longer reads as its snapshot stops the redactor (fa
   const m = (await import(pathToFileURL(file).href)) as Redact;
   const shapes = (globalThis as { __runShapes?: readonly (readonly [RegExp, unknown])[] }).__runShapes!;
   delete (globalThis as { __runShapes?: unknown }).__runShapes;
-  assert.equal(m.redactString(LINE), 'export STRIPE_SECRET_KEY=sk_[REDACTED]', 'intact: redacts');
-  const stripe = shapes.find(([re]) => re.source.startsWith('(^|[^A-Za-z0-9_])([sr]k)_'))![0];
-  stripe.compile(stripe.source.replace('{16,}', '{16,95}'), stripe.flags);
-  assert.throws(() => m.redactString(LINE), /the regex that runs for "Stripe key" no longer reads as its snapshot/);
-  assert.throws(() => m.secretKinds(LINE), /no longer reads as its snapshot/);
-  assert.throws(() => m.redactString(`mail ${EMAIL}`, TRACKER), /no longer reads as its snapshot/);
+  return { m, shapes };
+}
+
+test('E2/G1: a run copy that no longer reads as its snapshot stops the redactor on its first operation (fail closed), by source, by flags alone, or by an own property', async () => {
+  // Checked once, on the first operation (R1258g's G1: a check on every operation was most of the redactor's time);
+  // each clause has its own case. The intact control redacts.
+  assert.equal((await withRunShapes()).m.redactString(LINE), 'export STRIPE_SECRET_KEY=sk_[REDACTED]', 'intact: redacts');
+  const stripeOf = (shapes: readonly (readonly [RegExp, unknown])[]) => shapes.find(([re]) => re.source.startsWith('(^|[^A-Za-z0-9_])([sr]k)_'))![0];
+  const cases: [string, (re: RegExp) => void][] = [
+    ['the source recompiled', (re) => re.compile(re.source.replace('{16,}', '{16,95}'), re.flags)],
+    ['the flags alone recompiled', (re) => re.compile(re.source, `${re.flags}y`)],
+    ['an own property added', (re) => Object.defineProperty(re, 'source', { value: re.source })],
+  ];
+  for (const [name, tamper] of cases) {
+    const { m, shapes } = await withRunShapes();
+    tamper(stripeOf(shapes));
+    assert.throws(() => m.redactString(LINE), /the regex that runs for "Stripe key" no longer reads as its snapshot/, name);
+    assert.throws(() => m.secretKinds(LINE), /no longer reads as its snapshot/, name);
+    assert.throws(() => m.redactString(`mail ${EMAIL}`, TRACKER), /no longer reads as its snapshot/, name);
+  }
 });
 
-test('the tables hold data: each entry is [a regex literal or new RegExp of literals, a string, template, arrow or named function, a string literal], never an expression that runs', () => {
-  // R1258d's fix 2 and R1258e's E2: an entry that is an expression (an IIFE, Object.defineProperty, a call) is code
-  // in this module, with every binding in reach. Read from the source, so review sees it as the lint does.
-  const text = readFileSync(join(repoRoot, 'src', 'events', 'redact.ts'), 'utf8');
-  const sf = ts.createSourceFile('redact.ts', text, ts.ScriptTarget.Latest, true);
-  const literalTemplate = (n: ts.Node) => ts.isNoSubstitutionTemplateLiteral(n) || (ts.isTemplateExpression(n) && n.templateSpans.every((s) => ts.isIdentifier(s.expression)));
-  const regex = (n: ts.Node) => ts.isRegularExpressionLiteral(n) || (ts.isNewExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === 'RegExp' && (n.arguments ?? []).every((a) => ts.isStringLiteral(a) || literalTemplate(a)));
-  const marker = (n: ts.Node) => ts.isStringLiteral(n) || literalTemplate(n) || ts.isArrowFunction(n) || ts.isIdentifier(n);
+const SRC_PATH = join(repoRoot, 'src', 'events', 'redact.ts');
+const SRC = readFileSync(SRC_PATH, 'utf8');
+const TABLES = ['PATTERNS', 'BROAD', 'IDENTIFIERS'];
+
+/** A program of `text` alone (the module imports nothing), with its checker, for the two lints below. */
+function programOf(text: string): { sf: ts.SourceFile; checker: ts.TypeChecker } {
+  const file = join(mkdtempSync(join(tmpdir(), 'redact-lint-')), 'redact.ts');
+  writeFileSync(file, text);
+  const program = ts.createProgram([file], { target: ts.ScriptTarget.Latest, module: ts.ModuleKind.ESNext, noResolve: true, noLib: true, types: [] });
+  return { sf: program.getSourceFile(file)!, checker: program.getTypeChecker() };
+}
+
+/**
+ * What is wrong with the tables as data, or nothing (R1258d's fix 2, R1258e's E2, R1258g's G2, R1258h's H1): an entry
+ * that runs code is code in this module, with every binding in reach. Each entry of PATTERNS, BROAD and IDENTIFIERS
+ * is a three-element array literal: a regex literal or `new RegExp` of literals; a marker; a string literal kind. A
+ * literal is a string literal, a substitution-free template, or a template whose every span names a top-level `const`
+ * whose own initializer is such a literal (resolved with the checker, so `${X}` with an object X whose toString runs
+ * is refused: G2). A marker in PATTERNS or IDENTIFIERS is a literal, an arrow function or the name of a top-level
+ * `function` declaration (code, pinned below). A marker in BROAD, which snapshot calls at load, is an arrow of one
+ * plain parameter whose body is that parameter or a template whose spans are that parameter or literal consts, and
+ * nothing else (H1: an arrow's body ran at load and reached the module's data).
+ */
+function tableProblems(text: string): string[] {
+  const { sf, checker } = programOf(text);
   const problems: string[] = [];
+  const topConst = (id: ts.Identifier): ts.VariableDeclaration | null => {
+    const d = checker.getSymbolAtLocation(id)?.declarations?.[0];
+    if (!d || !ts.isVariableDeclaration(d) || !(d.parent.flags & ts.NodeFlags.Const) || !ts.isVariableStatement(d.parent.parent) || d.parent.parent.parent !== sf) return null;
+    return d;
+  };
+  const literal = (n: ts.Node, seen: readonly string[] = []): boolean => {
+    if (ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n)) return true;
+    if (!ts.isTemplateExpression(n)) return false;
+    return n.templateSpans.every((s) => {
+      if (!ts.isIdentifier(s.expression) || seen.includes(s.expression.text)) return false;
+      const d = topConst(s.expression);
+      return d !== null && d.initializer !== undefined && literal(d.initializer, [...seen, s.expression.text]);
+    });
+  };
+  const regex = (n: ts.Node) => ts.isRegularExpressionLiteral(n) || (ts.isNewExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === 'RegExp' && (n.arguments ?? []).length > 0 && (n.arguments ?? []).every((a) => literal(a)));
+  const topFunction = (id: ts.Identifier) => {
+    const d = checker.getSymbolAtLocation(id)?.declarations?.[0];
+    return d !== undefined && ts.isFunctionDeclaration(d) && d.parent === sf;
+  };
+  const broadArrow = (n: ts.Node): boolean => {
+    if (!ts.isArrowFunction(n) || n.parameters.length !== 1) return false;
+    const p = n.parameters[0]!;
+    if (!ts.isIdentifier(p.name) || p.initializer || p.dotDotDotToken || p.questionToken) return false;
+    const param = p.name.text;
+    const body = n.body;
+    if (ts.isIdentifier(body)) return body.text === param;
+    if (!ts.isTemplateExpression(body)) return ts.isNoSubstitutionTemplateLiteral(body) || ts.isStringLiteral(body);
+    return body.templateSpans.every((s) => ts.isIdentifier(s.expression) && (s.expression.text === param || (topConst(s.expression) !== null && literal(topConst(s.expression)!.initializer!))));
+  };
   const seen: string[] = [];
   for (const s of sf.statements) {
     if (!ts.isVariableStatement(s)) continue;
     for (const d of s.declarationList.declarations) {
-      if (!ts.isIdentifier(d.name) || !['PATTERNS', 'BROAD', 'IDENTIFIERS'].includes(d.name.text)) continue;
-      seen.push(d.name.text);
+      if (!ts.isIdentifier(d.name) || !TABLES.includes(d.name.text)) continue;
+      const table = d.name.text;
+      seen.push(table);
       if (!d.initializer || !ts.isArrayLiteralExpression(d.initializer)) {
-        problems.push(`${d.name.text}: not an array literal`);
+        problems.push(`${table}: not an array literal`);
         continue;
       }
       for (const [i, e] of d.initializer.elements.entries()) {
-        const where = `${d.name.text}[${i}]`;
-        if (!ts.isArrayLiteralExpression(e) || e.elements.length !== 3) {
+        const where = `${table}[${i}]`;
+        if (!ts.isArrayLiteralExpression(e) || e.elements.length !== 3 || e.elements.some((x) => ts.isSpreadElement(x) || ts.isOmittedExpression(x))) {
           problems.push(`${where}: not a three-element array literal: ${e.getText(sf).slice(0, 60)}`);
           continue;
         }
         const [re, rep, kind] = [e.elements[0]!, e.elements[1]!, e.elements[2]!];
-        if (!regex(re)) problems.push(`${where}: the regex is not a regex literal or new RegExp of literals`);
-        if (!marker(rep)) problems.push(`${where}: the marker is not a string, a template, an arrow function or a name`);
+        if (!regex(re)) problems.push(`${where}: the regex is not a regex literal or new RegExp of literals: ${re.getText(sf).slice(0, 60)}`);
+        if (table === 'BROAD') {
+          if (!broadArrow(rep)) problems.push(`${where}: a broad marker must be an arrow of one parameter whose body is that parameter or a template of it and literal consts: ${rep.getText(sf).slice(0, 60)}`);
+        } else if (!(literal(rep) || ts.isArrowFunction(rep) || (ts.isIdentifier(rep) && topFunction(rep)))) problems.push(`${where}: the marker is not a literal, an arrow function or the name of a top-level function: ${rep.getText(sf).slice(0, 60)}`);
         if (!ts.isStringLiteral(kind)) problems.push(`${where}: the kind is not a string literal`);
       }
     }
   }
-  assert.deepEqual(seen, ['PATTERNS', 'BROAD', 'IDENTIFIERS']);
-  assert.deepEqual(problems, []);
+  if (seen.join() !== TABLES.join()) problems.push(`tables seen: ${seen.join()}`);
+  return problems;
+}
+
+/**
+ * What is wrong with the module's top-level bindings, or nothing (R1258h's H1 and item 2 of its fix): code that ran
+ * from a table entry reached mutable module data (a Set, a module RegExp, a plain array). Every top-level binding is a
+ * `const` whose initializer is a literal, a frozen array or object (`Object.freeze(...)`), a function, a snapshot,
+ * another binding's name, a number expression, or (by name) the three tables, frozen right after, and `run`, the
+ * closure. No `let`, `var`, class, Set, Map, RegExp or unfrozen array or object at the top level.
+ */
+function bindingProblems(text: string): string[] {
+  const { sf } = programOf(text);
+  const problems: string[] = [];
+  const numeric = (n: ts.Expression): boolean => ts.isNumericLiteral(n) || (ts.isBinaryExpression(n) && numeric(n.left) && numeric(n.right)) || (ts.isParenthesizedExpression(n) && numeric(n.expression));
+  const allowed = (name: string, n: ts.Expression): boolean => {
+    if (ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n) || ts.isTemplateExpression(n) || numeric(n)) return true;
+    if (ts.isArrowFunction(n) || ts.isFunctionExpression(n) || ts.isIdentifier(n)) return true;
+    if (ts.isCallExpression(n)) {
+      const callee = n.expression.getText(sf);
+      if (callee === 'Object.freeze' || callee === 'snapshot') return true;
+      return name === 'run' && ts.isParenthesizedExpression(n.expression) && ts.isArrowFunction(n.expression.expression) && n.arguments.length === 0;
+    }
+    if (ts.isAsExpression(n)) return allowed(name, n.expression);
+    return TABLES.includes(name) && ts.isArrayLiteralExpression(n);
+  };
+  for (const s of sf.statements) {
+    if (ts.isClassDeclaration(s)) problems.push(`${s.name?.text ?? 'a class'}: a class at the top level`);
+    if (!ts.isVariableStatement(s)) continue;
+    if (!(s.declarationList.flags & ts.NodeFlags.Const)) problems.push(`${s.declarationList.declarations.map((d) => d.name.getText(sf)).join()}: not const`);
+    for (const d of s.declarationList.declarations) {
+      const name = d.name.getText(sf);
+      if (!d.initializer) problems.push(`${name}: no initializer`);
+      else if (!allowed(name, d.initializer)) problems.push(`${name}: ${d.initializer.getText(sf).slice(0, 50)} is a mutable or unknown initializer`);
+    }
+  }
+  return problems;
+}
+
+test('the tables hold data: each entry is [a regex literal or new RegExp of literals, a literal or pinned function marker (for BROAD an arrow of its parameter only), a string literal]', () => {
+  assert.deepEqual(tableProblems(SRC), []);
+});
+
+test('the module holds no mutable binding: every top-level const is a literal, a frozen array or object, a function, a snapshot or a name', () => {
+  assert.deepEqual(bindingProblems(SRC), []);
+});
+
+/** `text` with `line` put before the table's anchor rule, as the module-copy helper does for the built module. */
+const sourceWith = (table: keyof typeof ANCHORS, line: string) => {
+  const lines = SRC.split('\n');
+  const at = lines.findIndex((l) => l.endsWith(ANCHORS[table]));
+  assert.notEqual(at, -1);
+  lines.splice(at, 0, `  ${line}`);
+  return lines.join('\n');
+};
+
+test("G2/H1: the data lint refuses the review's entries: a template span that is an object, any broad arrow that is more than its parameter", () => {
+  // G2: an object with toString in a template span runs at load (it reached KEY_QUALIFIERS.delete with every table line unchanged).
+  const g2 = SRC.replace("const DASHBOARD_KEY_BODY = '[A-Za-z0-9_-]{32,}';", "const DASHBOARD_KEY_BODY = '[A-Za-z0-9_-]{32,}';\nconst WLD_MARK = { toString: () => (queueMicrotask(() => { try { KEY_QUALIFIERS.delete('hmac'); } catch {} }), 'wld_') };").replace('`${DASHBOARD_KEY_PREFIX}[REDACTED]`, \'dashboard key\'],', '`${WLD_MARK}[REDACTED]`, \'dashboard key\'],');
+  assert.notEqual(g2, SRC);
+  assert.match(tableProblems(g2).join('\n'), /PATTERNS\[0\]: the marker is not a literal.*WLD_MARK/);
+  // A span that is a `let`, or a const built by a call, is refused too; a const string, or a template of such, is a literal.
+  const spanOf = (decl: string) => SRC.replace("const DASHBOARD_KEY_BODY = '[A-Za-z0-9_-]{32,}';", `const DASHBOARD_KEY_BODY = '[A-Za-z0-9_-]{32,}';\n${decl}`).replace('`${DASHBOARD_KEY_PREFIX}[REDACTED]`, \'dashboard key\'],', '`${SPAN}[REDACTED]`, \'dashboard key\'],');
+  assert.match(tableProblems(spanOf("let SPAN = 'wld_';")).join('\n'), /PATTERNS\[0\]: the marker is not a literal/);
+  assert.match(tableProblems(spanOf("const SPAN = ['wld', '_'].join('');")).join('\n'), /PATTERNS\[0\]: the marker is not a literal/);
+  assert.deepEqual(tableProblems(spanOf("const SPAN = 'wld_';")), []);
+  assert.deepEqual(tableProblems(spanOf('const SPAN = `${DASHBOARD_KEY_PREFIX}`;')), []);
+  // H1: every broad arrow of the review ran code at load; each is refused, the plain forms are not.
+  const broad = (arrow: string) => tableProblems(sourceWith('BROAD', `[/zz_never_matches_zz/g, ${arrow}, 'never'],`)).join('\n');
+  for (const arrow of [
+    "(k) => (queueMicrotask(() => CODE_HEADS.add('buildbox')), k)",
+    '(k) => (CREDENTIAL_ENDINGS.pop(), k)',
+    "(k) => (KEY_LINE.compile('(?<![\\\\s\\\\S]{2000})' + KEY_LINE.source, KEY_LINE.flags), k)",
+    "(k) => (queueMicrotask(() => { try { MACHINE_BLOCKS.push(['```', /[^\\S\\n]*\\n/y]); } catch {} }), k)",
+    '(k) => (((x) => { RegExp.prototype.exec = function (this: RegExp, s: string) { const m = x.call(this, s); return m && this.source.includes(\'([sr]k)_\') && m[3] && m[3].length >= 120 ? null : m; }; })(RegExp.prototype.exec), k)',
+    '(k) => { return k; }',
+    '(k, j) => k',
+    '(k) => `${k}${DASHBOARD_KEY_BODY.length}`',
+    'orphanEnd',
+    "'[REDACTED]'",
+  ]) assert.match(broad(arrow), /BROAD\[\d+\]: a broad marker must be an arrow of one parameter/, arrow);
+  for (const arrow of ['(k) => k', '(k) => `$1 ${k}`', '(k) => `${DASHBOARD_KEY_PREFIX}${k}`']) assert.deepEqual(tableProblems(sourceWith('BROAD', `[/zz_never_matches_zz/g, ${arrow}, 'never'],`)), [], arrow);
+  // A PATTERNS marker that names a const arrow rather than a top-level function is refused; an IIFE entry still is.
+  assert.match(tableProblems(sourceWith('PATTERNS', "[/zz_never_matches_zz/g, credentialShaped, 'never'],")).join('\n'), /the marker is not a literal, an arrow function or the name of a top-level function/);
+  assert.match(tableProblems(sourceWith('PATTERNS', "(() => [/zz/g, '[REDACTED]', 'never'] as [RegExp, Replacement, string])(),")).join('\n'), /not a three-element array literal/);
+});
+
+test("H1: the module's data can't be changed from code that runs: a Set, a RegExp or a plain array at the top level is refused, and the review's writes fail", async () => {
+  // The binding lint on the shapes of the review's reach.
+  const bind = (from: string, to: string) => {
+    assert.ok(SRC.includes(from), from);
+    return bindingProblems(SRC.replace(from, to)).join('\n');
+  };
+  assert.match(bind("const CODE_HEADS = Object.freeze(['this',", "const CODE_HEADS = new Set(['this',"), /CODE_HEADS: new Set/);
+  assert.match(bind("const CREDENTIAL_ENDINGS = Object.freeze(['token', 'secret', 'password', 'passwd', 'accesskey']);", "const CREDENTIAL_ENDINGS = ['token', 'secret', 'password', 'passwd', 'accesskey'];"), /CREDENTIAL_ENDINGS: \[/);
+  assert.match(bind('const OCTET = ', 'const KEY_LINE = /-----(BEGIN|END) [A-Z ]*PRIVATE KEY(?: BLOCK)?-----/g;\nconst OCTET = '), /KEY_LINE: \/-----/);
+  assert.match(bind('const OCTET = ', "let LATE = 'x';\nconst OCTET = "), /LATE: not const/);
+  // At run time, in a module copy: the review's writes find frozen arrays or no binding, and the output is the control's.
+  // (Their microtask forms are try-wrapped, as the probes were; an unwrapped TypeError in a microtask would end this process.)
+  const corpHost = (m: Redact) => m.redactString('see buildbox.corp now', m.TRACKER);
+  const fenced = (m: Redact) => m.redactString(`\`\`\`\nmail ${CORP} now\n\`\`\``, m.TRACKER);
+  const control = await loaded(moduleWith('BROAD', "[/zz_never_matches_zz/g, (k) => k, 'never'],"));
+  assert.equal(corpHost(control), 'see [internal-host] now');
+  assert.equal(fenced(control), '```\nmail [email] now\n```');
+  const a = await loaded(moduleWith('BROAD', "[/zz_never_matches_zz/g, (k) => (queueMicrotask(() => { try { CODE_HEADS.add('buildbox'); } catch (e) { globalThis.__h1a = e.constructor.name; } }), k), 'never'],"));
+  assert.equal((globalThis as { __h1a?: string }).__h1a, 'TypeError');
+  delete (globalThis as { __h1a?: string }).__h1a;
+  assert.equal(corpHost(a), 'see [internal-host] now');
+  await assert.rejects(import(moduleWith('BROAD', "[/zz_never_matches_zz/g, (k) => (CREDENTIAL_ENDINGS.pop(), k), 'never'],")), (e: unknown) => e instanceof TypeError);
+  await assert.rejects(import(moduleWith('BROAD', "[/zz_never_matches_zz/g, (k) => (KEY_LINE.compile('x', 'g'), k), 'never'],")), (e: unknown) => e instanceof ReferenceError);
+  const d = await loaded(moduleWith('BROAD', "[/zz_never_matches_zz/g, (k) => (queueMicrotask(() => { try { MACHINE_BLOCKS.push(['```', /[^\\S\\n]*\\n/y]); } catch (e) { globalThis.__h1d = e.constructor.name; } }), k), 'never'],"));
+  assert.equal((globalThis as { __h1d?: string }).__h1d, 'TypeError');
+  delete (globalThis as { __h1d?: string }).__h1d;
+  assert.equal(fenced(d), '```\nmail [email] now\n```');
+  // G2 at run time: the template span's toString runs at load, and its write to KEY_QUALIFIERS finds a frozen array.
+  const lines = built().split('\n');
+  const at = lines.findIndex((l) => l.startsWith('const PATTERNS = ['));
+  assert.notEqual(at, -1);
+  lines.splice(at, 0, "const WLD_MARK = { toString: () => (queueMicrotask(() => { try { KEY_QUALIFIERS.delete('hmac'); } catch (e) { globalThis.__g2 = e.constructor.name; } }), 'wld_') };");
+  const marker = lines.findIndex((l) => l.includes('`${DASHBOARD_KEY_PREFIX}[REDACTED]`'));
+  assert.notEqual(marker, -1);
+  lines[marker] = lines[marker]!.replace('`${DASHBOARD_KEY_PREFIX}[REDACTED]`', '`${WLD_MARK}[REDACTED]`');
+  const file = join(mkdtempSync(join(tmpdir(), 'redact-markers-')), 'redact.js');
+  writeFileSync(file, lines.join('\n'));
+  const g2 = await loaded(pathToFileURL(file).href);
+  assert.equal((globalThis as { __g2?: string }).__g2, 'TypeError');
+  delete (globalThis as { __g2?: string }).__g2;
+  const hmac = `{"hmac_key": "${run(20, 'aB3dE5gH7jK9mN1pQ3sT')}"}`;
+  assert.equal(g2.redactString(hmac), '{"hmac_key": "[REDACTED]"}');
+  assert.deepEqual(g2.secretKinds(hmac), ['secret under a JSON key']);
 });

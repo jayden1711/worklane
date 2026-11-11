@@ -138,12 +138,12 @@ function basicPair(v) {
     return /^[\x20-\x7e]*:[\x20-\x7e]*$/.test(text);
 }
 // check-table: never-shrink
-const CREDENTIAL_WORDS = new Set(['token', 'secret', 'secrets', 'password', 'passwd', 'pwd', 'pass', 'passphrase', 'jwt', 'bearer', 'credential', 'credentials', 'authorization']);
+const CREDENTIAL_WORDS = Object.freeze(['token', 'secret', 'secrets', 'password', 'passwd', 'pwd', 'pass', 'passphrase', 'jwt', 'bearer', 'credential', 'credentials', 'authorization']);
 // check-table: never-shrink
-const CREDENTIAL_ENDINGS = ['token', 'secret', 'password', 'passwd', 'accesskey'];
-const credentialWord = (w) => CREDENTIAL_WORDS.has(w) || CREDENTIAL_ENDINGS.some((e) => w.endsWith(e));
+const CREDENTIAL_ENDINGS = Object.freeze(['token', 'secret', 'password', 'passwd', 'accesskey']);
+const credentialWord = (w) => CREDENTIAL_WORDS.includes(w) || CREDENTIAL_ENDINGS.some((e) => w.endsWith(e));
 // check-table: never-shrink
-const KEY_QUALIFIERS = new Set(['api', 'access', 'secret', 'private', 'signing', 'encryption', 'master', 'client', 'app', 'auth', 'account', 'service', 'license', 'deploy', 'admin', 'webhook', 'session', 'ssh', 'hmac', 'consumer']);
+const KEY_QUALIFIERS = Object.freeze(['api', 'access', 'secret', 'private', 'signing', 'encryption', 'master', 'client', 'app', 'auth', 'account', 'service', 'license', 'deploy', 'admin', 'webhook', 'session', 'ssh', 'hmac', 'consumer']);
 function credentialKey(k) {
     const words = k
         .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
@@ -155,19 +155,18 @@ function credentialKey(k) {
     if (words.some(credentialWord) || last === 'auth')
         return true;
     if (last === 'key')
-        return words.length === 1 || KEY_QUALIFIERS.has(words.at(-2));
-    return last.endsWith('key') && KEY_QUALIFIERS.has(last.slice(0, -3));
+        return words.length === 1 || KEY_QUALIFIERS.includes(words.at(-2));
+    return last.endsWith('key') && KEY_QUALIFIERS.includes(last.slice(0, -3));
 }
 exports.DASHBOARD_KEY_PREFIX = 'wld_';
 const DASHBOARD_KEY_BODY = '[A-Za-z0-9_-]{32,}';
 const isDashboardKey = (key) => new RegExp(`^${exports.DASHBOARD_KEY_PREFIX}${DASHBOARD_KEY_BODY}$`).test(key);
 exports.isDashboardKey = isDashboardKey;
-const KEY_LINE = /-----(BEGIN|END) [A-Z ]*PRIVATE KEY(?: BLOCK)?-----/g;
 function orphanEnd(m) {
+    const keyLine = /-----(BEGIN|END) [A-Z ]*PRIVATE KEY(?: BLOCK)?-----/g;
     let open = false;
     let cut = -1;
-    KEY_LINE.lastIndex = 0;
-    for (let k = KEY_LINE.exec(m); k; k = KEY_LINE.exec(m)) {
+    for (let k = keyLine.exec(m); k; k = keyLine.exec(m)) {
         if (k[1] === 'BEGIN')
             open = true;
         else if (open)
@@ -534,23 +533,17 @@ const BROAD = [
 ];
 const BROAD_SNAPSHOT = snapshot(BROAD, { broad: true });
 Object.freeze(BROAD);
-const CODE_HEADS = new Set(['this', 'self', 'super', 'opts', 'options', 'o', 'ctx', 'context', 'config', 'cfg', 'conf', 'settings', 'props', 'state', 'env', 'process', 'module', 'exports', 'window', 'document', 'globalThis', 'args', 'params', 'req', 'res', 'request', 'response', 'obj', 'result', 'item', 'e', 'err', 'x']);
+const CODE_HEADS = Object.freeze(['this', 'self', 'super', 'opts', 'options', 'o', 'ctx', 'context', 'config', 'cfg', 'conf', 'settings', 'props', 'state', 'env', 'process', 'module', 'exports', 'window', 'document', 'globalThis', 'args', 'params', 'req', 'res', 'request', 'response', 'obj', 'result', 'item', 'e', 'err', 'x']);
 function internalHost(m, pre, name) {
     const lower = name.toLowerCase();
     const labels = name.split('.').slice(0, lower.endsWith('.home.arpa') || lower.endsWith('.ts.net') ? -2 : -1);
     const suffix = name.slice(labels.join('.').length + 1);
     const prose = suffix !== suffix.toLowerCase() && suffix !== suffix.toUpperCase();
-    const code = !labels.some((l) => l.includes('-')) && (CODE_HEADS.has(labels[0]) || labels.some((l) => /[a-z][A-Z]/.test(l)));
+    const code = !labels.some((l) => l.includes('-')) && (CODE_HEADS.includes(labels[0]) || labels.some((l) => /[a-z][A-Z]/.test(l)));
     return prose || code ? m : `${pre}[internal-host]`;
 }
 const OCTET = '(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)';
-const PRIVATE_V4 = [
-    `10\\.${OCTET}`,
-    '172\\.(?:1[6-9]|2\\d|3[01])',
-    '192\\.168',
-    '100\\.(?:6[4-9]|[7-9]\\d|1[01]\\d|12[0-7])',
-    '169\\.254',
-].join('|');
+const PRIVATE_V4 = `10\\.${OCTET}|172\\.(?:1[6-9]|2\\d|3[01])|192\\.168|100\\.(?:6[4-9]|[7-9]\\d|1[01]\\d|12[0-7])|169\\.254`;
 const IDENTIFIERS = [
     [/(^|[^A-Za-z0-9._%+-])(?!git@)[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}(?![A-Za-z0-9-])/g, '$1[email]', 'email'],
     [
@@ -571,18 +564,17 @@ exports.REDACTION_PATTERNS = Object.freeze([
     ...IDENTIFIER_SNAPSHOT.map((r) => Object.freeze({ kind: r.kind, re: new RegExp(r.source, r.flags), rep: r.rep, group: 'identifier' })),
 ]);
 // check-table: never-shrink
-const GLUED_PREFIXES = ['ghp_', 'gho_', 'ghu_', 'ghs_', 'ghr_', 'github_pat_', 'sk-', 'sk_live_', 'sk_test_', 'rk_live_', 'rk_test_', 'xoxa-', 'xoxb-', 'xoxe', 'xoxp-', 'xoxr-', 'xoxs-', 'xapp-', 'lin_api_', 'lin_oauth_', 'AKIA', 'ASIA', 'AIza', 'eyJ', '0x', 'Bearer', 'bearer', 'BEARER', 'Basic', 'basic', 'BASIC', exports.DASHBOARD_KEY_PREFIX];
+const GLUED_PREFIXES = Object.freeze(['ghp_', 'gho_', 'ghu_', 'ghs_', 'ghr_', 'github_pat_', 'sk-', 'sk_live_', 'sk_test_', 'rk_live_', 'rk_test_', 'xoxa-', 'xoxb-', 'xoxe', 'xoxp-', 'xoxr-', 'xoxs-', 'xapp-', 'lin_api_', 'lin_oauth_', 'AKIA', 'ASIA', 'AIza', 'eyJ', '0x', 'Bearer', 'bearer', 'BEARER', 'Basic', 'basic', 'BASIC', exports.DASHBOARD_KEY_PREFIX]);
 // check-table: never-shrink
-const GLUE_PARTS = [
+const GLUE_PARTS = Object.freeze([
     String.raw `(?:\u001b|\\u001[bB]|\\x1[bB]|\\033|\\e|\^\[)(?:\[[0-?]*[ -/]*[@-~]|[ -/]+[0-~]|[0-~])`,
     String.raw `\u009b[0-?]*[ -/]*[@-~]`,
     String.raw `\\(?:u[0-9A-Fa-f]{4}|[nrtbf"\\/])`,
-];
-const GLUE = new RegExp(GLUE_PARTS.join('|'), 'g');
-function gluePoints(s) {
-    const cuts = [...s.matchAll(GLUE)].map((m) => m.index + m[0].length).filter((c) => /\w/.test(s[c - 1]));
+]);
+function gluePoints(s, glue, prefixes) {
+    const cuts = [...s.matchAll(glue)].map((m) => m.index + m[0].length).filter((c) => /\w/.test(s[c - 1]));
     for (let at = s.indexOf('_'); at !== -1; at = s.indexOf('_', at + 1))
-        if (GLUED_PREFIXES.some((p) => s.startsWith(p, at + 1)))
+        if (prefixes.some((p) => s.startsWith(p, at + 1)))
             cuts.push(at + 1);
     return [...new Set(cuts)].filter((c) => c < s.length).sort((a, b) => a - b);
 }
@@ -625,13 +617,11 @@ function applyKeepingLines(s, re, rep) {
 }
 exports.TRACKER = Object.freeze({ identifiers: true });
 const apply = (s, re, rep) => typeof rep === 'string' ? s.replace(re, rep) : s.replace(re, (m, ...rest) => called(rep, m, rest.slice(0, -2).map((g) => (typeof g === 'string' ? g : ''))));
-const MACHINE_BLOCKS = [
-    ['```done_when', /[^\S\n]*\n/y],
-    ['```research', /[ \t]*\r?\n/y],
-];
+const MACHINE_BLOCKS = Object.freeze([Object.freeze(['```done_when', String.raw `[^\S\n]*\n`]), Object.freeze(['```research', String.raw `[ \t]*\r?\n`])]);
 function outsideMachineBlocks(s, f) {
     const spans = [];
-    for (const [open, lineBreak] of MACHINE_BLOCKS) {
+    for (const [open, lineBreakSource] of MACHINE_BLOCKS) {
+        const lineBreak = new RegExp(lineBreakSource, 'y');
         for (let at = s.indexOf(open); at !== -1;) {
             lineBreak.lastIndex = at + open.length;
             if (!lineBreak.test(s)) {
@@ -673,7 +663,7 @@ function secretKinds(s) {
 }
 function spansOf(t, re, rep, rank, out) {
     if (!re.global)
-        throw new Error('spansOf needs the snapshot\'s global regex');
+        throw new Error("spansOf needs the run closure's global regex");
     const g = re;
     g.lastIndex = 0;
     for (let m = g.exec(t); m; m = g.exec(t)) {
@@ -699,29 +689,38 @@ const SHAPE_RULES = SHAPE_SNAPSHOT;
 // check-table: never-shrink
 const BROAD_RULES = Object.freeze([...SHAPE_RULES, ...BROAD_SNAPSHOT]);
 const run = (() => {
-    const build = (rules, global) => Object.freeze(rules.map((r) => Object.freeze([new RegExp(r.source, global && !r.flags.includes('g') ? `${r.flags}g` : r.flags), r.rep])));
+    const build = (rules, global) => rules.map((r) => [new RegExp(r.source, global && !r.flags.includes('g') ? `${r.flags}g` : r.flags), r.rep]);
     const shapes = build(SHAPE_RULES, true);
     const broad = build(BROAD_RULES, true);
     const identifiers = build(IDENTIFIER_SNAPSHOT, false);
-    const copies = [...shapes.map((c, i) => [c[0], SHAPE_RULES[i], true]), ...broad.map((c, i) => [c[0], BROAD_RULES[i], true]), ...identifiers.map((c, i) => [c[0], IDENTIFIER_SNAPSHOT[i], false])];
-    const verified = () => {
-        for (const [re, r, global] of copies) {
-            const flags = global && !r.flags.includes('g') ? `${r.flags}g` : r.flags;
-            if (re.source !== r.source || re.flags !== flags || Reflect.ownKeys(re).map(String).join() !== 'lastIndex')
+    const glue = new RegExp(GLUE_PARTS.join('|'), 'g');
+    const gluedPrefixes = [...GLUED_PREFIXES];
+    const copies = [
+        ...shapes.map((c, i) => [c[0], SHAPE_RULES[i], c[0].flags]),
+        ...broad.map((c, i) => [c[0], BROAD_RULES[i], c[0].flags]),
+        ...identifiers.map((c, i) => [c[0], IDENTIFIER_SNAPSHOT[i], c[0].flags]),
+    ];
+    let checked = false;
+    const check = () => {
+        if (checked)
+            return;
+        for (const [re, r, flags] of copies) {
+            if (re.source !== r.source || re.flags !== flags || Reflect.ownKeys(re).length !== 1)
                 throw new Error(`src/events/redact.ts: the regex that runs for "${r.kind}" no longer reads as its snapshot (#1257)`);
         }
+        checked = true;
     };
     return Object.freeze({
-        shapes: (s) => (verified(), allSpans(s, shapes)),
-        broad: (s) => (verified(), allSpans(s, broad)),
-        broadAt: (s, cuts, spans) => (verified(), readAt(s, cuts, broad, spans)),
-        identifiers: (part, keepLines) => (verified(), identifiers.reduce((t, [re, rep]) => (keepLines ? applyKeepingLines : apply)(t, re, rep), part)),
+        shapes: (s) => (check(), allSpans(s, shapes, glue, gluedPrefixes)),
+        broad: (s) => (check(), allSpans(s, broad, glue, gluedPrefixes)),
+        broadAt: (s, cuts, spans) => (check(), readAt(s, cuts, broad, spans)),
+        identifiers: (part, keepLines) => (check(), identifiers.reduce((t, [re, rep]) => (keepLines ? applyKeepingLines : apply)(t, re, rep), part)),
     });
 })();
-function allSpans(s, rules) {
+function allSpans(s, rules, glue, prefixes) {
     const spans = [];
     rules.forEach(([re, rep], i) => spansOf(s, re, rep, i, spans));
-    readAt(s, gluePoints(s), rules, spans);
+    readAt(s, gluePoints(s, glue, prefixes), rules, spans);
     return spans;
 }
 function replaceOnce(s, keepLines, found) {
