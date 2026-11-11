@@ -304,6 +304,7 @@ export function shellFileOf(w: readonly string[]): string | null {
 }
 
 /** Folders the repo walks never read (R1228ao D3: shared, so a sibling under one is no file the lint reads). */
+// check-table: never-grow
 const SCAN_SKIP = new Set(['node_modules', 'dist', '.git', '.claude']);
 
 /**
