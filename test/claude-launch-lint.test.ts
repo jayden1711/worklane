@@ -59,7 +59,15 @@ const COMMAND = /(?:^|[\s;&|(`"'])(?:\S*[\/\\])?claude(?:\.exe|\.cmd|\.ps1)?["'`
  * (shellContext), so prose elsewhere is untouched.
  */
 const SHELL_TOKEN = /^(?:.*[\/\\])?claude(?:\.exe|\.cmd|\.ps1)?$/i;
-const shellTokens = (t: string) => t.split(/\s+/).map((w) => w.replace(/^(?:\$\(|[("'`])+/, '').replace(/[)"'`;&|]+$/, '')).filter(Boolean);
+/**
+ * The same token in ANY string, wherever it ends up (R1185al/am D1, as R1185am measured it: a script held in a const, a
+ * non-literal `shell`, an `exec` under another name all pass a syntactic gate): lower-case only, so prose (`Claude …`)
+ * isn't one, and split at redirects and separators too (`claude>>"$LOG"`, `claude</dev/null`, `a;claude`).
+ */
+// The binary's token followed by what a shell call has after its command word (the end, a quote, `$`, `%`, `@`, a
+// redirect, a separator, a flag, a substitution), not by a word, which is how prose reads ("claude exited …").
+const WORD_TOKEN = /(?:^|[\s;&|<>(`'"{]|:[-=])(?:[^\s;&|<>()`'"{}]*[\/\\])?claude(?:\.exe|\.cmd|\.ps1)?(?=$|["$<>;&|)}`%@]|'(?![a-z])|\s+(?:["'$<>;&|)`%@-]|X(?![\w])|$)|\s*$)/;
+const shellTokens = (t: string) => t.split(/[\s<>;&|]+/).map((w) => w.replace(/^(?:\$\(|[("'`])+/, '').replace(/[)"'`;&|]+$/, '')).filter(Boolean);
 
 /**
  * Whether `n` is in a string a shell runs: inside an argv element after a `-c`-style flag (`sh -c`, `bash -lc`), the
@@ -89,6 +97,9 @@ const AUTH_HELPERS = /^(?:claudeAuthStatus|claudeAuthMethod|claudeAuthStatusJson
 /** Lines that name the claude binary and may: file, the line's whole text (trimmed), why, and how many lines have it (1 when absent). */
 // check-table: never-grow
 export const PINS: ([string, string, string] | [string, string, string, number])[] = [
+  ["src/cli-agents.ts", "if (req.interactive) return 'a person is waiting on this run; it runs on claude';", "a message naming claude (data): which runtime a run uses"],
+  ["src/runner.ts", "if (req.provider?.kind === 'cli') return { reason: 'failed', detail: `${req.provider.name} runs on its own CLI, not claude; not starting`, costUsd: 0, turns: 0, model: req.model };", "a message naming claude (data): a provider's run uses its own CLI"],
+  ["src/user-facing-error.ts", "\"that holds a Claude credential (a setup token, or a sign-in code), and the dashboard never takes one: install it at a root shell on the machine (credentials.sh <name> claude), or sign in there as the agent user; nothing was stored\",", "a message naming `credentials.sh <name> claude` (data): a root admin runs it"],
   ["src/claude-credential-guard.ts", "'issue #711: the dashboard never takes a Claude credential; a root admin installs it on the machine (sudo bash credentials.sh <name> claude), or signs in there as the agent user. See docs/auth.md';", "a message naming `credentials.sh <name> claude` (data): a root admin runs it"],
   ["src/claude-signin.ts", "const script = `sudo bash ${join(o.engineRoot, 'scripts', 'setup', 'credentials.sh')} ${o.instance} claude`;", "the sign-in script's text shown to a person (data): it names `credentials.sh <name> claude`"],
   ["src/claude-credential-guard.ts", "\"the dashboard no longer takes a Claude credential: a root admin installs one on the machine (sudo bash credentials.sh <name> claude), or signs in there as the agent user (sudo -u <agent user> -i claude auth login). See docs/auth.md\";", "a message naming claude (data): how a root admin installs a login"],
@@ -143,7 +154,7 @@ export function launchProblems(path: string, text: string): string[] {
   const visit = (n: Node) => {
     // A template is read whole too, each substitution as one word (R1185ag D1: a flag in its tail), besides its parts.
     const t = ts.isTemplateExpression(n) ? n.head.text + n.templateSpans.map((s: Node) => `X${s.literal.text}`).join('') : ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n) || ts.isTemplateHead(n) || ts.isTemplateMiddle(n) || ts.isTemplateTail(n) ? n.text : null;
-    if (t !== null && (BINARY.test(t) || COMMAND.test(t) || (shellContext(n) && shellTokens(t).some((w) => SHELL_TOKEN.test(w)))) && path !== LAUNCHER && !inType(n)) {
+    if (t !== null && (BINARY.test(t) || COMMAND.test(t) || WORD_TOKEN.test(t) || (shellContext(n) && shellTokens(t).some((w) => SHELL_TOKEN.test(w)))) && path !== LAUNCHER && !inType(n)) {
       const at = lineOf(n);
       const line = lines[at - 1]!.trim();
       const pin = PINS.find(([f, l]) => f === path && l === line);
@@ -193,19 +204,27 @@ test('#958: every way of naming claude outside the launch function is refused (f
     'absolute-path',
     'agent-sdk',
     'alias-assign',
+    'and-no-space',
     'array-join-line',
     'concat-args',
+    'const-command-execsync',
+    'const-multiline-script',
+    'const-object-wrappers',
+    'const-script',
     'const-bin',
     'data-literal',
+    'default-expansion-sh',
     'default-import',
     'destructure-namespace',
     'direct-spawn',
     'case-folded-name',
+    'cmd-c',
     'cmd-name',
     'copied-pinned-line',
     'exe-join',
     'exe-name',
     'exe-sh-c',
+    'exec-renamed-import',
     'doctor-unpinned-line',
     'dyn-import',
     'element-access',
@@ -230,13 +249,16 @@ test('#958: every way of naming claude outside the launch function is refused (f
     'pkg-dir',
     'pkg-parts',
     'promisify-exec',
+    'pwsh-command',
     'ps1-shim',
+    'redirect-no-space',
     'reflect-apply',
     'renamed-import',
     'require-destructured',
     'runner-bin-escapes',
     'runner-bin-spawn',
     'sh-arg-before-flag',
+    'shell-bin-bash',
     'sh-assignment-prefix',
     'sh-args-variable',
     'sh-c',
