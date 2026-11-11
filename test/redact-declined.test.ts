@@ -7,7 +7,7 @@
 import './helpers.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { REDACTION_PATTERNS, redactCut, redactString, secretKinds } from '../src/events/redact.js';
+import { redactionPatterns, redactCut, redactString, secretKinds } from '../src/events/redact.js';
 import { run } from './token-standins.js';
 
 const KEY_BEGIN = ['-----BEGIN', 'RSA', 'PRIVATE', 'KEY-----'].join(' ');
@@ -67,7 +67,7 @@ const PIECES: Record<string, string[]> = {
 };
 
 test('every function-backed rule is covered here, and nothing it accepts from any start is shown', () => {
-  const rules = REDACTION_PATTERNS.filter((p) => p.group === 'secret' && typeof p.rep === 'function');
+  const rules = redactionPatterns().filter((p) => p.group === 'secret' && typeof p.rep === 'function');
   // A new function-backed rule must be added to PIECES: its declined matches are where a token can hide.
   assert.deepEqual([...new Set(rules.map((p) => p.kind))].sort(), Object.keys(PIECES).sort());
   const missed: string[] = [];

@@ -115,8 +115,10 @@ const sharedRedact = (() => {
 const exports = {};
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.CUT_MARGIN = exports.UNSCANNABLE = exports.MAX_PASSES = exports.UNSCANNABLE_KIND = exports.TRACKER = exports.REDACTION_PATTERNS = exports.isDashboardKey = exports.DASHBOARD_KEY_PREFIX = void 0;
+exports.CUT_MARGIN = exports.UNSCANNABLE = exports.MAX_PASSES = exports.UNSCANNABLE_KIND = exports.TRACKER = exports.DASHBOARD_KEY_PREFIX = void 0;
+exports.isDashboardKey = isDashboardKey;
 exports.markerProblem = markerProblem;
+exports.redactionPatterns = redactionPatterns;
 exports.secretKinds = secretKinds;
 exports.fixedPoint = fixedPoint;
 exports.redactString = redactString;
@@ -125,8 +127,12 @@ exports.redactClip = redactClip;
 exports.readWindow = readWindow;
 exports.redactRecords = redactRecords;
 exports.redact = redact;
-const credentialShaped = (v) => (/[a-z]/.test(v) && /[A-Z]/.test(v) && /\d/.test(v)) || /^[0-9a-fA-F]{32,}$/.test(v);
-const basicShaped = (v) => /[0-9+/=]/.test(v) || (v.length >= 16 && v.length % 4 !== 1 && /[a-z]/.test(v) && /[A-Z]/.test(v)) || basicPair(v);
+function credentialShaped(v) {
+    return (/[a-z]/.test(v) && /[A-Z]/.test(v) && /\d/.test(v)) || /^[0-9a-fA-F]{32,}$/.test(v);
+}
+function basicShaped(v) {
+    return /[0-9+/=]/.test(v) || (v.length >= 16 && v.length % 4 !== 1 && /[a-z]/.test(v) && /[A-Z]/.test(v)) || basicPair(v);
+}
 function basicPair(v) {
     let text;
     try {
@@ -141,7 +147,9 @@ function basicPair(v) {
 const CREDENTIAL_WORDS = Object.freeze(['token', 'secret', 'secrets', 'password', 'passwd', 'pwd', 'pass', 'passphrase', 'jwt', 'bearer', 'credential', 'credentials', 'authorization']);
 // check-table: never-shrink
 const CREDENTIAL_ENDINGS = Object.freeze(['token', 'secret', 'password', 'passwd', 'accesskey']);
-const credentialWord = (w) => CREDENTIAL_WORDS.includes(w) || CREDENTIAL_ENDINGS.some((e) => w.endsWith(e));
+function credentialWord(w) {
+    return CREDENTIAL_WORDS.includes(w) || CREDENTIAL_ENDINGS.some((e) => w.endsWith(e));
+}
 // check-table: never-shrink
 const KEY_QUALIFIERS = Object.freeze(['api', 'access', 'secret', 'private', 'signing', 'encryption', 'master', 'client', 'app', 'auth', 'account', 'service', 'license', 'deploy', 'admin', 'webhook', 'session', 'ssh', 'hmac', 'consumer']);
 function credentialKey(k) {
@@ -160,8 +168,9 @@ function credentialKey(k) {
 }
 exports.DASHBOARD_KEY_PREFIX = 'wld_';
 const DASHBOARD_KEY_BODY = '[A-Za-z0-9_-]{32,}';
-const isDashboardKey = (key) => new RegExp(`^${exports.DASHBOARD_KEY_PREFIX}${DASHBOARD_KEY_BODY}$`).test(key);
-exports.isDashboardKey = isDashboardKey;
+function isDashboardKey(key) {
+    return new RegExp(`^${exports.DASHBOARD_KEY_PREFIX}${DASHBOARD_KEY_BODY}$`).test(key);
+}
 function orphanEnd(m) {
     const keyLine = /-----(BEGIN|END) [A-Z ]*PRIVATE KEY(?: BLOCK)?-----/g;
     let open = false;
@@ -249,8 +258,12 @@ function boundaryGroup(g) {
         return taking.length <= 1 || taking.every((it) => it.kind === 'atom');
     });
 }
-const these = (groups) => (groups.length === 0 ? 'no group is' : groups.length === 1 ? `group ${groups[0]} is` : `groups ${groups.join(', ')} are`);
-const groupCount = (re) => new RegExp(`${re.source}|`, re.flags.replace(/[gy]/g, '')).exec('').length - 1;
+function these(groups) {
+    return groups.length === 0 ? 'no group is' : groups.length === 1 ? `group ${groups[0]} is` : `groups ${groups.join(', ')} are`;
+}
+function groupCount(re) {
+    return new RegExp(`${re.source}|`, re.flags.replace(/[gy]/g, '')).exec('').length - 1;
+}
 function snapshot(table, o = {}) {
     const refuse = (who, why) => {
         throw new Error(`redaction rule ${who} could show a secret (#1257): ${why}`);
@@ -518,8 +531,6 @@ const PATTERNS = [
     ],
     [/(^|[^A-Za-z0-9])[A-Za-z0-9_-]{23,28}\.[A-Za-z0-9_-]{6,7}\.[A-Za-z0-9_-]{27,}\b/g, '$1[REDACTED]', 'Discord bot token'],
 ];
-const SHAPE_SNAPSHOT = snapshot(PATTERNS);
-Object.freeze(PATTERNS);
 // check-table: never-shrink
 const BROAD = [
     [/(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{8,}/g, (k) => k, 'GitHub token, cut short'],
@@ -531,8 +542,6 @@ const BROAD = [
     [/([a-z0-9+.-]{1,32}:\/\/)[^\s/@]+@/gi, (k) => `$1${k}@`, 'user info in a URL'],
     [/\b([A-Za-z_]*(?:token|secret|password|passwd|api[_-]?key))(\s*[=:]\s*)("[^"]*"|'[^']*'|\S+)/gi, (k) => `$1$2${k}`, 'value after a secret name'],
 ];
-const BROAD_SNAPSHOT = snapshot(BROAD, { broad: true });
-Object.freeze(BROAD);
 const CODE_HEADS = Object.freeze(['this', 'self', 'super', 'opts', 'options', 'o', 'ctx', 'context', 'config', 'cfg', 'conf', 'settings', 'props', 'state', 'env', 'process', 'module', 'exports', 'window', 'document', 'globalThis', 'args', 'params', 'req', 'res', 'request', 'response', 'obj', 'result', 'item', 'e', 'err', 'x']);
 function internalHost(m, pre, name) {
     const lower = name.toLowerCase();
@@ -554,20 +563,16 @@ const IDENTIFIERS = [
     [/(^|[^\w.])(?:10\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)|172\.(?:1[6-9]|2\d|3[01])|192\.168|100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])|169\.254)\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?![\w-]|\.\d)/g, '$1[private-ip]', 'private IP'],
     [/(^|[^\w:])f(?:[cd][0-9a-f]{2}|e[89ab][0-9a-f]):(?:[0-9a-f]{0,4}:){1,6}[0-9a-f]{0,4}(?![\w:])/gi, '$1[private-ip]', 'private IP'],
 ];
-const IDENTIFIER_SNAPSHOT = snapshot(IDENTIFIERS, { verbatim: true });
-Object.freeze(IDENTIFIERS);
-exports.REDACTION_PATTERNS = Object.freeze([
-    ...SHAPE_SNAPSHOT.map((r) => Object.freeze({ kind: r.kind, re: new RegExp(r.source, r.flags), rep: r.rep, group: 'secret' })),
-    ...BROAD_SNAPSHOT.map((r) => Object.freeze({ kind: r.kind, re: new RegExp(r.source, r.flags), rep: r.rep, group: 'broad' })),
-    ...IDENTIFIER_SNAPSHOT.map((r) => Object.freeze({ kind: r.kind, re: new RegExp(r.source, r.flags), rep: r.rep, group: 'identifier' })),
-]);
+function redactionPatterns() {
+    return BUILT.patterns;
+}
 // check-table: never-shrink
 const GLUED_PREFIXES = Object.freeze(['ghp_', 'gho_', 'ghu_', 'ghs_', 'ghr_', 'github_pat_', 'sk-', 'sk_live_', 'sk_test_', 'rk_live_', 'rk_test_', 'xoxa-', 'xoxb-', 'xoxe', 'xoxp-', 'xoxr-', 'xoxs-', 'xapp-', 'lin_api_', 'lin_oauth_', 'AKIA', 'ASIA', 'AIza', 'eyJ', '0x', 'Bearer', 'bearer', 'BEARER', 'Basic', 'basic', 'BASIC', exports.DASHBOARD_KEY_PREFIX]);
 // check-table: never-shrink
 const GLUE_PARTS = Object.freeze([
-    String.raw `(?:\u001b|\\u001[bB]|\\x1[bB]|\\033|\\e|\^\[)(?:\[[0-?]*[ -/]*[@-~]|[ -/]+[0-~]|[0-~])`,
-    String.raw `\u009b[0-?]*[ -/]*[@-~]`,
-    String.raw `\\(?:u[0-9A-Fa-f]{4}|[nrtbf"\\/])`,
+    '(?:\\u001b|\\\\u001[bB]|\\\\x1[bB]|\\\\033|\\\\e|\\^\\[)(?:\\[[0-?]*[ -/]*[@-~]|[ -/]+[0-~]|[0-~])',
+    '\\u009b[0-?]*[ -/]*[@-~]',
+    '\\\\(?:u[0-9A-Fa-f]{4}|[nrtbf"\\\\/])',
 ]);
 function gluePoints(s, glue, prefixes) {
     const cuts = [...s.matchAll(glue)].map((m) => m.index + m[0].length).filter((c) => /\w/.test(s[c - 1]));
@@ -588,8 +593,12 @@ function freeMark(s) {
             return String.fromCharCode(c);
     return null;
 }
-const expand = (rep, m, groups) => rep.replace(/\$(\d|\$|&)/g, (_, k) => (k === '$' ? '$' : k === '&' ? m : String(groups[Number(k) - 1] ?? '')));
-const breaks = (s) => s.split('\n').length - 1;
+function expand(rep, m, groups) {
+    return rep.replace(/\$(\d|\$|&)/g, (_, k) => (k === '$' ? '$' : k === '&' ? m : String(groups[Number(k) - 1] ?? '')));
+}
+function breaks(s) {
+    return s.split('\n').length - 1;
+}
 function shown(whole, groups, r) {
     if (r === whole)
         return r;
@@ -605,7 +614,9 @@ function shown(whole, groups, r) {
         return r;
     return `${whole.slice(0, a)}[REDACTED]${whole.slice(whole.length - b)}`;
 }
-const called = (rep, m, groups) => shown(m, groups, rep(m, ...groups));
+function called(rep, m, groups) {
+    return shown(m, groups, rep(m, ...groups));
+}
 function applyKeepingLines(s, re, rep) {
     return s.replace(re, (m, ...rest) => {
         const groups = rest.slice(0, -2).filter((g) => typeof g !== 'object');
@@ -614,8 +625,10 @@ function applyKeepingLines(s, re, rep) {
     });
 }
 exports.TRACKER = Object.freeze({ identifiers: true });
-const apply = (s, re, rep) => typeof rep === 'string' ? s.replace(re, rep) : s.replace(re, (m, ...rest) => called(rep, m, rest.slice(0, -2).map((g) => (typeof g === 'string' ? g : ''))));
-const MACHINE_BLOCKS = Object.freeze([Object.freeze(['```done_when', String.raw `[^\S\n]*\n`]), Object.freeze(['```research', String.raw `[ \t]*\r?\n`])]);
+function apply(s, re, rep) {
+    return typeof rep === 'string' ? s.replace(re, rep) : s.replace(re, (m, ...rest) => called(rep, m, rest.slice(0, -2).map((g) => (typeof g === 'string' ? g : ''))));
+}
+const MACHINE_BLOCKS = Object.freeze([Object.freeze(['```done_when', '[^\\S\\n]*\\n']), Object.freeze(['```research', '[ \\t]*\\r?\\n'])]);
 function outsideMachineBlocks(s, f) {
     const spans = [];
     for (const [open, lineBreakSource] of MACHINE_BLOCKS) {
@@ -650,7 +663,7 @@ exports.UNSCANNABLE_KIND = 'text too large to scan';
 function secretKinds(s) {
     const kinds = new Set();
     try {
-        replaceUnion(s, false, (rank) => kinds.add(SHAPE_SNAPSHOT[rank].kind));
+        replaceUnion(s, false, (rank) => kinds.add(BUILT.shapes[rank].kind));
     }
     catch (e) {
         if (e instanceof RangeError)
@@ -683,20 +696,28 @@ function spansOf(t, re, rep, rank, out) {
             out.push([m.index + a, m.index + whole.length - b, r.slice(a, r.length - b), rank]);
     }
 }
-const SHAPE_RULES = SHAPE_SNAPSHOT;
 // check-table: never-shrink
-const BROAD_RULES = Object.freeze([...SHAPE_RULES, ...BROAD_SNAPSHOT]);
-const run = (() => {
-    const build = (rules, global) => rules.map((r) => [new RegExp(r.source, global && !r.flags.includes('g') ? `${r.flags}g` : r.flags), r.rep]);
-    const shapes = build(SHAPE_RULES, true);
-    const broad = build(BROAD_RULES, true);
-    const identifiers = build(IDENTIFIER_SNAPSHOT, false);
+const BROAD_RULES = Object.freeze(['shapes', 'broad']);
+function build(patterns, broadTable, identifierTable) {
+    const shapes = snapshot(patterns);
+    Object.freeze(patterns);
+    const broadRules = snapshot(broadTable, { broad: true });
+    Object.freeze(broadTable);
+    const identifiers = snapshot(identifierTable, { verbatim: true });
+    Object.freeze(identifierTable);
+    const broad = Object.freeze(BROAD_RULES.flatMap((set) => (set === 'shapes' ? shapes : broadRules)));
+    const copy = (rules, group) => rules.map((r) => Object.freeze({ kind: r.kind, re: new RegExp(r.source, r.flags), rep: r.rep, group }));
+    const patternsOut = Object.freeze([...copy(shapes, 'secret'), ...copy(broadRules, 'broad'), ...copy(identifiers, 'identifier')]);
+    const compile = (rules, withG) => rules.map((r) => [new RegExp(r.source, withG && !r.flags.includes('g') ? `${r.flags}g` : r.flags), r.rep]);
+    const shapeRun = compile(shapes, true);
+    const broadRun = compile(broad, true);
+    const identifierRun = compile(identifiers, false);
     const glue = new RegExp(GLUE_PARTS.join('|'), 'g');
     const gluedPrefixes = [...GLUED_PREFIXES];
     const copies = [
-        ...shapes.map((c, i) => [c[0], SHAPE_RULES[i], c[0].flags]),
-        ...broad.map((c, i) => [c[0], BROAD_RULES[i], c[0].flags]),
-        ...identifiers.map((c, i) => [c[0], IDENTIFIER_SNAPSHOT[i], c[0].flags]),
+        ...shapeRun.map((c, i) => [c[0], shapes[i], c[0].flags]),
+        ...broadRun.map((c, i) => [c[0], broad[i], c[0].flags]),
+        ...identifierRun.map((c, i) => [c[0], identifiers[i], c[0].flags]),
     ];
     let checked = false;
     const check = () => {
@@ -708,13 +729,14 @@ const run = (() => {
         }
         checked = true;
     };
-    return Object.freeze({
-        shapes: (s) => (check(), allSpans(s, shapes, glue, gluedPrefixes)),
-        broad: (s) => (check(), allSpans(s, broad, glue, gluedPrefixes)),
-        broadAt: (s, cuts, spans) => (check(), readAt(s, cuts, broad, spans)),
-        identifiers: (part, keepLines) => (check(), identifiers.reduce((t, [re, rep]) => (keepLines ? applyKeepingLines : apply)(t, re, rep), part)),
+    const run = Object.freeze({
+        shapes: (s) => (check(), allSpans(s, shapeRun, glue, gluedPrefixes)),
+        broad: (s) => (check(), allSpans(s, broadRun, glue, gluedPrefixes)),
+        broadAt: (s, cuts, spans) => (check(), readAt(s, cuts, broadRun, spans)),
+        identifiers: (part, keepLines) => (check(), identifierRun.reduce((t, [re, rep]) => (keepLines ? applyKeepingLines : apply)(t, re, rep), part)),
     });
-})();
+    return Object.freeze({ shapes, broad: broadRules, identifiers, patterns: patternsOut, run });
+}
 function allSpans(s, rules, glue, prefixes) {
     const spans = [];
     rules.forEach(([re, rep], i) => spansOf(s, re, rep, i, spans));
@@ -722,7 +744,7 @@ function allSpans(s, rules, glue, prefixes) {
     return spans;
 }
 function replaceOnce(s, keepLines, found) {
-    const spans = run.shapes(s);
+    const spans = BUILT.run.shapes(s);
     if (found)
         for (const sp of spans)
             found(sp[3]);
@@ -763,9 +785,9 @@ function replaceUnion(s, keepLines, found) {
     return fixedPoint(s, (t) => replaceOnce(t, keepLines, found), keepLines);
 }
 function maskOnce(s, mask, keepLines) {
-    const spans = run.broad(s);
+    const spans = BUILT.run.broad(s);
     const word = (i) => /[A-Za-z0-9_]/.test(s[i] ?? '');
-    run.broadAt(s, [...new Set(spans.flatMap(([a, b]) => [a, b]))].filter((c) => c > 0 && c < s.length && word(c - 1) && word(c)).sort((a, b) => a - b), spans);
+    BUILT.run.broadAt(s, [...new Set(spans.flatMap(([a, b]) => [a, b]))].filter((c) => c > 0 && c < s.length && word(c - 1) && word(c)).sort((a, b) => a - b), spans);
     const masks = [];
     if (mask)
         for (let at = s.indexOf(mask); at !== -1; at = s.indexOf(mask, at + mask.length))
@@ -866,10 +888,10 @@ function redactString(s, o = {}) {
 function redactOrThrow(s, o) {
     let out = o.broad ? maskUnion(s, o.mask ?? '[REDACTED]', o.keepLines === true) : replaceUnion(s, o.keepLines === true);
     if (o.identifiers)
-        out = outsideMachineBlocks(out, (part) => run.identifiers(part, o.keepLines === true));
+        out = outsideMachineBlocks(out, (part) => BUILT.run.identifiers(part, o.keepLines === true));
     return out;
 }
-exports.CUT_MARGIN = 16 * 1024;
+exports.CUT_MARGIN = 16384;
 function redactCut(s, max, o = {}) {
     return redactClip(s, max, o).text;
 }
@@ -922,6 +944,7 @@ function redactKeys(entries, o) {
         return [key, redact(v, o)];
     });
 }
+const BUILT = build(PATTERNS, BROAD, IDENTIFIERS);
 return exports;
 })();
 // END generated from src/events/redact.ts
