@@ -26,7 +26,7 @@
 // - a pinned line's value used somewhere else (a lookup's result handed to a launch), or claudeBin's result: the pin's
 //   reason says where it goes, and review holds it;
 // - a binary name built at run time from parts (`'clau' + 'de'`) or from data with no `claude` in it (a config value,
-//   an env variable);
+//   an env variable, a constructor parameter that holds one: R1185ai M11);
 // - a launch through a module outside src/ (scripts/: test/claude-launch-shell-lint.test.ts reads those), or a child
 //   process that itself runs claude (a hook, a project command: the sandbox's job).
 import { test } from 'node:test';
@@ -41,7 +41,7 @@ type Node = any;
 const ts = createRequire(join(repoRoot, 'package.json'))('typescript') as Node;
 
 /** A text that IS the claude binary: its name, a path to it, its npm package, or its cli.js. */
-const BINARY = /^claude(?:\.exe|\.cmd)?$|[\/\\]claude(?:\.exe|\.cmd)?$|^claude-code$|@anthropic-ai[\/\\]claude-code|claude-code[\/\\]cli\.js|cli-wrapper\.cjs|@anthropic-ai[\/\\]claude-agent-sdk|^claude-agent-sdk$/i;
+const BINARY = /^claude(?:\.exe|\.cmd|\.ps1)?$|[\/\\]claude(?:\.exe|\.cmd|\.ps1)?$|^claude-code$|@anthropic-ai[\/\\]claude-code|claude-code[\/\\]cli\.js|cli-wrapper\.cjs|@anthropic-ai[\/\\]claude-agent-sdk|^claude-agent-sdk$/i;
 /**
  * A string that runs claude as a shell command (R1185ag D1, as R1185ag measured it): the binary as a word, quoted or
  * from a `$(…)`, then any words and a flag (`claude "$1" -p`, `exec "claude" -p`, `"$(command -v claude)" -p`), or a
@@ -51,7 +51,14 @@ const BINARY = /^claude(?:\.exe|\.cmd)?$|[\/\\]claude(?:\.exe|\.cmd)?$|^claude-c
  * a wrapper (exec, nohup, xargs, command, env, time, sudo, then, do) and its words, quoted or not, then the end, a
  * redirect, `;` `&` `|` `)`, or a space and a quote, `$`, `<` or a substitution.
  */
-const COMMAND = /(?:^|[\s;&|(`"'])(?:\S*[\/\\])?claude(?:\.exe|\.cmd)?["'`)]*(?:\s+[^\s;&|]+)*?\s+--?[a-z]|\|\s*(?:\S*[\/\\])?claude(?:\.exe|\.cmd)?\b|(?:^|[;&|(`\n]|\$\()\s*(?:(?:exec|nohup|xargs|command|env|time|sudo|then|do)\s+(?:[^\s;&|]+\s+)*?)?["']?(?:\S*[\/\\])?claude(?:\.exe|\.cmd)?["']?(?=\s*(?:$|[<>;&|)])|\s+["'$<X])/i;
+const COMMAND = /(?:^|[\s;&|(`"'])(?:\S*[\/\\])?claude(?:\.exe|\.cmd|\.ps1)?["'`)]*(?:\s+[^\s;&|]+)*?\s+--?[a-z]|\|\s*(?:\S*[\/\\])?claude(?:\.exe|\.cmd|\.ps1)?\b|(?:^|[;&|(`\n]|\$\()\s*(?:(?:exec|nohup|xargs|command|env|time|sudo|then|do)\s+(?:[^\s;&|]+\s+)*?)?["']?(?:\S*[\/\\])?claude(?:\.exe|\.cmd|\.ps1)?["']?(?=\s*(?:$|[<>;&|)])|\s+["'$<X])/i;
+/**
+ * A shell string that runs claude in a command's position, flags or not (R1185ai D1, as R1185ai measured it): after
+ * `;` `&&` `||` `$(`, or a launcher word (`exec`, `nohup`, `command`, `xargs`, `npx …`, `timeout N`, `env K=V…`,
+ * `nice -n N`, `stdbuf X`); or at the string's start, when a shell variable or the end follows. Case-sensitive: prose
+ * (`claude exited …`) doesn't run anything.
+ */
+const SHELL = /(?:;|&&|\|\||\$\(|\b(?:exec|nohup|command|xargs|npx(?:\s+-\S+)*|timeout\s+\S+|env(?:\s+\w+=\S*)*|nice(?:\s+-n\s*\S+)?|stdbuf\s+\S+))\s*["']?(?:\S*[\/\\])?claude(?:\.exe|\.cmd|\.ps1)?["')]*(?:\s|$)|^\s*["']?(?:\S*[\/\\])?claude(?:\.exe|\.cmd|\.ps1)?["']?\s+(?:"?\$|$)/;
 const LAUNCHER = 'src/claude-launch.ts';
 const AUTH_HELPERS = /^(?:claudeAuthStatus|claudeAuthMethod|claudeAuthStatusJson)$/;
 
@@ -112,7 +119,7 @@ export function launchProblems(path: string, text: string): string[] {
   const visit = (n: Node) => {
     // A template is read whole too, each substitution as one word (R1185ag D1: a flag in its tail), besides its parts.
     const t = ts.isTemplateExpression(n) ? n.head.text + n.templateSpans.map((s: Node) => `X${s.literal.text}`).join('') : ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n) || ts.isTemplateHead(n) || ts.isTemplateMiddle(n) || ts.isTemplateTail(n) ? n.text : null;
-    if (t !== null && (BINARY.test(t) || COMMAND.test(t)) && path !== LAUNCHER && !inType(n)) {
+    if (t !== null && (BINARY.test(t) || COMMAND.test(t) || SHELL.test(t)) && path !== LAUNCHER && !inType(n)) {
       const at = lineOf(n);
       const line = lines[at - 1]!.trim();
       const pin = PINS.find(([f, l]) => f === path && l === line);
@@ -125,6 +132,8 @@ export function launchProblems(path: string, text: string): string[] {
       else if (!pin) out.push(`${path}:${at}: names the claude binary (${n.getText(sf).slice(0, 60)}) outside ${LAUNCHER}: start every session with launchClaude; a lookup, an auth call or data is pinned in PINS with why (\`${line.slice(0, 100)}\`)`);
     }
     // The runner's binary reaches nothing but launchClaude (and the auth-status helpers, which start no session).
+    // Destructured from `this`, or read as `this['bin']`, it is refused outright (R1185ai D1: M12, M13).
+    if (path !== LAUNCHER && ((ts.isVariableDeclaration(n) && n.initializer?.kind === ts.SyntaxKind.ThisKeyword && ts.isObjectBindingPattern(n.name) && n.name.elements.some((e: Node) => (e.propertyName ?? e.name).getText(sf) === 'bin')) || (ts.isElementAccessExpression(n) && n.expression.kind === ts.SyntaxKind.ThisKeyword && ts.isStringLiteralLike(n.argumentExpression) && n.argumentExpression.text === 'bin'))) out.push(`${path}:${lineOf(n)}: the runner's binary (\`${n.getText(sf).replace(/\s+/g, ' ').slice(0, 100)}\`) read another way than this.bin: read it as this.bin, into launchClaude`);
     if (ts.isPropertyAccessExpression(n) && n.expression.kind === ts.SyntaxKind.ThisKeyword && n.name.text === 'bin' && path !== LAUNCHER) {
       const p = n.parent;
       let call = p.parent;
@@ -160,6 +169,8 @@ test('#958: every way of naming claude outside the launch function is refused (f
     'absolute-path',
     'agent-sdk',
     'alias-assign',
+    'array-join-line',
+    'concat-args',
     'const-bin',
     'data-literal',
     'default-import',
@@ -187,11 +198,13 @@ test('#958: every way of naming claude outside the launch function is refused (f
     'namespace-import',
     'object-file',
     'os-wrapper',
+    'npx-bare',
     'param-default',
     'pinned-line-plus-launch',
     'pkg-dir',
     'pkg-parts',
     'promisify-exec',
+    'ps1-shim',
     'reflect-apply',
     'renamed-import',
     'require-destructured',
@@ -205,11 +218,14 @@ test('#958: every way of naming claude outside the launch function is refused (f
     'sh-pipe',
     'sh-quoted-name',
     'sh-template-tail',
+    'sh-timeout-args',
     'sh-xargs',
     'signin-session',
     'src-helper',
     'sudo-wrapper',
     'template-args',
+    'this-bin-destructured',
+    'this-bin-element',
     'template-path',
     'ternary',
     'wrapper-cjs',
