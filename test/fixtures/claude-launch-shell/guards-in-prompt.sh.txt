@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+claude -p "Explain what --settings '{}' --setting-sources '' --strict-mcp-config do"

@@ -1,2 +1,2 @@
 #!/usr/bin/env bash
-claude -p hi --settings '{}' --setting-sources '' --strict-mcp-config
+sudo -u agent -- /usr/bin/env -i HOME=/h claude -p hi --model haiku --settings '{}' --setting-sources '' --strict-mcp-config 2>&1

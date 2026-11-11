@@ -1,0 +1,2 @@
+import { spawnSync } from 'node:child_process';
+spawnSync('npx', ['@anthropic-ai/claude-code', '-p', 'hi']);

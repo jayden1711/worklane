@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+ARGS=(-p hi --settings '{}' --setting-sources '' --strict-mcp-config)
+ARGS+=(--setting-sources project)
+claude "${ARGS[@]}"

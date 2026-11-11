@@ -1,0 +1,1 @@
+spawn('claude', ['-p', 'hi', '--settings', '{}', '--setting-sources', '', '--strict-mcp-config']);

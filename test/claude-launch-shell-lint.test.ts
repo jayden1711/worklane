@@ -1,102 +1,121 @@
 // lint-test
 // #1262 (the owner's decision, 2026-11-10): the one-launch rule (#958, test/claude-launch-lint.test.ts) reaches the
-// repo's scripts. Every `claude` a shell script, a workflow's `run:` step or a script the repo runs starts must end
-// with the launch's guards (`--settings <json>`, `--setting-sources ''`, `--strict-mcp-config`: Claude Code takes the
-// last of each), or be a pinned exception (file and argv: `--version`, `auth status`, `auth login`), which start no
-// session. Else a setup or CI script reopens #958's route: a planted hook or CLAUDE.md, loaded as root or the agent.
+// repo's scripts. Every `claude` a script the repo runs starts must END with the launch's guards
+// (`--settings <json> --setting-sources '' --strict-mcp-config`: Claude Code takes the last of each, so nothing after
+// them may name either, nor `--mcp-config`), or be a pinned exception (file and argv), which starts no session.
+// Else a setup, CI or spike script reopens #958's route: a planted hook or CLAUDE.md, loaded as root or the agent.
 //
-// What it reads, as text (a lint can't run a shell): each line of a shell file (`*.sh`, `*.bash`, a `#!/…sh` script)
-// and each line of a workflow file, comments and their tails dropped, continued lines joined. A command is found at
-// the start of a line or after `;`, `&&`, `||`, `|`, `(`, `{`, `$(`, a backtick, `then`, `do`, `else`, `!`, past any
-// `VAR=value` and the wrappers `command`, `exec`, `env` (its options and assignments), `sudo` (its options),
-// `timeout <n>`, `nice`, `nohup`, `time`. It is claude when it is `claude`, ends in `/claude`, or is a variable this
-// file sets to one of those (`C=claude`, `C=$(command -v claude)`). Its arguments are the rest of the command,
-// with an array it expands ("${ARGS[@]}") read from that array's assignment in this file. A `sh -c`/`bash -c`
-// string, a heredoc fed to a shell, and `$(...)` are read as lines of their own.
+// It fails closed (R1264a/b): it doesn't list the launchers claude can sit behind. In each command (a line split at
+// `;`, `&&`, `||`, `|`, `(`, `)`, `{`, `}`, `$(`, a backtick, quote-aware), ANY unquoted word that is `claude`,
+// `…/claude`, `@anthropic-ai/claude-code[@…]` or `…/claude-code/cli.js`, or a variable this file sets to one
+// (`C=claude`, `C="${X:-claude}"`, `C=$(command -v claude)`), in any position (after `sudo`, `/usr/bin/env -i`,
+// `timeout -k`, `xargs`, `find -exec`, `npx`, `node`, a helper of the repo's own), is a claude call, and so is a quoted
+// literal one as a command's first word. Only a command whose first word is a known non-launcher (`command -v`,
+// `which`, `install`, `ln`, `echo`, a `for` list, …) names claude without starting it. A string after `-c` (`bash -c`,
+// `bash -lc`, `su -c`) or `eval` is read as commands of its own, recursively.
+// A call passes only when its argument WORDS (a quoted prompt is one word: guards inside it don't count; an array it
+// expands is read from this file's `NAME=(…)` and `NAME+=(…)`; trailing redirections dropped) end with exactly the
+// guards, in any order among themselves, or when it is a pinned exception.
 //
-// What it can't see (named limits): a command built at run time (`eval`, a name from parts, `"$@"` handed claude by
-// a caller), a function or alias that wraps claude, a variable set in another file or the environment, a script
-// fetched at run time, and languages other than shell and JavaScript.
+// What it reads: every tracked file whose shebang names a shell, `*.sh`, `*.bash`, `*.zsh`, `*.ksh`, `*.fish`,
+// `.githooks/*`; every workflow's and composite action's `run:` steps (parsed as YAML) and any `uses:` of a claude
+// action; Makefile recipes; package.json scripts; Dockerfile RUN lines; and, as text, JavaScript and TypeScript under
+// scripts/ (jsLaunchProblems).
 //
-// JavaScript the repo runs (scripts/**/*.{mjs,cjs,js}) is read as text too (jsLaunchProblems): the claude binary as
-// a literal (`'claude'`, `'/…/claude'`) followed by a literal argv (`[...]`) must carry the guards, or start with an
-// exempt argv. A binary held in a variable, or an argv built another way, isn't seen here: src/'s launches are held by
-// an AST lint to the one launch function (#958), and that is the place for any new one.
+// What it can't see (named limits): an alias or function defined elsewhere that hides the word claude, a variable set
+// in another file or the environment (`$CLAUDE_BIN` from the caller), a command built at run time (a name from parts,
+// `eval "$x"` of a variable, `"$@"` handed claude by a caller), a script fetched at run time, and languages other than
+// shell and JavaScript. src/'s own launches are held by the AST lint, test/claude-launch-lint.test.ts.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { readdirSync, readFileSync } from 'node:fs';
-import { join, sep } from 'node:path';
+import { createRequire } from 'node:module';
+import { join } from 'node:path';
+import { parse } from 'yaml';
 import { repoRoot } from './helpers.js';
 
-const WRAPPERS = new Set(['command', 'exec', 'nohup', 'time', 'nice']);
-// check-table: never-shrink
+/** The claude binary as a word: its name, a path to it, its package (with a version), or its cli.js. */
+const BINARY = /^(?:\S*\/)?claude$|^@anthropic-ai\/claude-code(?:@\S*)?$|\/claude-code\/cli\.js$/;
+/** Commands that name claude without starting it: their words are data. */
+// check-table: never-grow
+const NON_LAUNCHERS = new Set([
+  'command',
+  'which',
+  'type',
+  'hash',
+  'install',
+  'ln',
+  'cp',
+  'mv',
+  'rm',
+  'test',
+  '[',
+  '[[',
+  'chmod',
+  'chown',
+  'readlink',
+  'realpath',
+  'ls',
+  'stat',
+  'file',
+  'sha256sum',
+  'echo',
+  'printf',
+  'for',
+  'case',
+  'grep',
+  'local',
+  'export',
+  'declare',
+  'readonly',
+]);
+/** An argv that starts no session: a call whose argument words begin so is exempt anywhere. */
+const EXEMPT_ARGV = /^(?:--version|auth status|auth login)(?:\s|$)/;
+/** Pinned exceptions: file, then text the command holds, each with why. */
+// check-table: never-grow
+export const SHELL_EXCEPTIONS: [string, string, string][] = [
+  [
+    '.github/workflows/ci-slow.yml',
+    '-p --output-format stream-json --verbose --max-turns 1 --setting-sources project --strict-mcp-config',
+    "a CI probe of Claude Code's own MCP policy (managed allowedMcpServers): the real CLI in a throwaway HOME with a stand-in key, its project source on purpose; no session gets past its init event",
+  ],
+  ['.github/workflows/ci-slow.yml', 'scripts/setup/credentials.sh probe claude', "credentials.sh's `probe claude` names the login to check: the script, not claude, runs"],
+];
+
+type Word = { text: string; quoted: boolean };
+/** Words that open a command without being it. */
+// check-table: never-grow
 const KEYWORDS = new Set([
-  'then',
-  'do',
-  'else',
   'if',
+  'then',
   'elif',
+  'else',
   'while',
   'until',
+  'do',
   '!',
-  '{',
-  '(',
+  'time',
 ]);
 
 /**
- * A line split into its commands: at `;`, `&&`, `||`, `|`, `(`, `{` outside quotes, and at `$(` or a backtick outside
- * single quotes (a substitution runs inside double quotes too). Quoted text stays in its command, as a word.
+ * Whether an argv (its words, unquoted) ends with exactly the launch's guards: `--settings <x>`, `--setting-sources
+ * ''` and `--strict-mcp-config`, in any order among themselves, each the only one of its flag in the argv, and no
+ * `--mcp-config` anywhere: so no later flag, and no earlier one a reader might take for the one that counts.
  */
-function commands(t: string): string[] {
-  const out: string[] = [];
-  let cur = '';
-  let q: string | null = null;
-  for (let k = 0; k < t.length; k++) {
-    const c = t[k]!;
-    const two = t.slice(k, k + 2);
-    if (q === "'") {
-      cur += c;
-      if (c === "'") q = null;
-      continue;
-    }
-    if (two === '$(' || c === '`') {
-      out.push(cur);
-      cur = '';
-      if (two === '$(') k++;
-      // A substitution is a context of its own: its quotes don't close the ones around it.
-      q = null;
-      continue;
-    }
-    if (q === '"') {
-      cur += c;
-      if (c === '"' && t[k - 1] !== '\\') q = null;
-      continue;
-    }
-    if (c === "'" || c === '"') {
-      q = c;
-      cur += c;
-    } else if (two === '&&' || two === '||') {
-      out.push(cur);
-      cur = '';
-      k++;
-    } else if (c === ';' || c === '|' || c === '(' || c === ')') {
-      out.push(cur);
-      cur = '';
-    } else cur += c;
-  }
-  out.push(cur);
-  return out.map((x) => x.trim()).filter(Boolean);
+export function guardsLast(argv: string[]): boolean {
+  const tail = argv.slice(-5);
+  const si = tail.indexOf('--settings');
+  const ss = tail.indexOf('--setting-sources');
+  const sm = tail.indexOf('--strict-mcp-config');
+  const once = (f: string) => argv.filter((a) => a === f || a.startsWith(`${f}=`)).length === 1;
+  return (
+    tail.length === 5 && si >= 0 && si < 4 && ss >= 0 && ss < 4 && tail[ss + 1] === '' && sm >= 0 && new Set([si, si + 1, ss, ss + 1, sm]).size === 5 &&
+    once('--settings') && once('--setting-sources') && once('--strict-mcp-config') && !argv.some((a) => a === '--mcp-config' || a.startsWith('--mcp-config='))
+  );
 }
-/** Pinned exceptions: file, then the argv (its first words) a call passes. None starts a session. */
-// check-table: never-grow
-export const SHELL_EXCEPTIONS: [string, string][] = [
-  // A CI probe of Claude Code's own MCP policy (managed allowedMcpServers): the real CLI in a throwaway HOME with a
-  // stand-in key, its project source on purpose (the policy is what it reads); no session gets past its init event.
-  ['.github/workflows/ci-slow.yml', '-p --output-format stream-json --verbose --max-turns 1 --setting-sources project --strict-mcp-config'],
-];
-const EXEMPT_ARGV = /^(?:--version|auth status|auth login)(?:\s|$)/;
 
-/** Joins continued lines, drops comments (a `#` at a word's start outside quotes) and blank lines. */
+/** Joins continued lines and drops comments (a `#` at a word's start outside quotes) and blank lines. */
 function logicalLines(text: string): { line: number; text: string }[] {
   const out: { line: number; text: string }[] = [];
   const raw = text.split('\n');
@@ -122,141 +141,364 @@ function logicalLines(text: string): { line: number; text: string }[] {
   return out;
 }
 
-const unquote = (w: string) => w.replace(/^["']|["']$/g, '');
+/** Where the `)` closing a `$(` that opens at `from` (just past its `(`) is: quotes and nested parens skipped. */
+function closeParen(t: string, from: number): number {
+  let depth = 1;
+  let q: string | null = null;
+  for (let k = from; k < t.length; k++) {
+    const c = t[k]!;
+    if (q) {
+      if (c === q && t[k - 1] !== '\\') q = null;
+    } else if (c === "'" || c === '"') q = c;
+    else if (c === '(') depth++;
+    else if (c === ')' && --depth === 0) return k;
+  }
+  return t.length;
+}
 
-/** Each claude this file's text starts without the guards, as `<path>:<line>: <why>`. */
+/**
+ * A line's commands: split at `;`, `&&`, `||`, `|`, `(`, `)`, `{`, `}` outside quotes. A substitution (`$(…)`, a
+ * backtick pair), outside single quotes, is a command list of its own, read recursively; in its place the outer
+ * command holds a placeholder word, so the quotes around it stay whole.
+ */
+function commands(t: string): string[] {
+  const out: string[] = [];
+  let cur = '';
+  let q: string | null = null;
+  let braces = 0;
+  for (let k = 0; k < t.length; k++) {
+    const c = t[k]!;
+    const two = t.slice(k, k + 2);
+    if (q === "'") {
+      cur += c;
+      if (c === "'") q = null;
+      continue;
+    }
+    if (two === '$(') {
+      const end = closeParen(t, k + 2);
+      out.push(...commands(t.slice(k + 2, end)));
+      cur += 'X';
+      k = end;
+      continue;
+    }
+    if (c === '`') {
+      let end = k + 1;
+      while (end < t.length && !(t[end] === '`' && t[end - 1] !== '\\')) end++;
+      out.push(...commands(t.slice(k + 1, end)));
+      cur += 'X';
+      k = end;
+      continue;
+    }
+    if (two === '${') {
+      braces++;
+      cur += two;
+      k++;
+      continue;
+    }
+    if (braces && c === '}') {
+      braces--;
+      cur += c;
+      continue;
+    }
+    if (q === '"') {
+      cur += c;
+      if (c === '"' && t[k - 1] !== '\\') q = null;
+      continue;
+    }
+    if (c === "'" || c === '"') {
+      q = c;
+      cur += c;
+    } else if (two === '&&' || two === '||') {
+      out.push(cur);
+      cur = '';
+      k++;
+    } else if (!braces && ';|(){}'.includes(c)) {
+      out.push(cur);
+      cur = '';
+    } else cur += c;
+  }
+  out.push(cur);
+  return out.map((x) => x.trim()).filter(Boolean);
+}
+
+/** A command's words, quotes kept together; `${x:+…}` stays one word. `quoted`: the whole word is one quoted string. */
+function wordsOf(cmd: string): Word[] {
+  const raw = cmd.match(/(?:\$\{[^}]*\}|'[^']*'|"(?:[^"\\]|\\.)*"|[^\s'"$]|\$(?!\{))+/g) ?? [];
+  return raw.map((w) => ({ text: w, quoted: /^(['"]).*\1$/s.test(w) }));
+}
+const unquote = (w: string) => w.replace(/^(['"])(.*)\1$/s, '$2');
+
+/** Each claude call a shell text starts without the guards at its end, as `<path>:<line>: <why>`. */
 export function shellLaunchProblems(path: string, text: string): string[] {
   const lines = logicalLines(text);
-  // Variables set to claude, and arrays' assigned text.
+  // Variables this file sets to claude; arrays' words (with `+=` appends).
   const vars = new Set<string>();
-  const arrays = new Map<string, string>();
+  const arrays = new Map<string, string[]>();
   for (const { text: t } of lines) {
-    const v = /^(?:export\s+|local\s+|readonly\s+)?([A-Za-z_]\w*)=(.*)$/.exec(t);
-    if (!v) continue;
-    const val = v[2]!.trim();
-    if (/^\(/.test(val)) arrays.set(v[1]!, val);
-    else if (/^["']?(?:[^"'\s]*\/)?claude["']?$/.test(val) || /^["']?\$\((?:command -v|which|type -P) claude\)["']?$/.test(val)) vars.add(v[1]!);
+    for (const part of t.split(/;\s*/)) {
+      const v = /^(?:export\s+|local\s+|readonly\s+|declare\s+(?:-\w+\s+)?)?([A-Za-z_]\w*)(\+?)=(.*)$/.exec(part.trim());
+      if (!v) continue;
+      const val = v[3]!.trim();
+      if (val.startsWith('(')) {
+        const inner = val.replace(/^\(|\)\s*$/g, '');
+        arrays.set(v[1]!, [...(v[2] ? (arrays.get(v[1]!) ?? []) : []), ...wordsOf(inner).map((w) => w.text)]);
+      } else {
+        const u = unquote(val);
+        if (BINARY.test(u) || /^\$\{\w+:-(?:\S*\/)?claude\}$/.test(u) || /^\$\((?:command -v|which|type -P) claude\)$/.test(u)) vars.add(v[1]!);
+      }
+    }
   }
-  const isClaude = (w: string) => {
-    const u = unquote(w);
-    if (/^(?:[^\s]*\/)?claude$/.test(u)) return true;
-    const m = /^\$\{?([A-Za-z_]\w*)\}?$/.exec(u);
-    return !!m && vars.has(m[1]!);
+  const isClaude = (w: Word, first: boolean) => {
+    const m = /^\$\{?([A-Za-z_]\w*)\}?$/.exec(unquote(w.text));
+    if (m && vars.has(m[1]!)) return true;
+    if (w.quoted) return first && BINARY.test(unquote(w.text));
+    return BINARY.test(w.text);
   };
   const out: string[] = [];
-  const judge = (path0: string, line: number, cmd: string) => {
-    // Words, quotes kept together (enough to find the command and read its arguments).
-    // A word is unquoted text and quoted runs together; `${x:+...}` and `${x:-...}` stay one word.
-    const words = cmd.match(/(?:\$\{[^}]*\}|'[^']*'|"(?:[^"\\]|\\.)*"|[^\s'"$]|\$(?!\{))+/g) ?? [];
+  const judge = (line: number, cmd: string) => {
+    const words = wordsOf(cmd);
+    // Strings run as commands: after `-c` (`bash -c`, `bash -lc`, `su -c`) or `eval`, recursively.
+    words.forEach((w, i) => {
+      const prev = words[i - 1]?.text;
+      if (w.quoted && prev && (/^-[a-z]*c$/.test(prev) || prev === 'eval')) scan(line, unquote(w.text));
+    });
     let k = 0;
-    const skipOpts = () => {
-      while (k < words.length && words[k]!.startsWith('-')) {
-        const o = words[k++]!;
-        if (/^-[ugCDhpTr]$|^--(?:user|group|chdir|prompt)$/.test(o)) k++;
+    while (k < words.length && (/^[A-Za-z_]\w*\+?=/.test(words[k]!.text) || KEYWORDS.has(words[k]!.text))) k++;
+    if (k >= words.length) return;
+    // A known non-launcher anywhere before a claude word (`sudo rm -f …/claude`, `[ "$c" != …/claude ]`) makes it
+    // data; `command` is one only as `command -v`/`-V`.
+    const dataFrom = (i: number) => words.slice(k, i).some((w, j, a) => !w.quoted && (NON_LAUNCHERS.has(w.text) ? w.text !== 'command' || /^-[vV]$/.test(a[j + 1]?.text ?? '') : false));
+    for (let i = k; i < words.length; i++) {
+      if (!isClaude(words[i]!, i === k) || dataFrom(i)) continue;
+      // Its argument words: arrays expanded, trailing redirections and `&` dropped.
+      const args: string[] = [];
+      for (const w of words.slice(i + 1)) {
+        const a = /^"?\$\{([A-Za-z_]\w*)\[@\]\}"?$/.exec(w.text);
+        if (a && arrays.has(a[1]!)) args.push(...arrays.get(a[1]!)!);
+        else args.push(w.text);
       }
-    };
-    for (;;) {
-      const w = words[k];
-      if (w === undefined) return;
-      if (/^[A-Za-z_]\w*=/.test(w) || KEYWORDS.has(w) || /^\$\{\w+:[+-]/.test(w)) k++;
-      else if (WRAPPERS.has(w)) {
-        k++;
-        if (w === 'nice') {
-          if (words[k] === '-n') k += 2;
-          skipOpts();
-        }
-      } else if (w === 'env') {
-        k++;
-        skipOpts();
-      } else if (w === 'sudo') {
-        k++;
-        skipOpts();
-        if (words[k] === '--') k++;
-      } else if (w === 'timeout') {
-        k++;
-        skipOpts();
-        k++;
-      } else break;
-    }
-    const c = words[k];
-    if (!c || !isClaude(c)) {
-      // `sh -c '<script>'`, `bash -c "<script>"`: the script is read as lines of its own.
-      if (c && /^(?:\S*\/)?(?:ba)?sh$/.test(unquote(c)) && words[k + 1] === '-c' && words[k + 2]) for (const l of logicalLines(unquote(words[k + 2]!))) scan(path0, line, l.text);
+      for (;;) {
+        if (args.length && /^(?:\d*[<>]+&?\S+|&|\\;|;|\+)$/.test(args.at(-1)!)) args.pop();
+        else if (args.length >= 2 && /^\d*[<>]{1,2}&?$/.test(args.at(-2)!)) args.splice(-2);
+        else break;
+      }
+      const plain = args.map(unquote);
+      const joined = plain.join(' ');
+      if (EXEMPT_ARGV.test(joined) || SHELL_EXCEPTIONS.some(([f, a]) => f === path && cmd.includes(a))) return;
+      const guarded = guardsLast(plain);
+      if (!guarded) out.push(`${path}:${line}: starts claude (\`${cmd.slice(0, 140)}\`) without the launch's guards at its end (--settings <json> --setting-sources '' --strict-mcp-config, nothing after them)`);
       return;
     }
-    let args = words.slice(k + 1).join(' ');
-    for (const [name, val] of arrays) args = args.replace(new RegExp(`"?\\$\\{${name}\\[@\\]\\}"?`, 'g'), val.replace(/^\(|\)$/g, ''));
-    if (EXEMPT_ARGV.test(args.replace(/["']/g, '')) || SHELL_EXCEPTIONS.some(([f, a]) => f === path0 && args.startsWith(a))) return;
-    const guarded = /--setting-sources(?:=|\s+)(?:''|"")/.test(args) && /--strict-mcp-config\b/.test(args) && /--settings\b/.test(args);
-    if (!guarded) out.push(`${path0}:${line}: starts claude (\`${cmd.slice(0, 120)}\`) without the launch's guards (--settings, --setting-sources '', --strict-mcp-config): add them, last`);
   };
-  function scan(path0: string, line: number, t: string) {
-    // A `case` label (`claude)`, `a|b)`) names no command.
-    const body = t.replace(/^[^()\s]+\)(?=\s|$)/, '');
-    for (const part of commands(body)) judge(path0, line, part);
+  function scan(line: number, t: string) {
+    for (const l of logicalLines(t)) for (const part of commands(l.text.replace(/^[^()\s]+\)(?=\s|$)/, ''))) judge(line, part);
   }
-  for (const { line, text: t } of lines) scan(path, line, t);
+  for (const { line, text: t } of lines) scan(line, t);
   return out;
 }
 
-/** Each literal claude call in a JavaScript file's text without the guards, as `<path>:<line>: <why>`. */
+/** A workflow's or composite action's `run:` steps as shell, and any `uses:` of a claude action. */
+export function workflowLaunchProblems(path: string, text: string): string[] {
+  const out: string[] = [];
+  const steps: Record<string, unknown>[] = [];
+  const walk = (x: unknown) => {
+    if (Array.isArray(x)) x.forEach(walk);
+    else if (x && typeof x === 'object') {
+      const o = x as Record<string, unknown>;
+      if ('run' in o || 'uses' in o) steps.push(o);
+      Object.values(o).forEach(walk);
+    }
+  };
+  walk(parse(text) as unknown);
+  for (const s of steps) {
+    const where = `${path} (step ${typeof s.name === 'string' ? JSON.stringify(s.name.slice(0, 60)) : '(unnamed)'})`;
+    if (typeof s.uses === 'string' && /claude/i.test(s.uses)) out.push(`${where}: uses ${s.uses}, which starts claude with the repo's own settings: not allowed`);
+    if (typeof s.run === 'string') out.push(...shellLaunchProblems(path, s.run).map((p) => p.replace(`${path}:`, `${where}:`)));
+  }
+  return out;
+}
+
+/** Makefile recipes, package.json scripts and Dockerfile RUN lines, as shell. */
+export function otherLaunchProblems(path: string, text: string): string[] {
+  if (/(^|\/)package\.json$/.test(path)) {
+    const scripts = (JSON.parse(text) as { scripts?: Record<string, string> }).scripts ?? {};
+    return Object.entries(scripts).flatMap(([k, v]) => shellLaunchProblems(`${path} (scripts.${k})`, v));
+  }
+  if (/(^|\/)Dockerfile[^/]*$/.test(path)) return shellLaunchProblems(path, text.split('\n').map((l) => (/^\s*RUN\s/.test(l) ? l.replace(/^\s*RUN\s+/, '') : '')).join('\n'));
+  if (/(^|\/)(?:GNU)?[Mm]akefile$|\.mk$/.test(path)) return shellLaunchProblems(path, text.split('\n').map((l) => (l.startsWith('\t') ? l.slice(1).replace(/^[@-]+/, '') : '')).join('\n'));
+  return [];
+}
+
+/** JavaScript lines that name the claude binary without starting it, pinned by file and line text, each with why. */
+// check-table: never-grow
+export const JS_NAMES: [string, string, string][] = [
+  ['scripts/bench/auth.ts', "export function requireSubscription(env: NodeJS.ProcessEnv, bin = 'claude'", "the binary's default; its only call is `bin auth status --json` (exempt), in this function"],
+  ['scripts/bench/auth.ts', "export function requireClaudePin(env: NodeJS.ProcessEnv, bin = 'claude'", "the binary's default; its only call is `bin --version` (exempt), in this function"],
+  ['scripts/bench/cli.ts', "claude: deps.claude ?? 'claude',", "the bench's claude binary, handed to its CliRunner (src/claude-launch.ts's launch) and to auth.ts's two exempt probes"],
+  ['scripts/dev/control-dashboard.mjs', "key: 'claude'", 'an event field (a login key), not a binary'],
+  ['scripts/dev/control-dashboard.mjs', "source: 'claude'", "an event field (a usage limit's source), not a binary"],
+];
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type TsNode = any;
+const ts = createRequire(join(repoRoot, 'package.json'))('typescript') as TsNode;
+
+/**
+ * JavaScript and TypeScript the repo runs (scripts/), read with typescript's parser (comments aren't code): the claude
+ * binary as a string literal is a call. With a literal argv array right after it (`spawn('claude', [...])`,
+ * `asUser(u, 'claude', [...])`), or the elements after it in its array (`'npx', ['@anthropic-ai/claude-code', ...]`),
+ * that argv must end with the guards (guardsLast), or start exempt. A string a shell runs (`exec`/`execSync`'s
+ * command, or the one after `'-c'`; a template's text with its holes as words) is read as shell. Any other literal
+ * claude is refused unless its line is pinned (JS_NAMES): what it starts can't be read here.
+ */
 export function jsLaunchProblems(path: string, text: string): string[] {
   const out: string[] = [];
-  const re = /(['"`])((?:[^'"`\s]*\/)?claude)\1\s*,\s*\[([^\]]*)\]/g;
-  for (const m of text.matchAll(re)) {
-    const argv = [...m[3]!.matchAll(/(['"`])((?:(?!\1).)*)\1/g)].map((x) => x[2]!);
-    const joined = argv.join(' ');
-    if (EXEMPT_ARGV.test(joined) || SHELL_EXCEPTIONS.some(([f, a]) => f === path && joined.startsWith(a))) continue;
-    const i = argv.indexOf('--setting-sources');
-    if (i >= 0 && argv[i + 1] === '' && argv.includes('--strict-mcp-config') && argv.includes('--settings')) continue;
-    out.push(`${path}:${text.slice(0, m.index).split('\n').length}: starts claude (${m[0].slice(0, 120)}) without the launch's guards: use the engine's launch, or add them, last`);
-  }
+  const sf = ts.createSourceFile(path, text, ts.ScriptTarget.Latest, true);
+  const lineOf = (n: TsNode) => sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1;
+  const lines = text.split('\n');
+  const textOf = (n: TsNode): string | null =>
+    ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n) ? n.text : ts.isTemplateExpression(n) ? [n.head.text, ...n.templateSpans.map((x: TsNode) => `X${x.literal.text}`)].join('') : null;
+  const literalArgv = (els: TsNode[]): string[] | null => (els.every((e: TsNode) => textOf(e) !== null) ? els.map((e: TsNode) => textOf(e)!) : null);
+  const visit = (n: TsNode) => {
+    const s = textOf(n);
+    if (s !== null) {
+      const at = lineOf(n);
+      const pinned = JS_NAMES.some(([f, l]) => f === path && lines[at - 1]!.includes(l));
+      const p = n.parent;
+      if (BINARY.test(s) && !pinned) {
+        let argv: string[] | null = null;
+        if (ts.isCallExpression(p)) {
+          const next = p.arguments[p.arguments.indexOf(n) + 1];
+          argv = next && ts.isArrayLiteralExpression(next) ? literalArgv(next.elements) : null;
+        } else if (ts.isArrayLiteralExpression(p)) argv = literalArgv(p.elements.slice(p.elements.indexOf(n) + 1));
+        if (argv === null) out.push(`${path}:${at}: names the claude binary (${n.getText(sf)}) where its argv can't be read: start it with a literal argv ending with the guards, or pin the line in JS_NAMES`);
+        else if (!EXEMPT_ARGV.test(argv.join(' ')) && !guardsLast(argv)) out.push(`${path}:${at}: starts claude (${p.getText(sf).replace(/\s+/g, ' ').slice(0, 140)}) without the launch's guards at its end`);
+      } else if (!BINARY.test(s)) {
+        // A string a shell runs: exec/execSync's command, or the string after '-c'.
+        const callee = ts.isCallExpression(p) ? p.expression.getText(sf) : '';
+        const afterC = ts.isArrayLiteralExpression(p) && textOf(p.elements[p.elements.indexOf(n) - 1] ?? n) === '-c' && p.elements.indexOf(n) > 0;
+        if ((/(?:^|\.)exec(?:Sync)?$/.test(callee) && p.arguments[0] === n) || afterC) out.push(...shellLaunchProblems(path, s).map((x) => x.replace(/^[^:]+:\d+:/, `${path}:${at}:`)));
+      }
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(sf);
   return out;
 }
 
-const jsFiles = (): string[] =>
-  readdirSync(join(repoRoot, 'scripts'), { recursive: true })
-    .map((x) => `scripts/${String(x).split(sep).join('/')}`)
-    .filter((f) => /\.(?:mjs|cjs|js)$/.test(f));
-
-const files = (): string[] => {
-  const all = readdirSync(repoRoot, { recursive: true }).map((x) => String(x).split(sep).join('/'));
-  return all.filter((f) => {
-    if (/(^|\/)(node_modules|dist|\.git|test\/fixtures)(\/|$)|^\.claude\//.test(f)) return false;
-    if (/\.(?:sh|bash)$/.test(f) || /^\.github\/workflows\/.*\.ya?ml$/.test(f)) return true;
-    if (!f.startsWith('scripts/') || /\.\w+$/.test(f)) return false;
-    try {
-      return /^#!.*\b(?:ba)?sh\b/.test(readFileSync(join(repoRoot, f), 'utf8').slice(0, 100));
-    } catch {
-      return false;
-    }
-  });
+const tracked = (): string[] => execFileSync('git', ['ls-files', '-z'], { cwd: repoRoot, encoding: 'utf8' }).split('\0').filter(Boolean);
+const shebang = (f: string) => {
+  try {
+    return readFileSync(join(repoRoot, f), 'utf8').slice(0, 120);
+  } catch {
+    return '';
+  }
 };
 
+/** Every place the lint reads, by kind. */
+export function lintedFiles(files: string[], head: (f: string) => string = shebang): { shell: string[]; workflow: string[]; other: string[]; js: string[] } {
+  const live = files.filter((f) => !/(^|\/)(node_modules|dist)\//.test(f) && !f.startsWith('test/fixtures/'));
+  return {
+    shell: live.filter((f) => /\.(?:sh|bash|zsh|ksh|fish)$/.test(f) || f.startsWith('.githooks/') || (!/\.\w+$/.test(f) && /^#!.*\b(?:ba|z|k|da|fi)?sh\b/.test(head(f)))),
+    workflow: live.filter((f) => /^\.github\/workflows\/[^/]+\.ya?ml$/.test(f) || /^\.github\/actions\/.+\/action\.ya?ml$/.test(f)),
+    other: live.filter((f) => /(^|\/)package\.json$|(^|\/)Dockerfile[^/]*$|(^|\/)(?:GNU)?[Mm]akefile$|\.mk$/.test(f)),
+    js: live.filter((f) => /^scripts\/.+\.(?:mjs|cjs|js|ts)$/.test(f) && !f.endsWith('.d.ts')),
+  };
+}
+
 test("#1262: every claude a script starts ends with the launch's guards, or is a pinned exception", () => {
-  const problems = files().flatMap((f) => shellLaunchProblems(f, readFileSync(join(repoRoot, f), 'utf8')));
+  const f = lintedFiles(tracked());
+  const read = (p: string) => readFileSync(join(repoRoot, p), 'utf8');
+  const problems = [
+    ...f.shell.flatMap((p) => shellLaunchProblems(p, read(p))),
+    ...f.workflow.flatMap((p) => workflowLaunchProblems(p, read(p))),
+    ...f.other.flatMap((p) => otherLaunchProblems(p, read(p))),
+    ...f.js.flatMap((p) => jsLaunchProblems(p, read(p))),
+  ];
   assert.deepEqual(problems, []);
-  assert.deepEqual(jsFiles().flatMap((f) => jsLaunchProblems(f, readFileSync(join(repoRoot, f), 'utf8'))), [], 'the scripts in JavaScript too');
 });
 
-test('#1262: every way a script can start claude without the guards is refused (fixtures), and the controls pass', () => {
+test('#1262 (R1264a/b): the places a script can live are all read', () => {
+  const heads: Record<string, string> = { 'tools/run': '#!/bin/zsh\n', 'bin/x': '#!/usr/bin/env bash\n' };
+  const f = lintedFiles(['a.zsh', 'b.ksh', 'c.fish', 'tools/run', 'bin/x', '.githooks/pre-commit', '.claude/hooks/h.sh', '.github/workflows/w.yml', '.github/actions/a/action.yaml', 'Makefile', 'sub/package.json', 'Dockerfile.ci', 'scripts/bench/x.ts', 'scripts/y.mjs', 'docs/a.md', 'test/fixtures/x.sh', 'node_modules/p/x.sh'], (p) => heads[p] ?? '');
+  assert.deepEqual(f, {
+    shell: ['a.zsh', 'b.ksh', 'c.fish', 'tools/run', 'bin/x', '.githooks/pre-commit', '.claude/hooks/h.sh'],
+    workflow: ['.github/workflows/w.yml', '.github/actions/a/action.yaml'],
+    other: ['Makefile', 'sub/package.json', 'Dockerfile.ci'],
+    js: ['scripts/bench/x.ts', 'scripts/y.mjs'],
+  });
+});
+
+test('#1262: every way a script can start claude without the guards at its end is refused (fixtures), and the controls pass', () => {
   const dir = join(repoRoot, 'test', 'fixtures', 'claude-launch-shell');
-  const names = readdirSync(dir).filter((f) => f.endsWith('.sh.txt')).map((f) => f.replace(/\.sh\.txt$/, '')).sort();
+  const all = readdirSync(dir).sort();
+  const nameOf = (f: string) => f.replace(/\.(?:sh|yml|mjs|mk|json|docker)\.txt$/, '');
   // Every fixture by name: one deleted fails here.
   // check-table: never-shrink
-  const MUST_FAIL = ['after-and', 'array-unguarded', 'backticks', 'command-builtin', 'command-v-variable', 'continued-line', 'direct', 'dollar-paren', 'env-wrapper', 'exec', 'heredoc', 'in-a-case-arm', 'one-guard-only', 'optional-env', 'path', 'sh-c', 'sudo-wrapper', 'timeout-wrapper', 'variable'];
+  const MUST_FAIL = [
+    'after-and',
+    'array-append',
+    'array-unguarded',
+    'backticks',
+    'bash-lc',
+    'command-builtin',
+    'command-v-variable',
+    'continued-line',
+    'default-variable',
+    'direct',
+    'dockerfile-run',
+    'dollar-paren',
+    'env-wrapper',
+    'eval-string',
+    'exec',
+    'find-exec',
+    'guards-in-prompt',
+    'guards-then-later-settings',
+    'guards-then-later-sources',
+    'helper',
+    'heredoc',
+    'in-a-case-arm',
+    'js-bare-binary',
+    'js-exec-string',
+    'js-later-sources',
+    'js-npx',
+    'makefile-recipe',
+    'node-cli-js',
+    'npx',
+    'one-guard-only',
+    'optional-env',
+    'package-json-script',
+    'path',
+    'setsid-stdbuf',
+    'sh-c',
+    'su-c',
+    'sudo-iu',
+    'sudo-usr-bin-env',
+    'sudo-wrapper',
+    'timeout-k',
+    'timeout-wrapper',
+    'variable',
+    'workflow-composite-uses',
+    'workflow-one-line-run',
+    'xargs',
+  ];
   // check-table: never-shrink
-  const CONTROLS = ['ok-auth-status', 'ok-case-label', 'ok-comment', 'ok-continued-guards', 'ok-grep-regex', 'ok-guarded', 'ok-guarded-array', 'ok-other-tool', 'ok-prose', 'ok-version'];
-  assert.deepEqual(names, [...MUST_FAIL, ...CONTROLS].sort(), 'every fixture, by name');
-  // JavaScript: a literal call without the guards is refused; with them, or an exempt argv, it passes.
-  const g = "'--settings', '{}', '--setting-sources', '', '--strict-mcp-config'";
-  assert.equal(jsLaunchProblems('scripts/x.mjs', "spawn('claude', ['-p', 'hi']);").length, 1, 'a literal call');
-  assert.equal(jsLaunchProblems('scripts/x.mjs', "spawnSync('/usr/local/bin/claude', ['-p', 'hi'], {});").length, 1, 'by its path');
-  assert.equal(jsLaunchProblems('scripts/x.mjs', "asUser(user, 'claude', ['-p', 'hi'], env);").length, 1, 'through a wrapper');
-  assert.deepEqual(jsLaunchProblems('scripts/x.mjs', `spawn('claude', ['-p', 'hi', ${g}]);`), [], 'guarded');
-  assert.deepEqual(jsLaunchProblems('scripts/x.mjs', "asUser(user, 'claude', ['auth', 'status', '--json'], env);"), [], 'auth status');
-  for (const n of names) {
-    const problems = shellLaunchProblems(`scripts/${n}.sh`, readFileSync(join(dir, `${n}.sh.txt`), 'utf8'));
+  const CONTROLS = ['ok-auth-status', 'ok-case-label', 'ok-comment', 'ok-continued-guards', 'ok-for-list', 'ok-grep-regex', 'ok-guarded', 'ok-guarded-array', 'ok-install-path', 'ok-js-auth-status', 'ok-js-guarded', 'ok-other-tool', 'ok-prose', 'ok-version', 'ok-workflow-block-guarded'];
+  assert.deepEqual(all.map(nameOf).sort(), [...MUST_FAIL, ...CONTROLS].sort(), 'every fixture, by name');
+  for (const f of all) {
+    const n = nameOf(f);
+    const text = readFileSync(join(dir, f), 'utf8');
+    const problems = f.endsWith('.yml.txt')
+      ? workflowLaunchProblems(`.github/workflows/${n}.yml`, text)
+      : f.endsWith('.mjs.txt')
+        ? jsLaunchProblems(`scripts/${n}.mjs`, text)
+        : f.endsWith('.mk.txt')
+          ? otherLaunchProblems('Makefile', text)
+          : f.endsWith('.json.txt')
+            ? otherLaunchProblems('package.json', text)
+            : f.endsWith('.docker.txt')
+              ? otherLaunchProblems('Dockerfile', text)
+              : shellLaunchProblems(`scripts/${n}.sh`, text);
     if (n.startsWith('ok-')) assert.deepEqual(problems, [], `${n}: a control passes`);
     else assert.ok(problems.length > 0, `${n}: refused`);
   }
