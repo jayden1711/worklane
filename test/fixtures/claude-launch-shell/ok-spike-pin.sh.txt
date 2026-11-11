@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# as scripts/spikes/worktree-commit.sh
+# as <pin 1>
 # The pinned line, once, in its own file.
 printf hi |
   (cd "$wt" && sudo -u "$agent" -- /usr/bin/env -i HOME="$home" PATH=/usr/local/bin:/usr/bin:/bin \

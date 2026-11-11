@@ -1,0 +1,10 @@
+{
+  "//": "Unguarded claude calls a script may make, each pinned by file and the exact text (trimmed) of the line that holds it, with why (test/claude-launch-shell-lint.test.ts reads this). A pin covers one line: a copy elsewhere is refused. Data here, not in the test, so no test names a spike (#673: a spike is run by hand only).",
+  "pins": [
+    [
+      "scripts/spikes/worktree-commit.sh",
+      "claude -p --max-budget-usd \"$SPIKE_CALL_BUDGET\" --settings \"$settings\" --model haiku --max-turns 3 --permission-mode dontAsk --allowedTools Bash --setting-sources project) | tail -6",
+      "a sandbox probe whose project-settings load is the point (the owner, 2026-11-11, \"spikes: b\")"
+    ]
+  ]
+}

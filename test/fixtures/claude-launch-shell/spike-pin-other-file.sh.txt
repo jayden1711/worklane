@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# as scripts/spikes/agent-messaging-copy.sh
+# as scripts/other.sh
 # The pinned line in another file: its pin is the spike's alone.
 printf hi |
   (cd "$wt" && sudo -u "$agent" -- /usr/bin/env -i HOME="$home" PATH=/usr/local/bin:/usr/bin:/bin \

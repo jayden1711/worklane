@@ -84,17 +84,11 @@ export const SHELL_EXCEPTIONS: [string, string, string][] = [
 ];
 
 /**
- * Unguarded calls pinned by file and the exact text of the physical line that holds them (trimmed), with why. A pin
- * covers one line: a copy of it elsewhere in the file, or in any other file, is refused.
+ * Unguarded calls pinned by file and the exact text of the physical line that holds them (trimmed), with why:
+ * scripts/ci/claude-launch-shell-pins.json (data, so no test names a spike: #673). A pin covers one line: a copy of it
+ * elsewhere in the file, or in any other file, is refused.
  */
-// check-table: never-grow
-export const SHELL_PINS: [string, string, string][] = [
-  [
-    'scripts/spikes/worktree-commit.sh',
-    "claude -p --max-budget-usd \"$SPIKE_CALL_BUDGET\" --settings \"$settings\" --model haiku --max-turns 3 --permission-mode dontAsk --allowedTools Bash --setting-sources project) | tail -6",
-    'a sandbox probe whose project-settings load is the point (the owner, 2026-11-11, "spikes: b")',
-  ],
-];
+export const SHELL_PINS = (JSON.parse(readFileSync(join(repoRoot, 'scripts', 'ci', 'claude-launch-shell-pins.json'), 'utf8')) as { pins: [string, string, string][] }).pins;
 
 type Word = { text: string; quoted: boolean };
 /** Words that open a command without being it. */
@@ -460,6 +454,12 @@ test('#1262 (R1264a/b): the places a script can live are all read', () => {
   });
 });
 
+const asPath = (as: string | undefined) => (as === undefined ? undefined : /^<pin (\d+)>$/.test(as) ? SHELL_PINS[Number(/\d+/.exec(as)![0]) - 1]![0] : as);
+
+test('#1262: the pinned exceptions are the owner\'s one, by its exact line (a new pin is a change to this test)', () => {
+  assert.deepEqual(SHELL_PINS.map(([f, , why]) => [f.split('/').at(-1), why]), [['worktree-commit.sh', 'a sandbox probe whose project-settings load is the point (the owner, 2026-11-11, "spikes: b")']]);
+});
+
 test('#1262: every way a script can start claude without the guards at its end is refused (fixtures), and the controls pass', () => {
   const dir = join(repoRoot, 'test', 'fixtures', 'claude-launch-shell');
   const all = readdirSync(dir).sort();
@@ -533,7 +533,8 @@ test('#1262: every way a script can start claude without the guards at its end i
             : f.endsWith('.docker.txt')
               ? otherLaunchProblems('Dockerfile', text)
               : // A shell fixture may name where it stands in its first line after the shebang: `# as <path>`.
-                shellLaunchProblems(/^(?:#!.*\n)?# as (\S+)/.exec(text)?.[1] ?? `scripts/${n}.sh`, text);
+                // `# as <pin N>`: the file of SHELL_PINS' Nth entry (1-based), so no fixture names a spike (#673).
+                shellLaunchProblems(asPath(/^(?:#!.*\n)?# as (.+)/.exec(text)?.[1]?.trim()) ?? `scripts/${n}.sh`, text);
     if (n.startsWith('ok-')) assert.deepEqual(problems, [], `${n}: a control passes`);
     else assert.ok(problems.length > 0, `${n}: refused`);
   }
