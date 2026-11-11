@@ -754,17 +754,41 @@ export function fileDownloadProblems(rel: string, text: string, probes: string[]
   // a workflow run is. A Dockerfile's RUN runs paths inside the image (a COPY's target), which the lint can't map: a
   // stated limit.
   // R1228as D1, R1228at D2, R1228au D2/D3: a `cd` or `pushd` (options, quotes and backticks around it included) into a
-  // folder the walk skips, outside comments, ends the sibling rule on its line; one that starts a logical line ends it
-  // for the rest of the file.
+  // folder the walk skips ends the sibling rule on its line, read as the shell splits it (a trailing comment cut:
+  // R1228av D2). R1228av D3: the target may hold quotes before the skipped folder (`cd "$ROOT"/.claude/hooks`).
+  // R1228av D4, R1228aw D2: one at any top-level command position (after `;`, `&&`, `then`, `{`, `builtin` or `command`)
+  // ends it for the rest of the file, or of the subshell or pushd it is in (R1228aw D3: restored at the closing `)` of a
+  // multi-line subshell, and at `popd`). R1228av D1, R1228aw D3: a package.json script and a Makefile recipe line each
+  // run in their own shell, so there a cd ends the rule on its own line only; R1228aw D1: a recipe's make prefix
+  // (`@`, `-`, `+`) is read past.
   const skip = [...SCAN_SKIP].map((x) => x.replace('.', '\\.')).join('|');
-  const cdInto = new RegExp(`(^|[\\s;&|(\`'"])(?:cd|pushd)\\s+(?:-[A-Za-z@]+\\s+|--\\s+)*["']?(?:[^\\s;&|"'\`]*/)?(?:${skip})(/|["'\\s;&|\`)]|$)`);
-  const cdTop = new RegExp(`^\\s*(?:cd|pushd)\\s+(?:-[A-Za-z@]+\\s+|--\\s+)*["']?(?:[^\\s;&|"'\`]*/)?(?:${skip})(/|["'\\s;&|]|$)`);
+  const target = `(?:-[A-Za-z@]+\\s+|--\\s+)*["']?(?:[^\\s;&|\`]*/)?(?:${skip})(/|["'\\s;&|\`)]|$)`;
+  const cdInto = new RegExp(`(^|[\\s;&|(\`'"])(?:cd|pushd)\\s+${target}`);
+  const cdTop = new RegExp(`^(?:(?:then|do|else|\\{|!)\\s+)*(?:(?:builtin|command)\\s+)?(?:cd|pushd)\\s+${target}`);
+  const make = MAKEFILE.test(n);
+  const own = make || n === 'package.json';
+  /** The line with its quoted strings, one-line subshells and trailing comment taken out, to count its parentheses. */
+  const bare = (x: string) => {
+    let y = x.replace(/'[^']*'|"(?:[^"\\]|\\.)*"|`[^`]*`/g, '');
+    for (let z = y.replace(/\([^()]*\)/g, ''); z !== y; z = y.replace(/\([^()]*\)/g, '')) y = z;
+    return y.replace(/(^|\s)#.*/, '$1');
+  };
   let cdSkipped = false;
-  if (!DOCKERFILE.test(n)) for (const l of logicalLines(t)) {
-    if (/^\s*#/.test(l)) continue;
-    if (cdTop.test(l)) cdSkipped = true;
-    const why = unreadShellFile(l, cdSkipped || cdInto.test(l) ? { anchored: false } : { anchored: false, name: rel });
+  const sub: boolean[] = [];
+  const dirs: boolean[] = [];
+  if (!DOCKERFILE.test(n)) for (const l0 of logicalLines(t)) {
+    if (/^\s*#/.test(l0)) continue;
+    const l = make ? l0.replace(/^(\s*)[@+-]+/, '$1') : l0;
+    const cmds = commands(l);
+    const b = bare(l);
+    const net = (b.match(/\(/g) ?? []).length - (b.match(/\)/g) ?? []).length;
+    if (!own && net > 0) sub.push(cdSkipped);
+    if (!own && /(^|[\s;&|{])pushd\s/.test(b)) dirs.push(cdSkipped);
+    if (!own && cmds.some((c) => cdTop.test(net > 0 ? c.replace(/^\(\s*/, '') : c))) cdSkipped = true;
+    const why = unreadShellFile(l, cdSkipped || cdInto.test(cmds.join(' ; ')) ? { anchored: false } : { anchored: false, name: rel });
     if (why) problems.push(why);
+    if (!own && net < 0 && sub.length) cdSkipped = sub.pop()!;
+    if (!own && /(^|[\s;&|{])popd(\s|;|$)/.test(b) && dirs.length) cdSkipped = dirs.pop()!;
   }
   const r = scriptProblems(t, probes);
   return { downloads: r.downloads, problems: [...problems, ...r.problems] };
@@ -1642,6 +1666,44 @@ test('R1228at, R1228au: an assignment before bash is read past (no false refusal
   assert.deepEqual(fileDownloadProblems('package.json', JSON.stringify({ scripts: { build: 'bash build.sh', pack: 'cd dist && npm pack' } })).problems.filter((p) => /a shell file/.test(p)), [], 'package.json: pack after build');
 });
 
+test("R1228av, R1228aw: a cd into a skipped folder is read as the shell runs it: at any top-level position, past make's prefix, quoted prefixes too, for the rest of its file or subshell; a package.json script or recipe line runs in its own shell", () => {
+  const unread = (rel: string, text: string) => fileDownloadProblems(rel, text).problems.filter((p) => /a shell file the download lint doesn't read/.test(p));
+  const sh = (text: string) => unread('scripts/ci/zz-a.sh', text);
+  // Refused: the sibling after a cd the shell keeps.
+  for (const [what, text] of [
+    ['av D3 V4a a quoted variable prefix', 'cd "$ROOT"/.claude/hooks && bash get.sh\n'],
+    ['av D3 V4b ${GITHUB_WORKSPACE}', 'cd "${GITHUB_WORKSPACE}"/.claude/hooks && bash get.sh\n'],
+    ['av D4 V3a set -e; cd', 'set -e; cd .claude/hooks\nbash get.sh\n'],
+    ['av D4 V3b [ -d ] && cd', '[ -d .claude/hooks ] && cd .claude/hooks\nbash get.sh\n'],
+    ['av D4 V3d if; then cd; fi', 'if [ -d node_modules/x ]; then cd node_modules/x; fi\nbash install.sh\n'],
+    ['av D4 V3f { cd; }', '{ cd .claude/hooks; }\nbash get.sh\n'],
+    ['av D4 V5d command cd', 'command cd .claude/hooks\nbash get.sh\n'],
+    ['aw D2 M3g builtin cd', 'builtin cd .claude/hooks\nbash get.sh\n'],
+    ['aw D2 M3e a multi-line subshell', '(cd .claude/hooks\nbash get.sh)\n'],
+    ['a top cd (control)', 'cd .claude/hooks\nbash get.sh\n'],
+  ] as const) assert.ok(sh(text).length > 0, `refused: ${what}`);
+  for (const [what, text] of [
+    ['aw D1 M1a @cd', 'hooks:\n\t@cd .claude/hooks && bash get.sh\n'],
+    ['aw D1 M1d -cd', 'hooks:\n\t-cd node_modules/x && bash install.sh\n'],
+    ['aw D1 M1e +cd', 'hooks:\n\t+cd node_modules/x && bash install.sh\n'],
+    ['aw D1 M1h @pushd', 'hooks:\n\t@pushd .claude/hooks && bash get.sh\n'],
+  ] as const) assert.ok(unread('Makefile', text).length > 0, `refused: ${what}`);
+  assert.ok(unread('package.json', JSON.stringify({ scripts: { get: 'cd .claude/hooks && bash get.sh' } }, null, 2)).length > 0, 'a cd and its sibling in one script: refused');
+  // Kept: each script or recipe line in its own shell; a comment; a subshell or pushd closed before the sibling.
+  for (const [what, rel, text] of [
+    ['av D1 V1a package.json, pack before build', 'package.json', JSON.stringify({ scripts: { pack: 'cd dist && npm pack', build: 'bash build.sh' } }, null, 2)],
+    ['av D1 one-line package.json', 'package.json', JSON.stringify({ scripts: { pack: 'cd dist && npm pack', build: 'bash build.sh' } })],
+    ['av D1 V1b2 postinstall into node_modules', 'package.json', JSON.stringify({ scripts: { postinstall: 'cd node_modules/foo && npm run prepare', build: 'bash build.sh' } }, null, 2)],
+    ['av D1 V1e a Makefile, pack before build', 'Makefile', 'pack:\n\tcd dist && npm pack\nbuild:\n\tbash build.sh\n'],
+    ['aw D3 M2g a recipe cd line, then a bash line', 'Makefile', 'all:\n\tcd dist\n\tbash build.sh\n'],
+    ['av D2 V2a a trailing comment', 'scripts/ci/zz-a.sh', 'bash b.sh  # run before cd dist\n'],
+    ['av D2 V2b', 'scripts/ci/zz-a.sh', 'bash b.sh # never cd node_modules here\n'],
+    ['aw D3 M2a a multi-line packing subshell', 'scripts/ci/zz-a.sh', '(\n  cd ../../dist\n  tar -cf x.tar .\n)\nbash b.sh\n'],
+    ['aw D3 M2b pushd ... popd', 'scripts/ci/zz-a.sh', 'pushd ../../dist\nnpm pack\npopd\nbash b.sh\n'],
+    ['a one-line subshell', 'scripts/ci/zz-a.sh', '(cd dist && npm pack)\nbash b.sh\n'],
+  ] as const) assert.deepEqual(unread(rel, text), [], `kept: ${what}`);
+});
+
 // Limits (owner decision (c): stated, not closed; the helper's digest check holds for each download it handles):
 // - What the lint reads (R1228ai D1, closing R1228i L9-L11; R1228aj, R1228ak): workflow and action YAML, a shell
 //   script anywhere, every file under scripts/ whatever its name (a pinned URL, prose in a .md aside; the retry rule in
@@ -1657,14 +1719,22 @@ test('R1228at, R1228au: an assignment before bash is read past (no false refusal
 //   cut (R1228an D3); a shellcheck or shfmt command names a dialect (`-s bash`), not a run. A read script's .sh
 //   sibling counts only where the walk reads (not under node_modules, dist, .git or .claude: R1228ao D3). The rule's
 //   known cost: a `bash` word followed by a path in another program's arguments (`grep -rn bash docs/`, an `echo` of
-//   "run bash tools/x.sh") is refused; reword it or name the file another way. Not seen: elsewhere, a path that is
+//   "run bash tools/x.sh") is refused; reword it or name the file another way. And a sibling after a top-level `cd`
+//   into a skipped folder in a shell script, even one undone by `cd ..` or `cd -` or inside a function body, is
+//   refused (R1228av D6b, R1228aw D3), as is a here-string of a substitution naming no unread file
+//   (`bash <<< "$(printf …)"`, R1228av D6c). Assignments before bash are read past, so `X=1 bash "$SCRIPT"` is refused as
+//   `bash "$SCRIPT"` is (R1228av D6a). Not seen: elsewhere, a path that is
 //   absolute (an installed copy, `/opt/<engine>/current/scripts/…`) or built from a variable (`"$here/x.sh"`), which
 //   can't be mapped to the checkout; elsewhere, a bare name with no `/` and no `.sh` (`sudo bash get`); a file piped in
-//   (`cat tools/get | bash`); a Dockerfile RUN running a path inside the image (a COPY's target); a file elsewhere
+//   (`cat tools/get | bash`) or given as a here-string other than `bash <<< "$(…)"` spaced at the start of a workflow
+//   run (the attached `<<<"$(…)"`, after `-s`, or in a read file: R1228av D5); a Dockerfile RUN running a path inside the image (a COPY's target); a file elsewhere
 //   that a workflow runs another way; a `cd` into a folder by a variable or built name before a relative .sh in a read
-//   file (a `cd` or `pushd` whose target names a folder the walk skips, with options, quoted or in backticks, ends the
-//   sibling rule on its line, and one that starts a line ends it for the rest of the file: R1228as D1, R1228at D2,
-//   R1228au D2/D3; not seen: a target built by a command substitution, `cd "$(dirname "$0")/../.claude/hooks"` or
+//   file (a `cd` or `pushd` whose target names a folder the walk skips, with options, quoted, a quoted variable prefix
+//   (`cd "$ROOT"/.claude/hooks`) or in backticks, ends the sibling rule on its line, read as the shell splits it with a
+//   trailing comment cut; one at a top-level command position (after `;`, `&&`, `then`, `{`, `builtin`, `command`)
+//   ends it for the rest of the file, or of the multi-line subshell or pushd it is in; a package.json script or a
+//   Makefile recipe line runs in its own shell, so there it ends it on its own line, past make's `@`, `-` or `+`:
+//   R1228as D1, R1228at D2, R1228au D2/D3, R1228av D1-D4, R1228aw D1-D3; not seen: a target built by a command substitution, `cd "$(dirname "$0")/../.claude/hooks"` or
 //   `cd "$(git rev-parse --show-toplevel)/.claude/hooks"` (R1228at D2's C2 rows), a cd after the .sh's own line, or a
 //   folder reached another way); a GitHub expression
 //   other than `${{ github.workspace }}` before a path (`${{ env.ROOT }}/x.sh`: a variable, so outside a command that
