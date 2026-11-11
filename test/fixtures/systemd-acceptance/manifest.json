@@ -1032,8 +1032,8 @@
     "^$"
   ],
   "r1169ad-swallowing-catch": [
-    1,
-    "test/y\\.test\\.ts: unit states, swallowing-catch: line \\d+, holding systemd's sign, never ran"
+    2,
+    "test/y\\.test\\.ts: unit states, swallowing-catch: line \\d+ holds systemd's sign in a try whose catch"
   ],
   "r1169ad-swallowing-catch-control": [
     0,
@@ -1086,5 +1086,21 @@
   "r1169ad-gate-subtest-no-plan": [
     2,
     "test/x\\.test\\.ts: base: the subtest at line \\d+ doesn't open with its own"
+  ],
+  "r1169ae-d1b-decoy-subtest": [
+    2,
+    "test/y\\.test\\.ts: unit states under the real service manager: the subtest at line \\d+ is given a function this file doesn't declare once"
+  ],
+  "r1169ae-d1g-gate-subtest-decoy": [
+    2,
+    "test/x\\.test\\.ts: base: the subtest at line \\d+ doesn't open with its own"
+  ],
+  "r1169af-f1-throw-before-sign": [
+    2,
+    "test/y\\.test\\.ts: the watchdog reads the installed unit from the real service manager: line \\d+ holds systemd's sign in a try whose catch"
+  ],
+  "r1169af-f11-optional-chain": [
+    2,
+    "test/y\\.test\\.ts: the watchdog reads unit states from the real service manager: line \\d+ holds systemd's sign in an optional call's arguments"
   ]
 }

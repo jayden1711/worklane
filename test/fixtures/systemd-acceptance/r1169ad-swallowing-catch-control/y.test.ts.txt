@@ -2,11 +2,13 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 test('unit states, swallowing-catch', () => {
+  // What may throw sits in its own try; the systemd work is outside it, so a run that skipped it shows.
+  let name = 'a.service';
   try {
     if (process.env.FIXTURE_NEVER) throw new Error('no bus');
-    spawnSync('systemctl', ['--version']);
   } catch {
-    // swallowed
+    name = 'b.service';
   }
+  spawnSync('systemctl', ['is-active', name]);
   assert.ok(true);
 });

@@ -1,0 +1,14 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+test('the watchdog reads the installed unit from the real service manager', (t) => {
+  try {
+    const unit = readFileSync('/nonexistent/worklane/unit-name', 'utf8').trim();
+    const r = spawnSync('systemctl', ['is-active', unit], { encoding: 'utf8' });
+    assert.fail(`the systemd assertions ran (${r.status})`);
+  } catch (e) {
+    if (e instanceof assert.AssertionError) throw e;
+    t.diagnostic(`no installed unit here: ${e.message}`);
+  }
+});

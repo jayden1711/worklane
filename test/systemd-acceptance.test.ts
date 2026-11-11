@@ -140,7 +140,7 @@ test("ci.yml run by hand (workflow_dispatch, #1169): its push gate checks the br
   const branches = (step.run ?? '').split(/\n\s*(?=elif |else\b)/);
   const manual = branches.find((b) => /\[ "\$EVENT" = workflow_dispatch \]/.test(b));
   assert.ok(manual, 'a branch for workflow_dispatch, before the push branch');
-  assert.match(manual!, /BASE="\$\(git merge-base origin\/main "\$GITHUB_SHA"\)"\s*\n\s*node scripts\/push-gate\.mjs --range "\$\{BASE\}\.\.\$\{GITHUB_SHA\}"/);
+  assert.match(manual!, /BASE="\$\(git merge-base origin\/main "\$GITHUB_SHA"\)"\s*\n\s*if \[ "\$BASE" = "\$GITHUB_SHA" \]; then BASE="\$\(git rev-parse "\$\{GITHUB_SHA\}~1"\)"; fi\s*\n\s*node scripts\/push-gate\.mjs --range "\$\{BASE\}\.\.\$\{GITHUB_SHA\}"/, 'on a branch its own commits; on main (an empty range) its tip commit (R1169af D6)');
   assert.ok(branches.findIndex((b) => b === manual) < branches.findIndex((b) => /BEFORE/.test(b)), "it comes before the push's branch, which a manual run would reach with no `before`");
 });
 
@@ -932,7 +932,9 @@ function plannedCount(text: string, line: number, column: number): { plan: numbe
 }
 
 test("R1169ab D2: each gate's t.plan count is what its function checks, read from its text (so a wrong count fails here, not on main's VM)", () => {
-  const files = ['test/engine-update.test.ts', 'test/setup-scripts.test.ts', 'test/watchdog.test.ts'];
+  // Every file with a gate, as the job finds them (R1169ae's note: a fifth gate in a new file is counted here too).
+  const files = sa.findAll(join(repoRoot, 'test'), 'test/').map((f) => `test/${f.file}`);
+  assert.ok(files.length >= 3, 'the gated files are found');
   let gates = 0;
   for (const f of files) {
     const text = readFileSync(join(repoRoot, f), 'utf8');
@@ -943,7 +945,7 @@ test("R1169ab D2: each gate's t.plan count is what its function checks, read fro
       assert.equal(r.plan, r.count, `${f}: ${g.name}: t.plan(${r.plan}), but it checks ${r.count} time(s)`);
     }
   }
-  assert.equal(gates, 4, 'the 4 gates');
+  assert.ok(gates >= 4, 'every gate (4 today) is counted');
   // The counter, on gates of its own.
   const g = (body: string, extra = '') => plannedCount(`${extra}test('g', { ${gate()} }, (t) => {\n${body}\n});\n`, extra.split('\n').length, 1);
   assert.deepEqual(g('t.plan(2); t.assert.ok(1); t.assert.ok(2);'), { plan: 2, count: 2 });
@@ -1014,7 +1016,14 @@ test("R1169ab D2: a gate opens with node's own count; a sign test's own function
   ].join('\n');
   const n = sa.mustRun(ts, file, shapes, 10, 1)!;
   assert.deepEqual([n.subtests, n.sign, n.refused], [[3, 5, 7], [3, 9], null], "t['test'], a bound alias, a destructured one; a same-file named function read");
-  assert.match(String(sa.mustRun(ts, file, shapes, 11, 1)!.refused), /its function is given by a name this file doesn't declare/, 'an imported function is refused, never skipped');
+  assert.match(String(sa.mustRun(ts, file, shapes, 11, 1)!.refused), /its function is given by a name this file doesn't declare once/, 'an imported function is refused, never skipped');
+  // R1169ae D1, R1169af D1/D2: what line coverage would read as run when it wasn't is refused before the run.
+  const refused = (body: string, extra = '') => sa.mustRun(ts, file, `import { test } from 'node:test';\n${extra}test('s', async (t) => {\n${body}\n});\n`, extra.split('\n').length + 1, 1)!.refused;
+  const unit = `run('${sd.slice(0, 6)}ctl')`;
+  assert.match(String(refused(`  try {\n    load();\n    ${unit};\n  } catch {}`)), /in a try whose catch would take a throw/, 'a sign line in a try with a catch');
+  assert.equal(refused(`  try {\n    load();\n  } finally {}\n  ${unit};`), null, 'a try with only a finally, the sign after it: read');
+  assert.match(String(refused(`  units?.expect(\n    ${unit},\n  );`)), /in an optional call's arguments/, "a sign line in an optional call's arguments");
+  assert.match(String(refused(`  const sub = () => ${unit};\n  await t.test('a', sub);`, `function sub() {}\n`)), /doesn't declare once/, 'a subtest function named twice in the file');
   // problems(): judged on the run's coverage of the file.
   const t = { name: 's', line: 2, column: 1, label: "'s'", subtests: true, mustRun: { ends: [its(7), its(3, 'the subtest at line 3')], subtests: [3, 4], sign: [6], refused: null } };
   const ev = (name: string, line: number, nesting = 0) => ({ type: 'test:pass', name, nesting, file: '/r/dist/test/g.test.js', line, column: 1, skip: null, todo: null });

@@ -95,10 +95,19 @@
 // option (b) of 2026-11-10): in the test's own function and, recursively, each subtest's (`t.test`, `t['test']`, an
 // alias; a function given by name is read when this file declares it, else refused), every line that holds the sign
 // must have run, each function must have reached its last statement, and each subtest must have started.
-// Named limits of that check (R1169ac, R1169ad): a branch, loop or catch around assertions alone (no sign in it); a
-// line that runs while part of it doesn't (a same-line `return`, a ternary, `&&`, a one-line test or loop body, a
-// callback on the line it's passed on); code in a helper the test calls in another function; and an excused test
-// (it skips here) isn't judged on it.
+// Refused before the run (exit 2), since line coverage would read them as run when they weren't (R1169ae, R1169af):
+// a sign line in a `try` that has a `catch` (a throwing call before it leaves no count), a sign line in an optional
+// call's arguments (a short-circuit leaves no count), and a test or subtest function given by a name the file declares
+// more than once (which one is meant can't be read without scope).
+// Named limits of that check (R1169ac, R1169ad, R1169ae, R1169af):
+// - a branch, loop or catch around assertions alone (no sign in it);
+// - a line that runs while part of it doesn't: a same-line `return`; any operand of `?:`, `&&`, `||` or `??`, however
+//   it is laid out (an operand on a line of its own keeps that line's count when the operator ran); a one-line test or
+//   loop body; a callback on the line it's passed on;
+// - tests registered by one loop share one function's line counts: one registration's run covers another's early
+//   return;
+// - a callback that is never called (a listener with no event), and an assertion on an unawaited Promise;
+// - code in a helper the test calls in another function; and an excused test (it skips here) isn't judged on it.
 //
 // Results come from node's test events (systemd-acceptance-reporter.mjs, R1169f), not from TAP text: each gate is
 // matched by its built file, the line and column its test() call is on, and its name, and the reporter writes to a
@@ -1552,15 +1561,17 @@ function functionOf(ts, sf, arg) {
   if (!arg) return null;
   if (ts.isArrowFunction(arg) || ts.isFunctionExpression(arg)) return arg;
   if (!ts.isIdentifier(arg)) return null;
-  let hit = null;
+  // Every declaration of the name in the file, at any depth (R1169ae D1): more than one, and which is meant can't be
+  // read without the scope, so none is taken.
+  const hits = [];
   const visit = (n) => {
-    if (hit) return;
-    if (ts.isFunctionDeclaration(n) && n.name?.text === arg.text && n.body) hit = n;
-    else if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.name.text === arg.text && n.initializer && (ts.isArrowFunction(n.initializer) || ts.isFunctionExpression(n.initializer))) hit = n.initializer;
-    else ts.forEachChild(n, visit);
+    if (ts.isFunctionDeclaration(n) && n.name?.text === arg.text) hits.push(n.body ? n : null);
+    else if ((ts.isVariableDeclaration(n) || ts.isParameter(n)) && ts.isIdentifier(n.name) && n.name.text === arg.text) hits.push(n.initializer && (ts.isArrowFunction(n.initializer) || ts.isFunctionExpression(n.initializer)) ? n.initializer : null);
+    else if ((ts.isClassDeclaration(n) || ts.isImportSpecifier(n) || ts.isImportClause(n) || ts.isNamespaceImport(n) || ts.isBindingElement(n)) && n.name && ts.isIdentifier(n.name) && n.name.text === arg.text) hits.push(null);
+    ts.forEachChild(n, visit);
   };
   visit(sf);
-  return hit;
+  return hits.length === 1 ? hits[0] : null;
 }
 
 /**
@@ -1620,20 +1631,30 @@ export function mustRun(ts, path, text, line, column) {
     }
     if (last) out.ends.push({ line: lineOf(last), what });
     const signs = (n) => {
-      if ((ts.isStringLiteralLike(n) || ts.isTemplateHead(n) || ts.isTemplateMiddle(n) || ts.isTemplateTail(n) || ts.isIdentifier(n) || ts.isRegularExpressionLiteral(n)) && sign.test(ts.isIdentifier(n) ? n.text : n.getText(sf))) out.sign.push(lineOf(n));
+      if ((ts.isStringLiteralLike(n) || ts.isTemplateHead(n) || ts.isTemplateMiddle(n) || ts.isTemplateTail(n) || ts.isIdentifier(n) || ts.isRegularExpressionLiteral(n)) && sign.test(ts.isIdentifier(n) ? n.text : n.getText(sf))) {
+        out.sign.push(lineOf(n));
+        // Where line coverage reads a line as run though it didn't (R1169af D1/D2, R1169ae D2): after a call that
+        // throws in a try whose catch takes it (V8 counts no block after a throwing call), and in the arguments of an
+        // optional call that short-circuits (V8 counts no block there). Refused, not judged: 0 picked tests have either.
+        for (let x = n; x.parent && x !== fn; x = x.parent) {
+          const p = x.parent;
+          if (ts.isTryStatement(p) && x === p.tryBlock && p.catchClause) out.refused ??= `line ${lineOf(n)} holds systemd's sign in a try whose catch would take a throw before it (line coverage would read it as run): keep the systemd work out of the try`;
+          if ((ts.isCallExpression(p) || ts.isElementAccessExpression(p)) && (p.questionDotToken || ts.isOptionalChain(p)) && x !== p.expression) out.refused ??= `line ${lineOf(n)} holds systemd's sign in an optional call's arguments (a short-circuit leaves no count): call it plainly`;
+        }
+      }
       ts.forEachChild(n, signs);
     };
     signs(fn.body);
     for (const c of subtestCalls(ts, fn)) {
       out.subtests.push(lineOf(c));
       const sub = functionOf(ts, sf, c.arguments.at(-1));
-      if (!sub) out.refused ??= `the subtest at line ${lineOf(c)} is given a function this file doesn't declare`;
+      if (!sub) out.refused ??= `the subtest at line ${lineOf(c)} is given a function this file doesn't declare once`;
       else walk(sub, `the subtest at line ${lineOf(c)}`);
     }
   };
   const call = callAt(ts, sf, line, column);
   const fn = functionOf(ts, sf, call?.arguments.at(-1));
-  if (!fn) return { ...out, refused: "its function is given by a name this file doesn't declare" };
+  if (!fn) return { ...out, refused: "its function is given by a name this file doesn't declare once" };
   walk(fn, 'its function');
   out.sign = [...new Set(out.sign)].sort((a, b) => a - b);
   return out;
