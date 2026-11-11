@@ -256,7 +256,9 @@ function snapshot(table: readonly unknown[], o: { broad?: boolean; verbatim?: bo
     if (typeof kind !== 'string') refuse(who, 'the kind must be a string');
     who = `"${kind}"`;
     const re = data(who, entry, 0, 'the regex');
-    if (!(re instanceof RegExp) || re.constructor !== RegExp || Reflect.ownKeys(re).map(String).join() !== 'lastIndex') refuse(who, 'its regex must be a plain RegExp with no own property but lastIndex (one could hide the pattern that runs)');
+    // Compared with the intrinsic through globalThis, not the module's name: a top-level binding named RegExp is
+    // refused by the test's binding lint, and this reads past one all the same (R1258j's J1a).
+    if (!(re instanceof globalThis.RegExp) || re.constructor !== globalThis.RegExp || Reflect.ownKeys(re).map(String).join() !== 'lastIndex') refuse(who, 'its regex must be a plain RegExp with no own property but lastIndex (one could hide the pattern that runs)');
     const source = `${re.source}`;
     const flags = `${re.flags}`;
     // The copy the marker is checked against; what runs is built again from the same primitives (run).
@@ -448,7 +450,10 @@ function trailingGroups(alternatives: Item[][]): number[] {
 const PATTERNS: [RegExp, Replacement, string][] = [
   // A dashboard key, wherever its prefix is (after a `-` or a letter too: `key-wld_...`): a match runs to the end of its
   // run of key characters and the next search starts after it, so linear.
-  [new RegExp(`${DASHBOARD_KEY_PREFIX}${DASHBOARD_KEY_BODY}(?![A-Za-z0-9_-])`, 'g'), `${DASHBOARD_KEY_PREFIX}[REDACTED]`, 'dashboard key'],
+  // Written out as a literal: a table entry's regex is a regex literal, never a construction (test/redact-markers.test.ts
+  // holds it equal to DASHBOARD_KEY_PREFIX + DASHBOARD_KEY_BODY; R1258j's J1a: `new RegExp` in an entry called a
+  // module-level name at load).
+  [/wld_[A-Za-z0-9_-]{32,}(?![A-Za-z0-9_-])/g, `${DASHBOARD_KEY_PREFIX}[REDACTED]`, 'dashboard key'],
   // A shape with a distinctive prefix is found wherever the prefix is (#889 round 4): no left boundary, so whatever is
   // glued before it (a name, an escape sequence in any encoding, a digit) can't hide it. Each such match runs to the end
   // of its run and the next search starts after it: linear. Only shapes with no distinctive prefix keep a boundary.
@@ -591,11 +596,11 @@ function internalHost(m: string, pre: string, name: string): string {
   return prose || code ? m : `${pre}[internal-host]`;
 }
 
-const OCTET = '(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)';
-// The private ranges, in order: 10/8, 172.16/12, 192.168/16, the shared range (RFC 6598: carrier NAT and tailnets,
-// 100.64/10) and link-local (169.254/16, cloud metadata among it). One template of literals and OCTET: a table entry's
-// text may name only such a const (test/redact-markers.test.ts, the data lint).
-const PRIVATE_V4 = `10\\.${OCTET}|172\\.(?:1[6-9]|2\\d|3[01])|192\\.168|100\\.(?:6[4-9]|[7-9]\\d|1[01]\\d|12[0-7])|169\\.254`;
+// The private IPv4 rule below is written out as one regex literal (a table entry's regex is a literal, never a
+// construction: test/redact-markers.test.ts, the data lint). Read it as: a boundary; one of the private ranges, in order
+// 10/8, 172.16/12, 192.168/16, the shared range (RFC 6598: carrier NAT and tailnets, 100.64/10) and link-local
+// (169.254/16, cloud metadata among it); two more octets, each `(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)`; no word character
+// or further octet after. The test holds the literal equal to that composition.
 
 /**
  * What names a person or the inside of a network rather than a secret: emails, internal hostnames, private IPs and
@@ -619,7 +624,7 @@ const IDENTIFIERS: [RegExp, Replacement, string][] = [
   // Hostnames under the private-use suffixes; code that looks like one stays (internalHost). After a slash only as a
   // URL's `//`: `./util.internal` is a module path, `http://nas.lan/` a host.
   [/(^|[^A-Za-z0-9./-]|\/\/)([A-Za-z0-9][A-Za-z0-9.-]*\.(?:internal|localdomain|lan|corp|intranet|home\.arpa|ts\.net|local))(?![A-Za-z0-9-]|\.[A-Za-z0-9])/gi, internalHost, 'internal host'],
-  [new RegExp(`(^|[^\\w.])(?:${PRIVATE_V4})\\.${OCTET}\\.${OCTET}(?![\\w-]|\\.\\d)`, 'g'), '$1[private-ip]', 'private IP'],
+  [/(^|[^\w.])(?:10\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)|172\.(?:1[6-9]|2\d|3[01])|192\.168|100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])|169\.254)\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?![\w-]|\.\d)/g, '$1[private-ip]', 'private IP'],
   // IPv6 unique-local (fc00::/7) and link-local (fe80::/10) addresses.
   [/(^|[^\w:])f(?:[cd][0-9a-f]{2}|e[89ab][0-9a-f]):(?:[0-9a-f]{0,4}:){1,6}[0-9a-f]{0,4}(?![\w:])/gi, '$1[private-ip]', 'private IP'],
 ];

@@ -279,7 +279,7 @@ function snapshot(table, o = {}) {
             refuse(who, 'the kind must be a string');
         who = `"${kind}"`;
         const re = data(who, entry, 0, 'the regex');
-        if (!(re instanceof RegExp) || re.constructor !== RegExp || Reflect.ownKeys(re).map(String).join() !== 'lastIndex')
+        if (!(re instanceof globalThis.RegExp) || re.constructor !== globalThis.RegExp || Reflect.ownKeys(re).map(String).join() !== 'lastIndex')
             refuse(who, 'its regex must be a plain RegExp with no own property but lastIndex (one could hide the pattern that runs)');
         const source = `${re.source}`;
         const flags = `${re.flags}`;
@@ -486,7 +486,7 @@ function trailingGroups(alternatives) {
 }
 // check-table: never-shrink
 const PATTERNS = [
-    [new RegExp(`${exports.DASHBOARD_KEY_PREFIX}${DASHBOARD_KEY_BODY}(?![A-Za-z0-9_-])`, 'g'), `${exports.DASHBOARD_KEY_PREFIX}[REDACTED]`, 'dashboard key'],
+    [/wld_[A-Za-z0-9_-]{32,}(?![A-Za-z0-9_-])/g, `${exports.DASHBOARD_KEY_PREFIX}[REDACTED]`, 'dashboard key'],
     [/gh[pousr]_[A-Za-z0-9]{30,}(?![A-Za-z0-9])/g, 'gh*_[REDACTED]', 'GitHub token'],
     [/github_pat_[A-Za-z0-9_]{40,}/g, 'github_pat_[REDACTED]', 'GitHub token'],
     [/sk-ant-[A-Za-z0-9_-]{20,}/g, 'sk-[REDACTED]', 'API key (sk-)'],
@@ -542,8 +542,6 @@ function internalHost(m, pre, name) {
     const code = !labels.some((l) => l.includes('-')) && (CODE_HEADS.includes(labels[0]) || labels.some((l) => /[a-z][A-Z]/.test(l)));
     return prose || code ? m : `${pre}[internal-host]`;
 }
-const OCTET = '(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)';
-const PRIVATE_V4 = `10\\.${OCTET}|172\\.(?:1[6-9]|2\\d|3[01])|192\\.168|100\\.(?:6[4-9]|[7-9]\\d|1[01]\\d|12[0-7])|169\\.254`;
 const IDENTIFIERS = [
     [/(^|[^A-Za-z0-9._%+-])(?!git@)[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}(?![A-Za-z0-9-])/g, '$1[email]', 'email'],
     [
@@ -553,7 +551,7 @@ const IDENTIFIERS = [
     ],
     [/(^|[^\w])[A-Za-z]:[\\/][Uu]sers[\\/]([^\\/\s"'`<>|]+)/g, '$1~', 'home path'],
     [/(^|[^A-Za-z0-9./-]|\/\/)([A-Za-z0-9][A-Za-z0-9.-]*\.(?:internal|localdomain|lan|corp|intranet|home\.arpa|ts\.net|local))(?![A-Za-z0-9-]|\.[A-Za-z0-9])/gi, internalHost, 'internal host'],
-    [new RegExp(`(^|[^\\w.])(?:${PRIVATE_V4})\\.${OCTET}\\.${OCTET}(?![\\w-]|\\.\\d)`, 'g'), '$1[private-ip]', 'private IP'],
+    [/(^|[^\w.])(?:10\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)|172\.(?:1[6-9]|2\d|3[01])|192\.168|100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])|169\.254)\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?![\w-]|\.\d)/g, '$1[private-ip]', 'private IP'],
     [/(^|[^\w:])f(?:[cd][0-9a-f]{2}|e[89ab][0-9a-f]):(?:[0-9a-f]{0,4}:){1,6}[0-9a-f]{0,4}(?![\w:])/gi, '$1[private-ip]', 'private IP'],
 ];
 const IDENTIFIER_SNAPSHOT = snapshot(IDENTIFIERS, { verbatim: true });

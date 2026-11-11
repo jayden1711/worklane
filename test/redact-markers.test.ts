@@ -14,7 +14,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import ts from 'typescript';
-import { markerProblem, REDACTION_PATTERNS, redactString, secretKinds, TRACKER } from '../src/events/redact.js';
+import { DASHBOARD_KEY_PREFIX, markerProblem, REDACTION_PATTERNS, redactString, secretKinds, TRACKER } from '../src/events/redact.js';
 import { repoRoot } from './helpers.js';
 import { leaks, run, SHAPES } from './token-standins.js';
 
@@ -458,7 +458,7 @@ function programOf(text: string): { sf: ts.SourceFile; checker: ts.TypeChecker }
 /**
  * What is wrong with the tables as data, or nothing (R1258d's fix 2, R1258e's E2, R1258g's G2, R1258h's H1): an entry
  * that runs code is code in this module, with every binding in reach. Each entry of PATTERNS, BROAD and IDENTIFIERS
- * is a three-element array literal: a regex literal or `new RegExp` of literals; a marker; a string literal kind. A
+ * is a three-element array literal: a regex literal (never a construction: J1a); a marker; a string literal kind. A
  * literal is a string literal, a substitution-free template, or a template whose every span names a top-level `const`
  * whose own initializer is such a literal (resolved with the checker, so `${X}` with an object X whose toString runs
  * is refused: G2). A marker in PATTERNS or IDENTIFIERS is a literal, an arrow function or the name of a top-level
@@ -483,13 +483,15 @@ function tableProblems(text: string): string[] {
       return d !== null && d.initializer !== undefined && literal(d.initializer, [...seen, s.expression.text]);
     });
   };
-  const regex = (n: ts.Node) => ts.isRegularExpressionLiteral(n) || (ts.isNewExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === 'RegExp' && (n.arguments ?? []).length > 0 && (n.arguments ?? []).every((a) => literal(a)));
+  // A regex literal only (R1258j's J1a): `new RegExp(...)` in an entry called a module-level name at load, and a
+  // module-level `RegExp` shadowed the intrinsic, patched it and let a key through.
+  const regex = (n: ts.Node) => ts.isRegularExpressionLiteral(n);
   const topFunction = (id: ts.Identifier) => {
     const d = checker.getSymbolAtLocation(id)?.declarations?.[0];
     return d !== undefined && ts.isFunctionDeclaration(d) && d.parent === sf;
   };
   const broadArrow = (n: ts.Node): boolean => {
-    if (!ts.isArrowFunction(n) || n.parameters.length !== 1) return false;
+    if (!ts.isArrowFunction(n) || n.parameters.length !== 1 || n.modifiers?.length || n.typeParameters?.length) return false;
     const p = n.parameters[0]!;
     if (!ts.isIdentifier(p.name) || p.initializer || p.dotDotDotToken || p.questionToken) return false;
     const param = p.name.text;
@@ -528,42 +530,105 @@ function tableProblems(text: string): string[] {
   return problems;
 }
 
+/** The intrinsics a module-level binding must never shadow (R1258j's J1a): every own name of globalThis, these among them. */
+const GLOBALS = new Set<string>([...Object.getOwnPropertyNames(globalThis), 'RegExp', 'Object', 'Array', 'String', 'Symbol', 'Function', 'Reflect', 'globalThis', 'Proxy', 'queueMicrotask', 'process']);
+
 /**
- * What is wrong with the module's top-level bindings, or nothing (R1258h's H1 and item 2 of its fix): code that ran
- * from a table entry reached mutable module data (a Set, a module RegExp, a plain array). Every top-level binding is a
- * `const` whose initializer is a literal, a frozen array or object (`Object.freeze(...)`), a function, a snapshot,
- * another binding's name, a number expression, or (by name) the three tables, frozen right after, and `run`, the
- * closure. No `let`, `var`, class, Set, Map, RegExp or unfrozen array or object at the top level.
+ * What is wrong with the module's top-level statements and bindings, or nothing (R1258h's H1 and item 2 of its fix;
+ * R1258j's J1): code that ran from a table entry reached mutable module data (a Set, a module RegExp, a plain array),
+ * called a module-level `RegExp` that shadowed the intrinsic (J1a), or added a table entry outside the table literal
+ * (J1b: `PATTERNS.push(...)`, a statement no lint read). So every top-level statement is read, and is one of:
+ * - a `function`, `interface` or `type` declaration (code and types; the functions are pinned or never called at load);
+ * - a `const` statement whose initializer is a literal, a frozen array or object (`Object.freeze(...)`), a function,
+ *   a snapshot (the top-level `snapshot` function, resolved), another binding's name, a number expression, or (by
+ *   name) one of the three tables as an array literal, or `run`, the closure;
+ * - the expression statement `Object.freeze(<table>);`, and no other expression statement.
+ * No `let`, `var`, class, enum, namespace, import, re-export, Set, Map, RegExp or unfrozen array or object at the top
+ * level. No top-level binding (a const, a function, a class, an enum, a namespace, an import) may bear the name of
+ * an own property of globalThis (GLOBALS). And a table's name appears only in its declaration, as the argument of
+ * `snapshot(...)` in a `const` statement, and in its `Object.freeze(...)` statement: never pushed, spliced, indexed,
+ * spread into another table or read by anything else.
  */
 function bindingProblems(text: string): string[] {
-  const { sf } = programOf(text);
+  const { sf, checker } = programOf(text);
   const problems: string[] = [];
   const numeric = (n: ts.Expression): boolean => ts.isNumericLiteral(n) || (ts.isBinaryExpression(n) && numeric(n.left) && numeric(n.right)) || (ts.isParenthesizedExpression(n) && numeric(n.expression));
+  const topFunctionNamed = (n: ts.Expression, name: string): boolean => {
+    if (!ts.isIdentifier(n) || n.text !== name) return false;
+    const d = checker.getSymbolAtLocation(n)?.declarations?.[0];
+    return d !== undefined && ts.isFunctionDeclaration(d) && d.parent === sf;
+  };
+  const freezeCall = (n: ts.Node): boolean => ts.isCallExpression(n) && n.expression.getText(sf) === 'Object.freeze';
   const allowed = (name: string, n: ts.Expression): boolean => {
     if (ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n) || ts.isTemplateExpression(n) || numeric(n)) return true;
     if (ts.isArrowFunction(n) || ts.isFunctionExpression(n) || ts.isIdentifier(n)) return true;
     if (ts.isCallExpression(n)) {
-      const callee = n.expression.getText(sf);
-      if (callee === 'Object.freeze' || callee === 'snapshot') return true;
+      if (freezeCall(n) || topFunctionNamed(n.expression, 'snapshot')) return true;
       return name === 'run' && ts.isParenthesizedExpression(n.expression) && ts.isArrowFunction(n.expression.expression) && n.arguments.length === 0;
     }
     if (ts.isAsExpression(n)) return allowed(name, n.expression);
     return TABLES.includes(name) && ts.isArrayLiteralExpression(n);
   };
+  const declared = (name: string, what: string) => {
+    if (GLOBALS.has(name)) problems.push(`${name}: ${what} named as a global (it would shadow the intrinsic)`);
+  };
   for (const s of sf.statements) {
-    if (ts.isClassDeclaration(s)) problems.push(`${s.name?.text ?? 'a class'}: a class at the top level`);
-    if (!ts.isVariableStatement(s)) continue;
+    if (ts.isFunctionDeclaration(s)) {
+      if (s.name) declared(s.name.text, 'a function');
+      continue;
+    }
+    if (ts.isInterfaceDeclaration(s) || ts.isTypeAliasDeclaration(s)) continue;
+    if (ts.isExpressionStatement(s)) {
+      const e = s.expression;
+      if (!(ts.isCallExpression(e) && freezeCall(e) && e.arguments.length === 1 && ts.isIdentifier(e.arguments[0]!) && TABLES.includes(e.arguments[0]!.text))) problems.push(`a statement that is not a declaration or Object.freeze(<table>): ${s.getText(sf).slice(0, 60)}`);
+      continue;
+    }
+    if (!ts.isVariableStatement(s)) {
+      const name = ts.isClassDeclaration(s) || ts.isEnumDeclaration(s) || ts.isModuleDeclaration(s) ? s.name?.getText(sf) : undefined;
+      problems.push(`${name ?? s.getText(sf).slice(0, 40)}: a ${ts.SyntaxKind[s.kind]} at the top level`);
+      if (name) declared(name, `a ${ts.SyntaxKind[s.kind]}`);
+      if (ts.isImportDeclaration(s) && s.importClause) for (const b of [s.importClause.name, ...(s.importClause.namedBindings && ts.isNamedImports(s.importClause.namedBindings) ? s.importClause.namedBindings.elements.map((x) => x.name) : [])]) if (b) declared(b.text, 'an import');
+      continue;
+    }
     if (!(s.declarationList.flags & ts.NodeFlags.Const)) problems.push(`${s.declarationList.declarations.map((d) => d.name.getText(sf)).join()}: not const`);
     for (const d of s.declarationList.declarations) {
       const name = d.name.getText(sf);
+      declared(name, 'a const');
       if (!d.initializer) problems.push(`${name}: no initializer`);
       else if (!allowed(name, d.initializer)) problems.push(`${name}: ${d.initializer.getText(sf).slice(0, 50)} is a mutable or unknown initializer`);
     }
   }
+  // Every mention of a table's name, anywhere in the module, is one of exactly three: its declaration, the argument
+  // of `snapshot(<table>…)` in the one const statement that declares its companion (SNAPSHOT_OF), and the argument of
+  // its `Object.freeze(<table>);` statement.
+  const mentions = new Map<string, number>(TABLES.map((t) => [t, 0]));
+  const visit = (n: ts.Node) => {
+    if (ts.isIdentifier(n) && TABLES.includes(n.text)) {
+      mentions.set(n.text, (mentions.get(n.text) ?? 0) + 1);
+      const p = n.parent;
+      const ok =
+        (ts.isVariableDeclaration(p) && p.name === n && ts.isVariableStatement(p.parent.parent) && p.parent.parent.parent === sf) ||
+        (ts.isCallExpression(p) &&
+          p.arguments[0] === n &&
+          topFunctionNamed(p.expression, 'snapshot') &&
+          ts.isVariableDeclaration(p.parent) &&
+          p.parent.name.getText(sf) === SNAPSHOT_OF[n.text] &&
+          ts.isVariableStatement(p.parent.parent.parent) &&
+          p.parent.parent.parent.parent === sf) ||
+        (ts.isCallExpression(p) && p.arguments[0] === n && freezeCall(p) && ts.isExpressionStatement(p.parent) && p.parent.parent === sf);
+      if (!ok) problems.push(`${n.text} is read outside its declaration, its snapshot and its freeze: ${p.getText(sf).slice(0, 60)}`);
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(sf);
+  for (const [t, n] of mentions) if (n !== 3) problems.push(`${t} is named ${n} times, not 3 (its declaration, its snapshot, its freeze)`);
   return problems;
 }
 
-test('the tables hold data: each entry is [a regex literal or new RegExp of literals, a literal or pinned function marker (for BROAD an arrow of its parameter only), a string literal]', () => {
+/** The one const that may hold each table's snapshot. */
+const SNAPSHOT_OF: Record<string, string> = { PATTERNS: 'SHAPE_SNAPSHOT', BROAD: 'BROAD_SNAPSHOT', IDENTIFIERS: 'IDENTIFIER_SNAPSHOT' };
+
+test('the tables hold data: each entry is [a regex literal, a literal or pinned function marker (for BROAD an arrow of its parameter only), a string literal]', () => {
   assert.deepEqual(tableProblems(SRC), []);
 });
 
@@ -619,8 +684,8 @@ test("H1: the module's data can't be changed from code that runs: a Set, a RegEx
   };
   assert.match(bind("const CODE_HEADS = Object.freeze(['this',", "const CODE_HEADS = new Set(['this',"), /CODE_HEADS: new Set/);
   assert.match(bind("const CREDENTIAL_ENDINGS = Object.freeze(['token', 'secret', 'password', 'passwd', 'accesskey']);", "const CREDENTIAL_ENDINGS = ['token', 'secret', 'password', 'passwd', 'accesskey'];"), /CREDENTIAL_ENDINGS: \[/);
-  assert.match(bind('const OCTET = ', 'const KEY_LINE = /-----(BEGIN|END) [A-Z ]*PRIVATE KEY(?: BLOCK)?-----/g;\nconst OCTET = '), /KEY_LINE: \/-----/);
-  assert.match(bind('const OCTET = ', "let LATE = 'x';\nconst OCTET = "), /LATE: not const/);
+  assert.match(bind('const CODE_HEADS = ', 'const KEY_LINE = /-----(BEGIN|END) [A-Z ]*PRIVATE KEY(?: BLOCK)?-----/g;\nconst CODE_HEADS = '), /KEY_LINE: \/-----/);
+  assert.match(bind('const CODE_HEADS = ', "let LATE = 'x';\nconst CODE_HEADS = "), /LATE: not const/);
   // At run time, in a module copy: the review's writes find frozen arrays or no binding, and the output is the control's.
   // (Their microtask forms are try-wrapped, as the probes were; an unwrapped TypeError in a microtask would end this process.)
   const corpHost = (m: Redact) => m.redactString('see buildbox.corp now', m.TRACKER);
@@ -654,4 +719,97 @@ test("H1: the module's data can't be changed from code that runs: a Set, a RegEx
   const hmac = `{"hmac_key": "${run(20, 'aB3dE5gH7jK9mN1pQ3sT')}"}`;
   assert.equal(g2.redactString(hmac), '{"hmac_key": "[REDACTED]"}');
   assert.deepEqual(g2.secretKinds(hmac), ['secret under a JSON key']);
+});
+
+// R1258j: code ran from a table entry at load through two routes the lints didn't read. J1a: `new RegExp(...)` in an
+// entry called a module-level `RegExp` that shadowed the intrinsic (one added const; the entry's own line unchanged).
+// J1b: a table entry added outside the table literal (`PATTERNS.push(...)`, a statement no lint read). Each is refused
+// by the lints above; the regexes in the two entries that were constructions are literals now.
+const J1A_SHADOW = "const RegExp = Object.freeze(Object.assign(function (source: string | RegExp, flags?: string): RegExp { const R = globalThis.RegExp; const P = Reflect.get(R, 'proto' + 'type') as Record<string, unknown>; if (P['constructor'] !== RegExp) { P['constructor'] = RegExp; const exec = P['exec'] as (this: RegExp, s: string) => RegExpExecArray | null; P['exec'] = function (this: RegExp, s: string) { const m = exec.call(this, s); return m && this.source.includes('([sr]k)_') && m[3] && m[3].length >= 120 ? null : m; }; } return new R(source, flags); }, { ['proto' + 'type']: Reflect.get(globalThis.RegExp, 'proto' + 'type') })) as unknown as RegExpConstructor;";
+const J1B_PUSH = "PATTERNS.push([/zz_never_matches_zz/g, `${{ toString: () => { const P = Reflect.get(RegExp, 'proto' + 'type') as Record<string, unknown>; const exec = P['exec'] as (this: RegExp, s: string) => RegExpExecArray | null; P['exec'] = function (this: RegExp, s: string) { const m = exec.call(this, s); return m && this.source.includes('([sr]k)_') && m[3] && m[3].length >= 120 ? null : m; }; return '[REDACTED]'; } }}`, 'Stripe key']);";
+const AFTER_BODY = "const DASHBOARD_KEY_BODY = '[A-Za-z0-9_-]{32,}';";
+const BEFORE_SNAPSHOT = 'const SHAPE_SNAPSHOT = snapshot(PATTERNS);';
+/** `SRC` with `line` put right after the DASHBOARD_KEY_BODY const (J1a) or right before the first snapshot (J1b). */
+const withLine = (where: 'after-body' | 'before-snapshot', line: string) => {
+  const anchor = where === 'after-body' ? AFTER_BODY : BEFORE_SNAPSHOT;
+  assert.equal(SRC.split(anchor).length, 2, anchor);
+  return SRC.replace(anchor, where === 'after-body' ? `${anchor}\n${line}` : `${line}\n${anchor}`);
+};
+
+test('J1a: a top-level binding named RegExp (or any other global) is refused, as a const, a function, a class or an import', () => {
+  assert.match(bindingProblems(withLine('after-body', J1A_SHADOW)).join('\n'), /RegExp: a const named as a global/);
+  assert.match(bindingProblems(withLine('after-body', 'function RegExp(source: string, flags?: string): RegExp { return new globalThis.RegExp(source, flags); }')).join('\n'), /RegExp: a function named as a global/);
+  for (const name of ['Object', 'Array', 'String', 'Symbol', 'Function', 'Reflect', 'globalThis', 'Proxy']) {
+    assert.match(bindingProblems(withLine('after-body', `const ${name} = globalThis.${name};`)).join('\n'), new RegExp(`${name}: a const named as a global`), name);
+  }
+  assert.match(bindingProblems(withLine('after-body', 'class RegExp {}')).join('\n'), /RegExp: a ClassDeclaration at the top level[\s\S]*RegExp: a ClassDeclaration named as a global/);
+  assert.match(bindingProblems(withLine('after-body', "import { RegExp } from './decoy.js';")).join('\n'), /ImportDeclaration at the top level[\s\S]*RegExp: an import named as a global/);
+  assert.match(bindingProblems(withLine('after-body', "import RegExp from './decoy.js';")).join('\n'), /RegExp: an import named as a global/);
+  // A name that is no global is allowed as a const of a literal.
+  assert.deepEqual(bindingProblems(withLine('after-body', "const SPAN = 'wld_';")), []);
+});
+
+test('J1b: a table entry added outside the table literal, or any other read of a table, is refused; so is any statement that is not a declaration or a freeze', () => {
+  assert.match(bindingProblems(withLine('before-snapshot', J1B_PUSH)).join('\n'), /a statement that is not a declaration or Object\.freeze\(<table>\): PATTERNS\.push[\s\S]*PATTERNS is read outside its declaration, its snapshot and its freeze/);
+  for (const line of [
+    "PATTERNS[3] = [/zz/g, '[REDACTED]', 'Stripe key'];",
+    "PATTERNS.splice(0, 0, [/zz/g, '[REDACTED]', 'Stripe key']);",
+    'const MORE = [...PATTERNS];',
+    'const FIRST = PATTERNS[0];',
+    'const COUNT = PATTERNS.length;',
+    "const IDENTIFIERS_TOO = Object.freeze([...IDENTIFIERS, [/zz/g, '[x]', 'email']]);",
+    'const BROAD_AGAIN = snapshot(BROAD);',
+  ]) assert.match(bindingProblems(withLine('before-snapshot', line)).join('\n'), /is read outside its declaration, its snapshot and its freeze/, line);
+  for (const line of ['queueMicrotask(() => {});', 'Object.freeze(CODE_HEADS);', 'void 0;', 'export {};', 'enum E { A }', 'namespace N { export let y = 1; }']) {
+    assert.notEqual(bindingProblems(withLine('before-snapshot', line)).length, 0, line);
+  }
+  // Each table is named exactly three times: with its freeze statement gone, the count says so.
+  assert.equal(SRC.split('Object.freeze(PATTERNS);').length, 2);
+  assert.match(bindingProblems(SRC.replace('Object.freeze(PATTERNS);', '')).join('\n'), /PATTERNS is named 2 times, not 3/);
+  // The real module has none of these.
+  assert.deepEqual(bindingProblems(SRC), []);
+});
+
+test("J1a: an entry's regex must be a regex literal; the two that were constructions are the same patterns written out", () => {
+  assert.match(tableProblems(sourceWith('PATTERNS', "[new RegExp('zz_never_matches_zz', 'g'), '[REDACTED]', 'never'],")).join('\n'), /the regex is not a regex literal/);
+  assert.match(tableProblems(sourceWith('PATTERNS', "[new RegExp(`${DASHBOARD_KEY_PREFIX}zz`, 'g'), '[REDACTED]', 'never'],")).join('\n'), /the regex is not a regex literal/);
+  assert.match(tableProblems(sourceWith('PATTERNS', "[RegExp('zz', 'g'), '[REDACTED]', 'never'],")).join('\n'), /the regex is not a regex literal/);
+  assert.deepEqual(tableProblems(sourceWith('PATTERNS', "[/zz_never_matches_zz/g, '[REDACTED]', 'never'],")), []);
+  assert.ok(!/new RegExp\(/.test(SRC.slice(SRC.indexOf('const PATTERNS'), SRC.indexOf('const IDENTIFIER_SNAPSHOT'))), 'no RegExp construction between the first table and the last snapshot');
+  // The dashboard-key literal is DASHBOARD_KEY_PREFIX + DASHBOARD_KEY_BODY; the private-IP literal is the composition.
+  const dashboard = REDACTION_PATTERNS.find((p) => p.kind === 'dashboard key')!;
+  assert.equal(dashboard.re.source, `${DASHBOARD_KEY_PREFIX}[A-Za-z0-9_-]{32,}(?![A-Za-z0-9_-])`);
+  assert.equal(dashboard.re.flags, 'g');
+  const octet = '(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)';
+  const ranges = `10\\.${octet}|172\\.(?:1[6-9]|2\\d|3[01])|192\\.168|100\\.(?:6[4-9]|[7-9]\\d|1[01]\\d|12[0-7])|169\\.254`;
+  const v4 = REDACTION_PATTERNS.filter((p) => p.kind === 'private IP')[0]!;
+  assert.equal(v4.re.source, `(^|[^\\w.])(?:${ranges})\\.${octet}\\.${octet}(?![\\w-]|\\.\\d)`);
+  assert.equal(v4.re.flags, 'g');
+  // (The addresses are joined here so that no literal private address is written in the file: the denylist.)
+  const ip = (...o: number[]) => o.join('.');
+  const addresses = `from ${ip(10, 1, 2, 3)} and ${ip(172, 31, 255, 1)} and ${ip(192, 168, 0, 9)} and ${ip(100, 64, 0, 1)} and ${ip(169, 254, 169, 254)}, not ${ip(8, 8, 8, 8)} or ${ip(172, 32, 0, 1)}`;
+  assert.equal(redactString(addresses, { identifiers: true }), `from [private-ip] and [private-ip] and [private-ip] and [private-ip] and [private-ip], not ${ip(8, 8, 8, 8)} or ${ip(172, 32, 0, 1)}`);
+  assert.equal(redactString(`key wld_${run(32)} here`), 'key wld_[REDACTED] here');
+});
+
+test("J1a at run time: the snapshot compares a rule's regex with the intrinsic through globalThis, so a shadow that passes the lint-free copy still refuses", async () => {
+  // A module copy with the review's shadow (the lints never see a built copy): the shadow's constructor step makes
+  // `instanceof` and `.constructor` pass against the module's name, and the snapshot reads the intrinsic through
+  // globalThis instead. The source has no `new RegExp` in a table any more, so the shadow isn't even called at load;
+  // this copy calls it from a spliced entry to show the comparison.
+  const lines = built().split('\n');
+  const at = lines.findIndex((l) => l.startsWith('const PATTERNS = ['));
+  assert.notEqual(at, -1);
+  const shadow = "const RegExp = Object.freeze(Object.assign(function (source, flags) { const R = globalThis.RegExp; const P = Reflect.get(R, 'proto' + 'type'); if (P['constructor'] !== RegExp) { P['constructor'] = RegExp; } return new R(source, flags); }, { ['proto' + 'type']: Reflect.get(globalThis.RegExp, 'proto' + 'type') }));";
+  lines.splice(at, 0, shadow);
+  const stripe = lines.findIndex((l) => l.endsWith(ANCHORS.PATTERNS));
+  lines.splice(stripe, 0, "    [new RegExp('zz_never_matches_zz', 'g'), '[REDACTED]', 'never'],");
+  const file = join(mkdtempSync(join(tmpdir(), 'redact-markers-')), 'redact.js');
+  writeFileSync(file, lines.join('\n'));
+  try {
+    await assert.rejects(import(pathToFileURL(file).href), refused(/plain RegExp with no own property/));
+  } finally {
+    // The shadow patched the intrinsic's prototype constructor in this process: put it back.
+    Object.defineProperty(globalThis.RegExp.prototype, 'constructor', { value: globalThis.RegExp, writable: true, configurable: true, enumerable: false });
+  }
 });
