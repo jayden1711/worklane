@@ -22,7 +22,8 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { devNull } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { loadRules, scanBinary, scanText, SKIP } from './lib/denylist.mjs';
 
 const ZERO = /^0+$/;
@@ -198,26 +199,75 @@ function cleanupMode(env = process.env) {
   return edited ? 'strip' : 'whitespace';
 }
 
-/** The comment prefix git uses: core.commentString, else core.commentChar, else `#` (`auto` read as `#`). */
-function commentPrefix() {
-  const c = gitConfig('core.commentString') ?? gitConfig('core.commentChar');
-  return !c || c === 'auto' ? '#' : c;
+/**
+ * The comment setting git reads (R1260c D2): from 2.45, core.commentChar and core.commentString, whichever is set last;
+ * before, core.commentChar alone (git ignored core.commentString). `#` when neither is set; `auto` as it is.
+ */
+function commentSetting() {
+  let newer = false;
+  try {
+    const m = /(\d+)\.(\d+)/.exec(runGit(['version'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }));
+    newer = !!m && (Number(m[1]) > 2 || (Number(m[1]) === 2 && Number(m[2]) >= 45));
+  } catch {
+    // no git: the default below
+  }
+  let set = [];
+  try {
+    set = runGit(['config', '--get-regexp', '^core\\.comment(char|string)$'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+      .split('\n')
+      .filter(Boolean)
+      .map((l) => [l.slice(0, l.indexOf(' ') === -1 ? l.length : l.indexOf(' ')).toLowerCase(), l.indexOf(' ') === -1 ? '' : l.slice(l.indexOf(' ') + 1)]);
+  } catch {
+    // none set
+  }
+  return set.filter(([k]) => newer || k === 'core.commentchar').at(-1)?.[1] || '#';
+}
+
+/** The characters git's `core.commentChar=auto` picks from, in order: the first that starts no line of the message. */
+const AUTO_COMMENT = '#;@!$%^&|:';
+const scissors = (c) => `${c} ------------------------ >8 ------------------------`;
+const BLANK = /^[ \t\n\v\f\r]*$/;
+
+/**
+ * The comment prefixes to judge an edited message by (R1260c D1, R1260d D2). A set prefix, as it is. For `auto`, git
+ * picked the first of AUTO_COMMENT that started no line of the message it prepared, then wrote its scissors line and
+ * help lines with it: read it from the scissors line, or from the help block at the end (lines starting with one
+ * candidate, after a blank line, below the message) when git's own rule over the lines above gives that candidate.
+ * Otherwise (no help lines to read it from) both readings, `#` stripped and nothing stripped: the hook refuses when
+ * either fails, never passing what git might commit differently.
+ */
+function commentPrefixes(text, setting) {
+  if (setting !== 'auto') return [setting];
+  const lines = text.split('\n');
+  for (const c of AUTO_COMMENT) if (lines.includes(scissors(c))) return [c];
+  let b = lines.length;
+  while (b > 0 && BLANK.test(lines[b - 1])) b--;
+  const c = b > 0 ? lines[b - 1][0] : undefined;
+  if (c && AUTO_COMMENT.includes(c)) {
+    while (b > 0 && (lines[b - 1].startsWith(c) || BLANK.test(lines[b - 1]))) b--;
+    const above = lines.slice(0, b);
+    const separated = b < lines.length && BLANK.test(lines[b]) && above.some((l) => !BLANK.test(l));
+    const gits = [...AUTO_COMMENT].find((x) => !above.some((l) => l.startsWith(x)));
+    if (separated && gits === c) return [c];
+  }
+  return ['#', null];
 }
 
 /**
  * The message as git will commit it, from the file the commit-msg hook is given, by git's cleanup `mode`: verbatim
  * changes nothing; strip and scissors cut at the scissors line; strip leaves out comment lines; all but verbatim then
  * take trailing whitespace off each line, fold runs of blank lines to one, and drop blank lines at the start and the
- * end. Blank and whitespace are ASCII, as git's isspace (a BOM or NBSP line is not blank: R1260b).
+ * end. Blank and whitespace are ASCII, as git's isspace (a BOM or NBSP line is not blank: R1260b). A null `comment`
+ * strips and cuts nothing (one of `auto`'s two readings).
  */
 function asCommitted(text, mode = 'strip', comment = '#') {
   if (mode === 'verbatim') return text;
   let lines = text.split('\n');
   if (mode === 'strip' || mode === 'scissors') {
-    const cut = lines.indexOf(`${comment} ------------------------ >8 ------------------------`);
+    const cut = comment === null ? -1 : lines.indexOf(scissors(comment));
     if (cut !== -1) lines = lines.slice(0, cut);
   }
-  if (mode === 'strip') lines = lines.filter((l) => !l.startsWith(comment));
+  if (mode === 'strip' && comment !== null) lines = lines.filter((l) => !l.startsWith(comment));
   const out = [];
   for (const l of lines.map((x) => x.replace(/[ \t\n\v\f\r]+$/, ''))) {
     if (l !== '') out.push(l);
@@ -291,11 +341,16 @@ function gitleaks(commits) {
 
 // The commit-msg hook (#1259; installed by setup-hooks): the message rule alone, before the commit is made, so none is
 // made that the gate would refuse and that would then have to be rewritten. No rules or git are read.
-// R1260a D2: only when the installed stub runs it, which names the message file in PUSH_GATE_COMMIT_MSG too. A pre-push
-// hook's first argument is the remote's name, and a remote may be named `--commit-msg`: that push is judged below.
-if (process.argv[2] === '--commit-msg' && process.argv.length === 4 && process.env.PUSH_GATE_COMMIT_MSG === process.argv[3]) {
+// R1260a D2, R1260d D1: only when the installed stub runs it: from its own copy in the hooks dir (commit-msg-gate/;
+// the pre-push launcher runs the gate from a fresh temp dir, never there), and with the message file named in
+// PUSH_GATE_COMMIT_MSG too. A pre-push hook's first argument is the remote's name and its second the remote's URL,
+// and its environment is the pusher's: a push that supplies all three is still judged below.
+const installedCopy = basename(dirname(dirname(fileURLToPath(import.meta.url)))) === 'commit-msg-gate';
+if (process.argv[2] === '--commit-msg' && installedCopy && process.argv.length === 4 && process.env.PUSH_GATE_COMMIT_MSG === process.argv[3]) {
   try {
-    const why = messageShapeProblems(asCommitted(readFileSync(process.argv[3], 'utf8'), cleanupMode(), commentPrefix()));
+    const text = readFileSync(process.argv[3], 'utf8');
+    const mode = cleanupMode();
+    const why = [...new Set(commentPrefixes(text, commentSetting()).flatMap((c) => messageShapeProblems(asCommitted(text, mode, c))))];
     if (why.length) {
       console.error(`commit refused, by the push gate's message-shape rule: ${why.join('; and ')}`);
       console.error(`Nothing was committed; the message is kept in ${process.argv[3]}. Put the subject alone on line 1 (at most ${SUBJECT_MAX} characters), then a blank line, then the body, and commit again.`);

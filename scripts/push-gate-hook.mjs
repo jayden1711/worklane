@@ -229,6 +229,8 @@ function main(argv) {
     return 0;
   }
   const hookMode = argv[0] !== '--range';
+  // R1260d D1: a remote named like an option (`--commit-msg`) would reach the gate as one; git allows such a name.
+  if (hookMode && (argv[0] ?? '').startsWith('-')) throw new Refusal(`a remote named ${JSON.stringify(argv[0])}: a name that starts with '-' reads as an option to the gate, so nothing is pushed to it. Rename it: git remote rename -- ${argv[0]} <name>`);
   const top = git(['rev-parse', '--show-toplevel']).trim();
   const gitDir = git(['rev-parse', '--absolute-git-dir']).trim();
   // INVARIANT: the gate and its rules live in a directory only this user can read, and it is gone when the hook returns.
@@ -241,6 +243,8 @@ function main(argv) {
     // WHY: the gate reads its rules (and gitleaks its config) from the directory it runs in, so it runs in the
     // private copy; GIT_DIR points its git commands at this repo, and nothing else of the checkout is in reach.
     const env = { ...process.env, GIT_DIR: gitDir, ...GIT_FIXED_ENV };
+    // R1260d D1: the commit-msg hook's marker is the installed stub's alone; a push never hands it on.
+    for (const k of Object.keys(env)) if (k.toUpperCase() === 'PUSH_GATE_COMMIT_MSG') delete env[k];
     for (const k of ['GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_PREFIX']) delete env[k];
     const r = spawnSync(process.execPath, [join(dir, GATE_CODE[0]), ...argv], { cwd: dir, stdio: 'inherit', env });
     if (r.error) throw r.error;

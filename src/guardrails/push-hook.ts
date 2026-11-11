@@ -14,6 +14,12 @@ export const PUSH_GATE_HATCH_ENV = 'PUSH_GATE_BOOTSTRAP';
 
 // WHY: case-insensitive, as environment names are on Windows.
 const HATCH = new RegExp(PUSH_GATE_HATCH_ENV, 'i');
+/**
+ * The commit-msg hook's marker (#1260): the installed commit-msg stub sets it for the gate's message check. An agent
+ * that set it on a push would ask the gate to take the push for a message (R1260d D1), so it is the hatch's kin.
+ */
+export const COMMIT_MSG_MARKER_ENV = 'PUSH_GATE_COMMIT_MSG';
+const MARKER = new RegExp(COMMIT_MSG_MARKER_ENV, 'i');
 const HOOKS_PATH_KEY = /^core\.hookspath(=|$)/i;
 /**
  * Config keys that make git read other config (an include) or run another command for a name (an alias, or a
@@ -55,9 +61,10 @@ const AUTOCORRECT_OFF = /^(0+|never|show)$/i;
 /** A read-only git query in a directory: its exit status (null when it didn't run) and its output. */
 export type GitLookup = (dir: string, args: string[]) => { status: number | null; stdout: string };
 
-/** `env` without the hatch (any spelling of its case). The same object, for chaining. */
+/** `env` without the hatch, nor the commit-msg hook's marker (any spelling of their case). The same object, for chaining. */
 export function withoutPushGateHatch<T extends Record<string, string | undefined>>(env: T): T {
   for (const k of Object.keys(env)) if (k.toUpperCase() === PUSH_GATE_HATCH_ENV) delete env[k];
+  for (const k of Object.keys(env)) if (k.toUpperCase() === COMMIT_MSG_MARKER_ENV) delete env[k];
   return env;
 }
 
@@ -68,6 +75,7 @@ export interface PushHookRefusal {
 
 const HATCH_REASON = `${PUSH_GATE_HATCH_ENV} is the push gate's first-time-setup hatch, for a person's own push; an agent never sets, exports, passes or stores it (a command that only reads, such as grep or cat on its own, may name it)`;
 const hatch = (): PushHookRefusal => ({ rule: 'push-gate-hatch', reason: HATCH_REASON });
+const MARKER_REASON = `${COMMIT_MSG_MARKER_ENV} is the commit-msg hook's own marker, set by its installed stub; an agent never sets, exports, passes or stores it (a command that only reads may name it)`;
 const bypass = (what: string): PushHookRefusal => ({ rule: 'push-hook-bypass', reason: `${what}: an agent never skips, swaps or rewrites git's pre-push hook; push through the hook as installed` });
 
 interface GitCall {
@@ -608,6 +616,8 @@ export function pushHookShellRefusal(command: string, commands: SimpleCommand[],
   const named = (c: SimpleCommand) => [...Object.keys(c.assignments), ...Object.values(c.assignments), ...c.argv, ...c.writes].some((t) => HATCH.test(t));
   // INVARIANT: a line that names the hatch anywhere runs only when every command in it can do nothing but read.
   if ((HATCH.test(command) || commands.some(named)) && !commands.every(onlyReads)) return hatch();
+  const marked = (c: SimpleCommand) => [...Object.keys(c.assignments), ...Object.values(c.assignments), ...c.argv, ...c.writes].some((t) => MARKER.test(t));
+  if ((MARKER.test(command) || commands.some(marked)) && !commands.every(onlyReads)) return { rule: 'push-gate-hatch', reason: MARKER_REASON };
 
   // INVARIANT (#993): every git call is judged as git reads it, alias and correction included; one the guard can't
   // read that way is refused.

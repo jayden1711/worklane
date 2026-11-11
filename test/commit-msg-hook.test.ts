@@ -5,12 +5,24 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { repoRoot } from './helpers.js';
 
 const gate = join(repoRoot, 'scripts', 'push-gate.mjs');
+/**
+ * The gate as setup-hooks installs it for the commit-msg hook (R1260d D1: its --commit-msg mode runs only from there,
+ * `<hooks>/commit-msg-gate/scripts/push-gate.mjs`, never from the checkout or the pre-push launcher's temp copy).
+ */
+const installedGate = (() => {
+  const d = join(mkdtempSync(join(tmpdir(), 'hooks-')), 'commit-msg-gate');
+  for (const f of ['scripts/push-gate.mjs', 'scripts/lib/denylist.mjs']) {
+    mkdirSync(dirname(join(d, f)), { recursive: true });
+    copyFileSync(join(repoRoot, f), join(d, f));
+  }
+  return join(d, 'scripts', 'push-gate.mjs');
+})();
 const installer = join(repoRoot, 'scripts', 'setup-hooks.mjs');
 const sized = (n: number) => `Long subject ${'x'.repeat(n - 13)}`;
 const sha = (t: string) => createHash('sha256').update(t).digest('hex');
@@ -21,7 +33,7 @@ function hook(text: string) {
   writeFileSync(join(d, 'COMMIT_EDITMSG'), text);
   const f = join(d, 'COMMIT_EDITMSG');
   // As the installed stub runs it, for an edited message (git's `strip` cleanup).
-  return spawnSync(process.execPath, [gate, '--commit-msg', f], { encoding: 'utf8', cwd: d, env: { ...process.env, PUSH_GATE_COMMIT_MSG: f, GIT_EDITOR: 'vi', GIT_DIR: join(d, 'no-repo') } });
+  return spawnSync(process.execPath, [installedGate, '--commit-msg', f], { encoding: 'utf8', cwd: d, env: { ...process.env, PUSH_GATE_COMMIT_MSG: f, GIT_EDITOR: 'vi', GIT_DIR: join(d, 'no-repo') } });
 }
 
 /** A scratch repo with this repo's denylist patterns, its own author, and no hooks of its own. */
@@ -64,7 +76,7 @@ test('the commit-msg hook refuses an over-long subject and a non-blank line 2, a
     assert.equal(r.status, 0, `kept: ${what}: ${r.stderr}`);
   }
   const missing = join(tmpdir(), 'no-such-message-file');
-  const none = spawnSync(process.execPath, [gate, '--commit-msg', missing], { encoding: 'utf8', env: { ...process.env, PUSH_GATE_COMMIT_MSG: missing } });
+  const none = spawnSync(process.execPath, [installedGate, '--commit-msg', missing], { encoding: 'utf8', env: { ...process.env, PUSH_GATE_COMMIT_MSG: missing } });
   assert.equal(none.status, 1, 'no message file: refused (it fails closed)');
 });
 
@@ -91,8 +103,9 @@ test("the commit-msg hook and the push gate refuse a message for the same reason
   assert.match(body('messageShapeProblems'), /line 2 is not blank/);
   assert.match(body('messageShape'), /messageShapeProblems\(message\)/, 'the push path calls it');
   const hookPath = src.slice(src.indexOf("if (process.argv[2] === '--commit-msg' &&"), src.indexOf("if (process.argv[2] === '--pr-body')"));
+  assert.ok(src.includes("const installedCopy = basename(dirname(dirname(fileURLToPath(import.meta.url)))) === 'commit-msg-gate';"), 'the installed copy, by where it runs from (R1260d D1)');
   assert.match(hookPath, /messageShapeProblems\(asCommitted\(/, 'the commit-msg path calls it');
-  assert.match(hookPath, /^if \(process\.argv\[2\] === '--commit-msg' && process\.argv\.length === 4 && process\.env\.PUSH_GATE_COMMIT_MSG === process\.argv\[3\]\)/, 'only with the stub\'s marker (R1260a D2)');
+  assert.match(hookPath, /^if \(process\.argv\[2\] === '--commit-msg' && installedCopy && process\.argv\.length === 4 && process\.env\.PUSH_GATE_COMMIT_MSG === process\.argv\[3\]\)/, "only the installed copy, with the stub's marker (R1260a D2, R1260d D1)");
 });
 
 test('setup-hooks installs the commit-msg hook beside the pre-push hook: a bad message is never committed, a good one is (#1259)', () => {
@@ -139,7 +152,7 @@ test('setup-hooks installs the commit-msg hook beside the pre-push hook: a bad m
 const hasGitleaks = spawnSync('gitleaks', ['version'], { stdio: 'ignore' }).status === 0;
 const L = 'a'.repeat(200);
 /** [name, git config, message file text or null, git commit args (MSG: the file)]. R1260b's msg-mismatch.sh rows. */
-type Row = [string, Record<string, string>, string | null, string[]];
+type Row = [string, Record<string, string>, string | null, string[], Record<string, string>?];
 const ROWS: Row[] = [
   ['ctl-long-subject', {}, null, ['-m', L]],
   ['ctl-ok', {}, null, ['-m', 'Fix the hook', '-m', 'Body.']],
@@ -170,19 +183,38 @@ const ROWS: Row[] = [
   ['u2028', {}, 'subj second\n', ['-F', 'MSG']],
   ['nbsp-line2', {}, 'subj\n \nbody\n', ['-F', 'MSG']],
   ['cr-only-line2', {}, 'subj\rline2\n', ['-F', 'MSG']],
+  // core.commentChar=auto (R1260c D1, R1260d D2): git picks the first of #;@!$%^&|: that starts no line, so a #NNN line
+  // is kept when the message has one.
+  ['auto-e-hash-long', { 'core.commentChar': 'auto' }, null, ['-e', '-m', `#1259: ${L}`, '-m', 'Body.']],
+  ['auto-e-hash-short', { 'core.commentChar': 'auto' }, null, ['-e', '-m', '#1259: short subject', '-m', L]],
+  ['auto-e-hash-line2', { 'core.commentChar': 'auto' }, null, ['-e', '-m', 'subj\n#1259 follow-up']],
+  ['auto-F-e-hashlong', { 'core.commentChar': 'auto' }, `#1259: ${L}\n\nbody\n`, ['-e', '-F', 'MSG']],
+  ['auto-m-hash-long', { 'core.commentChar': 'auto' }, null, ['-m', `#1259: ${L}`]],
+  ['auto-e-plain', { 'core.commentChar': 'auto' }, null, ['-e', '-m', 'subj', '-m', 'body']],
+  // No help lines to read git's choice from (commit.status=false): both readings, refused if either fails.
+  ['auto-nostatus-hash-long', { 'core.commentChar': 'auto', 'commit.status': 'false' }, null, ['-e', '-m', `#1259: ${L}`]],
+  ['auto-nostatus-plain', { 'core.commentChar': 'auto', 'commit.status': 'false' }, null, ['-e', '-m', 'subj', '-m', 'body']],
+  ['auto-e-verbose', { 'core.commentChar': 'auto' }, null, ['-e', '-v', '-m', '#1259: short subject', '-m', 'body']],
+  // core.commentString (git 2.45+, whichever of the two is set last; older git reads core.commentChar alone: R1260c D2).
+  ['cs-slash-e-long', { 'core.commentString': '//' }, `// note\n${L}\n`, ['-e', '-F', 'MSG']],
+  ['cs-slash-e-hash', { 'core.commentString': '//' }, 'subj\n#x\n\nbody\n', ['-e', '-F', 'MSG']],
+  ['cs-then-char', { 'core.commentString': '//', 'core.commentChar': ';' }, 'subj\n; note\n\nbody\n', ['-e', '-F', 'MSG']],
   // A --cleanup= on the command line, which no hook can see (stated in CONTRIBUTING): judged by the default mode.
   ['cli-strip-comment', {}, 'subj\n#x\n\nbody\n', ['--cleanup=strip', '-F', 'MSG']],
   ['cli-semi-line2', { 'core.commentChar': ';' }, 'subj\n; a note\n\nbody\n', ['--cleanup=strip', '-F', 'MSG']],
   ['cli-verbatim-lead', {}, '\nsubj\n', ['--cleanup=verbatim', '-F', 'MSG']],
+  // A GIT_EDITOR=':' the user set (R1260d D3): git edits (-e) and strips; the hook reads git's own "not edited" signal.
+  ['user-editor-colon', {}, `# c\n\n${L}\n`, ['-e', '-F', 'MSG'], { GIT_EDITOR: ':' }],
+  ['user-colon-l2', {}, 'subj\n# note\n\nbody\n', ['-e', '-F', 'MSG'], { GIT_EDITOR: ':' }],
 ];
 /** The rows the hook can't judge as the gate does: a --cleanup= on the command line (a fix shows up here). */
-const CLI_RESIDUAL: Record<string, string> = { 'cli-strip-comment': 'hook=refuse gate=pass', 'cli-semi-line2': 'hook=refuse gate=pass', 'cli-verbatim-lead': 'hook=pass gate=refuse' };
+const CLI_RESIDUAL: Record<string, string> = { 'cli-strip-comment': 'hook=refuse gate=pass', 'cli-semi-line2': 'hook=refuse gate=pass', 'cli-verbatim-lead': 'hook=pass gate=refuse', 'user-editor-colon': 'hook=pass gate=refuse', 'user-colon-l2': 'hook=refuse gate=pass' };
 
 test("the commit-msg hook and the push gate agree on what git commits, by git's cleanup mode (#1260 R1260a/b D1: msg-mismatch.sh's rows)", { skip: !hasGitleaks && 'gitleaks not installed', timeout: 300_000 }, () => {
   const env = { ...process.env, GIT_AUTHOR_NAME: 'Ada', GIT_AUTHOR_EMAIL: 'ada@example.com', GIT_COMMITTER_NAME: 'Ada', GIT_COMMITTER_EMAIL: 'ada@example.com', GIT_EDITOR: 'true' };
   delete (env as Record<string, string | undefined>).GIT_DIR;
   const seen: string[] = [];
-  for (const [name, cfg, body, args] of ROWS) {
+  for (const [name, cfg, body, args, rowEnv] of ROWS) {
     const a = repo();
     const b = repo();
     for (const [k, v] of Object.entries(cfg)) for (const r of [a, b]) r.git('config', k, v);
@@ -191,8 +223,8 @@ test("the commit-msg hook and the push gate agree on what git commits, by git's 
     const file = join(a.dir, '..', `${name}.msg`);
     if (body !== null) writeFileSync(file, body);
     const argv = args.map((x) => (x === 'MSG' ? file : x));
-    const hookOk = spawnSync('git', ['commit', '-q', '--allow-empty', ...argv], { cwd: a.dir, encoding: 'utf8', env }).status === 0;
-    const made = spawnSync('git', ['commit', '-q', '--allow-empty', '--no-verify', ...argv], { cwd: b.dir, encoding: 'utf8', env });
+    const hookOk = spawnSync('git', ['commit', '-q', '--allow-empty', ...argv], { cwd: a.dir, encoding: 'utf8', env: { ...env, ...rowEnv } }).status === 0;
+    const made = spawnSync('git', ['commit', '-q', '--allow-empty', '--no-verify', ...argv], { cwd: b.dir, encoding: 'utf8', env: { ...env, ...rowEnv } });
     assert.equal(made.status, 0, `${name}: git made the commit: ${made.stderr}`);
     const g = spawnSync(process.execPath, [gate, '--range', 'HEAD~1..HEAD'], { cwd: repoRoot, encoding: 'utf8', env: { ...process.env, GIT_DIR: join(b.dir, '.git') } });
     if (g.status !== 0) assert.match(g.stderr, /subject is not one short line/, `${name}: the gate refused for the message's shape, not something else: ${g.stderr}`);
@@ -218,4 +250,15 @@ test('a remote named --commit-msg is judged as a push, never as a message (#1260
   assert.notEqual(p.status, 0, `the push is judged, and refused: ${p.stderr}`);
   assert.match(p.stderr, /vendor attribution/);
   assert.notEqual(prePush({ PUSH_GATE_COMMIT_MSG: 'something else' }).status, 0, 'a marker naming another file: still a push');
+  // R1260d D1: the marker naming the URL itself, as a pusher's environment can: the gate isn't the installed copy, so
+  // it is still a push, judged and refused.
+  const matching = prePush({ PUSH_GATE_COMMIT_MSG: url });
+  assert.notEqual(matching.status, 0, `a matching marker from the pusher's environment: still a push: ${matching.stderr}`);
+  assert.match(matching.stderr, /vendor attribution/);
+  // And the pre-push launcher refuses a remote whose name reads as an option before any gate runs.
+  const launcher = spawnSync(process.execPath, [join(repoRoot, 'scripts', 'push-gate-hook.mjs'), '--commit-msg', url], { cwd: r.dir, encoding: 'utf8', input: '', env: { ...process.env, PUSH_GATE_COMMIT_MSG: url } });
+  assert.equal(launcher.status, 1, launcher.stderr);
+  assert.match(launcher.stderr, /a remote named "--commit-msg": a name that starts with '-' reads as an option/);
+  const src = readFileSync(join(repoRoot, 'scripts', 'push-gate-hook.mjs'), 'utf8');
+  assert.match(src, /if \(k\.toUpperCase\(\) === 'PUSH_GATE_COMMIT_MSG'\) delete env\[k\];/, "the launcher never hands the marker on");
 });
