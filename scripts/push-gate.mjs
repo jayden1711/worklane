@@ -230,11 +230,12 @@ const BLANK = /^[ \t\n\v\f\r]*$/;
 
 /**
  * The comment prefixes to judge an edited message by (R1260c D1, R1260d D2). A set prefix, as it is. For `auto`, git
- * picked the first of AUTO_COMMENT that started no line of the message it prepared, then wrote its scissors line and
- * help lines with it: read it from the scissors line, or from the help block at the end (lines starting with one
- * candidate, after a blank line, below the message) when git's own rule over the lines above gives that candidate.
- * Otherwise (no help lines to read it from) both readings, `#` stripped and nothing stripped: the hook refuses when
- * either fails, never passing what git might commit differently.
+ * picks a character (by a rule that differs between versions: 2.48 skips one a line of the message starts with, 2.56
+ * didn't for `-e -m`, measured in CI) and writes its scissors line and help lines with it, so the hook reads git's
+ * choice from what git wrote: the scissors line, or the help block at the end (lines starting with one candidate, after
+ * a blank line, below the message), when the block is git's (3 lines or more) or git's 2.48 rule over the lines above
+ * gives that candidate. Otherwise (no help lines to read it from) both readings, `#` stripped and nothing stripped: the
+ * hook refuses when either fails, never passing what git might commit differently.
  */
 function commentPrefixes(text, setting) {
   if (setting !== 'auto') return [setting];
@@ -248,7 +249,8 @@ function commentPrefixes(text, setting) {
     const above = lines.slice(0, b);
     const separated = b < lines.length && BLANK.test(lines[b]) && above.some((l) => !BLANK.test(l));
     const gits = [...AUTO_COMMENT].find((x) => !above.some((l) => l.startsWith(x)));
-    if (separated && gits === c) return [c];
+    const block = lines.slice(b).filter((l) => l.startsWith(c)).length;
+    if (separated && (block >= 3 || gits === c)) return [c];
   }
   return ['#', null];
 }
