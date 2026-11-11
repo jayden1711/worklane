@@ -94,6 +94,11 @@ export interface SoakSample {
   levelWalked?: number | null;
   /** SysV IPC objects alive (a real soak on Linux, R1181z D2): they outlive every process. */
   sysvIpc?: number | null;
+  /** POSIX message queues alive (/dev/mqueue; a real soak on Linux, null where it isn't mounted): R1181ab D3. */
+  mqueues?: number | null;
+  /** This user's keys and their bytes (/proc/key-users qnkeys, qnbytes; a real soak on Linux): R1181ab D4. */
+  userKeys?: number | null;
+  userKeyBytes?: number | null;
 }
 
 export interface SoakLimits {
@@ -179,6 +184,8 @@ const median = (xs: number[]): number => {
 export const STOP_DISK_BYTES = 16 * 2 ** 20;
 export const STOP_FILES = 64;
 export const STOP_LOG_BYTES = 2 ** 20;
+/** Growth in the bytes of this user's keys (the quota is 20,000 a uid by default): R1181ab D4. */
+export const USER_KEY_BYTES = 2048;
 /** The envelope's end: the highest of its last this many blocks (about the last 30 samples). */
 export const END_PEAK = 3;
 /** The end window drift is judged over too (R1181c). */
@@ -386,6 +393,9 @@ export function soakVerdict(input: readonly SoakSample[], limits: SoakLimits = S
     ['cgroupProcs', "the job cgroup's processes", limits.childGrowth, (n: number) => `by ${Math.round(n * 10) / 10}`],
     ['cgroupKernelBytes', "the job cgroup's unreclaimable kernel memory", limits.kernelGrowthBytes, MB],
     ['sysvIpc', 'SysV IPC objects', limits.childGrowth, (n: number) => `by ${Math.round(n * 10) / 10}`],
+    ['mqueues', 'POSIX message queues', limits.childGrowth, (n: number) => `by ${Math.round(n * 10) / 10}`],
+    ['userKeys', "keys in this user's keyrings", limits.childGrowth, (n: number) => `by ${Math.round(n * 10) / 10}`],
+    ['userKeyBytes', "bytes of this user's keys", USER_KEY_BYTES, (n: number) => `by ${Math.round(n)} bytes`],
   ] as const) {
     if (!use.some((s) => typeof s[k] === 'number')) continue;
     const counted = use.filter((s) => typeof s[k] === 'number');
@@ -433,7 +443,7 @@ export function soakVerdict(input: readonly SoakSample[], limits: SoakLimits = S
     const before = failures.length;
     const base = (k: keyof SoakSample) => median(first.map((s) => s[k]).filter((x): x is number => typeof x === 'number'));
     const at = (k: keyof SoakSample) => (typeof stop[k] === 'number' && first.some((s) => typeof s[k] === 'number') ? (stop[k] as number) : null);
-    for (const [k, what] of [['children', 'child process(es)'], ['cgroupProcs', "process(es) in the job's cgroup"], ['sysvIpc', 'SysV IPC object(s)'], ['worktrees', 'worktree(s)'], ['worktreeDirs', "entr(ies) in the worktree folder"]] as const) {
+    for (const [k, what] of [['children', 'child process(es)'], ['cgroupProcs', "process(es) in the job's cgroup"], ['sysvIpc', 'SysV IPC object(s)'], ['mqueues', 'POSIX message queue(s)'], ['userKeys', "key(s) in this user's keyrings"], ['worktrees', 'worktree(s)'], ['worktreeDirs', "entr(ies) in the worktree folder"]] as const) {
       const n = at(k);
       if (n !== null && n > base(k)) failures.push(`left at stop: ${n} ${what} after stop() and idle(), above the first quarter's ${base(k)}`);
     }

@@ -793,6 +793,32 @@ export function netlinkBytes(): number | null {
   }
 }
 
+/** POSIX message queues alive (the mqueue filesystem, /dev/mqueue; null where it isn't mounted): they outlive their maker (R1181ab D3). */
+export function posixMqueues(dir = '/dev/mqueue'): number | null {
+  try {
+    return readdirSync(dir).length;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * This user's keys and their bytes against the quota (/proc/key-users: `uid: usage nkeys/nikeys qnkeys/maxkeys
+ * qnbytes/maxbytes`), or null: a key in the user keyring outlives its maker (R1181ab D4). A uid with no line has none.
+ */
+export function userKeys(uid = process.getuid?.(), file = '/proc/key-users'): { keys: number; bytes: number } | null {
+  try {
+    const line = readFileSync(file, 'utf8').split('\n').find((l) => l.trim().startsWith(`${uid}:`));
+    if (!line) return { keys: 0, bytes: 0 };
+    const c = line.trim().split(/\s+/);
+    const keys = Number(c[3]?.split('/')[0]);
+    const bytes = Number(c[4]?.split('/')[0]);
+    return Number.isFinite(keys) && Number.isFinite(bytes) ? { keys, bytes } : null;
+  } catch {
+    return null;
+  }
+}
+
 /** SysV IPC objects (semaphore sets, message queues, shared memory segments) alive in this IPC namespace (R1181z D2): they outlive every process. */
 export function sysvIpcCount(): number | null {
   try {
@@ -994,6 +1020,10 @@ test('soak: the real coordinator works for a while with stand-in agents; nothing
       levelFiles: hours > 0 && process.platform === 'linux' ? fsInodes([f.base, '/var/tmp']) : null,
       levelWalked: hours > 0 && process.platform === 'linux' ? walkedOnCounted([f.base, process.env.XDG_CONFIG_HOME ? dirname(process.env.XDG_CONFIG_HOME) : null], [f.base, '/var/tmp']) : null,
       sysvIpc: hours > 0 && process.platform === 'linux' ? sysvIpcCount() : null,
+      // R1181ab D3, D4: POSIX message queues and this user's keys, a real soak's on Linux only.
+      mqueues: hours > 0 && process.platform === 'linux' ? posixMqueues() : null,
+      userKeys: hours > 0 && process.platform === 'linux' ? (userKeys()?.keys ?? null) : null,
+      userKeyBytes: hours > 0 && process.platform === 'linux' ? (userKeys()?.bytes ?? null) : null,
     };
   };
   let threw = true;
@@ -1931,7 +1961,7 @@ print(' '.join(map(str, ids)))`], { encoding: 'utf8' });
 
 test("soak driver (Linux, R1181z D1): the kernel level reads a netlink socket's unread buffers, which no cgroup is charged", linuxOnly, async (t) => {
   if (!python) return t.skip('no python3');
-  if (cgroupLevels().kernelBytes === null) return t.skip('no memory controller on this cgroup');
+  if (netlinkBytes() === null) return t.skip('no /proc/net/netlink here');
   // 64 NETLINK_USERSOCK sockets, each sent to until its receive queue is full, never read.
   const NL = `import os, socket, sys, time
 held, sent = [], 0
@@ -1947,7 +1977,7 @@ print('ready', sent, flush=True)
 time.sleep(60)`;
   const settle = () => new Promise((r) => setTimeout(r, 2500));
   await settle();
-  const before = cgroupLevels().kernelBytes!;
+  const before = netlinkBytes()!;
   const c = spawn('python3', ['-c', NL], { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, SOAK_CHILD_MARK: '' } });
   let out = '';
   c.stdout!.on('data', (b) => (out += String(b)));
@@ -1958,11 +1988,15 @@ time.sleep(60)`;
     const sent = Number(/ready (\d+)/.exec(out)![1]);
     if (sent < 4 * 2 ** 20) return t.skip(`only ${sent} bytes queued`);
     await settle();
-    const rise = cgroupLevels().kernelBytes! - before;
-    assert.ok(rise >= Math.min(8 * 2 ** 20, sent * 0.6), `the kernel level rose ${(rise / 2 ** 20).toFixed(1)} MB with ${(sent / 2 ** 20).toFixed(1)} MB queued`);
+    // R1181ab D5: on netlinkBytes' own rise, which no cgroup moves (the job cgroup's kernel memory swung by tens of MB
+    // with other work in it: 5 of 38 healthy runs failed on the whole level); the level adding it is pinned below.
+    const rise = netlinkBytes()! - before;
+    assert.ok(rise >= Math.min(8 * 2 ** 20, sent * 0.6), `the netlink queues rose ${(rise / 2 ** 20).toFixed(1)} MB with ${(sent / 2 ** 20).toFixed(1)} MB queued`);
   } finally {
     c.kill();
   }
+  const src = readFileSync(join(repoRoot, 'test', 'soak.test.ts'), 'utf8');
+  assert.ok(src.includes('    if (Number.isFinite(n)) kernelBytes = n + (netlinkBytes() ?? 0);'), 'the kernel level adds the netlink queues');
 });
 
 test('soak driver (Linux, R1181x L1, R1181z L2): a tmpfs is read through Shmem only, never twice', linuxOnly, (t) => {
@@ -2045,5 +2079,79 @@ test('soak driver: the worktree folder\'s files no checkout tracks are read, and
     assert.equal(walkedOnCounted([d], []), 0, 'not on a counted filesystem: none');
   } finally {
     rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test('soak verdict: POSIX message queues and this user\'s keys grown or left at stop fail, as SysV IPC objects; steady passes (#1181 review R1181ab D3, D4)', () => {
+  const opts = { expectedMs: 5.5 * 3600_000 - 60_000 };
+  const v = (x: SoakSample[], o = {}) => soakVerdict(x, SOAK_LIMITS, { ...opts, ...o }).failures.join(' | ');
+  // ab-mqueue: 10 a batch until the table (256) is full; ab-keys: 5 a batch, 16 -> 146 of 200.
+  assert.match(v(series(330, (m) => ({ mqueues: Math.min(256, m * 10) }))), /leak: POSIX message queues grew by \d+/);
+  assert.match(v(series(330, (m) => ({ userKeys: 16 + Math.min(130, m * 5), userKeyBytes: 200 }))), /leak: keys in this user's keyrings grew by \d+/);
+  assert.match(v(series(330, (m) => ({ userKeys: 16, userKeyBytes: 200 + m * 40 }))), /leak: bytes of this user's keys grew by \d+ bytes/);
+  assert.equal(v(series(330, () => ({ mqueues: 0, userKeys: 16, userKeyBytes: 200 }))), '');
+  assert.equal(v(series(330, () => ({ mqueues: null, userKeys: 16, userKeyBytes: 200 }))), '', '/dev/mqueue not mounted: not judged');
+  const stop = (o: Partial<SoakSample>) => {
+    const s = series(331, () => ({ mqueues: 0, userKeys: 16, userKeyBytes: 200 }));
+    s[330] = { ...s[329]!, at: s[329]!.at + 3000, ...o };
+    return v(s, { stopped: true });
+  };
+  assert.match(stop({ mqueues: 10 }), /^left at stop: 10 POSIX message queue\(s\) after stop\(\) and idle\(\), above the first quarter's 0$/);
+  assert.match(stop({ userKeys: 21 }), /^left at stop: 21 key\(s\) in this user's keyrings after stop\(\) and idle\(\), above the first quarter's 16$/);
+  assert.equal(stop({}), '');
+});
+
+test("soak driver: /proc/key-users and the mqueue filesystem are read as the kernel writes them (#1181 review R1181ab D3, D4)", () => {
+  const d = mkdtempSync(join(tmpdir(), 'soak-keys-'));
+  try {
+    const f = join(d, 'key-users');
+    writeFileSync(f, '    0:    84 83/83 77/1000000 1850/25000000\n 1000:     5 5/5 4/200 50/20000\n');
+    assert.deepEqual(userKeys(1000, f), { keys: 4, bytes: 50 });
+    assert.deepEqual(userKeys(1001, f), { keys: 0, bytes: 0 }, 'a uid with no line has none');
+    assert.equal(userKeys(1000, join(d, 'none')), null);
+    const mq = join(d, 'mqueue');
+    mkdirSync(mq);
+    for (const n of ['a', 'b', 'c']) writeFileSync(join(mq, n), '');
+    assert.equal(posixMqueues(mq), 3);
+    assert.equal(posixMqueues(join(d, 'none')), null, 'not mounted');
+  } finally {
+    rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test('soak driver (Linux, R1181ab D3): a POSIX message queue its maker left is counted', linuxOnly, async (t) => {
+  if (!python) return t.skip('no python3');
+  if (posixMqueues() === null) return t.skip('no /dev/mqueue here');
+  const before = posixMqueues()!;
+  const names = [1, 2, 3].map((i) => `/soak-${process.pid}-${i}`);
+  const made = spawnSync('python3', ['-c', `import ctypes, os, sys
+rt = ctypes.CDLL('librt.so.1', use_errno=True)
+rt.mq_open.restype = ctypes.c_int
+for n in sys.argv[1:]:
+    if rt.mq_open(n.encode(), os.O_CREAT | os.O_RDWR, 0o600, None) < 0: print('skip', ctypes.get_errno()); sys.exit(0)
+print('made')`, ...names], { encoding: 'utf8' });
+  try {
+    if (!/made/.test(made.stdout)) return t.skip(`mq_open unavailable: ${made.stdout}${made.stderr}`.slice(0, 200));
+    assert.ok(posixMqueues()! >= before + 3, `counted after its maker exited: ${before} -> ${posixMqueues()}`);
+  } finally {
+    for (const n of names) rmSync(join('/dev/mqueue', n.slice(1)), { force: true });
+  }
+});
+
+test("soak driver (Linux, R1181ab D4): a key its maker added to the user keyring is counted", linuxOnly, async (t) => {
+  if (!python) return t.skip('no python3');
+  if (process.arch !== 'x64') return t.skip('the add_key syscall number is x86_64\'s here');
+  const before = userKeys();
+  if (before === null) return t.skip('no /proc/key-users here');
+  const made = spawnSync('python3', ['-c', `import ctypes, sys
+libc = ctypes.CDLL(None, use_errno=True)
+k = libc.syscall(248, b'user', ('soak-%s' % sys.argv[1]).encode(), b'v', 1, -4)
+print(k if k > 0 else 'skip %d' % ctypes.get_errno())`, String(process.pid)], { encoding: 'utf8' });
+  const id = Number(made.stdout.trim());
+  try {
+    if (!(id > 0)) return t.skip(`add_key unavailable: ${made.stdout}`.slice(0, 200));
+    assert.ok(userKeys()!.keys >= before.keys + 1, `counted after its maker exited: ${before.keys} -> ${userKeys()!.keys}`);
+  } finally {
+    if (id > 0) spawnSync('python3', ['-c', `import ctypes; ctypes.CDLL(None).syscall(250, 3, ${id})`]);
   }
 });

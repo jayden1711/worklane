@@ -172,9 +172,11 @@ replaces main's pending scheduled run.
   - Scheduled work created during the run (a user timer, a crontab or `at` line), and a unit the user manager keeps
     loaded with no process (a path unit, a failed or `RemainAfterExit` unit), is seen only while its process runs at a
     sample, never as a schedule or a unit (R1181x D5, R1181z L4).
-  - SysV IPC objects (semaphore sets, message queues, shared memory segments) outlive every process: a real soak on
-    Linux counts them (`/proc/sysvipc`), as processes are judged, and any above the first quarter's at the stop sample
-    fail (R1181z D2). The smoke doesn't: a desktop's own programs make them.
+  - SysV IPC objects (semaphore sets, message queues, shared memory segments), POSIX message queues (`/dev/mqueue`,
+    where it is mounted) and keys in this user's keyrings (`/proc/key-users`: their count and bytes against the
+    quota) outlive every process: a real soak on Linux counts them, as processes are judged, and any above the first
+    quarter's at the stop sample fail (R1181z D2, R1181ab D3, D4). The smoke doesn't: a desktop's own programs make
+    them. Their noise on a runner hasn't been measured.
   - An empty file outside the walked folders costs an inode and no block. The filesystems' used inodes are read at the
     stop sample only, against the last run sample, less the walked folders' own files: mid-run they aren't judged, as
     their noise on a runner hasn't been measured (R1181z D3).
