@@ -83,6 +83,19 @@ export const SHELL_EXCEPTIONS: [string, string, string][] = [
   ['.github/workflows/ci-slow.yml', 'scripts/setup/credentials.sh probe claude', "credentials.sh's `probe claude` names the login to check: the script, not claude, runs"],
 ];
 
+/**
+ * Unguarded calls pinned by file and the exact text of the physical line that holds them (trimmed), with why. A pin
+ * covers one line: a copy of it elsewhere in the file, or in any other file, is refused.
+ */
+// check-table: never-grow
+export const SHELL_PINS: [string, string, string][] = [
+  [
+    'scripts/spikes/worktree-commit.sh',
+    "claude -p --max-budget-usd \"$SPIKE_CALL_BUDGET\" --settings \"$settings\" --model haiku --max-turns 3 --permission-mode dontAsk --allowedTools Bash --setting-sources project) | tail -6",
+    'a sandbox probe whose project-settings load is the point (the owner, 2026-11-11, "spikes: b")',
+  ],
+];
+
 type Word = { text: string; quoted: boolean };
 /** Words that open a command without being it. */
 // check-table: never-grow
@@ -116,8 +129,8 @@ export function guardsLast(argv: string[]): boolean {
 }
 
 /** Joins continued lines and drops comments (a `#` at a word's start outside quotes) and blank lines. */
-function logicalLines(text: string): { line: number; text: string }[] {
-  const out: { line: number; text: string }[] = [];
+function logicalLines(text: string): { line: number; end: number; text: string }[] {
+  const out: { line: number; end: number; text: string }[] = [];
   const raw = text.split('\n');
   for (let i = 0; i < raw.length; i++) {
     const start = i;
@@ -136,7 +149,7 @@ function logicalLines(text: string): { line: number; text: string }[] {
       }
     }
     const t = l.slice(0, cut).trim();
-    if (t) out.push({ line: start + 1, text: t });
+    if (t) out.push({ line: start + 1, end: i + 1, text: t });
   }
   return out;
 }
@@ -255,6 +268,10 @@ export function shellLaunchProblems(path: string, text: string): string[] {
     return BINARY.test(w.text);
   };
   const out: string[] = [];
+  // The physical lines of the logical line being judged, and the lines each pin has covered so far.
+  const raw = text.split('\n');
+  let phys: number[] = [];
+  const pinned = new Map<(typeof SHELL_PINS)[number], Set<number>>();
   const judge = (line: number, cmd: string) => {
     const words = wordsOf(cmd);
     // Strings run as commands: after `-c` (`bash -c`, `bash -lc`, `su -c`) or `eval`, recursively.
@@ -286,6 +303,15 @@ export function shellLaunchProblems(path: string, text: string): string[] {
       const joined = plain.join(' ');
       if (EXEMPT_ARGV.test(joined) || SHELL_EXCEPTIONS.some(([f, a]) => f === path && cmd.includes(a))) return;
       const guarded = guardsLast(plain);
+      const pin = guarded ? undefined : SHELL_PINS.find(([f, l]) => f === path && phys.some((n) => raw[n - 1]?.trim() === l));
+      if (pin) {
+        const at = phys.find((n) => raw[n - 1]?.trim() === pin[1])!;
+        const seen = pinned.get(pin) ?? new Set<number>();
+        seen.add(at);
+        pinned.set(pin, seen);
+        if (seen.size > 1) out.push(`${path}:${at}: a copy of a pinned line (\`${pin[1].slice(0, 100)}\`): its pin covers one line; end it with the launch's guards`);
+        return;
+      }
       if (!guarded) out.push(`${path}:${line}: starts claude (\`${cmd.slice(0, 140)}\`) without the launch's guards at its end (--settings <json> --setting-sources '' --strict-mcp-config, nothing after them)`);
       return;
     }
@@ -293,7 +319,10 @@ export function shellLaunchProblems(path: string, text: string): string[] {
   function scan(line: number, t: string) {
     for (const l of logicalLines(t)) for (const part of commands(l.text.replace(/^[^()\s]+\)(?=\s|$)/, ''))) judge(line, part);
   }
-  for (const { line, text: t } of lines) scan(line, t);
+  for (const { line, end, text: t } of lines) {
+    phys = Array.from({ length: end - line + 1 }, (_, k) => line + k);
+    scan(line, t);
+  }
   return out;
 }
 
@@ -416,6 +445,8 @@ test("#1262: every claude a script starts ends with the launch's guards, or is a
     ...f.js.flatMap((p) => jsLaunchProblems(p, read(p))),
   ];
   assert.deepEqual(problems, []);
+  // Each pin still names one line that is there, once.
+  for (const [p, l] of SHELL_PINS) assert.equal(read(p).split('\n').filter((x) => x.trim() === l).length, 1, `${p}: its pinned line is there once: ${l.slice(0, 80)}`);
 });
 
 test('#1262 (R1264a/b): the places a script can live are all read', () => {
@@ -444,6 +475,9 @@ test('#1262: every way a script can start claude without the guards at its end i
     'command-builtin',
     'command-v-variable',
     'continued-line',
+    'copied-spike-pin',
+    'spike-pin-other-file',
+    'spike-unguarded',
     'default-variable',
     'direct',
     'dockerfile-run',
@@ -483,7 +517,7 @@ test('#1262: every way a script can start claude without the guards at its end i
     'xargs',
   ];
   // check-table: never-shrink
-  const CONTROLS = ['ok-auth-status', 'ok-case-label', 'ok-comment', 'ok-continued-guards', 'ok-for-list', 'ok-grep-regex', 'ok-guarded', 'ok-guarded-array', 'ok-install-path', 'ok-js-auth-status', 'ok-js-guarded', 'ok-other-tool', 'ok-prose', 'ok-version', 'ok-workflow-block-guarded'];
+  const CONTROLS = ['ok-auth-status', 'ok-case-label', 'ok-comment', 'ok-continued-guards', 'ok-for-list', 'ok-grep-regex', 'ok-guarded', 'ok-guarded-array', 'ok-install-path', 'ok-js-auth-status', 'ok-js-guarded', 'ok-other-tool', 'ok-prose', 'ok-spike-pin', 'ok-version', 'ok-workflow-block-guarded'];
   assert.deepEqual(all.map(nameOf).sort(), [...MUST_FAIL, ...CONTROLS].sort(), 'every fixture, by name');
   for (const f of all) {
     const n = nameOf(f);
@@ -498,7 +532,8 @@ test('#1262: every way a script can start claude without the guards at its end i
             ? otherLaunchProblems('package.json', text)
             : f.endsWith('.docker.txt')
               ? otherLaunchProblems('Dockerfile', text)
-              : shellLaunchProblems(`scripts/${n}.sh`, text);
+              : // A shell fixture may name where it stands in its first line after the shebang: `# as <path>`.
+                shellLaunchProblems(/^(?:#!.*\n)?# as (\S+)/.exec(text)?.[1] ?? `scripts/${n}.sh`, text);
     if (n.startsWith('ok-')) assert.deepEqual(problems, [], `${n}: a control passes`);
     else assert.ok(problems.length > 0, `${n}: refused`);
   }
