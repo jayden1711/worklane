@@ -38,7 +38,7 @@ function moduleWith(table: keyof typeof ANCHORS, line: string | null, unchecked 
   const at = lines.findIndex((l) => l.endsWith(ANCHORS[table]));
   assert.notEqual(at, -1, `the built module holds ${ANCHORS[table]}`);
   if (line !== null) lines.splice(at, 0, `    ${line}`);
-  const text = lines.filter((l) => !unchecked || !l.startsWith(`markersChecked(${table},`)).join('\n');
+  const text = lines.filter((l) => !unchecked || !new RegExp(`^markersChecked\\(${table}[,)]`).test(l)).join('\n');
   if (unchecked) assert.notEqual(text, lines.join('\n'), `the built module checks ${table}`);
   const file = join(mkdtempSync(join(tmpdir(), 'redact-markers-')), 'redact.js');
   writeFileSync(file, text);
@@ -127,4 +127,66 @@ test('markerProblem: what is refused, and what a marker may keep', () => {
     if (why === null) assert.equal(got, null, name);
     else assert.match(got ?? '', why, name);
   }
+});
+
+// R1258b (the adversarial review of #1258): the values the check never read, and the pass whose reasoning it didn't cover.
+const EMAIL_RE = String.raw`/(^|[^A-Za-z0-9._%+-])([A-Za-z0-9._%+-]+)@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,})(?![A-Za-z0-9-])/g`;
+const EMAIL = ['alice.person', 'example.com'].join('@');
+const identifiers = (m: Redact) => m.redactString(`contact ${EMAIL} please`, m.TRACKER);
+
+test('B1: a marker that is neither a string nor a function (a String object, an object with toString) is refused at load', async () => {
+  // String.prototype.replace reads such a value as a marker and expands its `$n`; the check read it as code.
+  const why = refused(/a marker must be a string or a function, not \[object (String|Object)\]/);
+  await assert.rejects(import(moduleWith('IDENTIFIERS', `[${EMAIL_RE}, new String('$1[email:$2@$3-]'), 'email'],`)), why);
+  await assert.rejects(import(moduleWith('IDENTIFIERS', `[${EMAIL_RE}, { toString: () => '$1[email:$2@$3-]' }, 'email'],`)), why);
+  await assert.rejects(import(moduleWith('PATTERNS', `[${Y1_RE.toString()}, new String('${Y1_REP}'), 'Stripe key'],`)), why);
+});
+
+test('B2: a function that echoes what it replaced puts [REDACTED] there instead, in the default mode and the identifier pass', async () => {
+  // The review's shape: the Y1 marker as a function, under a variable name the test's own Stripe line doesn't use.
+  const re = String.raw`/(?<=STRIPE_API_KEY=[sr]k_)(live|test)_([A-Za-z0-9]{16,})(?![A-Za-z0-9_])/g`;
+  const line = `export STRIPE_API_KEY=${KEY}`;
+  const groups = (await import(moduleWith('PATTERNS', `[${re}, (m, a, b) => \`[REDACTED:\${a}_\${b}]\`, 'Stripe key'],`))) as Redact;
+  assert.equal(groups.redactString(line), 'export STRIPE_API_KEY=sk_[REDACTED]');
+  assert.deepEqual(groups.secretKinds(line), ['Stripe key']);
+  const whole = (await import(moduleWith('PATTERNS', `[${re}, (m) => \`[R:\${m}]\`, 'Stripe key'],`))) as Redact;
+  assert.equal(whole.redactString(line), 'export STRIPE_API_KEY=sk_[REDACTED]');
+  const who = (await import(moduleWith('IDENTIFIERS', `[${EMAIL_RE}, (m, pre, u) => \`\${pre}[email:\${u}]\`, 'email'],`))) as Redact;
+  assert.equal(identifiers(who), 'contact [REDACTED] please');
+  // The guard leaves a function that keeps only what the match begins with alone: main's own rules redact as before.
+  assert.equal(redactString(LINE), 'export STRIPE_SECRET_KEY=sk_[REDACTED]');
+  assert.equal(redactString('see https://someone:Pa55word-x@example.test/x'), 'see https://someone:[REDACTED]@example.test/x');
+  assert.equal(redactString('/home/you/proj/a.ts:42', { identifiers: true }), '~/proj/a.ts:42');
+});
+
+test('B2: every function-backed rule is listed here, so adding or changing one edits this test, where review sees it', () => {
+  const tick = '`';
+  const functions = REDACTION_PATTERNS.filter((p) => typeof p.rep === 'function').map((p) => `${p.group}: ${p.kind}: ${p.re.source}`);
+  assert.deepEqual(functions, [
+    String.raw`secret: Stripe key: (^|[^A-Za-z0-9_])([sr]k)_(?:live|test)_([A-Za-z0-9]{16,})(?![A-Za-z0-9_])`,
+    String.raw`secret: private key: ^[\s\S]*-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----`,
+    String.raw`secret: Basic credential: \b(basic)(\s+)((?:[A-Za-z0-9+/]|\\\/){8,}={0,2})`,
+    String.raw`secret: secret under a JSON key: (\\?"|')([A-Za-z0-9_-]+)\1(\s*(?::|=>)\s*)(\\?"|')([A-Za-z0-9_\-.+/=~]{16,})\4`,
+    String.raw`identifier: home path: (^|[^\w.~/:-]|file:\/\/)\/(?:home|Users|mnt\/[A-Za-z]\/Users)\/([^\s/"'${tick}<>()[\]{},;|\\]+)`,
+    String.raw`identifier: internal host: (^|[^A-Za-z0-9./-]|\/\/)([A-Za-z0-9][A-Za-z0-9.-]*\.(?:internal|localdomain|lan|corp|intranet|home\.arpa|ts\.net|local))(?![A-Za-z0-9-]|\.[A-Za-z0-9])`,
+  ]);
+});
+
+test('B3: an identifier marker may keep only a boundary group, since the identifier pass puts the marker out as it is', async () => {
+  // The address itself as a leading group: the shapes' rule accepts it (the union trims a kept group out of the span),
+  // but the identifier pass has no union and no trim, so the kept group is the output.
+  const whole = /(^|[^A-Za-z0-9._%+-])([A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,})(?![A-Za-z0-9-])/g;
+  assert.equal(markerProblem(whole, '$1$2-[email]'), null);
+  assert.match(markerProblem(whole, '$1$2-[email]', true) ?? '', /\$2.*must be a boundary/);
+  await assert.rejects(import(moduleWith('IDENTIFIERS', `[${whole.toString()}, '$1$2-[email]', 'email'],`)), refused(/"email".*\$2.*must be a boundary/));
+  // Boundaries: `^`, one character, literal text (the home path's `file://`), in any mix; every identifier rule's.
+  for (const re of [/(^|[^\w])x/g, /(^|[^\w.~/:-]|file:\/\/)\//g, /(\s)x/g, /(^|\.|,)x/g]) assert.equal(markerProblem(re, '$1[x]', true), null, re.source);
+  for (const re of [/(\w+)x/g, /(^|ab?)x/g, /(^|(a))x/g, /(a|\d\d)x/g]) assert.match(markerProblem(re, '$1[x]', true) ?? '', /must be a boundary/, re.source);
+  for (const p of REDACTION_PATTERNS) if (p.group === 'identifier' && typeof p.rep === 'string') assert.equal(markerProblem(p.re, p.rep, true), null, p.kind);
+});
+
+test('B4: a regex with an own property (a shadowed `source`) is refused at load', async () => {
+  const re = String.raw`/(?<=STRIPE_SECRET_KEY=[sr]k_)(?:live|test)_([A-Za-z0-9]{16,})(?![A-Za-z0-9_])/g`;
+  await assert.rejects(import(moduleWith('PATTERNS', `[Object.defineProperty(${re}, 'source', { value: '(x)y' }), '$1[REDACTED]', 'Stripe key'],`)), refused(/plain RegExp with no own property/));
+  await assert.rejects(import(moduleWith('PATTERNS', `[${re}, '$1[REDACTED]', 'Stripe key'],`)), refused(/\$1.*begins with \(no group is\)/));
 });

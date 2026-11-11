@@ -107,10 +107,14 @@ function orphanEnd(m: string): string {
  * groups, a rule added to PATTERNS gave `sk_[REDACTED:live_<key>]`, the key whole, and no test failed (R1184y's Y1).
  * `$<name>`, `` $` ``, `$'`, `$0` and `$nn` are refused too: expand and String.prototype.replace don't read them
  * alike. A regex this reader can't follow is refused as well (only a marker with a reference needs it read).
+ * With `verbatim` (the identifier pass, which puts the marker's text out as it is, with nothing trimmed and no union
+ * over other rules' spans), a kept group must be a boundary: each alternative `^`, one character, or literal text
+ * (`(^|[^\w])`, `(^|[^\w.~/:-]|file:\/\/)`), so it can't hold the identifier itself (R1258b's B3: `$1$2-[email]`
+ * with the address in group 2 passed, and the identifier pass showed it).
  * markersChecked runs it on every table at load, so a rule that could show a secret stops the module instead
  * (test/redact-markers.test.ts).
  */
-export function markerProblem(re: RegExp, rep: string): string | null {
+export function markerProblem(re: RegExp, rep: string, verbatim = false): string | null {
   const refs: { n: number; at: number }[] = [];
   for (let i = 0; i < rep.length; i++) {
     if (rep[i] !== '$') continue;
@@ -148,7 +152,26 @@ export function markerProblem(re: RegExp, rep: string): string | null {
   for (const [k, n] of lead.entries()) if (leading[k] !== n) return `\`$${n}\` leads the marker, but group ${n} isn't what the match begins with (${these(leading)})`;
   const trailing = trailingGroups(parsed.alternatives);
   for (const [k, n] of trail.entries()) if (trailing[trailing.length - trail.length + k] !== n) return `\`$${n}\` trails the marker, but group ${n} isn't what the match ends with (${these(trailing)})`;
+  if (verbatim) {
+    for (const n of [...lead, ...trail]) {
+      const g = parsed.alternatives[0]!.find((it) => it.kind === 'group' && it.capture === n);
+      if (!g || g.kind !== 'group' || !boundaryGroup(g)) return `\`$${n}\` is put out as it is, so group ${n} must be a boundary (each alternative \`^\`, one character or literal text), not text of its own`;
+    }
+  }
   return null;
+}
+
+/**
+ * Whether a group can hold nothing but a boundary: each alternative is `^` (or another zero-width item), one character
+ * (a class, a character or an escape), or literal text (`file:\/\/`), none quantified. Such a group can't match an
+ * identifier or a secret, so the identifier pass may put it out as it is.
+ */
+function boundaryGroup(g: Item & { kind: 'group' }): boolean {
+  return g.alternatives.every((alt) => {
+    const taking = alt.filter((it) => it.kind !== 'zero');
+    if (taking.some((it) => it.quantified || it.kind === 'group' || it.kind === 'backref')) return false;
+    return taking.length <= 1 || taking.every((it) => it.kind === 'atom');
+  });
 }
 
 /** Which groups are, in words, for markerProblem's reasons. */
@@ -158,23 +181,39 @@ const these = (groups: number[]) => (groups.length === 0 ? 'no group is' : group
 const groupCount = (re: RegExp) => new RegExp(`${re.source}|`, re.flags.replace(/[gy]/g, '')).exec('')!.length - 1;
 
 /**
- * Every string marker of `rules` passed markerProblem (`marker` gives a rule's, or null for a function). It throws on
- * the first that didn't, so the module doesn't load with it: a rule that could show a secret is refused at load, not
- * found in a log.
+ * Every rule of `rules` passed at load, or the module doesn't load: a rule that could show a secret is refused here,
+ * not found in a log. Each rule's regex must be a plain RegExp with no own property but `lastIndex` (R1258b's B4: an
+ * own `source` made markerProblem read a pattern other than the one that runs), and its marker a string, checked
+ * with markerProblem, or a function (code, read as code; shown guards what it returns at run time). Anything else is
+ * refused (B1: a String object or an object with toString is never a function, but String.prototype.replace reads
+ * it as a marker and expands its `$n`). `broad` gives a broad rule's marker as shown with the default mask;
+ * `verbatim` is the identifier pass (markerProblem).
  */
-function markersChecked<R>(rules: readonly (readonly [RegExp, R, string])[], marker: (rep: R) => string | null): void {
+function markersChecked(rules: readonly (readonly [RegExp, unknown, string])[], o: { broad?: (rep: (mask: string) => string) => string; verbatim?: boolean } = {}): void {
   for (const [re, rep, kind] of rules) {
-    const m = marker(rep);
-    const why = m === null ? null : markerProblem(re, m);
-    if (why !== null) throw new Error(`redaction rule "${kind}" could show a secret (#1257): ${why}`);
+    const refuse = (why: string): never => {
+      throw new Error(`redaction rule "${kind}" could show a secret (#1257): ${why}`);
+    };
+    if (!(re instanceof RegExp) || Object.getPrototypeOf(re) !== RegExp.prototype || Object.getOwnPropertyNames(re).join() !== 'lastIndex') refuse('its regex must be a plain RegExp with no own property (one could hide the pattern that runs)');
+    let marker: string | null = null;
+    if (typeof rep === 'string') marker = rep;
+    else if (typeof rep === 'function') marker = o.broad ? o.broad(rep as (mask: string) => string) : null;
+    else refuse(`a marker must be a string or a function, not ${Object.prototype.toString.call(rep)}`);
+    if (o.broad && typeof marker !== 'string') refuse('a broad rule must give its marker as a string');
+    const why = marker === null ? null : markerProblem(re, marker, o.verbatim === true);
+    if (why !== null) refuse(why);
   }
 }
 
-/** An item of a regex's sequence, as markerProblem reads it: a group (capturing, or a lookaround), a backreference, something zero-width (`^`, `$`, `\b`), or something that takes a character (parseRegex). */
+/**
+ * An item of a regex's sequence, as markerProblem reads it: a group (capturing, or a lookaround), a backreference,
+ * something zero-width (`^`, `$`, `\b`), one literal character (`a`, `\.`, `\u{28}`) or a class, which takes one of
+ * several characters (`[a-z]`, `\d`, `.`, a named backreference too) (parseRegex).
+ */
 type Item =
   | { kind: 'group'; capture: number | null; look: 'ahead' | 'behind' | null; alternatives: Item[][]; quantified: boolean }
   | { kind: 'backref'; n: number; quantified: boolean }
-  | { kind: 'zero' | 'atom'; quantified: boolean };
+  | { kind: 'zero' | 'atom' | 'class'; quantified: boolean };
 interface ParsedRegex {
   alternatives: Item[][];
   groups: number;
@@ -228,7 +267,7 @@ function parseRegex(source: string): ParsedRegex {
       for (i++; i < source.length && source[i] !== ']'; i++) if (source[i] === '\\') i++;
       if (source[i] !== ']') throw new Error('an unclosed class');
       i++;
-      it = { kind: 'atom', quantified: false };
+      it = { kind: 'class', quantified: false };
     } else if (c === '\\') {
       const n = source[i + 1] ?? '';
       if (/[1-9]/.test(n)) {
@@ -236,17 +275,24 @@ function parseRegex(source: string): ParsedRegex {
         i += 1 + m[0].length;
         it = { kind: 'backref', n: Number(m[0]), quantified: false };
       } else {
+        let kind: 'zero' | 'atom' | 'class' = 'atom';
         if ((n === 'u' || n === 'p' || n === 'P') && source[i + 2] === '{') {
           const close = source.indexOf('}', i);
           if (close === -1) throw new Error(`an unclosed escape at ${i}`);
           i = close + 1;
+          if (n !== 'u') kind = 'class';
         } else if (n === 'k' && source[i + 2] === '<') {
           const close = source.indexOf('>', i);
           if (close === -1) throw new Error(`an unclosed named backreference at ${i}`);
           i = close + 1;
+          kind = 'class';
         } else if (n === '') throw new Error('a trailing backslash');
-        else i += 2;
-        it = { kind: n === 'b' || n === 'B' ? 'zero' : 'atom', quantified: false };
+        else {
+          i += 2;
+          if (n === 'b' || n === 'B') kind = 'zero';
+          else if ('dDwWsSpP'.includes(n)) kind = 'class';
+        }
+        it = { kind, quantified: false };
       }
     } else if (c === '^' || c === '$') {
       i++;
@@ -254,7 +300,7 @@ function parseRegex(source: string): ParsedRegex {
     } else if (c === '*' || c === '+' || c === '?' || c === ')') throw new Error(`a stray \`${c}\` at ${i}`);
     else {
       i++;
-      it = { kind: 'atom', quantified: false };
+      it = { kind: c === '.' ? 'class' : 'atom', quantified: false };
     }
     if (skipQuantifier()) it.quantified = true;
     return it;
@@ -411,9 +457,7 @@ const PATTERNS: [RegExp, Replacement, string][] = [
   // is bounded (23 to 28 characters, then a dot), so each start reads a bounded stretch: linear (redact-shapes.test.ts).
   [/(^|[^A-Za-z0-9])[A-Za-z0-9_-]{23,28}\.[A-Za-z0-9_-]{6,7}\.[A-Za-z0-9_-]{27,}\b/g, '$1[REDACTED]', 'Discord bot token'],
 ];
-/** A rule's string marker, or null for a function (code, read as code). */
-const stringMarker = (rep: Replacement): string | null => (typeof rep === 'string' ? rep : null);
-markersChecked(PATTERNS, stringMarker);
+markersChecked(PATTERNS);
 // Not covered: a bare 32-character string with no prefix (a dashboard key from before #889 among them): a commit
 // hash, a digest and the engine's own ids have the same shape. New dashboard keys carry DASHBOARD_KEY_PREFIX.
 
@@ -443,7 +487,7 @@ const BROAD: [RegExp, (mask: string) => string, string][] = [
   [/\b([A-Za-z_]*(?:token|secret|password|passwd|api[_-]?key))(\s*[=:]\s*)("[^"]*"|'[^']*'|\S+)/gi, (k) => `$1$2${k}`, 'value after a secret name'],
 ];
 // A broad rule's marker only places its span (spansOf); checked as shown with the default mask.
-markersChecked(BROAD, (rep) => rep('[REDACTED]'));
+markersChecked(BROAD, { broad: (rep) => rep('[REDACTED]') });
 
 /**
  * The first word of a dotted name that is code, not a host: `this.internal`, `opts.corp`, `config.lan.x`. Only
@@ -505,7 +549,8 @@ const IDENTIFIERS: [RegExp, Replacement, string][] = [
   // IPv6 unique-local (fc00::/7) and link-local (fe80::/10) addresses.
   [/(^|[^\w:])f(?:[cd][0-9a-f]{2}|e[89ab][0-9a-f]):(?:[0-9a-f]{0,4}:){1,6}[0-9a-f]{0,4}(?![\w:])/gi, '$1[private-ip]', 'private IP'],
 ];
-markersChecked(IDENTIFIERS, stringMarker);
+// The identifier pass puts a marker out as it is (apply), so a kept group must be a boundary (verbatim).
+markersChecked(IDENTIFIERS, { verbatim: true });
 
 /**
  * Every pattern with its kind, for the linear-time test (test/redact.test.ts) and the shape tests
@@ -583,11 +628,35 @@ function freeMark(s: string): string | null {
 const expand = (rep: string, m: string, groups: unknown[]) => rep.replace(/\$(\d|\$|&)/g, (_, k: string) => (k === '$' ? '$' : k === '&' ? m : String(groups[Number(k) - 1] ?? '')));
 const breaks = (s: string) => s.split('\n').length - 1;
 
+/**
+ * What a function-backed rule's replacement `r` for the match `whole` may show (#1257, R1258b's B2): `r`, unless the
+ * part of it that stands for what it replaced (what `whole` and `r` don't share at either end, as spansOf cuts the
+ * span) holds that replaced text, or a group's text of 4 or more characters that the replaced text holds. Then the
+ * replacement fails closed: that part becomes `[REDACTED]`. A one-line function that echoes the key's groups
+ * (`` (m, a, b) => `[REDACTED:${a}_${b}]` ``) showed the key, while every hold and test passed; the string markers
+ * can't (markerProblem), and a function is held to the same at run time. Costs one scan of the replaced text per
+ * group that stands in the marker.
+ */
+function shown(whole: string, groups: readonly string[], r: string): string {
+  if (r === whole) return r;
+  let a = 0;
+  while (a < whole.length && a < r.length && whole[a] === r[a]) a++;
+  let b = 0;
+  while (b < whole.length - a && b < r.length - a && whole[whole.length - 1 - b] === r[r.length - 1 - b]) b++;
+  const taken = whole.slice(a, whole.length - b);
+  const put = r.slice(a, r.length - b);
+  if (!taken || (!put.includes(taken) && !groups.some((g) => g.length >= 4 && put.includes(g) && taken.includes(g)))) return r;
+  return `${whole.slice(0, a)}[REDACTED]${whole.slice(whole.length - b)}`;
+}
+
+/** A rule's function, called with the match and its groups as strings, its result guarded (shown). */
+const called = (rep: (match: string, ...groups: string[]) => string, m: string, groups: string[]) => shown(m, groups, rep(m, ...groups));
+
 /** As apply, but each replacement keeps as many line breaks as what it replaced. */
 function applyKeepingLines(s: string, re: RegExp, rep: Replacement): string {
   return s.replace(re, (m: string, ...rest: unknown[]) => {
     const groups = rest.slice(0, -2).filter((g) => typeof g !== 'object');
-    const out = typeof rep === 'string' ? expand(rep, m, groups) : rep(m, ...(groups as string[]));
+    const out = typeof rep === 'string' ? expand(rep, m, groups) : called(rep, m, groups as string[]);
     return out + '\n'.repeat(Math.max(0, breaks(m) - breaks(out)));
   });
 }
@@ -595,7 +664,9 @@ function applyKeepingLines(s: string, re: RegExp, rep: Replacement): string {
 /** The options for text bound for an issue, a comment or a pull request (src/backlog): secrets and identifiers. */
 export const TRACKER: Readonly<RedactTextOptions> = Object.freeze({ identifiers: true });
 
-const apply = (s: string, re: RegExp, rep: Replacement) => (typeof rep === 'string' ? s.replace(re, rep) : s.replace(re, rep));
+/** `re` replaced in `s` by `rep`: a string marker as String.prototype.replace reads it, a function guarded (shown). */
+const apply = (s: string, re: RegExp, rep: Replacement) =>
+  typeof rep === 'string' ? s.replace(re, rep) : s.replace(re, (m: string, ...rest: unknown[]) => called(rep, m, rest.slice(0, -2).map((g) => (typeof g === 'string' ? g : '')) as string[]));
 
 /**
  * Fenced blocks the harness parses back out of an issue (```done_when, src/backlog/types.ts parseContract and
@@ -684,7 +755,8 @@ function spansOf(t: string, re: RegExp, rep: Replacement, rank: number, out: Spa
     // found. Each match start is after the last one's, and at most 64 characters are read again: linear.
     g.lastIndex = Math.max(m.index + 1, m.index + whole.length - 64);
     const groups = m.slice(1).map((x) => x ?? '');
-    const r = typeof rep === 'string' ? expand(rep, whole, groups) : rep(whole, ...groups);
+    // A function's result is guarded (shown): one that echoes what it replaced puts `[REDACTED]` there instead.
+    const r = typeof rep === 'string' ? expand(rep, whole, groups) : called(rep, whole, groups);
     if (r === whole) {
       // A match the rule's function declined (no secret) hides nothing it stepped over (#889 round 7): the next search
       // starts at its next character, so a start inside it is still tried. Linear only for a rule whose starts are
