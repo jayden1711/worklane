@@ -286,6 +286,32 @@ test("core.commentChar=auto: the hook reads git's choice from git's own help blo
   assert.equal(judge('subj\n\n# ------------------------ >8 ------------------------\nx\n'), 0, 'below a blank line: line 2 is blank either way');
 });
 
+test("core.commentChar=auto with no help block: the hook asks this git which character it picks, so it agrees with git 2.48 and 2.56 alike (#1260, CI at af9687d0)", (t) => {
+  const r = repo();
+  r.git('config', 'core.commentChar', 'auto');
+  r.git('config', 'commit.status', 'false');
+  const realGit = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim();
+  if (!realGit) return t.skip('no git');
+  // A git whose `auto` picks `pick`: the real git, with core.commentChar=auto read as that character (2.56: `#`; 2.48,
+  // for a message with `#` lines: `;`).
+  const stub = (pick: string) => {
+    const d = mkdtempSync(join(tmpdir(), 'git-auto-'));
+    writeFileSync(join(d, 'git'), `#!/bin/sh\nfor a; do shift; [ "$a" = core.commentChar=auto ] && a='core.commentChar=${pick}'; set -- "$@" "$a"; done\nexec "${realGit}" "$@"\n`, { mode: 0o755 });
+    return d;
+  };
+  const judge = (text: string, pick: string) => {
+    const f = join(r.dir, '.git', 'COMMIT_EDITMSG');
+    writeFileSync(f, text);
+    return spawnSync(process.execPath, [installedGate, '--commit-msg', f], { cwd: r.dir, encoding: 'utf8', env: { ...process.env, PATH: `${stub(pick)}:${process.env.PATH}`, PUSH_GATE_COMMIT_MSG: f, GIT_EDITOR: 'true', GIT_DIR: join(r.dir, '.git') } }).status;
+  };
+  const issues = 'subj\n#1259\n#1260\n#1261\n';
+  assert.equal(judge(issues, '#'), 0, "a git that picks #: the # lines are comments, line 2 is blank (2.56's commit)");
+  assert.equal(judge(issues, ';'), 1, "a git that picks ;: the # lines are kept, line 2 is #1259 (2.48's commit)");
+  const long = `#1259: ${'a'.repeat(200)}\n\nBody.\n`;
+  assert.equal(judge(long, ';'), 1, 'kept: a long #NNN subject');
+  assert.equal(judge(`#1259: short\n\n${'a'.repeat(200)}\n`, ';'), 0, 'kept: a short #NNN subject over a long body line');
+});
+
 test('a remote named --commit-msg is judged as a push, never as a message (#1260 R1260a D2)', () => {
   const r = repo();
   const base = r.git('rev-parse', 'HEAD');

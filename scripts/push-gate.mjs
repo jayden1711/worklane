@@ -20,8 +20,8 @@
 // And a Signed-off-by line whose email is the commit's own author or committer
 // email (a squash merge's DCO trailers) is dropped whole, name included.
 import { execFileSync, spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
-import { devNull } from 'node:os';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { devNull, tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadRules, scanBinary, scanText, SKIP } from './lib/denylist.mjs';
@@ -46,7 +46,7 @@ const graphOff = (e) => {
   return { ...e, [`GIT_CONFIG_KEY_${n}`]: 'core.commitGraph', [`GIT_CONFIG_VALUE_${n}`]: 'false', GIT_CONFIG_COUNT: String(n + 1), ...last };
 };
 const GIT_ENV = graphOff({ ...process.env, GIT_NO_REPLACE_OBJECTS: '1', GIT_GRAFT_FILE: join(devNull, 'no-grafts') });
-const runGit = (args, opts) => execFileSync('git', [...GIT_FIXED_ARGS, ...args], { ...opts, env: GIT_ENV });
+const runGit = (args, opts) => execFileSync('git', [...GIT_FIXED_ARGS, ...args], { ...opts, env: opts?.env ?? GIT_ENV });
 const git = (...a) => runGit(a, { encoding: 'utf8', maxBuffer: READ_MAX });
 
 function fail(why) {
@@ -269,8 +269,35 @@ function helpBlockChar(lines) {
  */
 function commentPrefixes(text, setting, statusOn = true) {
   if (setting !== 'auto') return [setting];
-  const c = statusOn ? helpBlockChar(text.split('\n')) : null;
+  const c = (statusOn ? helpBlockChar(text.split('\n')) : null) ?? autoCharFromGit(text);
   return c ? [c] : ['#', null];
+}
+
+/**
+ * With no help block, the character this git's `auto` picks for the message, asked of git itself (CI at af9687d0: git
+ * 2.48 kept a message's `#` lines, picking `;`, where 2.56 stripped them, and git's release notes name no change between
+ * them): the message committed, edited and with --cleanup=strip, in a throwaway repository under core.commentChar=auto,
+ * then the candidate whose stripping gives what git committed. Null when git can't say (an empty message aborts): the
+ * hook then judges both readings.
+ */
+function autoCharFromGit(text) {
+  const dir = mkdtempSync(join(tmpdir(), 'commit-msg-auto-'));
+  try {
+    // Nothing of the commit in progress: its repository, index and work tree aren't the probe's.
+    const env = { ...GIT_ENV, GIT_EDITOR: 'true' };
+    for (const k of ['GIT_DIR', 'GIT_INDEX_FILE', 'GIT_WORK_TREE', 'GIT_PREFIX', 'GIT_COMMON_DIR', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_REFLOG_ACTION']) delete env[k];
+    const opts = { encoding: 'utf8', env, stdio: ['ignore', 'pipe', 'ignore'] };
+    const msg = join(dir, 'MSG');
+    writeFileSync(msg, text);
+    runGit(['init', '-q', join(dir, 'r')], opts);
+    runGit(['-C', join(dir, 'r'), '-c', 'core.commentChar=auto', '-c', 'commit.status=false', '-c', 'user.name=probe', '-c', 'user.email=probe@example.com', '-c', 'commit.gpgsign=false', '-c', `core.hooksPath=${devNull}`, 'commit', '-q', '--allow-empty', '--no-verify', '--cleanup=strip', '-e', '-F', msg], opts);
+    const committed = runGit(['-C', join(dir, 'r'), 'log', '-1', '--format=%B'], opts).replace(/\n+$/, '');
+    return [...AUTO_COMMENT].find((c) => asCommitted(text, 'strip', c, false) === committed) ?? null;
+  } catch {
+    return null;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 /** Whether git writes its help block into an edited message (commit.status, as git reads a boolean). */
