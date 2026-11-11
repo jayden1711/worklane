@@ -561,10 +561,11 @@ export function childFds(pids: readonly number[]): number | null {
 /**
  * The job's cgroup (cgroup v2, named by /proc/self/cgroup's `0::` line; R1181t D1, D4): the processes in it and its
  * sub-groups, whatever their uid, session or pid history (sudo doesn't move a process out of it), and its kernel
- * memory less what the kernel can reclaim (memory.stat `kernel` - `slab_reclaimable`), which bounds what no fd table
- * names: a pipe's or a socket's buffers held only in flight. R1181u C1, R1181v D1: those are charged as kernel pages,
- * not slab, so `slab_unreclaimable + sock` read about a tenth of them; the dentry cache (reclaimable slab) is left out,
- * so walking files doesn't move it. Each null where it can't be read.
+ * memory less what the kernel can reclaim, plus its socket buffers (memory.stat `kernel` - `slab_reclaimable` +
+ * `sock`), which bounds what no fd table names: a pipe's or a socket's buffers held only in flight. R1181u C1, R1181v
+ * D1: a pipe's and a unix socket's are charged as kernel pages, not slab, so `slab_unreclaimable + sock` read about a
+ * tenth of them; R1181x D1: a TCP or UDP socket's are charged as `sock`, not `kernel`. The dentry cache (reclaimable
+ * slab) is left out, so walking files doesn't move it. Each null where it can't be read.
  */
 export function cgroupLevels(root = '/sys/fs/cgroup'): { procs: number | null; kernelBytes: number | null } {
   let dir: string;
@@ -599,7 +600,8 @@ export function cgroupLevels(root = '/sys/fs/cgroup'): { procs: number | null; k
   try {
     const stat = readFileSync(join(dir, 'memory.stat'), 'utf8');
     const get = (k: string) => Number(new RegExp(`^${k} (\\d+)$`, 'm').exec(stat)?.[1]);
-    const n = get('kernel') - get('slab_reclaimable');
+    // R1181x D1: a TCP or UDP socket's buffers are charged as `sock`, not `kernel` (a unix socket's and a pipe's are kernel pages).
+    const n = get('kernel') - get('slab_reclaimable') + get('sock');
     if (Number.isFinite(n)) kernelBytes = n;
   } catch {
     // no memory controller here
@@ -696,6 +698,8 @@ export function fsLevels(paths: readonly (string | undefined)[]): number | null 
       if (devs.has(dev)) continue;
       devs.add(dev);
       const f = statfsSync(p);
+      // R1181x L1: a tmpfs is the kernel's Shmem, read below; its statfs too would read it twice.
+      if (f.type === 0x01021994) continue;
       bytes += (f.blocks - f.bfree) * f.bsize;
     }
     const shmem = /^Shmem:\s+(\d+) kB$/m.exec(readFileSync('/proc/meminfo', 'utf8'));
@@ -1602,6 +1606,17 @@ test('soak verdict: the sample read after stop() fails on what the shutdown left
   assert.match(err({ failedRuns: 2 }), /^left at stop: 2 agent run\(s\) that did not succeed logged during/);
   assert.match(err({ failureEvents: 1 }), /^left at stop: 1 failure event\(s\) logged during/);
   assert.equal(err({}), '', 'none logged: passes');
+  // R1181x D2: what the shutdown writes (its stop-disk probe: files 729 -> 30,731, disk +208 MB, the log +58 MB).
+  const wrote = (stop: (e: SoakSample) => Partial<SoakSample>) => {
+    const s = series(331, (m) => ({ diskBytes: 30 * MB + m * 100_000, files: 500 + m * 2, eventsBytes: 1_000_000 + m * 60_000 }));
+    s[330] = { ...s[329]!, at: s[329]!.at + 3000, ...stop(s[329]!) };
+    return soakVerdict(s, SOAK_LIMITS, opts).failures.join(' | ');
+  };
+  assert.match(wrote((e) => ({ files: e.files! + 30_000 })), /^left at stop: 30000 more files and folders after stop\(\) and idle\(\) \(limit 64\)$/);
+  assert.match(wrote((e) => ({ diskBytes: e.diskBytes! + 208 * MB })), /^left at stop: 208\.0 MB more on disk besides the event log/);
+  assert.match(wrote((e) => ({ eventsBytes: e.eventsBytes + 58 * MB, diskBytes: e.diskBytes! + 58 * MB })), /^left at stop: the event log grew 58\.0 MB during stop\(\) and idle\(\)/);
+  assert.match(wrote(() => ({ walBytes: 65 * MB })), /left at stop: the WAL at 65\.0 MB/);
+  assert.equal(wrote((e) => ({ files: e.files! + 3, diskBytes: e.diskBytes! + 50_000, eventsBytes: e.eventsBytes + 20_000 })), '', 'a few lines and files: passes');
   // The stop sample is the last one only with `stopped`: without it, one sample's rise at the end is the run's to judge.
   const s = series(331, () => ({ children: 1 }));
   s[330] = { ...s[329]!, children: 2 };
@@ -1700,7 +1715,12 @@ test("soak driver (Linux, R1181t D1, D4): the job's cgroup is read: a process st
 
 test("soak driver (Linux, R1181u C1, C2): the job cgroup's kernel level reads a pipe's buffers in full", linuxOnly, async (t) => {
   if (!python) return t.skip('no python3');
-  if (cgroupLevels().kernelBytes === null) return t.skip('no memory controller on this cgroup');
+  if (cgroupLevels().kernelBytes === null) {
+    // R1181x L2: where the job's cgroup has a memory.stat, the reader must read it (a null there passed every test).
+    const line = readFileSync('/proc/self/cgroup', 'utf8').split('\n').find((l) => l.startsWith('0::'));
+    assert.ok(!line || !existsSync(join('/sys/fs/cgroup', line.slice(3), 'memory.stat')), 'memory.stat is there, and the kernel level read null');
+    return t.skip('no memory controller on this cgroup');
+  }
   // 32 pipes of 1 MB (an unprivileged pipe's largest), each filled: 32 MB of pipe buffers, charged as kernel pages.
   const PIPES = `import fcntl, os, sys, time
 held = []
@@ -1732,5 +1752,41 @@ time.sleep(60)`;
     assert.ok(rise >= 16 * 2 ** 20, `the kernel level rose ${(rise / 2 ** 20).toFixed(1)} MB with 32 MB of pipe buffers held`);
   } finally {
     c?.kill();
+  }
+});
+
+test("soak driver (Linux, R1181x D1): the job cgroup's kernel level reads a TCP socket's buffers held in flight", linuxOnly, async (t) => {
+  if (!python) return t.skip('no python3');
+  if (cgroupLevels().kernelBytes === null) return t.skip('no memory controller on this cgroup');
+  // Loopback TCP pairs, each written until it would block, never read: the bytes sit in the two sockets' buffers.
+  const TCP = `import os, socket, sys, time
+srv = socket.socket(); srv.bind(('127.0.0.1', 0)); srv.listen(16)
+held, sent = [], 0
+for i in range(16):
+    a = socket.create_connection(srv.getsockname()); b, _ = srv.accept()
+    a.setblocking(False)
+    try:
+        while sent < (16 << 20): sent += a.send(b'x' * 65536)
+    except BlockingIOError:
+        pass
+    held += [a, b]
+    if sent >= (16 << 20): break
+print('ready', sent, flush=True)
+time.sleep(60)`;
+  const settle = () => new Promise((r) => setTimeout(r, 2500));
+  await settle();
+  const before = cgroupLevels().kernelBytes!;
+  const c = spawn('python3', ['-c', TCP], { stdio: ['ignore', 'pipe', 'ignore'], env: { ...process.env, SOAK_CHILD_MARK: '' } });
+  let out = '';
+  c.stdout!.on('data', (b) => (out += String(b)));
+  try {
+    assert.ok(await waitFor(() => /ready \d+/.test(out), 15_000), `the sockets filled: ${out}`);
+    const sent = Number(/ready (\d+)/.exec(out)![1]);
+    await settle();
+    const rise = cgroupLevels().kernelBytes! - before;
+    // 0.75 of what is held in flight (16 MB when the buffers take it all): `kernel - slab_reclaimable` alone read +0.5 MB of 516 (R1181x).
+    assert.ok(rise >= Math.min(12 * 2 ** 20, sent * 0.75), `the kernel level rose ${(rise / 2 ** 20).toFixed(1)} MB with ${(sent / 2 ** 20).toFixed(1)} MB in flight`);
+  } finally {
+    c.kill();
   }
 });

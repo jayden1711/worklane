@@ -27,8 +27,8 @@ verdict). Workflow: `.github/workflows/soak.yml`.
   - agent slots held;
   - on Linux, the open file handles the processes it started hold (each one's `/proc/<pid>/fd`);
   - on a real soak on Linux, the job's cgroup (named by `/proc/self/cgroup`): the processes in it and its sub-groups
-    (`cgroup.procs`), and its kernel memory less what the kernel can reclaim (`memory.stat` `kernel` less
-    `slab_reclaimable`).
+    (`cgroup.procs`), and its kernel memory less what the kernel can reclaim, plus its socket buffers
+    (`memory.stat` `kernel` − `slab_reclaimable` + `sock`).
 
   After the last tick the driver stops the coordinator, waits for its `idle()` and 2 s more, and takes **one more
   sample**, the stop sample, judged on its own (below): what the shutdown leaves is read too.
@@ -48,12 +48,12 @@ verdict). Workflow: `.github/workflows/soak.yml`.
 | Those processes' resident memory grew, as RSS is judged | 256 MB |
 | Those processes' open file handles grew (Linux, where they are required in every sample), as this process's are judged | 32 |
 | A real soak on Linux only (required in every sample there): the processes in the job's cgroup grew, as child processes are judged. They are counted whatever their uid, session or pid history (`sudo` doesn't move a process out of the cgroup). Processes, not tasks: `pids.current` counts threads, which the runner's own .NET processes add and drop | 4 |
-| A real soak on Linux only: the job cgroup's kernel memory less what the kernel can reclaim (`kernel` − `slab_reclaimable`) grew, as memory is judged. It bounds what no fd table names: a pipe's or a socket's buffers held only in flight (sent over a unix socket and never received), which the kernel charges as kernel pages (R1181u C1: `slab_unreclaimable` + `sock` read about a tenth of them). The dentry cache is reclaimable, so walking files doesn't move it | 64 MB, 4× held |
-| The stop sample (read after `stop()`, `idle()` and 2 s): processes the soak started, processes in the job's cgroup, worktrees or the worktree folder's entries above the first quarter's median; an agent run open, a slot or the full-run lock held; a `coordinator.error`, a failed run or another failure event logged during the shutdown (R1181v L1); open file handles (its own, the children's), watches, the children's RSS, the cgroup's kernel memory or the filesystems' level above the first quarter's median by more than its growth limit | any one, or the limit above |
+| A real soak on Linux only: the job cgroup's kernel memory less what the kernel can reclaim, plus its socket buffers (`kernel` − `slab_reclaimable` + `sock`), grew, as memory is judged. It bounds what no fd table names: a pipe's or a socket's buffers held only in flight (sent over a unix socket and never received, or sent over TCP or UDP and never read). The kernel charges a pipe's and a unix socket's as kernel pages (R1181u C1: `slab_unreclaimable` + `sock` read about a tenth of them) and a TCP or UDP socket's as `sock` (R1181x D1). The dentry cache is reclaimable, so walking files doesn't move it | 64 MB, 4× held |
+| The stop sample (read after `stop()`, `idle()` and 2 s): processes the soak started, processes in the job's cgroup, worktrees or the worktree folder's entries above the first quarter's median; an agent run open, a slot or the full-run lock held; a `coordinator.error`, a failed run or another failure event logged during the shutdown (R1181v L1); more than 64 files and folders, 16 MB of disk besides the event log, or 1 MB of event log written since the last run sample, or the WAL past its limit (R1181x D2); open file handles (its own, the children's), watches, the children's RSS, the cgroup's kernel memory or the filesystems' level above the first quarter's median by more than its growth limit | any one, or the limit above |
 | inotify watches and fanotify marks grew, this process's and those processes' (Linux, where they are required in every sample), as open file handles are judged | 32 |
 | Disk under the soak's folder, the test isolate's home, the `/dev/shm` entries the soak or one of its processes holds open or mapped, and (Linux) files they hold open or mapped after unlinking them, besides the event log (judged on its own above), per landed task after the warm-up | 64 KB |
 | The same disk, grown or held mid-run, as memory is judged (temp files are made inside the folder) | 256 MB, 4× held |
-| A real soak on Linux only (required in every sample there): the used space of the filesystems of the soak's folder and `/var/tmp` (statfs), plus the kernel's `Shmem` (which holds `/dev/shm`, `$XDG_RUNTIME_DIR` and every other tmpfs, so they aren't read twice), less the event log, which is on the soak folder's filesystem and judged on its own above. Grown or held, with the same envelope as the disk. It catches what a walk misses: an unlinked open or mapped file, a memfd, a file outside the walked folders. But it also counts anything else on those filesystems, so it is read only where the soak has its machine to itself: not in the smoke, which shares its machine with other test files, nor off Linux | 256 MB, 4× held |
+| A real soak on Linux only (required in every sample there): the used space of the filesystems of the soak's folder and `/var/tmp` (statfs), plus the kernel's `Shmem` (which holds `/dev/shm`, `$XDG_RUNTIME_DIR` and every other tmpfs, so they aren't read twice; a soak folder on a tmpfs is read through `Shmem` only, R1181x L1), less the event log, which is on the soak folder's filesystem and judged on its own above. Grown or held, with the same envelope as the disk. It catches what a walk misses: an unlinked open or mapped file, a memfd, a file outside the walked folders. But it also counts anything else on those filesystems, so it is read only where the soak has its machine to itself: not in the smoke, which shares its machine with other test files, nor off Linux | 256 MB, 4× held |
 | Files and folders under the soak's folder, per landed task after the warm-up | 64 |
 | Agent runs open, at any sample | 0 |
 | Agent slots held, at any sample | 0 |
@@ -160,7 +160,15 @@ replaces main's pending scheduled run.
     and never received) is read only through the job cgroup's kernel memory, on a real soak on Linux: a hoard under its
     64 MB limit isn't seen, and in the smoke none is (R1181t D1, R1181u C1). An inotify instance held in flight costs
     about 88 bytes a watch, so it is bounded only by the system's `max_user_watches` (65,536 on a stock Ubuntu: about
-    6 MB), never by this check.
+    6 MB), never by this check. A file handle held in flight shows only as its file struct, about 15% of what it holds:
+    the inode and dentry it pins count as reclaimable, which the level leaves out, so such a leak is bounded only by the
+    user's open-file limit (R1181x D4). A pipe hoard stalls on the user's `fs.pipe-user-pages-soft` (64 MB) and then
+    grows a page a pipe.
+  - Kernel memory is charged to the cgroup a process is in when it allocates. A counted process in another cgroup (a
+    user service the soak starts, a child that moves itself) holds what it puts in flight outside this check; it is
+    counted as a process, not by what it holds (R1181x D3).
+  - Scheduled work created during the run (a user timer, a crontab or `at` line) is seen only while its process runs
+    at a sample, never as a schedule (R1181x D5).
   - The stop sample is read 2 s after `stop()` and `idle()`: what the shutdown starts later, or ends later, isn't seen
     as left. A process the coordinator's git starts in the background (`git gc --auto` detaches) that is still running
     then would read as left behind.

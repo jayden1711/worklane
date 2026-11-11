@@ -78,9 +78,9 @@ export interface SoakSample {
   childFds?: number | null;
   /**
    * The job's cgroup (a real soak on Linux, R1181t D1, D4): its processes, every one whatever its uid, session or pid
-   * history (cgroup.procs, its sub-groups included), and its kernel memory less what the kernel can reclaim
-   * (memory.stat kernel - slab_reclaimable: R1181u C1), which bounds a pipe's or socket's buffers held only in flight,
-   * which no fd table names. Null elsewhere.
+   * history (cgroup.procs, its sub-groups included), and its kernel memory less what the kernel can reclaim, plus its
+   * socket buffers (memory.stat kernel - slab_reclaimable + sock: R1181u C1, R1181x D1), which bounds a pipe's or a
+   * socket's buffers held only in flight, which no fd table names. Null elsewhere.
    */
   cgroupProcs?: number | null;
   cgroupKernelBytes?: number | null;
@@ -165,6 +165,10 @@ const median = (xs: number[]): number => {
   return s.length % 2 ? s[m]! : (s[m - 1]! + s[m]!) / 2;
 };
 
+/** What a shutdown may add, read by the stop sample against the last run sample (R1181x D2). */
+export const STOP_DISK_BYTES = 16 * 2 ** 20;
+export const STOP_FILES = 64;
+export const STOP_LOG_BYTES = 2 ** 20;
 /** The envelope's end: the highest of its last this many blocks (about the last 30 samples). */
 export const END_PEAK = 3;
 /** The end window drift is judged over too (R1181c). */
@@ -439,6 +443,14 @@ export function soakVerdict(input: readonly SoakSample[], limits: SoakLimits = S
       const now = stop[k];
       if (typeof was === 'number' && typeof now === 'number' && now > was) failures.push(`left at stop: ${now - was} ${what} logged during stop() and idle()`);
     }
+    // R1181x D2: what the shutdown writes: files and disk (less the log) past the last run sample, and the event log.
+    const other = (s: SoakSample) => (typeof s.diskBytes === 'number' ? s.diskBytes - s.eventsBytes : null);
+    const diskEnd = other(end);
+    const diskStop = other(stop);
+    if (diskEnd !== null && diskStop !== null && diskStop - diskEnd > STOP_DISK_BYTES) failures.push(`left at stop: ${MB(diskStop - diskEnd)} more on disk besides the event log after stop() and idle() (limit ${MB(STOP_DISK_BYTES)})`);
+    if (typeof end.files === 'number' && typeof stop.files === 'number' && stop.files - end.files > STOP_FILES) failures.push(`left at stop: ${stop.files - end.files} more files and folders after stop() and idle() (limit ${STOP_FILES})`);
+    if (stop.eventsBytes - end.eventsBytes > STOP_LOG_BYTES) failures.push(`left at stop: the event log grew ${MB(stop.eventsBytes - end.eventsBytes)} during stop() and idle() (limit ${MB(STOP_LOG_BYTES)})`);
+    if (stop.walBytes > limits.walBytes) failures.push(`left at stop: the WAL at ${MB(stop.walBytes)} after stop() and idle() (limit ${MB(limits.walBytes)})`);
     if (stop.openRuns > 0) failures.push(`left at stop: ${stop.openRuns} agent run(s) open after stop() and idle()`);
     if (stop.slotsHeld > 0) failures.push(`left at stop: ${stop.slotsHeld} agent slot(s) held after stop() and idle()`);
     if ((stop.fullRunHeld ?? 0) > 0) failures.push('left at stop: the full-run lock held after stop() and idle()');
