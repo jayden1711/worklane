@@ -245,12 +245,15 @@ test("the commit-msg hook and the push gate agree on what git commits, by git's 
     if (g.status !== 0) assert.match(g.stderr, /subject is not one short line/, `${name}: the gate refused for the message's shape, not something else: ${g.stderr}`);
     const verdict = `hook=${hookOk ? 'pass' : 'refuse'} gate=${g.status === 0 ? 'pass' : 'refuse'}`;
     if (name in CLI_RESIDUAL) assert.equal(verdict, CLI_RESIDUAL[name], `${name}: the stated residual`);
-    else if (hookOk !== (g.status === 0)) seen.push(`${name}: ${verdict}`);
+    // R1260g/h: with core.commentChar=auto the hook can't know git's pick, so it judges every reading: it may refuse
+    // what git would commit (fail-safe), never pass what the gate refuses.
+    else if (hookOk && g.status !== 0) seen.push(`${name}: ${verdict}`);
+    else if (!hookOk && g.status === 0 && cfg['core.commentChar'] !== 'auto') seen.push(`${name}: ${verdict}`);
   }
-  assert.deepEqual(seen, [], 'every row the hook can see agrees with the gate');
+  assert.deepEqual(seen, [], "every row agrees with the gate, but auto's, which may only refuse more");
 });
 
-test("core.commentChar=auto: the hook reads git's choice from git's own help block, as git 2.48 and 2.56 each write it (#1260, CI at ae2bcf69)", () => {
+test("core.commentChar=auto: the hook can't know git's pick (git takes it from the message before the editor ran), so it judges every reading and refuses when any fails (#1260 R1260g D1, R1260h D1-D3)", () => {
   const r = repo();
   r.git('config', 'core.commentChar', 'auto');
   const judge = (text: string) => {
@@ -259,68 +262,30 @@ test("core.commentChar=auto: the hook reads git's choice from git's own help blo
     return spawnSync(process.execPath, [installedGate, '--commit-msg', f], { cwd: r.dir, encoding: 'utf8', env: { ...process.env, PUSH_GATE_COMMIT_MSG: f, GIT_EDITOR: 'true', GIT_DIR: join(r.dir, '.git') } }).status;
   };
   const help = (c: string) => `${c} Please enter the commit message for your changes. Lines starting\n${c} with '${c}' will be ignored, and an empty message aborts the commit.\n${c}\n${c} On branch main\n`;
-  // git 2.56 (the runner's): `#` chosen, the message's #1259 line joins the block and is stripped: line 2 is blank.
-  assert.equal(judge(`subj\n#1259 follow-up\n\n${help('#')}`), 0, '2.56: the # line is a comment');
-  // git 2.48: `;` chosen, the #1259 line is kept as line 2.
-  assert.equal(judge(`subj\n#1259 follow-up\n\n${help(';')}`), 1, '2.48: the # line is line 2');
-  // A #NNN subject: kept under `;`, stripped under `#`, whose next line is then the subject.
-  assert.equal(judge(`#1259: ${'a'.repeat(200)}\n\nBody.\n\n${help(';')}`), 1, 'a long #NNN subject kept');
-  assert.equal(judge(`#1259: short subject\n\n${'a'.repeat(200)}\n\n${help(';')}`), 0, 'a short #NNN subject kept, the long line is the body');
-  // No help block (commit.status=false): both readings, refused if either fails.
-  assert.equal(judge(`#1259: ${'a'.repeat(200)}\n`), 1, 'no block: strict');
-  // A message's own trailing lines after a blank line: line 2 is blank in every reading, whatever git picks. (With no
-  // help block the hook asks git: those cases are in the next test, with each version's pick.)
-  assert.equal(judge(`subj\n\n#1259\n#1260\n#1261\n`), 0, 'after a blank line: line 2 is blank in every reading');
-  // With -v: git's help block sits above its scissors line, the diff below it.
-  assert.equal(judge(`subj\n#1259 follow-up\n\n${help('#')}# ------------------------ >8 ------------------------\n# Do not modify or remove the line above.\ndiff --git a/x b/x\n+x\n`), 0, '-v: the block above the scissors line');
-  // R1260f F3: a typed scissors line in strip mode: git keeps what follows unless -v, so both readings.
+  const L = 'a'.repeat(200);
+  // Refused: a reading git may commit fails, whichever it picks.
+  for (const [what, text] of [
+    ['g D1 / h D1: an edited message, no help block', 'subj\n#1259 x\n\n#\n#1260 a\n#1261 b\n'],
+    ['h D2: a typed ; block and scissors line above -v', `Subject\n;\n\n;a\n;\n;b\n; ------------------------ >8 ------------------------\n`],
+    ['h D3: the message\'s own bare-char block, status off', 'subj\n#1259 x\n\n#\n#1260 a\n#1261 b\n'],
+    ['a ; line over a long line: a git that picks ; commits it as the subject', `; x\n\n${L}\n`],
+    ['issue lines under the subject', 'subj\n#1259\n#1260\n#1261\n'],
+    ["2.56's layout: # help under a # line (refused though 2.56 commits subj: fail-safe)", `subj\n#1259 follow-up\n\n${help('#')}`],
+    ['a long #NNN subject', `#1259: ${L}\n\nBody.\n\n${help(';')}`],
+    ['an empty template edited on line 1 (the help lines read as text in one reading: stated)', `subj\n${help('#')}`],
+  ] as const) assert.equal(judge(text), 1, `refused: ${what}`);
+  // Kept: every reading passes.
+  for (const [what, text] of [
+    ['a plain message', 'subj\n\nbody\n'],
+    ['a plain message under the help block', `subj\n\nbody\n\n${help('#')}`],
+    ['a # block after a blank line', 'subj\n\n#1259\n#1260\n'],
+    ['a short #NNN subject, then a blank line', `#1259: short subject\n\nbody\n\n${help(';')}`],
+    ['-v: the help and git scissors line below a blank line', `subj\n\nbody\n\n${help('#')}# ------------------------ >8 ------------------------\n# Do not modify or remove the line above.\ndiff --git a/x b/x\n+x\n`],
+  ] as const) assert.equal(judge(text), 0, `kept: ${what}`);
+  // R1260h D2: with a set character too, a typed scissors line above git's (-v): strip mode can't tell, so it judges
+  // the uncut reading too, where x is line 2.
   r.git('config', 'core.commentChar', '#');
-  assert.equal(judge('subj\n# ------------------------ >8 ------------------------\nx\n'), 1, 'a typed scissors line: x may be line 2');
-  assert.equal(judge('subj\n\n# ------------------------ >8 ------------------------\nx\n'), 0, 'below a blank line: line 2 is blank either way');
-});
-
-test("core.commentChar=auto with no help block: the hook asks this git which character it picks, so it agrees with git 2.48 and 2.56 alike (#1260, CI at af9687d0)", (t) => {
-  const r = repo();
-  r.git('config', 'core.commentChar', 'auto');
-  r.git('config', 'commit.status', 'false');
-  const realGit = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim();
-  if (!realGit) return t.skip('no git');
-  // A git whose `auto` picks `pick`: the real git, with core.commentChar=auto read as that character (2.56: `#`; 2.48,
-  // for a message with `#` lines: `;`).
-  const stub = (pick: string) => {
-    const d = mkdtempSync(join(tmpdir(), 'git-auto-'));
-    writeFileSync(join(d, 'git'), `#!/bin/sh\nfor a; do shift; [ "$a" = core.commentChar=auto ] && a='core.commentChar=${pick}'; set -- "$@" "$a"; done\nexec "${realGit}" "$@"\n`, { mode: 0o755 });
-    return d;
-  };
-  const judge = (text: string, pick: string) => {
-    const f = join(r.dir, '.git', 'COMMIT_EDITMSG');
-    writeFileSync(f, text);
-    return spawnSync(process.execPath, [installedGate, '--commit-msg', f], { cwd: r.dir, encoding: 'utf8', env: { ...process.env, PATH: `${stub(pick)}:${process.env.PATH}`, PUSH_GATE_COMMIT_MSG: f, GIT_EDITOR: 'true', GIT_DIR: join(r.dir, '.git') } }).status;
-  };
-  const issues = 'subj\n#1259\n#1260\n#1261\n';
-  assert.equal(judge(issues, '#'), 0, "a git that picks #: the # lines are comments, line 2 is blank (2.56's commit)");
-  assert.equal(judge(issues, ';'), 1, "a git that picks ;: the # lines are kept, line 2 is #1259 (2.48's commit)");
-  const long = `#1259: ${'a'.repeat(200)}\n\nBody.\n`;
-  assert.equal(judge(long, ';'), 1, 'kept: a long #NNN subject');
-  assert.equal(judge(`#1259: short\n\n${'a'.repeat(200)}\n`, ';'), 0, 'kept: a short #NNN subject over a long body line');
-  // R1260e D1, R1260f F2: a message's own trailing lines are no help block, so git is asked; each version's pick.
-  assert.equal(judge('subj\n; a\n; b\n; c\n', '#'), 1, "three ; lines, a git that picks # (2.48's for this message): kept, line 2");
-  assert.equal(judge('subj\n; a\n; b\n; c\n', ';'), 0, 'three ; lines, a git that picks ;: comments');
-  // commit.status=false: git writes no help block, so a block-shaped tail is the message's own, and git is asked.
-  const helpLike = 'subj\n#1259 follow-up\n\n# Please enter the commit message.\n#\n# On branch main\n';
-  assert.equal(judge(helpLike, '#'), 0, 'status off, a git that picks #: all # lines are comments');
-  assert.equal(judge(helpLike, ';'), 1, 'status off, a git that picks ;: the #1259 line is line 2');
-  // With status on, a block of the message's own # lines with no bare line is no help block (R1260e: a bare `c` line):
-  // a long #NNN subject above it is judged by git's pick, never stripped as help.
-  r.git('config', 'commit.status', 'true');
-  for (const pick of ['#', ';']) assert.equal(judge(`#1259: ${'a'.repeat(200)}\n\n#a\n#b\n#c\n`, pick), 1, `the message's own block, a git that picks ${pick}`);
-  // When git can't answer (here: it strips everything, an empty message, and aborts), the hook says so before judging
-  // both readings, so a CI refusal names its reason.
-  const f = join(r.dir, '.git', 'COMMIT_EDITMSG');
-  writeFileSync(f, `#1259: ${'a'.repeat(200)}\n`);
-  const said = spawnSync(process.execPath, [installedGate, '--commit-msg', f], { cwd: r.dir, encoding: 'utf8', env: { ...process.env, PATH: `${stub('#')}:${process.env.PATH}`, PUSH_GATE_COMMIT_MSG: f, GIT_EDITOR: 'true', GIT_DIR: join(r.dir, '.git') } });
-  assert.equal(said.status, 1);
-  assert.match(said.stderr, /commit-msg hook: note: git couldn't be asked which character core\.commentChar=auto picks \(.+\); both readings are judged/);
+  assert.equal(judge('subj\n# ------------------------ >8 ------------------------\nx\n\n# ------------------------ >8 ------------------------\ndiff\n'), 1, 'a typed scissors line: x may be line 2');
 });
 
 test('a remote named --commit-msg is judged as a push, never as a message (#1260 R1260a D2)', () => {

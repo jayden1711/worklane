@@ -20,8 +20,8 @@
 // And a Signed-off-by line whose email is the commit's own author or committer
 // email (a squash merge's DCO trailers) is dropped whole, name included.
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { devNull, tmpdir } from 'node:os';
+import { readFileSync } from 'node:fs';
+import { devNull } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadRules, scanBinary, scanText, SKIP } from './lib/denylist.mjs';
@@ -46,7 +46,7 @@ const graphOff = (e) => {
   return { ...e, [`GIT_CONFIG_KEY_${n}`]: 'core.commitGraph', [`GIT_CONFIG_VALUE_${n}`]: 'false', GIT_CONFIG_COUNT: String(n + 1), ...last };
 };
 const GIT_ENV = graphOff({ ...process.env, GIT_NO_REPLACE_OBJECTS: '1', GIT_GRAFT_FILE: join(devNull, 'no-grafts') });
-const runGit = (args, opts) => execFileSync('git', [...GIT_FIXED_ARGS, ...args], { ...opts, env: opts?.env ?? GIT_ENV });
+const runGit = (args, opts) => execFileSync('git', [...GIT_FIXED_ARGS, ...args], { ...opts, env: GIT_ENV });
 const git = (...a) => runGit(a, { encoding: 'utf8', maxBuffer: READ_MAX });
 
 function fail(why) {
@@ -235,97 +235,39 @@ const scissors = (c) => `${c} ------------------------ >8 ----------------------
 const BLANK = /^[ \t\n\v\f\r]*$/;
 
 /**
- * git's help block in an edited message, and its character (R1260e D1, R1260f F2): the lines after the last blank line,
- * 3 or more, every one starting with one candidate and one of them that character alone (git writes `#` on its own line
- * above "On branch"), below a message. A message's own trailing `#1259` lines have no bare line. With `-v` the block
- * sits above git's scissors line, the diff below it: so it is looked for at the end, then above each scissors line.
+ * The comment prefixes to judge an edited message by. A set prefix, as it is. For `auto` (R1260g D1, R1260h D1-D3),
+ * git picks its character from the message as it stood before the editor ran, which a commit-msg hook never sees, and
+ * git 2.48 and 2.56 pick differently: so the hook never infers it (not from a help block, a scissors line, or a probe)
+ * and judges every reading git might commit: each candidate that starts a line of the message, and nothing stripped.
+ * It refuses when any fails. That refuses some commits git would make (an `auto` commit edited from an empty template:
+ * the help lines read as text in one reading), and never passes one the gate refuses.
  */
-function helpBlockChar(lines) {
-  const at = (end) => {
-    let last = end - 1;
-    while (last >= 0 && BLANK.test(lines[last])) last--;
-    let b = last;
-    while (b >= 0 && !BLANK.test(lines[b])) b--;
-    const run = lines.slice(b + 1, last + 1);
-    const c = run[0]?.[0];
-    const ok = c && AUTO_COMMENT.includes(c) && run.length >= 3 && run.every((l) => l.startsWith(c)) && run.includes(c) && lines.slice(0, b + 1).some((l) => !BLANK.test(l));
-    return ok ? c : null;
-  };
-  const ends = [lines.length, ...[...lines.keys()].filter((i) => [...AUTO_COMMENT].some((c) => lines[i] === scissors(c)))];
-  for (const e of ends) {
-    const c = at(e);
-    if (c) return c;
-  }
-  return null;
-}
-
-/**
- * The comment prefixes to judge an edited message by (R1260c D1, R1260d D2). A set prefix, as it is. For `auto`, git
- * picks a character (by a rule that differs between versions: 2.48 skips one a line of the message starts with, 2.56
- * didn't for `-e -m`, measured in CI) and writes its help block with it, so the hook reads git's choice there; git
- * then strips every line that character starts, the message's own included. With no help block (commit.status=false,
- * or `--no-status`, which a hook can't see) both readings, `#` stripped and nothing stripped: the hook refuses when
- * either fails, never passing what git might commit differently.
- */
-function commentPrefixes(text, setting, statusOn = true) {
+function commentPrefixes(text, setting) {
   if (setting !== 'auto') return [setting];
-  const c = (statusOn ? helpBlockChar(text.split('\n')) : null) ?? autoCharFromGit(text);
-  return c ? [c] : ['#', null];
+  const lines = text.split('\n');
+  return [null, ...[...AUTO_COMMENT].filter((c) => lines.some((l) => l.startsWith(c)))];
 }
 
 /**
- * With no help block, the character this git's `auto` picks for the message, asked of git itself (CI at af9687d0: git
- * 2.48 kept a message's `#` lines, picking `;`, where 2.56 stripped them, and git's release notes name no change between
- * them): the message committed, edited and with --cleanup=strip, in a throwaway repository under core.commentChar=auto,
- * then the candidate whose stripping gives what git committed. Null when git can't say (an empty message aborts): the
- * hook then judges both readings.
+ * Where to judge the message cut (R1260f F3): git cuts at the FIRST scissors line (wt_status_truncate_message_at_cut_line
+ * finds the first), only under `--cleanup=scissors` (or commit.cleanup=scissors, edited) or with `-v`, which a hook
+ * can't see. So in `strip` mode both, uncut and cut at the first; in scissors mode, cut.
  */
-function autoCharFromGit(text) {
-  const dir = mkdtempSync(join(tmpdir(), 'commit-msg-auto-'));
-  try {
-    // Nothing of the commit in progress: its repository, index and work tree aren't the probe's.
-    const env = { ...GIT_ENV, GIT_EDITOR: 'true' };
-    for (const k of ['GIT_DIR', 'GIT_INDEX_FILE', 'GIT_WORK_TREE', 'GIT_PREFIX', 'GIT_COMMON_DIR', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_REFLOG_ACTION']) delete env[k];
-    const opts = { encoding: 'utf8', env, stdio: ['ignore', 'pipe', 'ignore'] };
-    const msg = join(dir, 'MSG');
-    writeFileSync(msg, text);
-    runGit(['init', '-q', join(dir, 'r')], opts);
-    runGit(['-C', join(dir, 'r'), '-c', 'core.commentChar=auto', '-c', 'commit.status=false', '-c', 'user.name=probe', '-c', 'user.email=probe@example.com', '-c', 'commit.gpgsign=false', '-c', `core.hooksPath=${devNull}`, 'commit', '-q', '--allow-empty', '--no-verify', '--cleanup=strip', '-e', '-F', msg], opts);
-    const committed = runGit(['-C', join(dir, 'r'), 'log', '-1', '--format=%B'], opts).replace(/\n+$/, '');
-    const c = [...AUTO_COMMENT].find((x) => asCommitted(text, 'strip', x, false) === committed) ?? null;
-    if (c === null) console.error("commit-msg hook: note: git's commit of the message matches no comment character it may pick; both readings are judged");
-    return c;
-  } catch (e) {
-    // Said, so a refusal from the strict readings is never a mystery (an empty message aborts git's commit too).
-    console.error(`commit-msg hook: note: git couldn't be asked which character core.commentChar=auto picks (${String(e.stderr || e.message).trim().split('\n')[0]}); both readings are judged`);
-    return null;
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-}
-
-/** Whether git writes its help block into an edited message (commit.status, as git reads a boolean). */
-const statusOn = () => !/^(false|no|off|0)$/i.test(gitConfig('commit.status') ?? '');
-
-/**
- * Whether to judge the message cut at its scissors line (R1260f F3): git cuts only under `--cleanup=scissors` (or
- * commit.cleanup=scissors, edited) or with `-v`, which a hook can't see, so in `strip` mode both readings.
- */
-const cutReadings = (mode) => (mode === 'scissors' ? [true] : mode === 'strip' ? [true, false] : [false]);
+const cutReadings = (mode) => (mode === 'scissors' ? ['first'] : mode === 'strip' ? ['none', 'first'] : ['none']);
 
 /**
  * The message as git will commit it, from the file the commit-msg hook is given, by git's cleanup `mode`: verbatim
- * changes nothing; with `cutAtScissors` (scissors mode, or a `-v` commit) it is cut at the scissors line; strip leaves
+ * changes nothing; with `cutAt` (scissors mode, or a `-v` commit) it is cut at the first scissors line; strip leaves
  * out comment lines (git's own scissors line among them, when it doesn't cut); all but verbatim then
  * take trailing whitespace off each line, fold runs of blank lines to one, and drop blank lines at the start and the
  * end. Blank and whitespace are ASCII, as git's isspace (a BOM or NBSP line is not blank: R1260b). A null `comment`
  * strips and cuts nothing (one of `auto`'s two readings).
  */
-function asCommitted(text, mode = 'strip', comment = '#', cutAtScissors = mode === 'scissors') {
+function asCommitted(text, mode = 'strip', comment = '#', cutAt = mode === 'scissors' ? 'first' : 'none') {
   if (mode === 'verbatim') return text;
   let lines = text.split('\n');
-  if (cutAtScissors) {
-    const cut = comment === null ? -1 : lines.indexOf(scissors(comment));
+  if (cutAt !== 'none' && comment !== null) {
+    const cut = lines.indexOf(scissors(comment));
     if (cut !== -1) lines = lines.slice(0, cut);
   }
   if (mode === 'strip' && comment !== null) lines = lines.filter((l) => !l.startsWith(comment));
@@ -411,7 +353,7 @@ if (process.argv[2] === '--commit-msg' && installedCopy && process.argv.length =
   try {
     const text = readFileSync(process.argv[3], 'utf8');
     const mode = cleanupMode();
-    const readings = commentPrefixes(text, commentSetting(), statusOn()).flatMap((c) => cutReadings(mode).map((cut) => asCommitted(text, mode, c, cut)));
+    const readings = commentPrefixes(text, commentSetting()).flatMap((c) => cutReadings(mode).map((cut) => asCommitted(text, mode, c, cut)));
     const why = [...new Set(readings.flatMap(messageShapeProblems))];
     if (why.length) {
       console.error(`commit refused, by the push gate's message-shape rule: ${why.join('; and ')}`);
