@@ -104,7 +104,8 @@ test("the commit-msg hook and the push gate refuse a message for the same reason
   assert.match(body('messageShape'), /messageShapeProblems\(message\)/, 'the push path calls it');
   const hookPath = src.slice(src.indexOf("if (process.argv[2] === '--commit-msg' &&"), src.indexOf("if (process.argv[2] === '--pr-body')"));
   assert.ok(src.includes("const installedCopy = basename(dirname(dirname(fileURLToPath(import.meta.url)))) === 'commit-msg-gate';"), 'the installed copy, by where it runs from (R1260d D1)');
-  assert.match(hookPath, /messageShapeProblems\(asCommitted\(/, 'the commit-msg path calls it');
+  assert.match(hookPath, /asCommitted\(text, mode, c, cut\)/, 'the commit-msg path reads the message as git commits it');
+  assert.match(hookPath, /readings\.flatMap\(messageShapeProblems\)/, 'and judges each reading by the one rule');
   assert.match(hookPath, /^if \(process\.argv\[2\] === '--commit-msg' && installedCopy && process\.argv\.length === 4 && process\.env\.PUSH_GATE_COMMIT_MSG === process\.argv\[3\]\)/, "only the installed copy, with the stub's marker (R1260a D2, R1260d D1)");
 });
 
@@ -119,6 +120,7 @@ test('setup-hooks installs the commit-msg hook beside the pre-push hook: a bad m
   assert.equal(readFileSync(join(hooks, 'commit-msg-gate', 'scripts', 'push-gate.mjs'), 'utf8'), readFileSync(gate, 'utf8'), "the gate's own code, not a copy of the rule");
   assert.ok(existsSync(join(hooks, 'commit-msg-gate', 'scripts', 'lib', 'denylist.mjs')), 'with what it imports');
   assert.ok(existsSync(join(hooks, 'pre-push')), 'the pre-push hook stays');
+  assert.match(readFileSync(join(hooks, 'pre-push'), 'utf8'), /exec node "\$\(dirname "\$0"\)\/push-gate-hook\.mjs" --pre-push "\$@"\n$/, 'it marks a push (R1260f F1)');
   const head = r.git('rev-parse', 'HEAD');
   writeFileSync(join(r.dir, 'a.md'), 'a\n');
   r.git('add', 'a.md');
@@ -194,6 +196,19 @@ const ROWS: Row[] = [
   // No help lines to read git's choice from (commit.status=false): both readings, refused if either fails.
   ['auto-nostatus-hash-long', { 'core.commentChar': 'auto', 'commit.status': 'false' }, null, ['-e', '-m', `#1259: ${L}`]],
   ['auto-nostatus-plain', { 'core.commentChar': 'auto', 'commit.status': 'false' }, null, ['-e', '-m', 'subj', '-m', 'body']],
+  // A message's own trailing lines with one candidate are no help block (R1260e D1, R1260f F2): no bare line, or none written.
+  ['auto-nostatus-semi3', { 'core.commentChar': 'auto', 'commit.status': 'false' }, 'subj\n; a\n; b\n; c\n', ['-e', '-F', 'MSG']],
+  ['auto-nostatus-hash3', { 'core.commentChar': 'auto', 'commit.status': 'false' }, 'subj\n#1259\n#1260\n#1261\n', ['-e', '-F', 'MSG']],
+  ['auto-cli-nostatus-semi3', { 'core.commentChar': 'auto' }, 'subj\n; a\n; b\n; c\n', ['-e', '--no-status', '-F', 'MSG']],
+  ['auto-status-hash3', { 'core.commentChar': 'auto' }, 'subj\n#1259\n#1260\n#1261\n', ['-e', '-F', 'MSG']],
+  ['auto-nostatus-hash-block', { 'core.commentChar': 'auto', 'commit.status': 'false' }, `#1259: ${L}\n\n#a\n#b\n#c\n`, ['-e', '-F', 'MSG']],
+  // A scissors line the user typed: git cuts only with -v or cleanup=scissors (R1260f F3).
+  ['ctl-cc-hash-sciss', {}, 'subj\n# ------------------------ >8 ------------------------\nx\n', ['-e', '-F', 'MSG']],
+  ['auto-hash-sciss', { 'core.commentChar': 'auto' }, 'subj\n# ------------------------ >8 ------------------------\nx\n', ['-e', '-F', 'MSG']],
+  ['auto-semi-sciss', { 'core.commentChar': 'auto' }, 'subj\n; ------------------------ >8 ------------------------\nx\n', ['-e', '-F', 'MSG']],
+  ['sciss-line3', {}, 'subj\n\n# ------------------------ >8 ------------------------\nx\n', ['-e', '-F', 'MSG']],
+  ['ctl-verbose', {}, null, ['-e', '-v', '-m', 'subj', '-m', 'body']],
+  ['cfg-scissors-edited', { 'commit.cleanup': 'scissors' }, 'subj\n# ------------------------ >8 ------------------------\nx\n', ['-e', '-F', 'MSG']],
   ['auto-e-verbose', { 'core.commentChar': 'auto' }, null, ['-e', '-v', '-m', '#1259: short subject', '-m', 'body']],
   // core.commentString (git 2.45+, whichever of the two is set last; older git reads core.commentChar alone: R1260c D2).
   ['cs-slash-e-long', { 'core.commentString': '//' }, `// note\n${L}\n`, ['-e', '-F', 'MSG']],
@@ -253,6 +268,22 @@ test("core.commentChar=auto: the hook reads git's choice from git's own help blo
   assert.equal(judge(`#1259: short subject\n\n${'a'.repeat(200)}\n\n${help(';')}`), 0, 'a short #NNN subject kept, the long line is the body');
   // No help block (commit.status=false): both readings, refused if either fails.
   assert.equal(judge(`#1259: ${'a'.repeat(200)}\n`), 1, 'no block: strict');
+  // R1260e D1, R1260f F2: a message's own trailing lines are no help block (no bare line): strict, so refused.
+  assert.equal(judge('subj\n#1259\n#1260\n#1261\n'), 1, 'issue lines under the subject');
+  assert.equal(judge('subj\n; a\n; b\n; c\n'), 1, 'three ; lines');
+  assert.equal(judge(`subj\n\n#1259\n#1260\n#1261\n`), 0, 'after a blank line: line 2 is blank in every reading');
+  // No bare line, so no help block: a long #NNN subject over a block of the message's own # lines is judged strictly.
+  assert.equal(judge(`#1259: ${'a'.repeat(200)}\n\n#a\n#b\n#c\n`), 1, "the message's own block: not git's");
+  // With -v: git's help block sits above its scissors line, the diff below it.
+  assert.equal(judge(`subj\n#1259 follow-up\n\n${help('#')}# ------------------------ >8 ------------------------\n# Do not modify or remove the line above.\ndiff --git a/x b/x\n+x\n`), 0, '-v: the block above the scissors line');
+  // commit.status=false: git writes no help block, so a block-shaped tail is the message's own.
+  r.git('config', 'commit.status', 'false');
+  assert.equal(judge(`subj\n#1259 follow-up\n\n${help('#')}`), 1, 'status off: strict');
+  r.git('config', '--unset', 'commit.status');
+  // R1260f F3: a typed scissors line in strip mode: git keeps what follows unless -v, so both readings.
+  r.git('config', 'core.commentChar', '#');
+  assert.equal(judge('subj\n# ------------------------ >8 ------------------------\nx\n'), 1, 'a typed scissors line: x may be line 2');
+  assert.equal(judge('subj\n\n# ------------------------ >8 ------------------------\nx\n'), 0, 'below a blank line: line 2 is blank either way');
 });
 
 test('a remote named --commit-msg is judged as a push, never as a message (#1260 R1260a D2)', () => {
@@ -279,6 +310,26 @@ test('a remote named --commit-msg is judged as a push, never as a message (#1260
   const launcher = spawnSync(process.execPath, [join(repoRoot, 'scripts', 'push-gate-hook.mjs'), '--commit-msg', url], { cwd: r.dir, encoding: 'utf8', input: '', env: { ...process.env, PUSH_GATE_COMMIT_MSG: url } });
   assert.equal(launcher.status, 1, launcher.stderr);
   assert.match(launcher.stderr, /a remote named "--commit-msg": a name that starts with '-' reads as an option/);
+  // R1260f F1: with the stub's --pre-push, every name that reads as an option is refused before any dispatch.
+  for (const name of ['--print-gate-files', '--range', '--commit-msg', '-x']) {
+    const p = spawnSync(process.execPath, [join(repoRoot, 'scripts', 'push-gate-hook.mjs'), '--pre-push', name, name === '--range' ? 'HEAD..HEAD' : url], { cwd: r.dir, encoding: 'utf8', input: '' });
+    assert.equal(p.status, 1, `refused: a remote named ${name}: ${p.stdout}${p.stderr}`);
+    assert.match(p.stderr, /a name that starts with '-' reads as an option/);
+    assert.doesNotMatch(p.stdout, /"code"/, 'no file list printed');
+  }
+  // And the gate, given `--`, takes what follows as a remote's name: `-- --range HEAD..HEAD` is a push, judged.
+  const ended = spawnSync(process.execPath, [gate, '--', '--range', 'HEAD..HEAD'], { cwd: repoRoot, encoding: 'utf8', input: `refs/heads/leak ${tip} refs/heads/leak ${'0'.repeat(40)}\n`, env: { ...process.env, GIT_DIR: join(r.dir, '.git') } });
+  assert.notEqual(ended.status, 0, `judged as a push: ${ended.stderr}`);
+  assert.match(ended.stderr, /vendor attribution/);
+  // `-- <remote>`: the remote's name, so what it already has isn't judged again (the refused commit is on origin; a
+  // clean one on top is pushed). Without `--` read as such, `--` would be the name, and the old commit refused.
+  if (hasGitleaks) {
+    r.git('update-ref', 'refs/remotes/origin/main', tip);
+    r.git('commit', '-q', '--no-verify', '--allow-empty', '-m', 'Add y');
+    const top = r.git('rev-parse', 'HEAD');
+    const onto = spawnSync(process.execPath, [gate, '--', 'origin', url], { cwd: repoRoot, encoding: 'utf8', input: `refs/heads/leak ${top} refs/heads/leak ${'0'.repeat(40)}\n`, env: { ...process.env, GIT_DIR: join(r.dir, '.git') } });
+    assert.equal(onto.status, 0, `only what origin hasn't: ${onto.stderr}`);
+  }
   const src = readFileSync(join(repoRoot, 'scripts', 'push-gate-hook.mjs'), 'utf8');
   assert.match(src, /if \(k\.toUpperCase\(\) === 'PUSH_GATE_COMMIT_MSG'\) delete env\[k\];/, "the launcher never hands the marker on");
 });

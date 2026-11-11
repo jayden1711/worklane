@@ -130,6 +130,20 @@ test("an agent may not set, export or pass the commit-msg hook's marker: on a pu
   assert.deepEqual(withoutPushGateHatch(env), { KEEP: '1' }, "an agent's environment never carries it");
 });
 
+test("an agent may not push to, add or rename a remote named like an option: the pre-push hook would read its name as one (#1260 R1260f F1)", () => {
+  for (const c of [
+    'git push -- --print-gate-files HEAD',
+    'git push -- --range HEAD',
+    'git push --repo=--range HEAD',
+    'git push --repo --range HEAD',
+    'git remote add -- --range HEAD..HEAD',
+    'git remote add -- --print-gate-files /tmp/x',
+    'git remote rename -- origin --commit-msg',
+    "git -c alias.ship='push -- --print-gate-files' ship HEAD",
+  ]) assert.deepEqual([bash(c).decision, bash(c).rule], ['deny', 'push-hook-bypass'], c);
+  for (const c of ['git push -- origin HEAD', 'git push origin -- HEAD', 'git remote add origin https://example.com/r.git', 'git remote -v', 'git push --repo=origin HEAD']) assert.notEqual(bash(c).decision, 'deny', `kept: ${c}`);
+});
+
 test('an agent may not store the hatch where a later shell or push would read it', () => {
   for (const c of [
     `echo 'export ${H}=1' >> ~/.zshrc`,

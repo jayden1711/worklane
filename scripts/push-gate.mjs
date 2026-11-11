@@ -56,12 +56,18 @@ function fail(why) {
 
 /** Commits to scan and tips to check, from the hook's stdin or --range. */
 function targets(argv) {
+  // R1260f F1: the launcher passes `-- <remote> <url>`, so a remote's name is never read as an option.
+  if (argv[0] === '--') return pushed(argv[1]);
   if (argv[0] === '--range') {
     const [base, tip] = (argv[1] ?? '').split('..');
     if (!base || !tip) fail('usage: --range <base>..<tip>');
     return [{ tip: git('rev-parse', '--verify', `${tip}^{commit}`).trim(), commits: git('rev-list', `${base}..${tip}`).split('\n').filter(Boolean) }];
   }
-  const remote = argv[0];
+  return pushed(argv[0]);
+}
+
+/** A pre-push hook's refs (on stdin), with what `remote` doesn't have yet. */
+function pushed(remote) {
   if (!remote) fail('run as a pre-push hook (remote name expected) or with --range');
   const out = [];
   for (const line of readFileSync(0, 'utf8').split('\n').filter(Boolean)) {
@@ -229,46 +235,65 @@ const scissors = (c) => `${c} ------------------------ >8 ----------------------
 const BLANK = /^[ \t\n\v\f\r]*$/;
 
 /**
- * The comment prefixes to judge an edited message by (R1260c D1, R1260d D2). A set prefix, as it is. For `auto`, git
- * picks a character (by a rule that differs between versions: 2.48 skips one a line of the message starts with, 2.56
- * didn't for `-e -m`, measured in CI) and writes its scissors line and help lines with it, so the hook reads git's
- * choice from what git wrote: the scissors line, or the help block at the end (lines starting with one candidate, after
- * a blank line, below the message), when the block is git's (3 lines or more, the message's own lines that start with
- * the same character joining it) or git's 2.48 rule over the lines above gives that candidate. Otherwise (no help lines to read it from) both readings, `#` stripped and nothing stripped: the
- * hook refuses when either fails, never passing what git might commit differently.
+ * git's help block in an edited message, and its character (R1260e D1, R1260f F2): the lines after the last blank line,
+ * 3 or more, every one starting with one candidate and one of them that character alone (git writes `#` on its own line
+ * above "On branch"), below a message. A message's own trailing `#1259` lines have no bare line. With `-v` the block
+ * sits above git's scissors line, the diff below it: so it is looked for at the end, then above each scissors line.
  */
-function commentPrefixes(text, setting) {
-  if (setting !== 'auto') return [setting];
-  const lines = text.split('\n');
-  for (const c of AUTO_COMMENT) if (lines.includes(scissors(c))) return [c];
-  let b = lines.length;
-  while (b > 0 && BLANK.test(lines[b - 1])) b--;
-  const c = b > 0 ? lines[b - 1][0] : undefined;
-  if (c && AUTO_COMMENT.includes(c)) {
-    while (b > 0 && (lines[b - 1].startsWith(c) || BLANK.test(lines[b - 1]))) b--;
-    const above = lines.slice(0, b);
-    const separated = b < lines.length && BLANK.test(lines[b]) && above.some((l) => !BLANK.test(l));
-    const gits = [...AUTO_COMMENT].find((x) => !above.some((l) => l.startsWith(x)));
-    // A block of 3 or more is git's help text: its character is git's, and git strips every line it starts, the
-    // message's own included (git 2.56 picks `#` with a `#` line in the message, which then joins the block: CI).
-    const block = lines.slice(b).filter((l) => l.startsWith(c)).length;
-    if (block >= 3 && above.some((l) => !BLANK.test(l))) return [c];
-    if (separated && gits === c) return [c];
+function helpBlockChar(lines) {
+  const at = (end) => {
+    let last = end - 1;
+    while (last >= 0 && BLANK.test(lines[last])) last--;
+    let b = last;
+    while (b >= 0 && !BLANK.test(lines[b])) b--;
+    const run = lines.slice(b + 1, last + 1);
+    const c = run[0]?.[0];
+    const ok = c && AUTO_COMMENT.includes(c) && run.length >= 3 && run.every((l) => l.startsWith(c)) && run.includes(c) && lines.slice(0, b + 1).some((l) => !BLANK.test(l));
+    return ok ? c : null;
+  };
+  const ends = [lines.length, ...[...lines.keys()].filter((i) => [...AUTO_COMMENT].some((c) => lines[i] === scissors(c)))];
+  for (const e of ends) {
+    const c = at(e);
+    if (c) return c;
   }
-  return ['#', null];
+  return null;
 }
 
 /**
+ * The comment prefixes to judge an edited message by (R1260c D1, R1260d D2). A set prefix, as it is. For `auto`, git
+ * picks a character (by a rule that differs between versions: 2.48 skips one a line of the message starts with, 2.56
+ * didn't for `-e -m`, measured in CI) and writes its help block with it, so the hook reads git's choice there; git
+ * then strips every line that character starts, the message's own included. With no help block (commit.status=false,
+ * or `--no-status`, which a hook can't see) both readings, `#` stripped and nothing stripped: the hook refuses when
+ * either fails, never passing what git might commit differently.
+ */
+function commentPrefixes(text, setting, statusOn = true) {
+  if (setting !== 'auto') return [setting];
+  const c = statusOn ? helpBlockChar(text.split('\n')) : null;
+  return c ? [c] : ['#', null];
+}
+
+/** Whether git writes its help block into an edited message (commit.status, as git reads a boolean). */
+const statusOn = () => !/^(false|no|off|0)$/i.test(gitConfig('commit.status') ?? '');
+
+/**
+ * Whether to judge the message cut at its scissors line (R1260f F3): git cuts only under `--cleanup=scissors` (or
+ * commit.cleanup=scissors, edited) or with `-v`, which a hook can't see, so in `strip` mode both readings.
+ */
+const cutReadings = (mode) => (mode === 'scissors' ? [true] : mode === 'strip' ? [true, false] : [false]);
+
+/**
  * The message as git will commit it, from the file the commit-msg hook is given, by git's cleanup `mode`: verbatim
- * changes nothing; strip and scissors cut at the scissors line; strip leaves out comment lines; all but verbatim then
+ * changes nothing; with `cutAtScissors` (scissors mode, or a `-v` commit) it is cut at the scissors line; strip leaves
+ * out comment lines (git's own scissors line among them, when it doesn't cut); all but verbatim then
  * take trailing whitespace off each line, fold runs of blank lines to one, and drop blank lines at the start and the
  * end. Blank and whitespace are ASCII, as git's isspace (a BOM or NBSP line is not blank: R1260b). A null `comment`
  * strips and cuts nothing (one of `auto`'s two readings).
  */
-function asCommitted(text, mode = 'strip', comment = '#') {
+function asCommitted(text, mode = 'strip', comment = '#', cutAtScissors = mode === 'scissors') {
   if (mode === 'verbatim') return text;
   let lines = text.split('\n');
-  if (mode === 'strip' || mode === 'scissors') {
+  if (cutAtScissors) {
     const cut = comment === null ? -1 : lines.indexOf(scissors(comment));
     if (cut !== -1) lines = lines.slice(0, cut);
   }
@@ -355,7 +380,8 @@ if (process.argv[2] === '--commit-msg' && installedCopy && process.argv.length =
   try {
     const text = readFileSync(process.argv[3], 'utf8');
     const mode = cleanupMode();
-    const why = [...new Set(commentPrefixes(text, commentSetting()).flatMap((c) => messageShapeProblems(asCommitted(text, mode, c))))];
+    const readings = commentPrefixes(text, commentSetting(), statusOn()).flatMap((c) => cutReadings(mode).map((cut) => asCommitted(text, mode, c, cut)));
+    const why = [...new Set(readings.flatMap(messageShapeProblems))];
     if (why.length) {
       console.error(`commit refused, by the push gate's message-shape rule: ${why.join('; and ')}`);
       console.error(`Nothing was committed; the message is kept in ${process.argv[3]}. Put the subject alone on line 1 (at most ${SUBJECT_MAX} characters), then a blank line, then the body, and commit again.`);

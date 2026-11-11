@@ -672,6 +672,14 @@ export function pushHookShellRefusal(command: string, commands: SimpleCommand[],
       const why = configRefusal(git.rest);
       if (why) return bypass(why);
     }
+    // R1260f F1: a remote named like an option (`--range`, `--print-gate-files`) reaches the pre-push hook as one. git
+    // takes such a name only after `--`, or as --repo's value; an agent never names, adds or renames one.
+    if (git.sub === 'push' || git.sub === 'remote') {
+      const end = git.rest.indexOf('--');
+      const repo = git.rest.findIndex((t) => t === '--repo' || t.startsWith('--repo='));
+      const named = (end !== -1 && git.rest.slice(end + 1).some((t) => t.startsWith('-'))) || (repo !== -1 && (git.rest[repo]!.startsWith('--repo=-') || (git.rest[repo] === '--repo' && (git.rest[repo + 1] ?? '').startsWith('-'))));
+      if (named) return bypass(`git ${git.sub} with a remote named like an option, which the pre-push hook would read as one`);
+    }
   }
   return null;
 }
