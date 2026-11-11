@@ -82,7 +82,10 @@ function copyBindingProblems(script: string, text: string, names: readonly strin
   const program = ts.createProgram([file], { allowJs: true, noLib: true, noResolve: true, types: [] }, host);
   const sf = program.getSourceFile(file)!;
   const checker = program.getTypeChecker();
-  const local = (id: ts.Identifier) => (checker.getSymbolAtLocation(id)?.declarations ?? []).some((d) => d.getSourceFile() === sf);
+  // Local: bound by a binding declaration in this file. `globalThis`'s own symbol points at a synthetic identifier,
+  // which is no binding (R1184ak D2: it was caught only behind braces before).
+  const binding = (d: ts.Declaration) => ts.isVariableDeclaration(d) || ts.isParameter(d) || ts.isBindingElement(d) || ts.isFunctionDeclaration(d) || ts.isFunctionExpression(d) || ts.isClassDeclaration(d) || ts.isClassExpression(d) || ts.isImportSpecifier(d) || ts.isImportClause(d) || ts.isNamespaceImport(d) || ts.isImportEqualsDeclaration(d);
+  const local = (id: ts.Identifier) => (checker.getSymbolAtLocation(id)?.declarations ?? []).some((d) => d.getSourceFile() === sf && binding(d));
   const lines = text.split('\n');
   const [begin, end] = [lines.findIndex((l) => l.startsWith('// BEGIN tables from ')), lines.findIndex((l) => l.startsWith('// END tables from '))];
   const lineOf = (n: ts.Node) => sf.getLineAndCharacterOfPosition(n.getStart(sf)).line;
@@ -145,6 +148,20 @@ test("the copy lock refuses a copy turned off by lines around it, by escapes, a 
   for (const [label, decl] of [['AI1a', 'const ALLOWED_PACKAGE_JSON = [];'], ['AI1d', 'const \\u0041LLOWED_PACKAGE_JSON = [];']] as const) {
     assert.notDeepEqual(copyBindingProblems(pins.script, `${cp.slice(0, body)}\n  ${decl}${cp.slice(body)}`, names), [], label);
   }
+  // R1184aj D1: a comment or braces hidden behind a line terminator other than \n in a `//` line.
+  for (const [name, ch] of [['CR', '\r'], ['U+2028', '\u2028'], ['U+2029', '\u2029']] as const) {
+    assert.notDeepEqual(copyBindingProblems(changelog.script, around(`// note${ch}/*\n`, `\n// note${ch}*/`), copyNamesOf(cl, changelog)), [], `AJ1 a comment behind ${name}`);
+    assert.notDeepEqual(copyBindingProblems(changelog.script, around(`// note${ch}{\n`, `\n// note${ch}}`), copyNamesOf(cl, changelog)), [], `AJ1 braces behind ${name}`);
+  }
+  // R1184ak D2: each rule with the block intact, so each is pinned on its own.
+  for (const [label, line] of [
+    ['a global key set', "globalThis.UNRELATED = 1;"],
+    ['self reached', 'void self;'],
+    ['a with statement', 'with (Math) {}'],
+    ['eval', "eval('1');"],
+    ['Function', "Function('return 1')();"],
+    ['the name assigned', 'GUARDRAIL_PATHS = [];'],
+  ] as const) assert.notDeepEqual(copyBindingProblems(changelog.script, around('', `\n${line}`), copyNamesOf(cl, changelog)), [], label);
   // Control: an unrelated line added after the block passes.
   assert.deepEqual(copyBindingProblems(changelog.script, around('', '\nexport const UNRELATED = 1;'), copyNamesOf(cl, changelog)), []);
 });

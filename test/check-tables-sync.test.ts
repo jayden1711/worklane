@@ -141,3 +141,20 @@ test("REPLACERS is plain named properties, each defined once, in the module and 
   ] as const) assert.ok(replacerProblems(block(props), 'x.js').problems.length > 0, label);
   assert.deepEqual(replacerProblems(block('  zz: (m) => m,\n  orphanEnd,\n  basic(m) { return m; },'), 'x.js').problems, [], 'the control');
 });
+
+test('the freeze hook and the tests that pin the tables and the copy lock are self-modification and engine guards: never a tests-only change (#941, R1184ak D1-D2)', async () => {
+  const { globMatches } = await import('../src/confusables.js');
+  const { readFileSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const { repoRoot } = await import('./helpers.js');
+  const guards = readFileSync(join(repoRoot, '.worklane', 'review.yaml'), 'utf8');
+  const locked = (p: string) => LOCKED_CATEGORIES[SELF_MODIFICATION]!.some((g) => globMatches(g, p));
+  const part = SELF_MODIFICATION_PARTS.find((x) => x.what === 'the tests of the harness controls')!;
+  for (const p of ['test/table-freeze.ts', 'test/table-freeze.test.ts', 'test/table-copies.test.ts', 'test/check-tables.test.ts', 'test/check-tables-sync.test.ts', 'test/merge-policy-data-attacks.test.ts', 'test/merge-policy-data-tables.test.ts']) {
+    assert.ok(locked(p), `${p}: self-modification`);
+    assert.ok(part.globs.some((g) => globMatches(g, p)), `${p}: in the harness controls' tests part`);
+    assert.ok(guards.split('\n').includes(`    - ${p}`), `${p}: an engine guard in .worklane/review.yaml`);
+  }
+  // Control: an unrelated test file is in none of them.
+  assert.ok(!locked('test/zz-unrelated.test.ts') && !guards.includes('test/zz-unrelated.test.ts'));
+});

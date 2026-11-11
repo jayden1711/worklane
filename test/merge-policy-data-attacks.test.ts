@@ -397,6 +397,12 @@ test('R1184y Y6a: a line of a generated copy changed without its data waits; cha
     ['a with statement', around('', '', `with (x) {}\n${after}`)],
     ['a global reached after the block, the block intact', around('', '', `${after}globalThis['TAB' + 'LES'] = ${weak};\n`)],
     ['Function after the block, the block intact', around('', '', `${after}Function('return 1')();\n`)],
+    ['AJ1 a comment hidden behind a CR in a // line', around('// note\r/*\n', '// note\r*/\n')],
+    ['AJ1 braces hidden behind a CR in a // line', around('// note\r{\n', '// note\r}\n')],
+    ['AJ1 a comment hidden behind a U+2028 in a // line', around('// note\u2028/*\n', '// note\u2028*/\n')],
+    ['AJ1 braces hidden behind a U+2028 in a // line', around('// note\u2028{\n', '// note\u2028}\n')],
+    ['AJ1 a comment hidden behind a U+2029 in a // line', around('// note\u2029/*\n', '// note\u2029*/\n')],
+    ['AJ1 braces hidden behind a U+2029 in a // line', around('// note\u2029{\n', '// note\u2029}\n')],
   ];
   for (const [label, files] of held) assert.ok(reasons(files, base).length > 0, label);
   // Control: an unrelated line after the block, naming no table and no global, passes.

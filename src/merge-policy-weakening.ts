@@ -566,8 +566,9 @@ export const unescapeIds = (s: string): string =>
 /**
  * A text's code, for the copy rules (R1184ai D2): comments, strings and templates blanked (line breaks kept), with
  * where each line starts ('code', 'comment' or 'string') and the brace depth there. `sure` is false when the reading
- * may be wrong: a template holding `${`, a string not closed on its line, or a `/` in code (a regexp or a division,
- * which a quote or a brace after it could be read through). The caller fails closed on it.
+ * may be wrong: a line terminator other than \n or CRLF, a template holding `${`, a string not closed on its line, or a
+ * `/` in code (a regexp or a division, which a quote or a brace after it could be read through). The caller fails
+ * closed on it.
  */
 export function copyCodeOf(text: string): { code: string; starts: { state: 'code' | 'comment' | 'string'; depth: number }[]; slash: Set<number>; sure: boolean } {
   let out = '';
@@ -578,6 +579,9 @@ export function copyCodeOf(text: string): { code: string; starts: { state: 'code
   const slash = new Set<number>();
   const starts: { state: 'code' | 'comment' | 'string'; depth: number }[] = [{ state, depth }];
   const blank = (c: string) => (c === '\n' ? '\n' : ' ');
+  // A lone CR, U+2028 or U+2029 ends a line (and a `//` comment) for JS and TypeScript but not for this reading, which
+  // splits at \n (R1184aj D1: `// note<CR>/*` opens a comment the reading doesn't see): not sure, so the caller waits.
+  if (/\r(?!\n)|[\u2028\u2029]/.test(text)) sure = false;
   for (let i = 0; i < text.length; ) {
     const c = text[i]!;
     if (c === '\n') {

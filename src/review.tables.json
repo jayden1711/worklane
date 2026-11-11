@@ -226,6 +226,13 @@
         "test/not-yet-files-locks.test.ts",
         "test/git-runner.test.ts",
         "test/plan-decisions.test.ts",
+        "test/table-freeze.ts",
+        "test/table-freeze.test.ts",
+        "test/table-copies.test.ts",
+        "test/check-tables.test.ts",
+        "test/check-tables-sync.test.ts",
+        "test/merge-policy-data-attacks.test.ts",
+        "test/merge-policy-data-tables.test.ts",
         "docs/releasing.md",
         "docs/design.md",
         "docs/process.md",
@@ -568,7 +575,14 @@
           "test/engine-guard-locks.test.ts",
           "test/not-yet-files-locks.test.ts",
           "test/git-runner.test.ts",
-          "test/plan-decisions.test.ts"
+          "test/plan-decisions.test.ts",
+          "test/table-freeze.ts",
+          "test/table-freeze.test.ts",
+          "test/table-copies.test.ts",
+          "test/check-tables.test.ts",
+          "test/check-tables-sync.test.ts",
+          "test/merge-policy-data-attacks.test.ts",
+          "test/merge-policy-data-tables.test.ts"
         ]
       },
       {
