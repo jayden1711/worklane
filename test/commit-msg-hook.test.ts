@@ -324,11 +324,70 @@ test("git-independent: auto in any case, git's cut-line match, and a commit enco
   r.git('config', '--unset', 'commit.cleanup');
   r.git('config', 'i18n.commitEncoding', 'ISO-8859-1');
   assert.equal(judge(`${'é'.repeat(100)}\n`).status, 1, 'Latin-1: 200 characters to the gate');
-  assert.equal(judge(`${'e'.repeat(100)}\n`).status, 0, 'ASCII: the same in both');
+  assert.equal(judge(`${'e'.repeat(100)}\n`).status, 1, 'any message under a commit encoding but UTF-8: refused (R1260k D3, R1260l D1)');
   r.git('config', 'i18n.commitEncoding', 'x-no-such-encoding');
   const unknown = judge('ok\n');
   assert.equal(unknown.status, 1);
-  assert.match(unknown.stderr, /i18n\.commitEncoding is x-no-such-encoding, which the commit-msg hook can't decode/);
+  assert.match(unknown.stderr, /i18n\.commitEncoding is x-no-such-encoding: set i18n\.commitEncoding to UTF-8 or unset it/);
+});
+
+test('the hook fails closed on a comment setting or an encoding it would have to model; the gate reads the raw commit, whatever the log settings (#1260 R1260k D1-D3, R1260l D1, D2)', (t) => {
+  const r = repo();
+  const judge = (text: string | Buffer) => {
+    const f = join(r.dir, '.git', 'COMMIT_EDITMSG');
+    writeFileSync(f, text);
+    return spawnSync(process.execPath, [installedGate, '--commit-msg', f], { cwd: r.dir, encoding: 'utf8', env: { ...process.env, PUSH_GATE_COMMIT_MSG: f, GIT_EDITOR: 'true', GIT_DIR: join(r.dir, '.git') } });
+  };
+  // k D1, D2: a comment setting that isn't auto or printable ASCII with no whitespace.
+  for (const v of ['a\nb', 'é', '�', 'a b', '\t']) {
+    r.git('config', 'core.commentChar', v);
+    const got = judge('subj\n\nbody\n');
+    assert.equal(got.status, 1, `refused: ${JSON.stringify(v)}`);
+    assert.match(got.stderr, /commit refused: core\.commentChar or core\.commentString is .*, which the commit-msg hook won't model/);
+  }
+  for (const v of ['#', ';', '//', 'Auto']) {
+    r.git('config', 'core.commentChar', v);
+    assert.equal(judge('subj\n\nbody\n').status, 0, `kept: ${v}`);
+  }
+  r.git('config', '--unset', 'core.commentChar');
+  // k D3, l D1: a commit encoding but UTF-8, and a message that isn't UTF-8.
+  for (const enc of ['ISO-8859-1', 'BIG5-HKSCS', 'latin1']) {
+    r.git('config', 'i18n.commitEncoding', enc);
+    const got = judge('subj\n\nbody\n');
+    assert.equal(got.status, 1, `refused: ${enc}`);
+    assert.match(got.stderr, /set i18n\.commitEncoding to UTF-8 or unset it/);
+  }
+  for (const enc of ['UTF-8', 'utf8', 'Utf-8']) {
+    r.git('config', 'i18n.commitEncoding', enc);
+    assert.equal(judge('subj\n\nbody\n').status, 0, `kept: ${enc}`);
+  }
+  r.git('config', '--unset', 'i18n.commitEncoding');
+  const bad = judge(Buffer.from([0x73, 0x75, 0x62, 0x6a, 0xff, 0x0a]));
+  assert.equal(bad.status, 1);
+  assert.match(bad.stderr, /the message is not valid UTF-8/);
+  // l D2: the gate reads the raw commit object, decoded by its own encoding header, whatever log.showSignature or
+  // i18n.logOutputEncoding say at push time.
+  const g = repo();
+  const base = g.git('rev-parse', 'HEAD');
+  writeFileSync(join(g.dir, 'ok.md'), 'x\n');
+  g.git('add', 'ok.md');
+  g.git('-c', 'i18n.commitEncoding=ISO-8859-1', 'commit', '-q', '--no-verify', '-m', 'é'.repeat(100));
+  const gate1 = (cfg: string[]) => spawnSync(process.execPath, [gate, '--range', `${base}..HEAD`], { cwd: repoRoot, encoding: 'utf8', env: { ...process.env, GIT_DIR: join(g.dir, '.git'), GIT_CONFIG_COUNT: String(cfg.length / 2), ...Object.fromEntries(cfg.flatMap((x, i) => (i % 2 ? [] : [[`GIT_CONFIG_KEY_${i / 2}`, x], [`GIT_CONFIG_VALUE_${i / 2}`, cfg[i + 1]!]]))) } });
+  for (const cfg of [[], ['i18n.logOutputEncoding', 'ISO-8859-1'], ['i18n.logOutputEncoding', 'UTF-8'], ['log.showSignature', 'true']]) {
+    const got = gate1(cfg);
+    assert.notEqual(got.status, 0, `refused under ${cfg.join('=') || 'no setting'}`);
+    assert.match(got.stderr, /the subject is 200 characters, over 180/, `as stored, 200 Latin-1 characters: ${cfg.join('=')}`);
+  }
+  // A signed commit (ssh, where ssh-keygen is here) with log.showSignature on: the signature isn't the message.
+  if (spawnSync('ssh-keygen', ['-?'], { stdio: 'ignore' }).error) return t.diagnostic('no ssh-keygen: the signed case not run');
+  const key = join(g.dir, '..', 'k');
+  spawnSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', key]);
+  const s1 = g.git('rev-parse', 'HEAD');
+  writeFileSync(join(g.dir, 'ok2.md'), 'y\n');
+  g.git('add', 'ok2.md');
+  g.git('-c', 'gpg.format=ssh', '-c', `user.signingkey=${key}`, 'commit', '-q', '--no-verify', '-S', '-m', 'Add ok2');
+  const signed = spawnSync(process.execPath, [gate, '--range', `${s1}..HEAD`], { cwd: repoRoot, encoding: 'utf8', env: { ...process.env, GIT_DIR: join(g.dir, '.git'), GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'log.showSignature', GIT_CONFIG_VALUE_0: 'true' } });
+  assert.doesNotMatch(signed.stderr, /subject is not one short line|line 2 is not blank/, `a signed commit's message as stored: ${signed.stderr}`);
 });
 
 test('a remote named --commit-msg is judged as a push, never as a message (#1260 R1260a D2)', () => {

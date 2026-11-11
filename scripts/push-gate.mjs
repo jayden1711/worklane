@@ -176,9 +176,29 @@ function messageShapeProblems(message) {
   return why;
 }
 
+/**
+ * A commit's message as git stored it (R1260l D2): the raw commit object's text after its headers, decoded by its own
+ * `encoding` header (UTF-8 when there is none), never git's formatted log, which log.showSignature,
+ * i18n.logOutputEncoding and the like change at push time. Throws when the encoding can't be decoded, so the gate
+ * fails closed.
+ */
+function commitMessage(sha) {
+  const raw = runGit(['cat-file', 'commit', sha], { maxBuffer: READ_MAX });
+  const end = raw.indexOf('\n\n');
+  const head = (end === -1 ? raw : raw.subarray(0, end)).toString('latin1');
+  const body = end === -1 ? Buffer.alloc(0) : raw.subarray(end + 2);
+  const enc = /^encoding (.+)$/m.exec(head)?.[1]?.trim();
+  if (!enc || /^utf-?8$/i.test(enc)) return body.toString('utf8');
+  try {
+    return new TextDecoder(enc, { fatal: true, ignoreBOM: true }).decode(body);
+  } catch {
+    throw new Error(`commit ${sha.slice(0, 8)}'s message is in ${enc}, which the gate can't decode`);
+  }
+}
+
 /** A pushed commit's message shape. Only the pushed commits are judged, never what's already on main. */
 function messageShape(sha) {
-  const message = git('log', '-1', '--format=%B', sha);
+  const message = commitMessage(sha);
   const why = messageShapeProblems(message);
   return why.length ? [`${sha.slice(0, 8)}: ${why.join('; and ')}\n    line 1: ${message.split(/\r?\n/)[0]}`] : [];
 }
@@ -219,15 +239,30 @@ function commentSetting() {
   }
   let set = [];
   try {
-    set = runGit(['config', '--get-regexp', '^core\\.comment(char|string)$'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
-      .split('\n')
+    // -z (R1260k D1, D2): a value may hold a newline, and its bytes are read as they are, not as text.
+    const out = runGit(['config', '-z', '--get-regexp', '^core\\.comment(char|string)$'], { stdio: ['ignore', 'pipe', 'ignore'] });
+    set = out
+      .toString('latin1')
+      .split('\0')
       .filter(Boolean)
-      .map((l) => [l.slice(0, l.indexOf(' ') === -1 ? l.length : l.indexOf(' ')).toLowerCase(), l.indexOf(' ') === -1 ? '' : l.slice(l.indexOf(' ') + 1)]);
+      .map((entry) => {
+        const nl = entry.indexOf('\n');
+        return [(nl === -1 ? entry : entry.slice(0, nl)).toLowerCase(), nl === -1 ? '' : Buffer.from(entry.slice(nl + 1), 'latin1')];
+      });
   } catch {
     // none set
   }
-  return set.filter(([k]) => newer || k === 'core.commentchar').at(-1)?.[1] || '#';
+  const value = set.filter(([k]) => newer || k === 'core.commentchar').at(-1)?.[1];
+  if (value === undefined) return '#';
+  // Fail closed (R1260k D1, D2): `auto` in any case, or printable ASCII with no whitespace; anything else (a newline,
+  // bytes that aren't UTF-8, U+FFFD, a space) is refused rather than modelled.
+  const text = value.toString('latin1');
+  if (text.toLowerCase() === 'auto' || /^[\x21-\x7e]+$/.test(text)) return text;
+  throw new Refusal(`core.commentChar or core.commentString is ${JSON.stringify(value.toString('utf8'))}, which the commit-msg hook won't model: set it to printable ASCII with no whitespace (# by default), or auto`);
 }
+
+/** A refusal the commit-msg hook gives with its own words (no "could not read" prefix). */
+class Refusal extends Error {}
 
 /** The characters git's `core.commentChar=auto` picks from, in order: the first that starts no line of the message. */
 const AUTO_COMMENT = '#;@!$%^&|:';
@@ -293,7 +328,7 @@ function scanCommit(rules, sha, owner) {
   // A commit's own author and committer identity (and its sign-off) are inherent to it; anything else in the message is scanned.
   const [an, ae, cn, ce] = git('log', '-1', '--format=%an%x00%ae%x00%cn%x00%ce', sha).trim().split('\0');
   const isMerge = git('log', '-1', '--format=%P', sha).trim().split(' ').length > 1;
-  let msg = withoutOwnSignOffs(withoutOwnMergeSubject(git('log', '-1', '--format=%B', sha), owner, isMerge), [ae, ce]);
+  let msg = withoutOwnSignOffs(withoutOwnMergeSubject(commitMessage(sha), owner, isMerge), [ae, ce]);
   for (const id of [ae, ce, an, cn].filter(Boolean)) msg = msg.split(id).join('');
   hits.push(...scanText(rules, 'COMMIT_MSG', msg).map((h) => `${short} ${h}`));
   return hits;
@@ -355,18 +390,18 @@ const installedCopy = basename(dirname(dirname(fileURLToPath(import.meta.url))))
 if (process.argv[2] === '--commit-msg' && installedCopy && process.argv.length === 4 && process.env.PUSH_GATE_COMMIT_MSG === process.argv[3]) {
   try {
     const raw = readFileSync(process.argv[3]);
-    // R1260j D2: git stores the bytes as typed and names i18n.commitEncoding in the commit; the gate reads git's log,
-    // re-encoded, so a subject's length depends on the decoding. Under any encoding but UTF-8, both are judged.
-    const texts = [raw.toString('utf8')];
+    // Fail closed on encodings (R1260k D3, R1260l D1): git stores the bytes as typed and names i18n.commitEncoding in
+    // the commit, and rewrites bytes that aren't UTF-8, so the hook judges only a UTF-8 message under UTF-8.
     const enc = gitConfig('i18n.commitEncoding');
-    if (enc && !/^utf-?8$/i.test(enc)) {
-      try {
-        texts.push(new TextDecoder(enc).decode(raw));
-      } catch {
-        console.error(`commit refused: i18n.commitEncoding is ${enc}, which the commit-msg hook can't decode, so the message's shape can't be judged as the push gate will read it.`);
-        process.exit(1);
-      }
+    if (enc && !/^utf-?8$/i.test(enc)) throw new Refusal(`i18n.commitEncoding is ${enc}: set i18n.commitEncoding to UTF-8 or unset it (the hook judges a UTF-8 message only)`);
+    let text;
+    try {
+      // ignoreBOM: a leading BOM stays, as git keeps it (a BOM-only line 1 isn't blank).
+      text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(raw);
+    } catch {
+      throw new Refusal('the message is not valid UTF-8: write it in UTF-8 (and set i18n.commitEncoding to UTF-8 or unset it)');
     }
+    const texts = [text];
     const mode = cleanupMode();
     const readings = texts.flatMap((text) => commentPrefixes(text, commentSetting()).flatMap((c) => cutReadings(mode).map((cut) => asCommitted(text, mode, c, cut))));
     const why = [...new Set(readings.flatMap(messageShapeProblems))];
@@ -377,7 +412,7 @@ if (process.argv[2] === '--commit-msg' && installedCopy && process.argv.length =
     }
     process.exit(0);
   } catch (e) {
-    console.error(`commit refused: the commit-msg hook could not read the message: ${e.message}`);
+    console.error(e instanceof Refusal ? `commit refused: ${e.message}` : `commit refused: the commit-msg hook could not read the message: ${e.message}`);
     process.exit(1);
   }
 }
@@ -398,7 +433,7 @@ try {
   const shape = commits.flatMap(messageShape);
   if (shape.length) fail(`a commit message's subject is not one short line:\n${shape.map((s) => `  ${s}`).join('\n')}\nPut the subject alone on line 1 (at most ${SUBJECT_MAX} characters), then a blank line, then the body. Reword it before pushing (git commit --amend for the last commit, a rebase's reword for an older one); once pushed, a reword needs the owner's OK to force-push.`);
   const owner = repoOwner();
-  const attribution = commits.flatMap((sha) => attributionLines(`${sha.slice(0, 8)} COMMIT_MSG`, git('log', '-1', '--format=%B', sha)));
+  const attribution = commits.flatMap((sha) => attributionLines(`${sha.slice(0, 8)} COMMIT_MSG`, commitMessage(sha)));
   if (attribution.length) fail(`vendor attribution in a commit message:\n${attribution.map((h) => `  ${h}`).join('\n')}\n${ATTRIBUTION_FIX}`);
   for (const sha of commits) hits.push(...scanCommit(rules, sha, owner));
   for (const t of all) hits.push(...scanTree(rules, t.tip));
