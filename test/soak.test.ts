@@ -761,7 +761,9 @@ export function walkedOnCounted(dirs: readonly (string | null | undefined)[], co
 /**
  * Files in the worktree folder that no checkout tracks (R1181aa AA1): in each git worktree, its untracked and ignored
  * files (`git status --porcelain --untracked-files=all --ignored`); in any other entry, all of it. A checkout's own
- * files are tracked, so one open at stop (R1181y Y1) adds none; what a shutdown leaves there does.
+ * files are tracked, so one open at stop (R1181y Y1) adds none; what a shutdown leaves there does. A folder git lists
+ * whole (a nested repository, `git init` or a `.git` file in it, which git never enters, or an ignored folder) counts
+ * every file under it, not one line (R1181ac AC2).
  */
 export function worktreeLeftovers(wtDir: string): number {
   if (!existsSync(wtDir)) return 0;
@@ -770,7 +772,8 @@ export function worktreeLeftovers(wtDir: string): number {
     const p = join(wtDir, e.name);
     if (e.isDirectory() && existsSync(join(p, '.git'))) {
       const r = spawnSync('git', ['-C', p, 'status', '--porcelain', '--untracked-files=all', '--ignored'], { encoding: 'utf8' });
-      n += r.status === 0 ? r.stdout.split('\n').filter((l) => /^(\?\?|!!) /.test(l)).length : dirUsage(p).files;
+      const listed = r.stdout.split('\n').filter((l) => /^(\?\?|!!) /.test(l)).map((l) => l.slice(3).replace(/^"(.*)"$/, '$1'));
+      n += r.status === 0 ? listed.reduce((k, x) => k + (x.endsWith('/') && existsSync(join(p, x)) ? dirUsage(join(p, x)).files + 1 : 1), 0) : dirUsage(p).files;
     } else n += e.isDirectory() ? dirUsage(p).files + 1 : 1;
   }
   return n;
@@ -1229,13 +1232,15 @@ test("the soak driver's counts read what they claim: failures in a log, worktree
 
 test('the soak driver takes each count from those helpers (#1181 review R1181k D2: a constant in their place passed every test)', () => {
   const src = readFileSync(join(repoRoot, 'test', 'soak.test.ts'), 'utf8');
-  for (const line of ['...failureCounts(f.log),', 'worktrees: worktreeCount(f.repo),', 'worktreeDirs: entriesIn(wtDir),', 'worktreeFiles: existsSync(wtDir) ? dirUsage(wtDir).files : 0,', 'worktreeLeftovers: worktreeLeftovers(wtDir),', "levelWalked: hours > 0 && process.platform === 'linux' ? walkedOnCounted([f.base, process.env.XDG_CONFIG_HOME ? dirname(process.env.XDG_CONFIG_HOME) : null], [f.base, '/var/tmp']) : null,", 'diskBytes: usage.bytes,', 'files: usage.files,', 'children: kids?.length ?? null,', 'childRss: rssOf(kids ?? []),', 'watches: inotifyWatches(kids ?? []),', 'fullRunHeld: slotStatus(f.slotsDir).fullRun ? 1 : 0,', "levelBytes: hours > 0 && process.platform === 'linux' ? levelLessLog(fsLevels([f.base, '/var/tmp']), logBytes) : null,", 'eventsBytes: logBytes,', 'childFds: childFds(kids ?? []),', 'cgroupProcs: cg.procs,', 'cgroupKernelBytes: cg.kernelBytes,', "levelFiles: hours > 0 && process.platform === 'linux' ? fsInodes([f.base, '/var/tmp']) : null,", "sysvIpc: hours > 0 && process.platform === 'linux' ? sysvIpcCount() : null,"]) assert.ok(src.includes(`\n      ${line}\n`), line);
+  for (const line of ['...failureCounts(f.log),', 'worktrees: worktreeCount(f.repo),', 'worktreeDirs: entriesIn(wtDir),', 'worktreeFiles: existsSync(wtDir) ? dirUsage(wtDir).files : 0,', 'worktreeLeftovers: worktreeLeftovers(wtDir),', "levelWalked: hours > 0 && process.platform === 'linux' ? walkedOnCounted([f.base, process.env.XDG_CONFIG_HOME ? dirname(process.env.XDG_CONFIG_HOME) : null], [f.base, '/var/tmp']) : null,", 'diskBytes: usage.bytes,', 'files: usage.files,', 'children: kids?.length ?? null,', 'childRss: rssOf(kids ?? []),', 'watches: inotifyWatches(kids ?? []),', 'fullRunHeld: slotStatus(f.slotsDir).fullRun ? 1 : 0,', "levelBytes: hours > 0 && process.platform === 'linux' ? levelLessLog(fsLevels([f.base, '/var/tmp']), logBytes) : null,", 'eventsBytes: logBytes,', 'childFds: childFds(kids ?? []),', 'cgroupProcs: cg.procs,', 'cgroupKernelBytes: cg.kernelBytes,', "mqueues: hours > 0 && process.platform === 'linux' ? posixMqueues() : null,", "userKeys: hours > 0 && process.platform === 'linux' ? (userKeys()?.keys ?? null) : null,", "userKeyBytes: hours > 0 && process.platform === 'linux' ? (userKeys()?.bytes ?? null) : null,", "levelFiles: hours > 0 && process.platform === 'linux' ? fsInodes([f.base, '/var/tmp']) : null,", "sysvIpc: hours > 0 && process.platform === 'linux' ? sysvIpcCount() : null,"]) assert.ok(src.includes(`\n      ${line}\n`), line);
   assert.match(src, /\n {4}const kids = childPids\(childMark, seenLeaders, startProcs, hours > 0\);\n {4}const logBytes = statSync\(f\.log\.path\)\.size \+ wal;\n {4}const inside = dirUsage\(f\.base\);\n {4}const outside = usageOutside\(f\.base, kids \?\? \[\]\);\n {4}const usage = \{ bytes: inside\.bytes \+ outside\.bytes \+ deletedOpenBytes\(kids \?\? \[\]\), files: inside\.files \+ outside\.files \};\n/);
   // R1181t D1, D4: the cgroup on a real Linux soak; D3: each sample from the one reader, the last after stop().
   assert.ok(src.includes("\n    const cg = hours > 0 && process.platform === 'linux' ? cgroupLevels() : { procs: null, kernelBytes: null };\n"), 'the cgroup read');
   assert.ok(src.includes('\n        samples.push(read(at));\n'), 'a sample in the loop');
   assert.ok(src.includes('\n      samples.push(await readAfterStop(c, () => read(performance.now() - start)));\n'), 'the stop sample');
   assert.match(src, /\n {2}const startProcs = processSnapshot\(\);\n {2}const f = fixture\(\);\n/);
+  // R1181ac AC5: the kernel level adds the netlink queues, anchored to its source line (here, on every platform).
+  assert.match(src, /\n {4}if \(Number\.isFinite\(n\)\) kernelBytes = n \+ \(netlinkBytes\(\) \?\? 0\);\n/, 'the kernel level adds the netlink queues');
   // R1181q D3: the whole call, the real soak's branch with its `linux` too (the smoke's alone satisfied a shorter pin).
   assert.ok(src.includes('\n  const v = soakVerdict(samples, limits, hours > 0 ? { expectedMs: ms - sampleMs, sampleMs, issueEveryMs, extended: true, linux, stopped: true } : { extended: true, linux, stopped: true });\n'), 'the verdict call');
   assert.match(src, /\n {2}process\.env\.SOAK_CHILD_MARK = childMark;\n/);
@@ -1996,7 +2001,8 @@ time.sleep(60)`;
     c.kill();
   }
   const src = readFileSync(join(repoRoot, 'test', 'soak.test.ts'), 'utf8');
-  assert.ok(src.includes('    if (Number.isFinite(n)) kernelBytes = n + (netlinkBytes() ?? 0);'), 'the kernel level adds the netlink queues');
+  // R1181ac AC5: anchored to a source line (a plain includes() found this assertion's own text).
+  assert.match(src, /\n {4}if \(Number\.isFinite\(n\)\) kernelBytes = n \+ \(netlinkBytes\(\) \?\? 0\);\n/, 'the kernel level adds the netlink queues');
 });
 
 test('soak driver (Linux, R1181x L1, R1181z L2): a tmpfs is read through Shmem only, never twice', linuxOnly, (t) => {
@@ -2049,6 +2055,13 @@ test("soak verdict: at stop, files in the worktree folder no checkout tracks are
   // A checkout open at stop (R1181y Y1) adds files its checkout tracks, not leftovers: passes.
   const y1 = [...filled.slice(0, -1), { ...filled.at(-1)!, worktreeFiles: 195, files: filled.at(-1)!.files! + 195, worktrees: 2, worktreeDirs: 1, worktreeLeftovers: 0 }];
   assert.deepEqual(soakVerdict(y1, SOAK_LIMITS, o).failures, []);
+  // R1181ac AC1: no checkout open at any run sample (the samples' phase), one open at stop and clean: passes; two, or
+  // one holding leftovers, fails.
+  const none = filled.slice(0, -1).map((s) => ({ ...s, worktrees: 1, worktreeDirs: 0 }));
+  const atStop = (w: number, d: number, left = 0) => [...none, { ...filled.at(-1)!, worktreeFiles: 195 * d, files: filled.at(-1)!.files! + 195 * d, worktrees: w, worktreeDirs: d, worktreeLeftovers: left }];
+  assert.deepEqual(soakVerdict(atStop(2, 1), SOAK_LIMITS, o).failures, [], 'one checkout open at stop, none at a sample: passes');
+  assert.match(soakVerdict(atStop(3, 2), SOAK_LIMITS, o).failures.join(), /left at stop: 3 worktree\(s\) after stop\(\) and idle\(\), above the first quarter's 1/, 'two: fails');
+  assert.match(soakVerdict(atStop(2, 1, 65), SOAK_LIMITS, o).failures.join(), /left at stop: 2 worktree\(s\)/, 'one holding leftovers: no allowance');
 });
 
 test('soak driver: the worktree folder\'s files no checkout tracks are read, and the walked files on a counted filesystem (#1181 review R1181aa AA1, AA2)', () => {
@@ -2073,6 +2086,18 @@ test('soak driver: the worktree folder\'s files no checkout tracks are read, and
     mkdirSync(join(wt, 'junk'));
     for (const n of ['1', '2', '3']) writeFileSync(join(wt, 'junk', n), '');
     assert.equal(worktreeLeftovers(wt), 2 + 4, 'and a folder that is no checkout, whole');
+    // R1181ac AC2: a nested repository in a checkout is one `?? dir/` line to git; every file under it counts.
+    const nested = join(wt, 'task-1', 'cache');
+    mkdirSync(nested);
+    g(nested, 'init', '-q');
+    for (let i = 0; i < 30; i++) writeFileSync(join(nested, `f${i}`), '');
+    assert.ok(worktreeLeftovers(wt) >= 2 + 4 + 30, `a nested git init folder's files: ${worktreeLeftovers(wt)}`);
+    rmSync(nested, { recursive: true, force: true });
+    mkdirSync(nested);
+    writeFileSync(join(nested, '.git'), 'gitdir: /nowhere\n');
+    for (let i = 0; i < 30; i++) writeFileSync(join(nested, `f${i}`), '');
+    assert.ok(worktreeLeftovers(wt) >= 2 + 4 + 30, `a folder with a .git file: ${worktreeLeftovers(wt)}`);
+    rmSync(nested, { recursive: true, force: true });
     // AA2: the walked files on a filesystem the inode count reads (this temp dir is counted where it isn't a tmpfs).
     const counted = statfsSync(d).type !== 0x01021994;
     assert.equal(walkedOnCounted([d], [d]), counted ? dirUsage(d).files : 0);
@@ -2152,6 +2177,11 @@ print(k if k > 0 else 'skip %d' % ctypes.get_errno())`, String(process.pid)], { 
     if (!(id > 0)) return t.skip(`add_key unavailable: ${made.stdout}`.slice(0, 200));
     assert.ok(userKeys()!.keys >= before.keys + 1, `counted after its maker exited: ${before.keys} -> ${userKeys()!.keys}`);
   } finally {
-    if (id > 0) spawnSync('python3', ['-c', `import ctypes; ctypes.CDLL(None).syscall(250, 3, ${id})`]);
+    // R1181ac AC4: unlink it from the user keyring (KEYCTL_UNLINK, 9; KEY_SPEC_USER_KEYRING, -4): a revoke needs a
+    // permission the key doesn't give its user, and failed, leaving a key against the user's quota every run.
+    if (id > 0) {
+      const un = spawnSync('python3', ['-c', `import ctypes, sys; sys.exit(0 if ctypes.CDLL(None, use_errno=True).syscall(250, 9, ${id}, -4) == 0 else 1)`]);
+      assert.equal(un.status, 0, 'the test key unlinked from the user keyring');
+    }
   }
 });

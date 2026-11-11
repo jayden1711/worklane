@@ -443,9 +443,13 @@ export function soakVerdict(input: readonly SoakSample[], limits: SoakLimits = S
     const before = failures.length;
     const base = (k: keyof SoakSample) => median(first.map((s) => s[k]).filter((x): x is number => typeof x === 'number'));
     const at = (k: keyof SoakSample) => (typeof stop[k] === 'number' && first.some((s) => typeof s[k] === 'number') ? (stop[k] as number) : null);
+    // R1181ac AC1: a task's checkout may be open at stop though no run sample saw one (the samples' phase against the
+    // filings): one worktree and one folder entry more are allowed when the leftovers check reads it clean.
+    const leftClean = typeof end.worktreeLeftovers === 'number' && typeof stop.worktreeLeftovers === 'number' && stop.worktreeLeftovers - end.worktreeLeftovers <= STOP_FILES;
     for (const [k, what] of [['children', 'child process(es)'], ['cgroupProcs', "process(es) in the job's cgroup"], ['sysvIpc', 'SysV IPC object(s)'], ['mqueues', 'POSIX message queue(s)'], ['userKeys', "key(s) in this user's keyrings"], ['worktrees', 'worktree(s)'], ['worktreeDirs', "entr(ies) in the worktree folder"]] as const) {
       const n = at(k);
-      if (n !== null && n > base(k)) failures.push(`left at stop: ${n} ${what} after stop() and idle(), above the first quarter's ${base(k)}`);
+      const slack = leftClean && (k === 'worktrees' || k === 'worktreeDirs') ? 1 : 0;
+      if (n !== null && n > base(k) + slack) failures.push(`left at stop: ${n} ${what} after stop() and idle(), above the first quarter's ${base(k)}`);
     }
     for (const [k, what, limit, fmt] of [
       ['fds', 'open file handles', limits.fdGrowth, String],
