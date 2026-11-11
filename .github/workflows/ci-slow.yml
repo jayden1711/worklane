@@ -788,7 +788,9 @@ jobs:
     # WHY: ubuntu-26.04 (ubuntu-latest from image 20261101) refuses unprivileged user namespaces, which this job's
     # sandboxes need; pinned with ci.yml's test shards until #1137 ports the suite.
     runs-on: ubuntu-24.04
-    timeout-minutes: 46
+    # WHY 70: #958's setting-sources probe runs here, once clean and once per must-fail wrapper (27 since R1185aa),
+    # about 26 minutes of the job on its own (1529 s at 2cf50dd5), on top of the ~19 the rest takes on main.
+    timeout-minutes: 70
     defaults:
       run:
         shell: bash
