@@ -45,15 +45,21 @@ const BINARY = /^claude(?:\.exe|\.cmd)?$|[\/\\]claude(?:\.exe|\.cmd)?$|^claude-c
 /**
  * A string that runs claude as a shell command (R1185ag D1, as R1185ag measured it): the binary as a word, quoted or
  * from a `$(…)`, then any words and a flag (`claude "$1" -p`, `exec "claude" -p`, `"$(command -v claude)" -p`), or a
- * pipe into it (`… | claude $ARGS`).
+ * pipe into it (`… | claude $ARGS`); or (R1185ah D1, as R1185ah measured it) in a shell command's position with no
+ * flag needed after it, its flags coming from outside the string (`exec claude "$@"`, `claude $ARGS`, a template's
+ * substitution, `xargs claude`): at the start or after `;` `&` `|` `(` a backtick, a newline or `$(`, optionally after
+ * a wrapper (exec, nohup, xargs, command, env, time, sudo, then, do) and its words, quoted or not, then the end, a
+ * redirect, `;` `&` `|` `)`, or a space and a quote, `$`, `<` or a substitution.
  */
-const COMMAND = /(?:^|[\s;&|(`"'])(?:\S*[\/\\])?claude(?:\.exe|\.cmd)?["'`)]*(?:\s+[^\s;&|]+)*?\s+--?[a-z]|\|\s*(?:\S*[\/\\])?claude(?:\.exe|\.cmd)?\b/i;
+const COMMAND = /(?:^|[\s;&|(`"'])(?:\S*[\/\\])?claude(?:\.exe|\.cmd)?["'`)]*(?:\s+[^\s;&|]+)*?\s+--?[a-z]|\|\s*(?:\S*[\/\\])?claude(?:\.exe|\.cmd)?\b|(?:^|[;&|(`\n]|\$\()\s*(?:(?:exec|nohup|xargs|command|env|time|sudo|then|do)\s+(?:[^\s;&|]+\s+)*?)?["']?(?:\S*[\/\\])?claude(?:\.exe|\.cmd)?["']?(?=\s*(?:$|[<>;&|)])|\s+["'$<X])/i;
 const LAUNCHER = 'src/claude-launch.ts';
 const AUTH_HELPERS = /^(?:claudeAuthStatus|claudeAuthMethod|claudeAuthStatusJson)$/;
 
 /** Lines that name the claude binary and may: file, the line's whole text (trimmed), why, and how many lines have it (1 when absent). */
 // check-table: never-grow
 export const PINS: ([string, string, string] | [string, string, string, number])[] = [
+  ["src/claude-credential-guard.ts", "'issue #711: the dashboard never takes a Claude credential; a root admin installs it on the machine (sudo bash credentials.sh <name> claude), or signs in there as the agent user. See docs/auth.md';", "a message naming `credentials.sh <name> claude` (data): a root admin runs it"],
+  ["src/claude-signin.ts", "const script = `sudo bash ${join(o.engineRoot, 'scripts', 'setup', 'credentials.sh')} ${o.instance} claude`;", "the sign-in script's text shown to a person (data): it names `credentials.sh <name> claude`"],
   ["src/claude-credential-guard.ts", "\"the dashboard no longer takes a Claude credential: a root admin installs one on the machine (sudo bash credentials.sh <name> claude), or signs in there as the agent user (sudo -u <agent user> -i claude auth login). See docs/auth.md\";", "a message naming claude (data): how a root admin installs a login"],
   ["src/cli.ts", "const USAGE = `${BRAND.name} ${pkg.version}: ${BRAND.tagline}", "the CLI's usage text (data): it names claude's commands, runs none"],
   ["src/cli.ts", "scaffold ${BRAND.configDir}/; with --instance, write the hooks and rules", "the CLI's usage text (data), a later line of the same template"],
@@ -192,14 +198,18 @@ test('#958: every way of naming claude outside the launch function is refused (f
     'runner-bin-escapes',
     'runner-bin-spawn',
     'sh-arg-before-flag',
+    'sh-args-variable',
     'sh-c',
+    'sh-exec-args',
     'sh-lookup',
     'sh-pipe',
     'sh-quoted-name',
     'sh-template-tail',
+    'sh-xargs',
     'signin-session',
     'src-helper',
     'sudo-wrapper',
+    'template-args',
     'template-path',
     'ternary',
     'wrapper-cjs',
