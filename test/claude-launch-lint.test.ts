@@ -16,7 +16,10 @@
 //   auth-status helpers' binary argument, or claudeBin's first (the launch's resolver: it starts nothing).
 // - The names are read in any case and with Windows' `.exe` and `.cmd` (R1185ae D4: `Claude` is `claude` on a
 //   case-insensitive volume, and the npm package's file is bin/claude.exe), the package's name as a part of a path
-//   (`join(…, '@anthropic-ai', 'claude-code', …)`) and its launcher cli-wrapper.cjs (R1185ad D1), and a pin covers as many lines with its
+//   (`join(…, '@anthropic-ai', 'claude-code', …)`) and its launcher cli-wrapper.cjs (R1185ad D1), the Agent SDK's package
+//   (`@anthropic-ai/claude-agent-sdk`: it starts its own claude, and its settingSources loads every source), and a
+//   shell string that runs claude however its words are spelled before a flag or after a pipe, a template read whole
+//   as well as by part (R1185ag D1). A pin covers as many lines with its
 //   exact text as it says (one by default), so a pinned line copied into new code is refused.
 //
 // What it can't see (named limits):
@@ -38,15 +41,26 @@ type Node = any;
 const ts = createRequire(join(repoRoot, 'package.json'))('typescript') as Node;
 
 /** A text that IS the claude binary: its name, a path to it, its npm package, or its cli.js. */
-const BINARY = /^claude(?:\.exe|\.cmd)?$|[\/\\]claude(?:\.exe|\.cmd)?$|^claude-code$|@anthropic-ai[\/\\]claude-code|claude-code[\/\\]cli\.js|cli-wrapper\.cjs/i;
-/** A string that runs claude as a shell command: the binary as a word, then a flag (`sh -c 'claude -p hi'`). */
-const COMMAND = /(?:^|[\s;&|(`])(?:\S*[\/\\])?claude(?:\.exe|\.cmd)?\s+-/i;
+const BINARY = /^claude(?:\.exe|\.cmd)?$|[\/\\]claude(?:\.exe|\.cmd)?$|^claude-code$|@anthropic-ai[\/\\]claude-code|claude-code[\/\\]cli\.js|cli-wrapper\.cjs|@anthropic-ai[\/\\]claude-agent-sdk|^claude-agent-sdk$/i;
+/**
+ * A string that runs claude as a shell command (R1185ag D1, as R1185ag measured it): the binary as a word, quoted or
+ * from a `$(…)`, then any words and a flag (`claude "$1" -p`, `exec "claude" -p`, `"$(command -v claude)" -p`), or a
+ * pipe into it (`… | claude $ARGS`).
+ */
+const COMMAND = /(?:^|[\s;&|(`"'])(?:\S*[\/\\])?claude(?:\.exe|\.cmd)?["'`)]*(?:\s+[^\s;&|]+)*?\s+--?[a-z]|\|\s*(?:\S*[\/\\])?claude(?:\.exe|\.cmd)?\b/i;
 const LAUNCHER = 'src/claude-launch.ts';
 const AUTH_HELPERS = /^(?:claudeAuthStatus|claudeAuthMethod|claudeAuthStatusJson)$/;
 
 /** Lines that name the claude binary and may: file, the line's whole text (trimmed), why, and how many lines have it (1 when absent). */
 // check-table: never-grow
 export const PINS: ([string, string, string] | [string, string, string, number])[] = [
+  ["src/claude-credential-guard.ts", "\"the dashboard no longer takes a Claude credential: a root admin installs one on the machine (sudo bash credentials.sh <name> claude), or signs in there as the agent user (sudo -u <agent user> -i claude auth login). See docs/auth.md\";", "a message naming claude (data): how a root admin installs a login"],
+  ["src/cli.ts", "const USAGE = `${BRAND.name} ${pkg.version}: ${BRAND.tagline}", "the CLI's usage text (data): it names claude's commands, runs none"],
+  ["src/cli.ts", "scaffold ${BRAND.configDir}/; with --instance, write the hooks and rules", "the CLI's usage text (data), a later line of the same template"],
+  ["src/setup-steps.ts", "today: `Run \\`claude auth login\\` in a terminal, then \\`${BRAND.cli} init\\` again (it picks up here). An API key instead: \\`${BRAND.cli} init --answer agent-runtime=api_key --answer api-key-file=<path>\\`. The login must be one agent_runtime.kind runs on.`,", "a message naming `claude auth login` (data): the person runs it"],
+  ["src/agent-settings.ts", "return `claude did not apply the --settings this run passed (${what}): its init event doesn't report the run's check value in output_style, so the run's deny rules and hooks may be off (one invalid value makes claude drop the whole file without a word)`;", "a message naming claude (data): the run's check that its --settings applied"],
+  ["src/runner.ts", "? `claude sent ${j.type === 'assistant' || j.type === 'user' || j.type === 'result' ? `a ${j.type} line` : 'a line'} before its init event confirmed the --settings this run passed (${settingsName}), so its deny rules and hooks may be off`", "a message naming claude (data): what claude sent"],
+  ["src/runner.ts", "if (settingsState === 'pending') return done({ reason: 'failed', detail: `claude exited ${code} before its init event confirmed the --settings this run passed (${settingsName}): ${stderrTail(stderr)}`, ...base });", "a message naming claude (data): claude exited before its init event"],
   ["src/claude-auth-failure.ts", "export const DEFAULT_LOGIN_KEY = 'claude';", "a login key (data), never run"],
   ["src/claude-signin.ts", "const c = spawn('claude', ['auth', 'login'], { env, stdio: 'ignore' });", "`claude auth login`: the sign-in, no session"],
   ["src/claude-signin.ts", "execFile('claude', ['auth', 'status', '--json'], { encoding: 'utf8', timeout: 30_000, env: signinEnv(null) }, (_e, stdout) => resolve(parseClaudeStatus(stdout ?? '')));", "`claude auth status --json`: no session"],
@@ -90,7 +104,8 @@ export function launchProblems(path: string, text: string): string[] {
   // The lines each pin covers, so far: past its count, a copy is refused.
   const used = new Map<(typeof PINS)[number], Set<number>>();
   const visit = (n: Node) => {
-    const t = ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n) || ts.isTemplateHead(n) || ts.isTemplateMiddle(n) || ts.isTemplateTail(n) ? n.text : null;
+    // A template is read whole too, each substitution as one word (R1185ag D1: a flag in its tail), besides its parts.
+    const t = ts.isTemplateExpression(n) ? n.head.text + n.templateSpans.map((s: Node) => `X${s.literal.text}`).join('') : ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n) || ts.isTemplateHead(n) || ts.isTemplateMiddle(n) || ts.isTemplateTail(n) ? n.text : null;
     if (t !== null && (BINARY.test(t) || COMMAND.test(t)) && path !== LAUNCHER && !inType(n)) {
       const at = lineOf(n);
       const line = lines[at - 1]!.trim();
@@ -137,6 +152,7 @@ test('#958: every way of naming claude outside the launch function is refused (f
   // check-table: never-shrink
   const MUST_FAIL = [
     'absolute-path',
+    'agent-sdk',
     'alias-assign',
     'const-bin',
     'data-literal',
@@ -175,7 +191,12 @@ test('#958: every way of naming claude outside the launch function is refused (f
     'require-destructured',
     'runner-bin-escapes',
     'runner-bin-spawn',
+    'sh-arg-before-flag',
     'sh-c',
+    'sh-lookup',
+    'sh-pipe',
+    'sh-quoted-name',
+    'sh-template-tail',
     'signin-session',
     'src-helper',
     'sudo-wrapper',
