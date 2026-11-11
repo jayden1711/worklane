@@ -269,6 +269,7 @@ export abstract class Decisions extends Recovery {
       if (m) said.add(m[1]!);
     }
     // A command is about a decision here when it names an id or its option is one a decision here offers.
+    const live = new Set(open.map((x) => x.toLowerCase()));
     const ours = (l: CommandLine | null): l is CommandLine => l !== null && (l.ids.length > 0 || optionsHere.has(l.option));
     for (const { c, r } of parsed) {
       const first = ours(r.first) ? r.first : null;
@@ -278,7 +279,7 @@ export abstract class Decisions extends Recovery {
       const badOption = first && first.ids.length === 1 && byId.has(first.ids[0]!) && !byId.get(first.ids[0]!)!.options.includes(first.option) ? first : null;
       // A comment that isn't plain ASCII answers nothing; it says so only when its ASCII text names the command or a
       // decision here (so discussion in another language stays quiet).
-      const mentions = r.ascii.includes(`/${BRAND.cli.toLowerCase()}`) || idsIn(r.ascii).some((x) => byId.has(x));
+      const mentions = r.ascii.includes(`/${BRAND.cli.toLowerCase()}`) || idsIn(r.ascii).some((x) => live.has(x)); // R1182an AN5: a live id
       const kind = r.notAscii
         ? mentions
           ? 'reply_not_ascii'
@@ -299,15 +300,18 @@ export abstract class Decisions extends Recovery {
                   ? 'reply_unknown_option'
                   : first.ids.length === 0
                     ? 'reply_without_id'
-                    : null;
+                    : !first.idNext
+                      ? 'reply_id_not_after_option'
+                      : null;
       if (!kind) continue;
       const key = `#${n}: reply ${c.id ?? createHash('sha256').update(`${c.author}\n${c.at ?? ''}\n${c.body}`).digest('hex').slice(0, 12)}`;
       if (said.has(key)) continue;
       said.add(key);
       const why = {
-        reply_not_ascii: `has a character outside plain ASCII (${r.notAscii?.code} on line ${r.notAscii?.line}: an accented letter, an emoji or another symbol; curly quotes and en or em dashes are fine)`,
+        reply_not_ascii: `has a character outside plain ASCII (${r.notAscii?.code} on line ${r.notAscii?.line}: an accented letter, an emoji or another symbol; curly quotes and en or em dashes are read as plain ones, though the first line takes no quotes)`,
         reply_not_first_line: "has its command somewhere other than the start of the comment's first line, where it is not read",
-        reply_unsafe_text: 'has a character a reply can\'t hold on its first line (` < > [ ] ( ) " \' \\ & ! ~, or one that prints nothing or reorders text)',
+        reply_unsafe_text: 'has a character a reply can\'t hold on its first line (` < > [ ] ( ) " \' \\ & ! ~ $ %; a curly quote or apostrophe counts as a quote)',
+        reply_id_not_after_option: `names ${first?.ids[0]}, but not right after the option (a reply is \`/${BRAND.cli} <option> <id> [note]\`)`,
         reply_more_than_one: `has more than one \`/${BRAND.cli}\` command (a reply is one command, on its first line)`,
         reply_several_ids: `names ${several?.ids.length} decisions (${several?.ids.slice(0, 5).join(', ')})`,
         reply_unknown_id: `names ${unknown?.ids[0]}, which isn't a decision on this issue`,
@@ -319,7 +323,7 @@ export abstract class Decisions extends Recovery {
     }
     const id = q.id.toLowerCase();
     const picks = parsed
-      .map(({ c, r }) => ({ c, line: !r.notAscii && r.first && !r.unsafe && r.others.length === 0 && r.first.ids.length === 1 && r.first.ids[0] === id && q.options.includes(r.first.option) ? r.first : undefined }))
+      .map(({ c, r }) => ({ c, line: !r.notAscii && r.first && !r.unsafe && r.others.length === 0 && r.first.idNext && r.first.ids.length === 1 && r.first.ids[0] === id && q.options.includes(r.first.option) ? r.first : undefined }))
       .filter((x) => x.line !== undefined);
     for (const r of picks.reverse()) {
       const role = await this.commenterRole(r.c.author);

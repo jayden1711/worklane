@@ -12,6 +12,11 @@ export interface CommandLine {
   ids: string[];
   /** The rest of the line without its ids, in its original case. */
   note: string;
+  /**
+   * The token right after the option is an id (R1182an AN3: the shape is `/<cli> <option> <id> [note]`; an id later on
+   * the line, as in `approve not yet: <id>`, doesn't answer). A comma, colon, semicolon or full stop may follow it.
+   */
+  idNext: boolean;
 }
 
 /** A comment read as a reply. */
@@ -98,7 +103,7 @@ export function readReply(typed: string): Reply {
   const at = lines.findIndex((l) => l.trim() !== '');
   const firstRaw = at >= 0 ? lines[at]! : '';
   const m = COMMAND.exec(replyText(firstRaw));
-  const first = m ? { option: m[1]!, ids: idsIn(`${m[1]} ${m[2]}`), note: noteOf(firstRaw) } : null;
+  const first = m ? { option: m[1]!, ids: idsIn(`${m[1]} ${m[2]}`), note: noteOf(firstRaw), idNext: /^[ \t]+d-[\w-]*\w[.,:;]?(?:[ \t]|$)/.test(m[2]!) } : null;
   const others: CommandLine[] = [];
   lines.forEach((raw, i) => {
     let skip = i === at && first !== null; // the first line's own command is `first`, not another
@@ -107,11 +112,11 @@ export function readReply(typed: string): Reply {
         skip = false;
         continue;
       }
-      others.push({ option: o[1]!, ids: idsIn(`${o[1]} ${o[2]}`), note: '' });
+      others.push({ option: o[1]!, ids: idsIn(`${o[1]} ${o[2]}`), note: '', idNext: false });
     }
     for (const o of replyText(raw).matchAll(SHAPED)) {
       const ids = idsIn(`${o[2]} ${o[3]}`);
-      if (o[1] !== BRAND.cli.toLowerCase() && ids.length > 0) others.push({ option: o[2]!, ids, note: '' });
+      if (o[1] !== BRAND.cli.toLowerCase() && ids.length > 0) others.push({ option: o[2]!, ids, note: '', idNext: false });
     }
   });
   return { notAscii, ascii: replyText(text), first, unsafe: first !== null && UNSAFE.test(firstRaw), others };
