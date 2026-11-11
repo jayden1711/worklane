@@ -5,7 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { BRAND } from '../src/brand.js';
-import { NOT_ASCII, readReply, replyText, TYPED, UNSAFE } from '../src/decision-reply.js';
+import { idsElsewhere, NOT_ASCII, pageText, readReply, replyText, TYPED, UNSAFE } from '../src/decision-reply.js';
 
 const c = `/${BRAND.cli}`;
 const ID = 'd-12-a3f9c1';
@@ -121,4 +121,27 @@ test('R1182an AN3: the id must come right after the option (idNext); a comma, co
   assert.equal(next(`${c} revise keep v1 ${ID} tables`), false);
   assert.equal(next(`${c} approve x${ID}`), false, "a letter glued before the id: no id there");
   assert.equal(next(`${c} approve`), false);
+});
+
+test('rule (c): an open id anywhere outside line 1 slot, as typed or as the page shows it, is found (idsElsewhere, pageText)', () => {
+  const live = [ID];
+  const elsewhere = (body: string) => idsElsewhere(readReply(body), live);
+  assert.deepEqual(elsewhere(`${c} approve ${ID}`), [], 'the slot only');
+  assert.deepEqual(elsewhere(`${c} approve ${ID}, thanks`), [], 'the slot with a comma');
+  assert.deepEqual(elsewhere(`${c} approve ${ID}\nsee the d-12-bbbbbb plan`), [], 'another id is not this one');
+  for (const body of [
+    `${c} approve ${ID}, as in ${ID} plan`,
+    `${c} approve ${ID}\n${ID}`,
+    `${c} approve ${ID}\n&#100;${ID.slice(1)}`,
+    `${c} approve ${ID}\n&#x64;&#45;${ID.slice(2)}`,
+    `${c} approve ${ID}\n<b>d</b>${ID.slice(1)}`,
+    `${c} approve ${ID}\n*d*${ID.slice(1)}`,
+    `${c} approve ${ID}\nd&ndash;${ID.slice(2)}`,
+    `${c} approve ${ID}\nd&shy;${ID.slice(1)}`,
+    `${c} approve ${ID}\nd<!-- x -->${ID.slice(1)}`,
+    `${c} approve ${ID}\nx${ID}0`,
+    `${c} approve not yet ${ID}`,
+  ]) assert.deepEqual(elsewhere(body), [ID], JSON.stringify(body));
+  assert.equal(pageText('/wor&#108;&lowbar;lane&sol; A&nbsp;b'), '/worllane/ a b');
+  assert.equal(pageText('&bogus; &#0; &#xFFFFFFF;'), '&bogus; &#0; &#xfffffff;', 'unknown or out-of-range entities stay as typed');
 });

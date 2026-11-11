@@ -314,8 +314,9 @@ test("Q text (not the review's): the question says the id is required", async ()
   // changed by (b) (the owner, 2026-11-10: only a comment's first line is read, in plain text): the question says so; was "the id is required: a reply without it answers nothing".
   assert.match(body, /Reply with a comment that starts with `\/worklane approve d-/);
   // changed by the ASCII rule (the owner, 2026-11-10: a reply is plain ASCII; curly quotes and en or em dashes read as ' " -): the wording.
-  assert.match(body, /Only a comment's first line is read: with the id, no other command in the comment/);
+  assert.match(body, /Only a comment's first line is read: with the id right after the option and nowhere else in the comment/); // and rule (c), 2026-11-10
   assert.match(body, /nor any other slash command naming a decision id/, 'the R1182ak K1d rule, stated');
+  assert.match(body, /with the id right after the option and nowhere else in the comment \(naming an open decision's id again/, 'rule (c), stated');
   assert.match(body, /quote or apostrophe \(curly ones too\)/, 'the owner, 2026-11-10: line 1 stays strict about quotes');
   assert.match(body, /the whole comment must be plain ASCII \(no accented letters, emoji or other symbols; curly quotes and en or em dashes, which phone keyboards insert, are read as/);
   assert.ok(body.includes(`/worklane approve ${d.id}`), body);
