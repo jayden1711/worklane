@@ -313,7 +313,7 @@ export abstract class Decisions extends Recovery {
       if (said.has(key)) continue;
       said.add(key);
       const why = {
-        reply_not_ascii: `has a character outside plain ASCII (${r.notAscii?.code} on line ${r.notAscii?.line}: an accented letter, an emoji or another symbol; curly quotes and en or em dashes are read as plain ones, though the first line takes no quotes)`,
+        reply_not_ascii: `has a character outside plain ASCII, typed or drawn by an HTML entity or bidi markup (${r.notAscii?.code} on line ${r.notAscii?.line}: an accented letter, an emoji, an invisible character or another symbol; curly quotes and en or em dashes are read as plain ones, though the first line takes no quotes)`,
         reply_not_first_line: "has its command somewhere other than the start of the comment's first line, where it is not read",
         reply_unsafe_text: 'has a character a reply can\'t hold on its first line (` < > [ ] ( ) " \' \\ & ! ~ $ %; a curly quote or apostrophe counts as a quote)',
         reply_id_elsewhere: `names ${idsElsewhere(r, live).slice(0, 3).join(', ')} somewhere other than right after the option on its first line (a reply names an open decision's id once, there: even "approve <id>, as in <id>'s plan" answers nothing)`,

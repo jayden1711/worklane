@@ -33,9 +33,10 @@ export interface Reply {
   others: CommandLine[];
   /**
    * The comment without line 1's id slot (the id right after the option), lower case: as typed, and as the page shows it
-   * (pageText). A live decision id found in either voids the comment (the owner, 2026-11-10, rule (c); idsElsewhere).
+   * in each reading of the page (pageReadings). A live decision id found in any voids the comment (the owner, 2026-11-10,
+   * rule (c); idsElsewhere).
    */
-  rest: { typed: string; shown: string };
+  rest: { typed: string; shown: string[] };
 }
 
 /**
@@ -91,47 +92,99 @@ const noteOf = (raw: string) => {
 };
 
 /**
- * The named HTML entities a page turns into a character a reply's text could use: the ASCII punctuation ones, the
- * spaces, the six phone characters (then mapped as TYPED maps them) and the ones that print nothing. Letters, digits and
- * the hyphen-minus have no named entity, so numeric entities (decoded below) cover the rest of an id.
+ * The named HTML entities whose value is plain ASCII (every one HTML5 has: 46, fjlig included), or one of the six phone
+ * characters (read as TYPED maps them). Any other named entity, or an unknown one, decodes outside plain ASCII on the
+ * page, so it voids the comment (rule (1) on the page, R1182ap AP3; pageNotAscii).
  */
-const NAMED: Readonly<Record<string, string>> = {
-  excl: '!', quot: '"', num: '#', dollar: '$', percnt: '%', amp: '&', apos: "'", lpar: '(', rpar: ')', ast: '*', midast: '*',
-  plus: '+', comma: ',', period: '.', sol: '/', colon: ':', semi: ';', lt: '<', equals: '=', gt: '>', quest: '?',
-  commat: '@', lsqb: '[', lbrack: '[', bsol: '\\', rsqb: ']', rbrack: ']', hat: '^', lowbar: '_', underbar: '_',
-  grave: '`', diacriticalgrave: '`', lcub: '{', lbrace: '{', verbar: '|', vert: '|', verticalline: '|', rcub: '}',
-  rbrace: '}', tab: '\t', newline: '\n', nbsp: ' ', nonbreakingspace: ' ', ensp: ' ', emsp: ' ', thinsp: ' ',
-  ndash: '-', mdash: '-', lsquo: "'", rsquo: "'", ldquo: '"', rdquo: '"', shy: '', zwj: '', zwnj: '',
-  zerowidthspace: '', nobreak: '', invisibletimes: '', invisiblecomma: '', applyfunction: '', ic: '', it: '', af: '',
+const NAMED_ASCII: Readonly<Record<string, string>> = {
+  amp: '&', apos: "'", ast: '*', bsol: '\\', colon: ':', comma: ',', commat: '@', diacriticalgrave: '`', dollar: '$',
+  equals: '=', excl: '!', fjlig: 'fj', grave: '`', gt: '>', hat: '^', lbrace: '{', lbrack: '[', lcub: '{', lowbar: '_',
+  lpar: '(', lsqb: '[', lt: '<', midast: '*', newline: '\n', num: '#', percnt: '%', period: '.', plus: '+', quest: '?',
+  quot: '"', rbrace: '}', rbrack: ']', rcub: '}', rpar: ')', rsqb: ']', semi: ';', sol: '/', tab: '\t', underbar: '_',
+  verbar: '|', vert: '|', verticalline: '|',
+  ndash: '-', mdash: '-', lsquo: "'", rsquo: "'", ldquo: '"', rdquo: '"',
 };
+/**
+ * The named entities that print nothing (every HTML5 one whose value is all format or default-ignorable characters: 17,
+ * R1182ao D1), and the spaces. They void the comment too (not ASCII), and in the readings below they are what the page
+ * draws: nothing, or a space.
+ */
+export const NAMED_EMPTY: readonly string[] = ['applyfunction', 'invisiblecomma', 'invisibletimes', 'negativemediumspace', 'negativethickspace', 'negativethinspace', 'negativeverythinspace', 'nobreak', 'zerowidthspace', 'af', 'ic', 'it', 'lrm', 'rlm', 'shy', 'zwj', 'zwnj'];
+const NAMED_SPACE = ['nbsp', 'nonbreakingspace', 'ensp', 'emsp', 'emsp13', 'emsp14', 'thinsp', 'hairsp', 'numsp', 'puncsp', 'mediumspace', 'thinspace', 'veryspace', 'verythinspace'];
+
+/** An entity as CommonMark reads one (the semicolon required), with its line. */
+const ENTITY = /&(?:#(x[0-9a-f]{1,6}|[0-9]{1,7})|([a-z][a-z0-9]{0,31}));/gi;
+/** What a numeric entity's code decodes to (NUL and out-of-range codes are U+FFFD, as HTML5 decodes them). */
+const fromCode = (n: string) => {
+  const code = n[0] === 'x' || n[0] === 'X' ? parseInt(n.slice(1), 16) : parseInt(n, 10);
+  return code > 0 && code <= 0x10ffff && !(code >= 0xd800 && code <= 0xdfff) ? String.fromCodePoint(code) : '\uFFFD';
+};
+/** Entities decoded (numeric with or without the semicolon, as HTML attributes allow; named from the tables) and the six mapped. */
+const decode = (s: string) =>
+  s
+    .replace(/&#(x[0-9a-f]+|\d+);?/gi, (_all, n: string) => fromCode(n))
+    .replace(/&([a-z][a-z0-9]*);/gi, (all, n: string) => {
+      const k = n.toLowerCase();
+      return NAMED_ASCII[k] ?? (NAMED_EMPTY.includes(k) ? '' : NAMED_SPACE.includes(k) ? ' ' : all);
+    })
+    .replace(/[\u2018\u2019\u201C\u201D\u2013\u2014]/g, (ch) => TYPED[ch]!);
+/**
+ * Real HTML comments and tags only (R1182ao D2, R1182ap AP1): a comment `<!-- … -->`, HTML5's empty `<!-->` and
+ * `<!--->`; a tag is `<` (or `</`) right before a letter, on one line, with no `<` inside. `1 < 2 > 0`, `x <` then `>`
+ * lines later, and `&lt;…&gt;` are text, as on the page.
+ */
+const COMMENT = /<!--(?:>|->|[\s\S]*?-->)/g;
+const TAG = /<\/?[a-z][a-z0-9-]*(?:[ \t/][^<>\n]*)?>/gi;
+/** Attribute text a page shows (an image's alt when it fails to load, a title on hover). */
+const SHOWN_ATTR = /\b(?:alt|title)[ \t]*=[ \t]*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/gi;
+/** Characters that print nothing dropped, markdown's emphasis, code and escape marks dropped, lower case. */
+const unmark = (s: string) => s.replace(/[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu, '').replace(/[*_~`\\]/g, '').toLowerCase();
+const untag = (s: string) => s.replace(COMMENT, '').replace(TAG, '');
 
 /**
- * Text as a page shows it, for finding an id in it (rule (c)): HTML entities decoded (numeric, and the named ones above),
- * the six phone characters mapped, HTML comments and tags dropped, characters that print nothing dropped, and markdown's
- * emphasis, code and escape marks (`* _ ~ \``, `\`) dropped. Lower case.
+ * Every reading of a text a page could show, for finding an id or a command in it (rule (c), R1182ao, R1182ap). Any
+ * reading that contains one counts, so more readings only void more comments:
+ * - decoded with tags kept (`<` and `>` left in place);
+ * - real tags and comments dropped first, then decoded (CommonMark's order);
+ * - decoded, then real tags and comments dropped;
+ * - the text of `alt` and `title` attributes, decoded;
+ * - each of these reversed, for text a bidi override would draw backwards (R1182ap AP2; such text also voids as not ASCII).
  */
-export function pageText(s: string): string {
-  return s
-    .replace(/&#(x[0-9a-f]+|\d+);?/gi, (all, n: string) => {
-      const code = n[0] === 'x' || n[0] === 'X' ? parseInt(n.slice(1), 16) : parseInt(n, 10);
-      return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : all;
-    })
-    .replace(/&([a-z]+);?/gi, (all, n: string) => NAMED[n.toLowerCase()] ?? all)
-    .replace(/[\u2018\u2019\u201C\u201D\u2013\u2014]/g, (ch) => TYPED[ch]!)
-    .replace(/<!--[\s\S]*?-->/g, '')
-    .replace(/<[^>]*>/g, '')
-    .replace(/[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu, '')
-    .replace(/[*_~`\\]/g, '')
-    .toLowerCase();
+export function pageReadings(s: string): string[] {
+  const attrs = [...s.matchAll(SHOWN_ATTR)].map((m) => m[1] ?? m[2] ?? m[3] ?? '').join('\n');
+  const forwards = [unmark(decode(s)), unmark(decode(untag(s))), unmark(untag(decode(s))), unmark(decode(attrs))];
+  return [...forwards, ...forwards.map((t) => [...t].reverse().join(''))];
+}
+
+/** The reading of R1182am/an (decoded, tags dropped), kept for the unit tests' examples. */
+export const pageText = (s: string): string => unmark(untag(decode(s)));
+
+/**
+ * Rule (1) on the page (R1182ap AP2, AP3): what the page draws must be plain ASCII too. The first entity that decodes
+ * outside plain ASCII (after the six mapped characters; a character that prints nothing counts), an unknown named
+ * entity, or bidi markup (`<bdo`, a `dir=` attribute), with its line. Null when there is none.
+ */
+export function pageNotAscii(body: string): { code: string; line: number } | null {
+  const lineOf = (i: number) => body.slice(0, i).split(/\r\n|\r|\n/).length;
+  for (const m of body.matchAll(ENTITY)) {
+    const value = m[1] !== undefined ? fromCode(m[1]) : NAMED_ASCII[m[2]!.toLowerCase()];
+    const mapped = value?.replace(/[\u2018\u2019\u201C\u201D\u2013\u2014]/g, (ch) => TYPED[ch]!);
+    if (mapped === undefined) return { code: `&${m[2]};`, line: lineOf(m.index!) };
+    const bad = mapped.search(NOT_ASCII);
+    if (bad >= 0) return { code: `U+${mapped.codePointAt(bad)!.toString(16).toUpperCase().padStart(4, '0')}`, line: lineOf(m.index!) };
+  }
+  const bidi = /<bdo\b|<[a-z][^<>\n]*[ \t/]dir[ \t]*=/i.exec(body);
+  return bidi ? { code: /^<bdo/i.test(bidi[0]) ? '<bdo>' : 'dir=', line: lineOf(bidi.index) } : null;
 }
 
 /**
  * The live decision ids a comment names outside line 1's id slot (rule (c), the owner, 2026-11-10): found in the comment
- * as typed or as the page shows it. Any one of them voids the comment; that, not the second-command scan, is what makes
- * sure a comment can't show a second answer to a live decision. The cost: a reply can't name its id twice.
+ * as typed or in any reading of the page (pageReadings). Any one of them voids the comment; that, not the second-command
+ * scan, is what makes sure a comment can't show a second answer to a live decision. The cost: a reply can't name its id
+ * twice.
  */
 export const idsElsewhere = (r: Reply, live: Iterable<string>): string[] =>
-  [...live].map((x) => x.toLowerCase()).filter((x) => r.rest.typed.includes(x) || r.rest.shown.includes(x));
+  [...live].map((x) => x.toLowerCase()).filter((x) => r.rest.typed.includes(x) || r.rest.shown.some((t) => t.includes(x)));
 
 /** The first character in `body` that isn't plain ASCII, and its line. */
 function firstNotAscii(body: string): Reply['notAscii'] {
@@ -141,38 +194,43 @@ function firstNotAscii(body: string): Reply['notAscii'] {
   return { code: `U+${code}`, line: body.slice(0, i).split(/\r\n|\r|\n/).length };
 }
 
+/** A line's commands: on the line as typed and in each reading of it, the one that finds the most (extra defence). */
+function commandsOn(raw: string, skipFirst: boolean): CommandLine[] {
+  let best: CommandLine[] = [];
+  for (const text of [replyText(raw), ...pageReadings(raw)]) {
+    const found: CommandLine[] = [];
+    let skip = skipFirst;
+    for (const o of text.matchAll(ANYWHERE)) {
+      if (skip) {
+        skip = false;
+        continue;
+      }
+      found.push({ option: o[1]!, ids: idsIn(`${o[1]} ${o[2]}`), note: '', idNext: false });
+    }
+    for (const o of text.matchAll(SHAPED)) {
+      const ids = idsIn(`${o[2]} ${o[3]}`);
+      if (o[1] !== BRAND.cli.toLowerCase() && ids.length > 0) found.push({ option: o[2]!, ids, note: '', idNext: false });
+    }
+    if (found.length > best.length) best = found;
+  }
+  return best;
+}
+
 /** A comment as a reply: whether it is plain ASCII, its first line's command, whether that line is refused, and every other command. */
 export function readReply(typed: string): Reply {
   const body = typed.replace(/[\u2018\u2019\u201C\u201D\u2013\u2014]/g, (ch) => TYPED[ch]!);
-  const notAscii = firstNotAscii(body);
+  // Rule (1) as typed, then on the page (entities and bidi markup, R1182ap).
+  const typedNotAscii = firstNotAscii(body);
+  const notAscii = typedNotAscii ?? pageNotAscii(body);
   // A comment that isn't plain ASCII answers nothing; its ASCII characters are still read, to decide whether to say so.
-  const text = notAscii ? body.replace(new RegExp(NOT_ASCII.source, 'gu'), '') : body;
+  const text = typedNotAscii ? body.replace(new RegExp(NOT_ASCII.source, 'gu'), '') : body;
   const lines = text.split(/\r\n|\r|\n/);
   const at = lines.findIndex((l) => l.trim() !== '');
   const firstRaw = at >= 0 ? lines[at]! : '';
   const m = COMMAND.exec(replyText(firstRaw));
   const first = m ? { option: m[1]!, ids: idsIn(`${m[1]} ${m[2]}`), note: noteOf(firstRaw), idNext: /^[ \t]+d-[\w-]*\w[.,:;]?(?:[ \t]|$)/.test(m[2]!) } : null;
-  const others: CommandLine[] = [];
-  lines.forEach((raw, i) => {
-    let skip = i === at && first !== null; // the first line's own command is `first`, not another
-    // As typed, and as the page shows it (entities, tags and emphasis undone), whichever finds more.
-    const typedHits = [...replyText(raw).matchAll(ANYWHERE)].length;
-    const shownLine = pageText(raw);
-    const scan = [...shownLine.matchAll(ANYWHERE)].length > typedHits ? shownLine : replyText(raw);
-    for (const o of scan.matchAll(ANYWHERE)) {
-      if (skip) {
-        skip = false;
-        continue;
-      }
-      others.push({ option: o[1]!, ids: idsIn(`${o[1]} ${o[2]}`), note: '', idNext: false });
-    }
-    for (const o of scan.matchAll(SHAPED)) {
-      const ids = idsIn(`${o[2]} ${o[3]}`);
-      if (o[1] !== BRAND.cli.toLowerCase() && ids.length > 0) others.push({ option: o[2]!, ids, note: '', idNext: false });
-    }
-  });
+  const others = lines.flatMap((raw, i) => commandsOn(raw, i === at && first !== null));
   // Line 1's id slot: the token right after the option, taken out once; every other place an id appears is "elsewhere".
-  const slotted = first?.idNext ? lines.map((l, i) => (i === at ? l.replace(/^(\s*\S+\s+\S+[ \t]+)\S+/, '$1') : l)) : lines;
-  const restTyped = replyText(slotted.join('\n'));
-  return { notAscii, ascii: replyText(text), first, unsafe: first !== null && UNSAFE.test(firstRaw), others, rest: { typed: restTyped, shown: pageText(slotted.join('\n')) } };
+  const slotted = (first?.idNext ? lines.map((l, i) => (i === at ? l.replace(/^(\s*\S+\s+\S+[ \t]+)\S+/, '$1') : l)) : lines).join('\n');
+  return { notAscii, ascii: replyText(text), first, unsafe: first !== null && UNSAFE.test(firstRaw), others, rest: { typed: replyText(slotted), shown: pageReadings(slotted) } };
 }
