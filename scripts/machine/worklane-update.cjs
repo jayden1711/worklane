@@ -285,7 +285,6 @@ function snapshot(table, o = {}) {
         const source = `${re.source}`;
         const flags = `${re.flags}`;
         const copy = new RegExp(source, flags);
-        const g = new RegExp(source, flags.includes('g') ? flags : `${flags}g`);
         const rep = data(who, entry, 1, 'the marker');
         let marker = null;
         let kept;
@@ -306,7 +305,7 @@ function snapshot(table, o = {}) {
         const why = marker === null ? null : markerProblem(copy, marker, o.verbatim === true);
         if (why !== null)
             refuse(who, why);
-        rows.push(Object.freeze({ re: copy, g, rep: kept, kind }));
+        rows.push(Object.freeze({ source, flags, rep: kept, kind }));
     }
     return Object.freeze(rows);
 }
@@ -567,9 +566,9 @@ const IDENTIFIERS = [
 const IDENTIFIER_SNAPSHOT = snapshot(IDENTIFIERS, { verbatim: true });
 Object.freeze(IDENTIFIERS);
 exports.REDACTION_PATTERNS = Object.freeze([
-    ...SHAPE_SNAPSHOT.map((r) => Object.freeze({ kind: r.kind, re: r.re, rep: r.rep, group: 'secret' })),
-    ...BROAD_SNAPSHOT.map((r) => Object.freeze({ kind: r.kind, re: r.re, rep: r.rep, group: 'broad' })),
-    ...IDENTIFIER_SNAPSHOT.map((r) => Object.freeze({ kind: r.kind, re: r.re, rep: r.rep, group: 'identifier' })),
+    ...SHAPE_SNAPSHOT.map((r) => Object.freeze({ kind: r.kind, re: new RegExp(r.source, r.flags), rep: r.rep, group: 'secret' })),
+    ...BROAD_SNAPSHOT.map((r) => Object.freeze({ kind: r.kind, re: new RegExp(r.source, r.flags), rep: r.rep, group: 'broad' })),
+    ...IDENTIFIER_SNAPSHOT.map((r) => Object.freeze({ kind: r.kind, re: new RegExp(r.source, r.flags), rep: r.rep, group: 'identifier' })),
 ]);
 // check-table: never-shrink
 const GLUED_PREFIXES = ['ghp_', 'gho_', 'ghu_', 'ghs_', 'ghr_', 'github_pat_', 'sk-', 'sk_live_', 'sk_test_', 'rk_live_', 'rk_test_', 'xoxa-', 'xoxb-', 'xoxe', 'xoxp-', 'xoxr-', 'xoxs-', 'xapp-', 'lin_api_', 'lin_oauth_', 'AKIA', 'ASIA', 'AIza', 'eyJ', '0x', 'Bearer', 'bearer', 'BEARER', 'Basic', 'basic', 'BASIC', exports.DASHBOARD_KEY_PREFIX];
@@ -696,9 +695,29 @@ function spansOf(t, re, rep, rank, out) {
             out.push([m.index + a, m.index + whole.length - b, r.slice(a, r.length - b), rank]);
     }
 }
-const SHAPE_RULES = Object.freeze(SHAPE_SNAPSHOT.map((r) => Object.freeze([r.g, r.rep])));
+const SHAPE_RULES = SHAPE_SNAPSHOT;
 // check-table: never-shrink
-const BROAD_RULES = Object.freeze([...SHAPE_RULES, ...BROAD_SNAPSHOT.map((r) => Object.freeze([r.g, r.rep]))]);
+const BROAD_RULES = Object.freeze([...SHAPE_RULES, ...BROAD_SNAPSHOT]);
+const run = (() => {
+    const build = (rules, global) => Object.freeze(rules.map((r) => Object.freeze([new RegExp(r.source, global && !r.flags.includes('g') ? `${r.flags}g` : r.flags), r.rep])));
+    const shapes = build(SHAPE_RULES, true);
+    const broad = build(BROAD_RULES, true);
+    const identifiers = build(IDENTIFIER_SNAPSHOT, false);
+    const copies = [...shapes.map((c, i) => [c[0], SHAPE_RULES[i], true]), ...broad.map((c, i) => [c[0], BROAD_RULES[i], true]), ...identifiers.map((c, i) => [c[0], IDENTIFIER_SNAPSHOT[i], false])];
+    const verified = () => {
+        for (const [re, r, global] of copies) {
+            const flags = global && !r.flags.includes('g') ? `${r.flags}g` : r.flags;
+            if (re.source !== r.source || re.flags !== flags || Reflect.ownKeys(re).map(String).join() !== 'lastIndex')
+                throw new Error(`src/events/redact.ts: the regex that runs for "${r.kind}" no longer reads as its snapshot (#1257)`);
+        }
+    };
+    return Object.freeze({
+        shapes: (s) => (verified(), allSpans(s, shapes)),
+        broad: (s) => (verified(), allSpans(s, broad)),
+        broadAt: (s, cuts, spans) => (verified(), readAt(s, cuts, broad, spans)),
+        identifiers: (part, keepLines) => (verified(), identifiers.reduce((t, [re, rep]) => (keepLines ? applyKeepingLines : apply)(t, re, rep), part)),
+    });
+})();
 function allSpans(s, rules) {
     const spans = [];
     rules.forEach(([re, rep], i) => spansOf(s, re, rep, i, spans));
@@ -706,7 +725,7 @@ function allSpans(s, rules) {
     return spans;
 }
 function replaceOnce(s, keepLines, found) {
-    const spans = allSpans(s, SHAPE_RULES);
+    const spans = run.shapes(s);
     if (found)
         for (const sp of spans)
             found(sp[3]);
@@ -747,9 +766,9 @@ function replaceUnion(s, keepLines, found) {
     return fixedPoint(s, (t) => replaceOnce(t, keepLines, found), keepLines);
 }
 function maskOnce(s, mask, keepLines) {
-    const spans = allSpans(s, BROAD_RULES);
+    const spans = run.broad(s);
     const word = (i) => /[A-Za-z0-9_]/.test(s[i] ?? '');
-    readAt(s, [...new Set(spans.flatMap(([a, b]) => [a, b]))].filter((c) => c > 0 && c < s.length && word(c - 1) && word(c)).sort((a, b) => a - b), BROAD_RULES, spans);
+    run.broadAt(s, [...new Set(spans.flatMap(([a, b]) => [a, b]))].filter((c) => c > 0 && c < s.length && word(c - 1) && word(c)).sort((a, b) => a - b), spans);
     const masks = [];
     if (mask)
         for (let at = s.indexOf(mask); at !== -1; at = s.indexOf(mask, at + mask.length))
@@ -848,10 +867,9 @@ function redactString(s, o = {}) {
     }
 }
 function redactOrThrow(s, o) {
-    const put = o.keepLines ? applyKeepingLines : apply;
     let out = o.broad ? maskUnion(s, o.mask ?? '[REDACTED]', o.keepLines === true) : replaceUnion(s, o.keepLines === true);
     if (o.identifiers)
-        out = outsideMachineBlocks(out, (part) => IDENTIFIER_SNAPSHOT.reduce((t, r) => put(t, r.re, r.rep), part));
+        out = outsideMachineBlocks(out, (part) => run.identifiers(part, o.keepLines === true));
     return out;
 }
 exports.CUT_MARGIN = 16 * 1024;

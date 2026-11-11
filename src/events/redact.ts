@@ -187,12 +187,14 @@ const these = (groups: number[]) => (groups.length === 0 ? 'no group is' : group
 const groupCount = (re: RegExp) => new RegExp(`${re.source}|`, re.flags.replace(/[gy]/g, '')).exec('')!.length - 1;
 
 /**
- * A rule as this module runs it: the regex rebuilt from the checked source and flags (`re`), the same with `g` for
- * the span search (`g`), the marker as a primitive string or the function the table gave, and the kind. Frozen.
+ * A rule as checked: the regex's source and flags as primitives (the regexes that run are built from them inside
+ * `run`, below, and REDACTION_PATTERNS exports other copies: R1258e's E1 and E2, a RegExp object can't be frozen and
+ * any holder of one can recompile it), the marker as a primitive string or the function the table gave, and the
+ * kind. Frozen.
  */
 interface Rule {
-  readonly re: RegExp;
-  readonly g: RegExp;
+  readonly source: string;
+  readonly flags: string;
   readonly rep: Replacement;
   readonly kind: string;
 }
@@ -206,8 +208,9 @@ interface Rule {
  * - the table is a plain array, each slot a data property; each rule a plain array whose own keys are exactly
  *   `0`, `1`, `2` and `length`, all data properties (no accessor, no own iterator, no symbol);
  * - the regex is a RegExp made by RegExp itself, with no own property but `lastIndex`; its `source` and `flags` are
- *   read once and the copy is `new RegExp(source, flags)`, which nothing outside this module holds, so no later
- *   `compile` or write reaches it;
+ *   read once, as primitives, and the marker is checked against `new RegExp(source, flags)`. The regexes that run are
+ *   built from the same primitives inside `run` (below), which no binding exposes, and REDACTION_PATTERNS exports
+ *   copies of its own, so no later `compile` or write reaches what runs (R1258e's E1 and E2);
  * - the marker is a string, copied as a primitive and checked with markerProblem against the copy, or a function
  *   (code: trusted as reviewed, pinned by its exact source text in test/redact-markers.test.ts, and its result held
  *   by shown at run time as a backstop). Anything else is refused (R1258b's B1: a String object or an object with
@@ -248,8 +251,8 @@ function snapshot(table: readonly unknown[], o: { broad?: boolean; verbatim?: bo
     if (!(re instanceof RegExp) || re.constructor !== RegExp || Reflect.ownKeys(re).map(String).join() !== 'lastIndex') refuse(who, 'its regex must be a plain RegExp with no own property but lastIndex (one could hide the pattern that runs)');
     const source = `${re.source}`;
     const flags = `${re.flags}`;
+    // The copy the marker is checked against; what runs is built again from the same primitives (run).
     const copy = new RegExp(source, flags);
-    const g = new RegExp(source, flags.includes('g') ? flags : `${flags}g`);
     const rep = data(who, entry, 1, 'the marker');
     let marker: string | null = null;
     let kept: Replacement;
@@ -263,7 +266,7 @@ function snapshot(table: readonly unknown[], o: { broad?: boolean; verbatim?: bo
     } else refuse(who, `a marker must be a string or a function, not ${rep === null ? 'null' : typeof rep !== 'object' ? `a ${typeof rep}` : rep instanceof String ? 'a String object' : 'an object'}`);
     const why = marker === null ? null : markerProblem(copy, marker, o.verbatim === true);
     if (why !== null) refuse(who, why);
-    rows.push(Object.freeze({ re: copy, g, rep: kept, kind }));
+    rows.push(Object.freeze({ source, flags, rep: kept, kind }));
   }
   return Object.freeze(rows);
 }
@@ -625,9 +628,11 @@ Object.freeze(IDENTIFIERS);
  * `broad: true` (shown with the default mask), `identifier` for one applied with `identifiers: true`.
  */
 export const REDACTION_PATTERNS: readonly { kind: string; re: RegExp; rep: Replacement; group: 'secret' | 'broad' | 'identifier' }[] = Object.freeze([
-  ...SHAPE_SNAPSHOT.map((r) => Object.freeze({ kind: r.kind, re: r.re, rep: r.rep, group: 'secret' as const })),
-  ...BROAD_SNAPSHOT.map((r) => Object.freeze({ kind: r.kind, re: r.re, rep: r.rep, group: 'broad' as const })),
-  ...IDENTIFIER_SNAPSHOT.map((r) => Object.freeze({ kind: r.kind, re: r.re, rep: r.rep, group: 'identifier' as const })),
+  // Each `re` is a copy of its own (R1258e's E1): the regexes that run live in `run`, so what an importer does to an
+  // exported one (compile, an own Symbol.replace) changes nothing here.
+  ...SHAPE_SNAPSHOT.map((r) => Object.freeze({ kind: r.kind, re: new RegExp(r.source, r.flags), rep: r.rep, group: 'secret' as const })),
+  ...BROAD_SNAPSHOT.map((r) => Object.freeze({ kind: r.kind, re: new RegExp(r.source, r.flags), rep: r.rep, group: 'broad' as const })),
+  ...IDENTIFIER_SNAPSHOT.map((r) => Object.freeze({ kind: r.kind, re: new RegExp(r.source, r.flags), rep: r.rep, group: 'identifier' as const })),
 ]);
 
 export interface RedactTextOptions {
@@ -836,10 +841,43 @@ function spansOf(t: string, re: RegExp, rep: Replacement, rank: number, out: Spa
 }
 
 /** Every rule of the default mode: the shapes, each with its own marker. */
-const SHAPE_RULES: readonly (readonly [RegExp, Replacement])[] = Object.freeze(SHAPE_SNAPSHOT.map((r) => Object.freeze([r.g, r.rep] as const)));
+const SHAPE_RULES: readonly Rule[] = SHAPE_SNAPSHOT;
 /** Every rule of the broad mode: the shapes and the broad rules, each shown with the default mask. */
 // check-table: never-shrink
-const BROAD_RULES: readonly (readonly [RegExp, Replacement])[] = Object.freeze([...SHAPE_RULES, ...BROAD_SNAPSHOT.map((r) => Object.freeze([r.g, r.rep] as const))]);
+const BROAD_RULES: readonly Rule[] = Object.freeze([...SHAPE_RULES, ...BROAD_SNAPSHOT]);
+
+/**
+ * The regexes that run, and the only operations on them (R1258e's E2): they are built from the snapshots' primitives
+ * inside this closure, and no module binding holds them, so code in a table entry (an expression, whose closure can
+ * name every module binding and run after load) can't name them, and nothing it returns is a regex: spans, text and a
+ * kind only. REDACTION_PATTERNS exports copies of its own (E1). Each operation first checks that every run copy still
+ * reads as its snapshot (source, flags, no own property but lastIndex) and throws if not: fail closed, cheap (37
+ * string compares a call next to the scans).
+ */
+const run = (() => {
+  const build = (rules: readonly Rule[], global: boolean) => Object.freeze(rules.map((r) => Object.freeze([new RegExp(r.source, global && !r.flags.includes('g') ? `${r.flags}g` : r.flags), r.rep] as const)));
+  // The span search needs `g`; the identifier pass runs each rule's own flags (String.prototype.replace).
+  const shapes = build(SHAPE_RULES, true);
+  const broad = build(BROAD_RULES, true);
+  const identifiers = build(IDENTIFIER_SNAPSHOT, false);
+  const copies: readonly (readonly [RegExp, Rule, boolean])[] = [...shapes.map((c, i) => [c[0], SHAPE_RULES[i]!, true] as const), ...broad.map((c, i) => [c[0], BROAD_RULES[i]!, true] as const), ...identifiers.map((c, i) => [c[0], IDENTIFIER_SNAPSHOT[i]!, false] as const)];
+  const verified = () => {
+    for (const [re, r, global] of copies) {
+      const flags = global && !r.flags.includes('g') ? `${r.flags}g` : r.flags;
+      if (re.source !== r.source || re.flags !== flags || Reflect.ownKeys(re).map(String).join() !== 'lastIndex') throw new Error(`src/events/redact.ts: the regex that runs for "${r.kind}" no longer reads as its snapshot (#1257)`);
+    }
+  };
+  return Object.freeze({
+    /** What every shape finds in `s` (allSpans). */
+    shapes: (s: string): Span[] => (verified(), allSpans(s, shapes)),
+    /** What every rule of the broad mode finds in `s` (allSpans). */
+    broad: (s: string): Span[] => (verified(), allSpans(s, broad)),
+    /** The broad rules read again from each of `cuts` (readAt), the spans found added to `spans`. */
+    broadAt: (s: string, cuts: number[], spans: Span[]): void => (verified(), readAt(s, cuts, broad, spans)),
+    /** The identifier pass over `part`: each rule in turn, the line count kept with `keepLines`. */
+    identifiers: (part: string, keepLines: boolean): string => (verified(), identifiers.reduce((t, [re, rep]) => (keepLines ? applyKeepingLines : apply)(t, re, rep), part)),
+  });
+})();
 
 /** What every rule of `rules` finds in `s`: on the text as it was, and again with a boundary at each glue point. */
 function allSpans(s: string, rules: readonly (readonly [RegExp, Replacement])[]): Span[] {
@@ -858,7 +896,7 @@ function allSpans(s: string, rules: readonly (readonly [RegExp, Replacement])[])
  * spans that only overlap becomes `[REDACTED]`. One pass of replaceUnion. `found` is told the rule of every span.
  */
 function replaceOnce(s: string, keepLines: boolean, found?: (rank: number) => void): string {
-  const spans = allSpans(s, SHAPE_RULES);
+  const spans = run.shapes(s);
   if (found) for (const sp of spans) found(sp[3]);
   if (!spans.length) return s;
   spans.sort((x, y) => x[0] - y[0] || y[1] - x[1] || x[3] - y[3]);
@@ -915,9 +953,9 @@ function maskOnce(s: string, mask: string, keepLines: boolean): string {
   // where a span found begins or ends between two word characters (a module's own rules, applied in turn, saw a
   // boundary where an earlier rule's replacement ended: `xoxa-...[here]_db_password=...`). Apart from the glue points,
   // so a boundary of one kind can't break a match the other needs.
-  const spans = allSpans(s, BROAD_RULES);
+  const spans = run.broad(s);
   const word = (i: number) => /[A-Za-z0-9_]/.test(s[i] ?? '');
-  readAt(s, [...new Set(spans.flatMap(([a, b]) => [a, b]))].filter((c) => c > 0 && c < s.length && word(c - 1) && word(c)).sort((a, b) => a - b), BROAD_RULES, spans);
+  run.broadAt(s, [...new Set(spans.flatMap(([a, b]) => [a, b]))].filter((c) => c > 0 && c < s.length && word(c - 1) && word(c)).sort((a, b) => a - b), spans);
   // What is already a mask stays as it is: a rule that takes in a mask word (`token=[REDACTED]`) adds nothing.
   const masks: [number, number][] = [];
   if (mask) for (let at = s.indexOf(mask); at !== -1; at = s.indexOf(mask, at + mask.length)) masks.push([at, at + mask.length]);
@@ -1027,12 +1065,11 @@ export function redactString(s: string, o: RedactTextOptions = {}): string {
 }
 
 function redactOrThrow(s: string, o: RedactTextOptions): string {
-  const put = o.keepLines ? applyKeepingLines : apply;
   // Both modes read every rule on the text as it was, so no rule's match hides another's: the broad mode masks the
   // union of what the shapes and the broad rules find (maskUnion); the default mode replaces each run of what the
   // shapes find, with its rule's marker (replaceUnion).
   let out = o.broad ? maskUnion(s, o.mask ?? '[REDACTED]', o.keepLines === true) : replaceUnion(s, o.keepLines === true);
-  if (o.identifiers) out = outsideMachineBlocks(out, (part) => IDENTIFIER_SNAPSHOT.reduce((t, r) => put(t, r.re, r.rep), part));
+  if (o.identifiers) out = outsideMachineBlocks(out, (part) => run.identifiers(part, o.keepLines === true));
   return out;
 }
 

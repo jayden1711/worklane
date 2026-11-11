@@ -13,7 +13,8 @@ import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { markerProblem, REDACTION_PATTERNS, redactString } from '../src/events/redact.js';
+import ts from 'typescript';
+import { markerProblem, REDACTION_PATTERNS, redactString, secretKinds, TRACKER } from '../src/events/redact.js';
 import { repoRoot } from './helpers.js';
 import { leaks, run, SHAPES } from './token-standins.js';
 
@@ -192,20 +193,24 @@ test('B2/D5: every function-backed rule is pinned by its exact code, so adding o
   // place, same regex and kind, showed a 98-character key). The pin is the function's own source text
   // (Function.prototype.toString, read once here, which an own toString can't change), and the source text of the
   // helpers a function calls, each as a digest. The run-time guard (shown) is a backstop for a literal echo only.
-  const pinned = REDACTION_PATTERNS.filter((p) => typeof p.rep === 'function').map((p) => `${p.group}: ${p.kind}: ${p.re.source} :: ${digest(Function.prototype.toString.call(p.rep))}`);
+  // The whole regex, flags included (R1258f: a lost `i` or `g` is a weakening the corpus may miss).
+  const pinned = REDACTION_PATTERNS.filter((p) => typeof p.rep === 'function').map((p) => `${p.group}: ${p.kind}: ${p.re.source}/${p.re.flags} :: ${digest(Function.prototype.toString.call(p.rep))}`);
   const tick = '`';
   assert.deepEqual(pinned, [
-    String.raw`secret: Stripe key: (^|[^A-Za-z0-9_])([sr]k)_(?:live|test)_([A-Za-z0-9]{16,})(?![A-Za-z0-9_]) :: 3e7b9f030ef54515`,
-    String.raw`secret: private key: ^[\s\S]*-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?----- :: d109dbf5762aaa19`,
-    String.raw`secret: Basic credential: \b(basic)(\s+)((?:[A-Za-z0-9+/]|\\\/){8,}={0,2}) :: 126e8951f6072122`,
-    String.raw`secret: secret under a JSON key: (\\?"|')([A-Za-z0-9_-]+)\1(\s*(?::|=>)\s*)(\\?"|')([A-Za-z0-9_\-.+/=~]{16,})\4 :: fbee9afb455be897`,
-    String.raw`identifier: home path: (^|[^\w.~/:-]|file:\/\/)\/(?:home|Users|mnt\/[A-Za-z]\/Users)\/([^\s/"'${tick}<>()[\]{},;|\\]+) :: 2c3c46b26a5809ac`,
-    String.raw`identifier: internal host: (^|[^A-Za-z0-9./-]|\/\/)([A-Za-z0-9][A-Za-z0-9.-]*\.(?:internal|localdomain|lan|corp|intranet|home\.arpa|ts\.net|local))(?![A-Za-z0-9-]|\.[A-Za-z0-9]) :: 2743654c7cb78e86`,
+    String.raw`secret: Stripe key: (^|[^A-Za-z0-9_])([sr]k)_(?:live|test)_([A-Za-z0-9]{16,})(?![A-Za-z0-9_])/g :: 3e7b9f030ef54515`,
+    String.raw`secret: private key: ^[\s\S]*-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----/ :: d109dbf5762aaa19`,
+    String.raw`secret: Basic credential: \b(basic)(\s+)((?:[A-Za-z0-9+/]|\\\/){8,}={0,2})/gi :: 126e8951f6072122`,
+    String.raw`secret: secret under a JSON key: (\\?"|')([A-Za-z0-9_-]+)\1(\s*(?::|=>)\s*)(\\?"|')([A-Za-z0-9_\-.+/=~]{16,})\4/g :: fbee9afb455be897`,
+    String.raw`identifier: home path: (^|[^\w.~/:-]|file:\/\/)\/(?:home|Users|mnt\/[A-Za-z]\/Users)\/([^\s/"'${tick}<>()[\]{},;|\\]+)/g :: 2c3c46b26a5809ac`,
+    String.raw`identifier: internal host: (^|[^A-Za-z0-9./-]|\/\/)([A-Za-z0-9][A-Za-z0-9.-]*\.(?:internal|localdomain|lan|corp|intranet|home\.arpa|ts\.net|local))(?![A-Za-z0-9-]|\.[A-Za-z0-9])/gi :: 2743654c7cb78e86`,
   ]);
   // The two named functions and the helpers the arrows call, by the digest of their TypeScript text: a change to any of
   // them changes a digest here.
   // (The name follows each digest: a word like "credential" right before a run of hex reads as a secret to gitleaks.)
-  const helpers = ['orphanEnd', 'internalHost', 'basicShaped', 'basicPair', 'credentialShaped', 'credentialKey', 'credentialWord', 'shown', 'called'];
+  // With the data a pinned function reads and decides by (R1258e's E3): CODE_HEADS (internalHost; a word added there
+  // is a host kept) and KEY_LINE (orphanEnd). The credential word tables credentialKey reads are never-shrink tables,
+  // held by the merge policy, and a word added to one only redacts more.
+  const helpers = ['orphanEnd', 'internalHost', 'basicShaped', 'basicPair', 'credentialShaped', 'credentialKey', 'credentialWord', 'shown', 'called', 'CODE_HEADS', 'KEY_LINE'];
   assert.deepEqual(
     helpers.map((n) => `${digest(helperText(n))} ${n}`),
     [
@@ -218,6 +223,8 @@ test('B2/D5: every function-backed rule is pinned by its exact code, so adding o
       'c98eab415bd12740 credentialWord',
       '8f17cc920a3237dc shown',
       '6fed88fc7eb6d7a3 called',
+      '12d96b1def462e4f CODE_HEADS',
+      '5e872738db48fdc9 KEY_LINE',
     ],
   );
 });
@@ -324,4 +331,101 @@ test('the snapshot and the listing are frozen, and the source tables too', () =>
   for (const p of REDACTION_PATTERNS) assert.ok(Object.isFrozen(p), p.kind);
   const text = built();
   for (const table of ['PATTERNS', 'BROAD', 'IDENTIFIERS']) assert.ok(text.includes(`Object.freeze(${table});`), `${table} is frozen after its snapshot`);
+});
+
+// R1258e: a RegExp object can't be frozen, so no object that runs may be reachable. The regexes that run live in a
+// closure (`run`) that exposes only operations; REDACTION_PATTERNS exports copies of its own; each call verifies the
+// run copies still read as the snapshot.
+const LONG_KEY = 'sk_live_' + run(101, 'Hq8Xk2Lm9Tb4Wp7Rv3Ny6Hc');
+const CORPUS = [...SHAPES.map((s) => `x ${s.value} y`), `mail ${EMAIL} now`, `host ${['10', '1', '2', '3'].join('.')} up`, '/home/you/proj/a.ts:42', 'peer fe80::1ff:fe23:4567:890a up', 'see vault.internal now', `export K=${LONG_KEY}`];
+const MODES: Parameters<typeof redactString>[1][] = [{}, { broad: true }, TRACKER, { keepLines: true }, { identifiers: true, keepLines: true }];
+const picture = (m: Redact) => CORPUS.map((s) => [...MODES.map((o) => m.redactString(s, o)), m.secretKinds(s).join()]);
+
+test('E1: whatever an importer does to an exported regex (compile, an own Symbol.replace) changes no redaction', () => {
+  const before = picture({ redactString, secretKinds } as Redact);
+  const kept = REDACTION_PATTERNS.map((p) => [p.re.source, p.re.flags] as const);
+  try {
+    for (const p of REDACTION_PATTERNS) {
+      p.re.compile('(?!)', 'g');
+      Object.defineProperty(p.re, Symbol.replace, { value: (s: string) => s, configurable: true });
+    }
+    assert.ok(REDACTION_PATTERNS.every((p) => p.re.source === '(?!)'), 'the exported regexes were recompiled');
+    assert.deepEqual(picture({ redactString, secretKinds } as Redact), before);
+    assert.equal(redactString(`mail ${EMAIL} now`, TRACKER), 'mail [email] now');
+  } finally {
+    REDACTION_PATTERNS.forEach((p, i) => {
+      delete (p.re as unknown as Record<symbol, unknown>)[Symbol.replace];
+      p.re.compile(kept[i]![0], kept[i]![1]);
+    });
+  }
+});
+
+test("E2: a table entry that recompiles the run's Stripe regex after load reaches no regex: SHAPE_RULES holds primitives, and a long key stays redacted", async () => {
+  // The review's line (compiled): the entry's own marker is plain, so it loads; its microtask then looks for the run
+  // copy where it was. The rows hold the snapshot's primitives, so there is no regex to recompile.
+  const line = `(() => { queueMicrotask(() => { try { const r = SHAPE_RULES.find((x) => x[0].source.startsWith('(^|[^A-Za-z0-9_])([sr]k)_')); r[0].compile(r[0].source.replace('{16,}', '{16,95}'), r[0].flags); } catch (e) { globalThis.__e2 = e.constructor.name; } }); return [/(?<=STRIPE_X_KEY=[sr]k_)(?:live|test)_[A-Za-z0-9]{16,}(?![A-Za-z0-9_])/g, '[REDACTED]', 'Stripe key']; })(),`;
+  const m = await loaded(moduleWith('PATTERNS', line));
+  assert.equal((globalThis as { __e2?: string }).__e2, 'TypeError', 'the entry found no regex to recompile');
+  delete (globalThis as { __e2?: string }).__e2;
+  assert.equal(m.redactString(`export K=${LONG_KEY}`), 'export K=sk_[REDACTED]');
+  assert.deepEqual(m.secretKinds(`export K=${LONG_KEY}`), ['Stripe key']);
+  // No binding of the module names a run copy: the closure's handle (`run`) gives spans and text only.
+  await loaded(moduleWith('PATTERNS', `(() => { queueMicrotask(() => { globalThis.__run = Object.keys(run); }); return [/(?<=STRIPE_Z_KEY=[sr]k_)(?:live|test)_[A-Za-z0-9]{16,}(?![A-Za-z0-9_])/g, '[REDACTED]', 'Stripe key']; })(),`));
+  assert.deepEqual((globalThis as { __run?: string[] }).__run, ['shapes', 'broad', 'broadAt', 'identifiers']);
+  delete (globalThis as { __run?: string[] }).__run;
+});
+
+test("E2: a run copy that no longer reads as its snapshot stops the redactor (fail closed), checked on every call", async () => {
+  // A copy of the built module with the closure's shapes handed out (what no code path does), then one recompiled.
+  const lines = built().split('\n');
+  const at = lines.findIndex((l) => l.trim() === 'const identifiers = build(IDENTIFIER_SNAPSHOT, false);');
+  assert.notEqual(at, -1, 'the built module builds the identifier copies inside run');
+  lines.splice(at + 1, 0, '    globalThis.__runShapes = shapes;');
+  const file = join(mkdtempSync(join(tmpdir(), 'redact-markers-')), 'redact.js');
+  writeFileSync(file, lines.join('\n'));
+  const m = (await import(pathToFileURL(file).href)) as Redact;
+  const shapes = (globalThis as { __runShapes?: readonly (readonly [RegExp, unknown])[] }).__runShapes!;
+  delete (globalThis as { __runShapes?: unknown }).__runShapes;
+  assert.equal(m.redactString(LINE), 'export STRIPE_SECRET_KEY=sk_[REDACTED]', 'intact: redacts');
+  const stripe = shapes.find(([re]) => re.source.startsWith('(^|[^A-Za-z0-9_])([sr]k)_'))![0];
+  stripe.compile(stripe.source.replace('{16,}', '{16,95}'), stripe.flags);
+  assert.throws(() => m.redactString(LINE), /the regex that runs for "Stripe key" no longer reads as its snapshot/);
+  assert.throws(() => m.secretKinds(LINE), /no longer reads as its snapshot/);
+  assert.throws(() => m.redactString(`mail ${EMAIL}`, TRACKER), /no longer reads as its snapshot/);
+});
+
+test('the tables hold data: each entry is [a regex literal or new RegExp of literals, a string, template, arrow or named function, a string literal], never an expression that runs', () => {
+  // R1258d's fix 2 and R1258e's E2: an entry that is an expression (an IIFE, Object.defineProperty, a call) is code
+  // in this module, with every binding in reach. Read from the source, so review sees it as the lint does.
+  const text = readFileSync(join(repoRoot, 'src', 'events', 'redact.ts'), 'utf8');
+  const sf = ts.createSourceFile('redact.ts', text, ts.ScriptTarget.Latest, true);
+  const literalTemplate = (n: ts.Node) => ts.isNoSubstitutionTemplateLiteral(n) || (ts.isTemplateExpression(n) && n.templateSpans.every((s) => ts.isIdentifier(s.expression)));
+  const regex = (n: ts.Node) => ts.isRegularExpressionLiteral(n) || (ts.isNewExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === 'RegExp' && (n.arguments ?? []).every((a) => ts.isStringLiteral(a) || literalTemplate(a)));
+  const marker = (n: ts.Node) => ts.isStringLiteral(n) || literalTemplate(n) || ts.isArrowFunction(n) || ts.isIdentifier(n);
+  const problems: string[] = [];
+  const seen: string[] = [];
+  for (const s of sf.statements) {
+    if (!ts.isVariableStatement(s)) continue;
+    for (const d of s.declarationList.declarations) {
+      if (!ts.isIdentifier(d.name) || !['PATTERNS', 'BROAD', 'IDENTIFIERS'].includes(d.name.text)) continue;
+      seen.push(d.name.text);
+      if (!d.initializer || !ts.isArrayLiteralExpression(d.initializer)) {
+        problems.push(`${d.name.text}: not an array literal`);
+        continue;
+      }
+      for (const [i, e] of d.initializer.elements.entries()) {
+        const where = `${d.name.text}[${i}]`;
+        if (!ts.isArrayLiteralExpression(e) || e.elements.length !== 3) {
+          problems.push(`${where}: not a three-element array literal: ${e.getText(sf).slice(0, 60)}`);
+          continue;
+        }
+        const [re, rep, kind] = [e.elements[0]!, e.elements[1]!, e.elements[2]!];
+        if (!regex(re)) problems.push(`${where}: the regex is not a regex literal or new RegExp of literals`);
+        if (!marker(rep)) problems.push(`${where}: the marker is not a string, a template, an arrow function or a name`);
+        if (!ts.isStringLiteral(kind)) problems.push(`${where}: the kind is not a string literal`);
+      }
+    }
+  }
+  assert.deepEqual(seen, ['PATTERNS', 'BROAD', 'IDENTIFIERS']);
+  assert.deepEqual(problems, []);
 });
