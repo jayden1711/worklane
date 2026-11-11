@@ -1,204 +1,105 @@
 // lint-test
 // One launch for every Claude Code session the engine starts (#958, the owner's decision, 2026-11-09): src/
-// claude-launch.ts's launchClaude, which always loads no setting source, reads no MCP config but its own, takes its
-// settings only from --settings and keeps the auto memory off. This holds src/ to it: no other module starts the
-// claude binary, or Claude Code's cli.js under node, and the runner's `bin` reaches nothing but launchClaude.
+// claude-launch.ts's launchClaude (and its sync sibling), which always loads no setting source, reads no MCP config but
+// its own, takes its settings only from --settings, keeps the auto memory off and owns its environment. This holds src/
+// to it, and it FAILS CLOSED (R1185ab, R1185ac; the structural move of #1264): it doesn't follow callees.
 //
-// What it reads (typescript's parser, every .ts file under src/):
-// - a call of spawn, spawnSync, exec, execSync, execFile, execFileSync or fork, by any name bound to node:child_process,
-//   child_process or src/os/child-process.ts (named, renamed, a namespace or default import, a require(), an alias:
-//   `const run = spawn`, `const { spawn: s } = cp`, `cp['spawn']`), flagged when any string, template or regex in its
-//   arguments (an argv array's, a `sh -c` command's, a `sudo`/`env` wrapper's), or the initializer of a const or a
-//   parameter's default it names, is `claude`, ends in `/claude`, runs `claude ...`, or names @anthropic-ai/claude-code
-//   or its cli.js (`process.execPath` with that path);
-// - any call at all (a helper that forwards its command, as the setup wizard's `p.run('claude', ...)` did: R1185z D1),
-//   also through `.call`/`.apply`, whose first argument is the claude binary (a literal, a const, a parameter's
-//   default, or a const another src/ module exports, claudeExports) and whose second is an argv (an array, a name, a
-//   property or a call): `add('claude', 'warn', ...)` is a report's row, not a launch;
-// - `this.bin` (the runner's binary) anywhere but `bin: this.bin` in a launchClaude call, or the three auth-status
-//   helpers' binary argument.
+// - Every string literal and template part in src/ (typescript's parser, every .ts file) that IS the claude binary
+//   (`claude`, ends in `/claude`, names `@anthropic-ai/claude-code` or `claude-code/cli.js`), outside
+//   src/claude-launch.ts and outside a type (`'claude' | 'default'` runs nothing), is refused unless its whole line is
+//   pinned in PINS, by file and line text, with why: an auth login or status, a `--version`, a lookup (`findTool`,
+//   `which`), the runner's or skill-eval's binary handed to the launch, or a value that names claude as data (a step
+//   id, an event field). So `findTool('claude') ?? 'claude'`, a template `${dir}/claude`, `join(bin, 'claude')`, a
+//   ternary, `{ file: 'claude' }`, a tuple, `promisify(exec)`, a dynamic import or `Reflect.apply` are all refused,
+//   whatever calls them; a new launch must go through the launch function, or be pinned with its reason in review.
+// - `this.bin` (the runner's binary) may go nowhere but `bin: this.bin` in a launchClaude call, or the three
+//   auth-status helpers' binary argument.
 //
-// Named exceptions, each pinned by file and argv: claude-signin.ts's `claude auth login` and `auth status --json`,
-// doctor.ts's `claude --version`, init.ts's `claude auth login` (the terminal's own login) and setup-steps.ts's
-// `claude auth status`; and runner.ts's authStatusCommand, which builds only `auth status --json`: none starts a
-// session.
-//
-// What it can't see (named limits, as #1228's are):
-// - a binary path built at run time from data with no `claude` in it (a config value, an env variable:
-//   `spawn(cfg.agentBin)`), or from parts (`'clau' + 'de'`);
-// - an argv given a launch some other way than as its second argument (a conditional, a literal string);
-// - a launch through a module outside src/ (scripts/, a package);
-// - a child process that itself runs claude (a hook, a project command: the sandbox's job, not this lint's);
-// - a call through `Function`, `eval`, `vm` or worker_threads; a dynamic `import()`, `createRequire` or
-//   `process.binding` of child_process (test/child-process.test.ts, #846, refuses those outside src/os/);
-// - a binary the runner holds under another name than `bin` (the check on `this.bin` is by name).
+// What it can't see (named limits):
+// - a pinned line's value used somewhere else (a lookup's result handed to a launch): the pin's reason says where it
+//   goes, and review holds it;
+// - a binary name built at run time from parts (`'clau' + 'de'`) or from data with no `claude` in it (a config value,
+//   an env variable);
+// - a launch through a module outside src/ (scripts/: test/claude-launch-shell-lint.test.ts reads those), or a child
+//   process that itself runs claude (a hook, a project command: the sandbox's job).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readdirSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { join, posix, sep } from 'node:path';
+import { join, sep } from 'node:path';
 import { repoRoot } from './helpers.js';
 
-type Node = { kind: number; text?: string; parent?: Node; name?: Node; expression?: Node; argumentExpression?: Node; arguments?: Node[]; initializer?: Node; elements?: Node[]; propertyName?: Node; moduleSpecifier?: Node; importClause?: Node & { name?: Node; namedBindings?: Node }; modifiers?: Node[]; getText: () => string; getStart: () => number };
-const ts = createRequire(join(repoRoot, 'package.json'))('typescript') as Record<string, (...a: unknown[]) => unknown> & { ScriptTarget: { Latest: number }; createSourceFile: (f: string, t: string, v: number, p: boolean) => Node & { getLineAndCharacterOfPosition: (p: number) => { line: number } } };
-const is = (k: string, n: Node | undefined): boolean => !!n && (ts[`is${k}`] as (n: Node) => boolean)(n);
-const each = (n: Node, f: (c: Node) => void) => (ts.forEachChild as (n: Node, f: (c: Node) => void) => void)(n, f);
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Node = any;
+const ts = createRequire(join(repoRoot, 'package.json'))('typescript') as Node;
 
-const SPAWNERS = /^(?:spawn|spawnSync|exec|execSync|execFile|execFileSync|fork)$/;
-const MODULES = (spec: string, path: string) => spec === 'node:child_process' || spec === 'child_process' || (/(?:^|\/)os\/child-process\.js$/.test(spec) || (path.startsWith('src/os/') && spec === './child-process.js'));
-/** A text that names the claude binary or Claude Code's cli.js. */
-const CLAUDE = /^claude$|\/claude$|(?:^|[\s;&|(])claude(?:\s|$)|@anthropic-ai\/claude-code|claude-code\/cli\.js/;
-/** A text that is the claude binary itself (a command's first argument), or Claude Code's package or cli.js. */
+/** A text that IS the claude binary: its name, a path to it, its npm package, or its cli.js. */
 const BINARY = /^claude$|\/claude$|@anthropic-ai\/claude-code|claude-code\/cli\.js/;
+/** A string that runs claude as a shell command: the binary as a word, then a flag (`sh -c 'claude -p hi'`). */
+const COMMAND = /(?:^|[\s;&|(`])(?:\S*\/)?claude\s+-/;
 const LAUNCHER = 'src/claude-launch.ts';
-/** Pinned exceptions: file, then the argv (its literal elements, in order) the call passes. */
-// check-table: never-grow
-const EXCEPTIONS: [string, string[]][] = [
-  ['src/claude-signin.ts', ['auth', 'login']],
-  ['src/claude-signin.ts', ['auth', 'status', '--json']],
-  ['src/doctor.ts', ['--version']],
-  ['src/init.ts', ['auth', 'login']],
-  ['src/setup-steps.ts', ['auth', 'status']],
-];
-/**
- * Pinned command builders: file, the builder, and the one argv it builds (the real-tree test holds it there). A launch
- * whose command is `<x>.file`, `<x>` a const that builder's call made, is that argv.
- */
-// check-table: never-grow
-const BUILDERS: [string, string, string[]][] = [['src/runner.ts', 'authStatusCommand', ['auth', 'status', '--json']]];
 const AUTH_HELPERS = /^(?:claudeAuthStatus|claudeAuthMethod|claudeAuthStatusJson)$/;
 
-/**
- * The consts each module in `files` ([path, text]) exports whose value is the claude binary (`export const CLAUDE_BIN =
- * 'claude'`), as `<path>#<name>`: an import of one names claude as its value would (R1185z D2).
- */
-export function claudeExports(files: [string, string][]): Set<string> {
-  const out = new Set<string>();
-  for (const [path, text] of files) {
-    const sf = ts.createSourceFile(path, text, ts.ScriptTarget.Latest, true);
-    const visit = (n: Node) => {
-      if (is('VariableStatement', n) && (n.modifiers ?? []).some((m) => m.getText() === 'export'))
-        for (const d of (n as unknown as { declarationList: { declarations: Node[] } }).declarationList.declarations)
-          if (is('Identifier', d.name) && d.initializer && (is('StringLiteral', d.initializer) || is('NoSubstitutionTemplateLiteral', d.initializer)) && BINARY.test(d.initializer.text!)) out.add(`${path}#${d.name!.text}`);
-      each(n, visit);
-    };
-    visit(sf);
-  }
-  return out;
-}
+/** Lines that name the claude binary and may: file, the line's whole text (trimmed), why. */
+// check-table: never-grow
+export const PINS: [string, string, string][] = [
+  ["src/claude-auth-failure.ts", "export const DEFAULT_LOGIN_KEY = 'claude';", "a login key (data), never run"],
+  ["src/claude-signin.ts", "const c = spawn('claude', ['auth', 'login'], { env, stdio: 'ignore' });", "`claude auth login`: the sign-in, no session"],
+  ["src/claude-signin.ts", "execFile('claude', ['auth', 'status', '--json'], { encoding: 'utf8', timeout: 30_000, env: signinEnv(null) }, (_e, stdout) => resolve(parseClaudeStatus(stdout ?? '')));", "`claude auth status --json`: no session"],
+  ["src/doctor.ts", "const claude = findTool('claude');", "a lookup; its only use is doctor's `claude --version`, no session"],
+  ["src/doctor.ts", "if (!claude) add('claude', cfg?.project.agent_runtime.kind === 'cli' ? 'fail' : 'warn', `Claude Code CLI not on PATH or in ${toolBin()}`);", "a report row's name (data)"],
+  ["src/doctor.ts", "add('claude', v.status === 0 ? 'ok' : 'warn', (v.stdout || v.stderr || '').trim().split('\\n')[0] ?? '');", "a report row's name (data)"],
+  ["src/init.ts", "if (c.mode === 'server') return handoff(c, 'claude', act);", "a setup step id (data)"],
+  ["src/init.ts", "if (!c.interactive || !c.io.which('claude')) return v.mismatch ? asStep(v) : { status: 'failed', detail: `${v.detail}: run \\`claude auth login\\`, then \\`${BRAND.cli} init\\` again (it picks up here)` };", "a lookup, and a message"],
+  ["src/init.ts", "await c.io.interactive('claude', ['auth', 'login']);", "`claude auth login` on the person's terminal: no session"],
+  ["src/instance.ts", "throw new ConfigInvalid([{ file: join(home, 'credentials.yaml'), path: 'claude', message: 'agents run as the coordinator user, so set claude.config_dir to the Claude login they use' }]);", "a config key (data)"],
+  ["src/runner.ts", "export function authStatusCommand(env: NodeJS.ProcessEnv, runAs?: RunAs, bin = 'claude'): { file: string; args: string[]; env: NodeJS.ProcessEnv } {", "the default binary of `claude auth status --json` (its only argv)"],
+  ["src/runner.ts", "export function claudeAuthMethod(env: NodeJS.ProcessEnv, runAs?: RunAs, bin = 'claude'): string {", "the default binary of `claude auth status --json`"],
+  ["src/runner.ts", "export function claudeAuthStatus(env: NodeJS.ProcessEnv, runAs?: RunAs, bin = 'claude'): { method: string; text: string; account?: string | null } {", "the default binary of `claude auth status --json`"],
+  ["src/runner.ts", "export function claudeAuthStatusJson(env: NodeJS.ProcessEnv, runAs?: RunAs, bin = 'claude'): { loggedIn: boolean; expiresAt?: unknown } | null {", "the default binary of `claude auth status --json`"],
+  ["src/runner.ts", "private bin = 'claude',", "the runner's binary: it reaches only launchClaude and the auth-status helpers (the `this.bin` rule)"],
+  ["src/service.ts", "const claude = new CliRunner(instanceRuntime(i).runtime, process.env, 'claude', i.runAs ?? undefined, allLanes(i), identity, {}, () => guardrailSettings(i.home, i.name, i.repo.path), agentKeyFile, login, plugins, { instance: i.name, register: (role, ttlMs) => registerRun(i.name, role, ttlMs), end: (ticket) => endRun(i.name, ticket) }, i.repo.path, start.cfg.project.project.default_branch, start.note === null ? undefined : start.cfg.guardrails.secret_paths, worktreePlaces(i.repo.path, start.cfg.tests.worktree.root, agentTasksDir(i.repo.path, i.stateDir, i.runAs ?? undefined)));", "an instance runner's binary (CliRunner's `bin`)"],
+  ["src/setup-steps.ts", "export function claudeProbeRun(spec: LoginProofSpec, env: NodeJS.ProcessEnv, timeoutMs: number, bin = findTool('claude') ?? 'claude'): RunResult {", "the login proof's binary: handed only to launchClaudeSync, in this function"],
+  ["src/setup-steps.ts", "{ id: 'claude', title: 'Claude login', optional: false, modes: MODES, walked: true },", "a setup group id (data)"],
+  ["src/setup-steps.ts", "export const REQUIRED_TOOLS: Record<Mode, string[]> = { local: ['git', 'gitleaks', 'claude', 'gh'], server: ['git', 'gitleaks', 'claude'] };", "tool names the tools step looks up (data)"],
+  ["src/setup-steps.ts", "if (!p.which('claude')) return no('claude is not installed (the tools step)');", "a lookup"],
+  ["src/setup-steps.ts", "const r = p.run('claude', ['auth', 'status'], as);", "`claude auth status`: no session"],
+  ["src/setup-steps.ts", "group: 'claude',", "a setup group id (data)"],
+  ["src/skilleval.ts", "const child = launchClaude({ bin: 'claude', cwd: req.cwd, env: agentEnv(ownEnv(), 'cli'), settings: {}, mode: 'json', model: req.model, maxTurns: 3, maxBudgetUsd: req.maxBudgetUsd, allowedTools: [], disallowedTools: NO_TOOLS, jsonSchema: req.schema, ...(req.system ? { appendSystemPrompt: req.system } : {}) });", "skill-eval's binary, handed to launchClaude on this line"],
+  ["src/tool-install.ts", "if (tool === 'claude') {", "a tool name (data)"],
+  ["src/tool-install.ts", "return { tool, version: v, url: `https://registry.npmjs.org/@anthropic-ai/claude-code/-/claude-code-${v}.tgz`, checksum: { algo: 'sha512', value: PINS.claude.integrity.slice('sha512-'.length) }, archive: 'npm', member: '', dest, prefix };", "the pinned package's download URL (data)"],
+  ["src/usage-limit.ts", "return { resetAt: new Date(Math.max(named, o.now + MIN_PAUSE_MS)).toISOString(), source: 'claude', kind };", "an event field's value (data)"],
+  ["src/events/types.ts", "'usage.limit_hit': z.strictObject({ issue: issue.nullable(), role: z.string(), model: z.string(), provider: z.string().nullable(), reset_at: z.string(), source: z.enum(['claude', 'default']), kind: z.string().nullable(), detail: z.string() }),", "an event field's schema (data)"],
+  ["src/events/types.ts", "'usage.paused': z.strictObject({ reset_at: z.string(), source: z.enum(['claude', 'default']), kind: z.string().nullable(), issue: issue.nullable(), role: z.string(), detail: z.string() }),", "an event field's schema (data)"],
+];
 
-/** Each launch of claude in `text` (the file `path`) outside the one launch function, as `<path>:<line>: <why>`. */
-export function launchProblems(path: string, text: string, exported: Set<string> = new Set()): string[] {
+/** Each line of `text` (the file `path`) that names the claude binary unpinned, or sends the runner's binary elsewhere. */
+export function launchProblems(path: string, text: string): string[] {
   const sf = ts.createSourceFile(path, text, ts.ScriptTarget.Latest, true);
-  const at = (n: Node) => `${path}:${sf.getLineAndCharacterOfPosition(n.getStart()).line + 1}`;
+  const lines = text.split('\n');
+  const lineOf = (n: Node) => sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1;
   const out: string[] = [];
-  // The names bound to child_process's spawners here, and its namespaces.
-  const fns = new Set<string>();
-  const spaces = new Set<string>();
-  const consts = new Map<string, Node>();
-  // Names whose value is the claude binary, imported from another src/ module that exports it (claudeExports).
-  const imported = new Set<string>();
-  const bind = (n: Node) => {
-    if (is('ImportDeclaration', n) && n.moduleSpecifier && is('StringLiteral', n.moduleSpecifier) && MODULES(n.moduleSpecifier.text!, path)) {
-      const c = n.importClause;
-      if (c?.name) spaces.add(c.name.text!);
-      const nb = c?.namedBindings;
-      if (nb && is('NamespaceImport', nb)) spaces.add(nb.name!.text!);
-      else if (nb) for (const e of (nb as unknown as { elements: Node[] }).elements) if (SPAWNERS.test((e.propertyName ?? e.name)!.text!)) fns.add(e.name!.text!);
-    } else if (is('ImportDeclaration', n) && n.moduleSpecifier && is('StringLiteral', n.moduleSpecifier) && n.moduleSpecifier.text!.startsWith('.')) {
-      const from = posix.join(posix.dirname(path), n.moduleSpecifier.text!).replace(/\.js$/, '.ts');
-      const nb = n.importClause?.namedBindings;
-      if (nb && !is('NamespaceImport', nb)) for (const e of (nb as unknown as { elements: Node[] }).elements) if (exported.has(`${from}#${(e.propertyName ?? e.name)!.text}`)) imported.add(e.name!.text!);
-    }
-    if (is('VariableDeclaration', n) && n.initializer) {
-      const init = n.initializer.getText();
-      if (/require\(\s*['"](?:node:)?child_process['"]\s*\)/.test(init)) {
-        if (is('Identifier', n.name)) spaces.add(n.name!.text!);
-        else for (const e of n.name!.elements ?? []) if (SPAWNERS.test((e.propertyName ?? e.name)!.text!)) fns.add(e.name!.text!);
-      } else if (is('Identifier', n.name)) consts.set(n.name!.text!, n.initializer);
-    }
-    // A parameter's default (`function go(bin = 'claude')`): its value when the caller passes none.
-    if (is('Parameter', n) && n.initializer && is('Identifier', n.name)) consts.set(n.name!.text!, n.initializer);
-    each(n, bind);
-  };
-  bind(sf);
-  // Aliases of a spawner (R1185z D2, R1185aa D2), until none is new: `const run = spawn`, `const { spawn: s } = cp`
-  // (cp a namespace), `const s = cp.spawn` or `cp['spawn']`.
-  for (let grew = true; grew; ) {
-    grew = false;
-    const alias = (n: Node) => {
-      if (is('VariableDeclaration', n) && n.initializer) {
-        const i = n.initializer;
-        if (is('Identifier', n.name) && !fns.has(n.name!.text!) && spawner(i)) (fns.add(n.name!.text!), (grew = true));
-        if (is('ObjectBindingPattern', n.name) && is('Identifier', i) && spaces.has(i.text!))
-          for (const e of n.name!.elements ?? []) if (SPAWNERS.test((e.propertyName ?? e.name)!.text!) && !fns.has(e.name!.text!)) (fns.add(e.name!.text!), (grew = true));
-      }
-      each(n, alias);
-    };
-    alias(sf);
-  }
-  function spawner(c: Node | undefined): boolean {
-    if (is('Identifier', c)) return fns.has(c!.text!);
-    if (is('PropertyAccessExpression', c)) return SPAWNERS.test(c!.name!.text!) && is('Identifier', c!.expression) && spaces.has(c!.expression!.text!);
-    if (is('ElementAccessExpression', c)) return is('StringLiteral', c!.argumentExpression) && SPAWNERS.test(c!.argumentExpression!.text!) && is('Identifier', c!.expression) && spaces.has(c!.expression!.text!);
+  const inType = (n: Node) => {
+    for (let p = n.parent; p; p = p.parent) if (ts.isTypeNode(p)) return true;
     return false;
-  }
-  // Whether a node is the claude binary itself: a literal, a const or parameter default, or an import that is one.
-  const isBinary = (n: Node | undefined, seen = new Set<Node>()): boolean => {
-    if (!n) return false;
-    if (is('StringLiteral', n) || is('NoSubstitutionTemplateLiteral', n)) return BINARY.test(n.text!);
-    if (is('Identifier', n)) {
-      if (imported.has(n.text!)) return true;
-      const v = consts.get(n.text!);
-      if (!v || seen.has(n)) return false;
-      seen.add(n);
-      return isBinary(v, seen);
-    }
-    if (is('ParenthesizedExpression', n) || is('AsExpression', n)) return isBinary(n.expression, seen);
-    return false;
-  };
-  // Whether a node holds a text naming claude: its strings, templates and regexes, and a const's initializer it names.
-  const names = (n: Node, seen = new Set<Node>()): boolean => {
-    let hit = false;
-    const walk = (x: Node) => {
-      if (hit) return;
-      if ((is('StringLiteral', x) || is('NoSubstitutionTemplateLiteral', x) || is('TemplateHead', x) || is('TemplateMiddle', x) || is('TemplateTail', x)) && CLAUDE.test(x.text!)) hit = true;
-      else if (is('Identifier', x) && consts.has(x.text!) && !seen.has(x)) {
-        seen.add(x);
-        if (names(consts.get(x.text!)!, seen)) hit = true;
-      } else each(x, walk);
-    };
-    walk(n);
-    return hit;
   };
   const visit = (n: Node) => {
-    // `f.call(this, ...)`/`f.apply(this, [...])`: the call of f with the rest.
-    const viaCall = is('CallExpression', n) && is('PropertyAccessExpression', n.expression) && /^(?:call|apply)$/.test(n.expression!.name!.text!);
-    const callee = viaCall ? n.expression!.expression : n.expression;
-    const args = viaCall ? (n.arguments ?? []).slice(1) : (n.arguments ?? []);
-    const argvLike = (a: Node | undefined) => !!a && (is('ArrayLiteralExpression', a) || is('Identifier', a) || is('PropertyAccessExpression', a) || is('CallExpression', a) || is('SpreadElement', a));
-    // A spawner given claude anywhere in its arguments; or any call (a helper that forwards its command, R1185z D1)
-    // whose command is the claude binary and that passes an argv.
-    const launch = is('CallExpression', n) && ((spawner(callee) && args.some((a) => names(a))) || (isBinary(args[0]) && argvLike(args[1])));
-    if (launch) {
-      const a = args[1];
-      const argv = a && is('ArrayLiteralExpression', a) ? a.elements!.map((e) => (is('StringLiteral', e) ? e.text! : '?')) : [];
-      const c0 = args[0];
-      const built = c0 && is('PropertyAccessExpression', c0) && c0.name!.text === 'file' && is('Identifier', c0.expression) ? consts.get(c0.expression!.text!) : undefined;
-      const byBuilder = !!built && is('CallExpression', built) && BUILDERS.some(([f, b]) => f === path && built.expression!.getText() === b);
-      const excepted = byBuilder || EXCEPTIONS.some(([f, want]) => f === path && JSON.stringify(want) === JSON.stringify(argv));
-      if (path !== LAUNCHER && !excepted) out.push(`${at(n)}: starts claude (\`${n.getText().replace(/\s+/g, ' ').slice(0, 100)}\`) outside ${LAUNCHER}: start every session with launchClaude, which always loads no setting source`);
+    const t = ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n) || ts.isTemplateHead(n) || ts.isTemplateMiddle(n) || ts.isTemplateTail(n) ? n.text : null;
+    if (t !== null && (BINARY.test(t) || COMMAND.test(t)) && path !== LAUNCHER && !inType(n)) {
+      const at = lineOf(n);
+      const line = lines[at - 1]!.trim();
+      if (!PINS.some(([f, l]) => f === path && l === line)) out.push(`${path}:${at}: names the claude binary (${n.getText(sf).slice(0, 60)}) outside ${LAUNCHER}: start every session with launchClaude; a lookup, an auth call or data is pinned in PINS with why (\`${line.slice(0, 100)}\`)`);
     }
     // The runner's binary reaches nothing but launchClaude (and the auth-status helpers, which start no session).
-    if (is('PropertyAccessExpression', n) && n.expression?.kind === (ts.SyntaxKind as unknown as Record<string, number>).ThisKeyword && n.name!.text === 'bin' && path !== LAUNCHER) {
-      const p = n.parent!;
+    if (ts.isPropertyAccessExpression(n) && n.expression.kind === ts.SyntaxKind.ThisKeyword && n.name.text === 'bin' && path !== LAUNCHER) {
+      const p = n.parent;
       let call = p.parent;
-      while (call && (is('AsExpression', call.parent) || is('SatisfiesExpression', call.parent) || is('ParenthesizedExpression', call.parent))) call = call.parent;
-      const intoLaunch = is('PropertyAssignment', p) && p.name!.text === 'bin' && is('ObjectLiteralExpression', p.parent) && is('CallExpression', call?.parent) && call!.parent!.expression!.getText() === 'launchClaude';
-      const intoAuth = is('CallExpression', p) && AUTH_HELPERS.test(p.expression!.getText()) && p.arguments!.includes(n);
-      if (!intoLaunch && !intoAuth) out.push(`${at(n)}: the runner's binary (\`${p.getText().replace(/\s+/g, ' ').slice(0, 100)}\`) goes somewhere but launchClaude`);
+      while (call && (ts.isAsExpression(call.parent) || ts.isSatisfiesExpression(call.parent) || ts.isParenthesizedExpression(call.parent))) call = call.parent;
+      const intoLaunch = ts.isPropertyAssignment(p) && p.name.getText(sf) === 'bin' && ts.isObjectLiteralExpression(p.parent) && call?.parent && ts.isCallExpression(call.parent) && call.parent.expression.getText(sf) === 'launchClaude';
+      const intoAuth = ts.isCallExpression(p) && AUTH_HELPERS.test(p.expression.getText(sf)) && p.arguments.includes(n);
+      if (!intoLaunch && !intoAuth) out.push(`${path}:${lineOf(n)}: the runner's binary (\`${p.getText(sf).replace(/\s+/g, ' ').slice(0, 100)}\`) goes somewhere but launchClaude`);
     }
-    each(n, visit);
+    ts.forEachChild(n, visit);
   };
   visit(sf);
   return out;
@@ -206,35 +107,66 @@ export function launchProblems(path: string, text: string, exported: Set<string>
 
 const srcFiles = () => readdirSync(join(repoRoot, 'src'), { recursive: true }).map((x) => String(x).split(sep).join('/')).filter((x) => x.endsWith('.ts') && !x.endsWith('.d.ts')).map((x) => `src/${x}`);
 
-test('#958: no module in src/ starts Claude Code but src/claude-launch.ts (the named exceptions start no session)', () => {
+test('#958: no module in src/ names the claude binary but src/claude-launch.ts and its pinned lines (fail closed)', () => {
   const files = srcFiles().map((p): [string, string] => [p, readFileSync(join(repoRoot, p), 'utf8')]);
-  const exported = claudeExports(files);
-  const problems = files.flatMap(([p, t]) => launchProblems(p, t, exported));
-  assert.deepEqual(problems, []);
-  // It reads the real launches: the one launch function's spawn, and each exception.
+  assert.deepEqual(files.flatMap(([p, t]) => launchProblems(p, t)), []);
+  // It reads the real launch, and no pin is stale: each still names a line that is there.
   assert.match(readFileSync(join(repoRoot, LAUNCHER), 'utf8'), /return spawn\(w\.file, w\.args/);
-  for (const [f, b, argv] of BUILDERS) assert.match(readFileSync(join(repoRoot, f), 'utf8'), new RegExp(`function ${b}\\([^]*?\\n  const argv = ${JSON.stringify(argv).replace(/"/g, "'").replace(/,/g, ', ').replace(/[[\]]/g, '\\$&')};`), `${f}: ${b} still builds only ${argv.join(' ')}`);
-  for (const [f, argv] of EXCEPTIONS) assert.ok(readFileSync(join(repoRoot, f), 'utf8').includes(JSON.stringify(argv).replace(/"/g, "'").replace(/,/g, ', ')), `${f}: ${argv.join(' ')} is still there`);
+  const text = new Map(files);
+  for (const [f, l] of PINS) assert.ok((text.get(f) ?? '').split('\n').some((x) => x.trim() === l), `${f}: the pinned line is still there: ${l.slice(0, 80)}`);
 });
 
-test('#958: every way of starting claude outside the launch function is refused (fixtures), and the controls pass', () => {
+test('#958: every way of naming claude outside the launch function is refused (fixtures), and the controls pass', () => {
   const dir = join(repoRoot, 'test', 'fixtures', 'claude-launch');
   const files = readdirSync(dir).filter((f) => f.endsWith('.ts.txt')).sort();
-  // Every fixture by name (R1185z D2): one deleted fails here, as the probe's wrapper list is held.
+  // Every fixture by name: one deleted fails here.
   // check-table: never-shrink
-  const MUST_FAIL = ['absolute-path', 'alias-assign', 'const-bin', 'default-import', 'destructure-namespace', 'direct-spawn', 'element-access', 'exec-string', 'execpath-cli-js', 'fn-call', 'imported-const', 'namespace-import', 'os-wrapper', 'param-default', 'renamed-import', 'require-destructured', 'runner-bin-escapes', 'runner-bin-spawn', 'sh-c', 'signin-session', 'src-helper', 'sudo-wrapper'];
+  const MUST_FAIL = [
+    'absolute-path',
+    'alias-assign',
+    'const-bin',
+    'data-literal',
+    'default-import',
+    'destructure-namespace',
+    'direct-spawn',
+    'doctor-unpinned-line',
+    'dyn-import',
+    'element-access',
+    'exec-string',
+    'execpath-cli-js',
+    'exported-name',
+    'fn-call',
+    'helper-const-findtool',
+    'helper-findtool',
+    'helper-findtool-nullish',
+    'helper-join',
+    'helper-object-bin',
+    'helper-tuple-file',
+    'namespace-import',
+    'object-file',
+    'os-wrapper',
+    'param-default',
+    'promisify-exec',
+    'reflect-apply',
+    'renamed-import',
+    'require-destructured',
+    'runner-bin-escapes',
+    'runner-bin-spawn',
+    'sh-c',
+    'signin-session',
+    'src-helper',
+    'sudo-wrapper',
+    'template-path',
+    'ternary',
+  ];
   // check-table: never-shrink
-  const CONTROLS = ['ok-doctor', 'ok-launch-bin', 'ok-launcher', 'ok-names', 'ok-other-tool', 'ok-report-row', 'ok-signin'];
-  assert.deepEqual(files.map((f) => f.replace(/\.ts\.txt$/, '')), [...MUST_FAIL, ...CONTROLS].sort(), 'every fixture, by name');
-  // A fixture names where it stands in its first line: `// as src/<path>`; the exports of all of them are read together.
-  const all = files.map((f): [string, string] => {
+  const CONTROLS = ['ok-launch-bin', 'ok-launcher', 'ok-other-tool', 'ok-signin', 'ok-type-position'];
+  assert.deepEqual(files.map((f) => f.replace(/\.ts\.txt$/, '')).sort(), [...MUST_FAIL, ...CONTROLS].sort(), 'every fixture, by name');
+  for (const f of files) {
     const text = readFileSync(join(dir, f), 'utf8');
-    return [/^\/\/ as (\S+)/.exec(text)?.[1] ?? `src/${f.replace(/\.txt$/, '')}`, text];
-  });
-  const exported = claudeExports(all);
-  for (const [i, f] of files.entries()) {
-    const [as, text] = all[i]!;
-    const problems = launchProblems(as, text, exported);
+    // A fixture names where it stands in its first line: `// as src/<path>`.
+    const as = /^\/\/ as (\S+)/.exec(text)?.[1] ?? `src/${f.replace(/\.txt$/, '')}`;
+    const problems = launchProblems(as, text);
     if (f.startsWith('ok-')) assert.deepEqual(problems, [], `${f}: a control passes`);
     else assert.ok(problems.length > 0, `${f}: refused`);
   }

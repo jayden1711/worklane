@@ -1,0 +1,5 @@
+// as src/x.ts
+import { commandSpawnSync } from './os/git.js';
+import { findTool } from './tool-path.js';
+const bin = findTool('claude') ?? 'claude';
+commandSpawnSync(bin, ['-p', 'hi']);
