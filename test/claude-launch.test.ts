@@ -2,8 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { claudeArgv, launchClaudeSync, launchEnv, launchGuards, LAUNCH_ENV } from '../src/claude-launch.js';
+import { delimiter, join } from 'node:path';
+import { claudeArgv, claudeBin, launchClaudeSync, launchEnv, launchGuards, LAUNCH_ENV, LAUNCH_ENV_KEEP, LAUNCH_ENV_PASS } from '../src/claude-launch.js';
+import { PASS_THROUGH } from '../src/runner.js';
 import { PermissionRule } from '../src/config/permission-rule.js';
 import { claudeProbeRun, LOGIN_PROOF, proveClaudeLogin } from '../src/setup-steps.js';
 
@@ -62,7 +63,7 @@ test('R1185z D1: the login proof goes through the launch, in an empty folder of 
   assert.equal(s.status, 0, s.stderr);
 });
 
-test('R1185ac D1/D3: the launch owns its environment: no CLAUDE_*/ANTHROPIC_* it doesn\'t name, and PATH only absolute', { skip: !posix && 'a POSIX stand-in claude' }, () => {
+test('R1185ac D1/D3, R1185ae D1: the launch owns its environment: an allowlist (BUN_OPTIONS, NODE_OPTIONS, a loader, a stray CLAUDE_* never pass), and PATH only absolute', { skip: !posix && 'a POSIX stand-in claude' }, () => {
   const dir = mkdtempSync(join(tmpdir(), 'launch-env-'));
   const bins = join(dir, 'bin');
   const checkout = join(dir, 'checkout');
@@ -87,7 +88,16 @@ test('R1185ac D1/D3: the launch owns its environment: no CLAUDE_*/ANTHROPIC_* it
     claude_code_plugin_dirs: join(dir, 'lower'),
     ANTHROPIC_CUSTOM_HEADERS: 'x: y',
     CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0',
-    KEEP_ME: 'yes',
+    // R1185ae D1 (B1/B2): code inside the Bun-built claude before it starts, or a loader; and any name it doesn't list.
+    BUN_OPTIONS: `--preload ${join(dir, 'planted.js')}`,
+    BUN_INSPECT_PRELOAD: join(dir, 'planted.js'),
+    NODE_OPTIONS: `--require ${join(dir, 'planted.js')}`,
+    LD_PRELOAD: join(dir, 'planted.so'),
+    DYLD_INSERT_LIBRARIES: join(dir, 'planted.dylib'),
+    SOME_TOOL_SETTING: 'x',
+    LANG: 'C.UTF-8',
+    GIT_CONFIG_KEY_0: 'credential.helper',
+    GIT_AUTHOR_NAME: 'engine-bot',
   };
   const seen = () => JSON.parse(readFileSync(log, 'utf8')) as { who: string; env: Record<string, string> };
   // P1: a launch given the variables.
@@ -96,14 +106,16 @@ test('R1185ac D1/D3: the launch owns its environment: no CLAUDE_*/ANTHROPIC_* it
   assert.equal(s.who, 'the claude on PATH', "an empty or relative PATH entry never runs the checkout's own claude");
   assert.deepEqual(Object.keys(s.env).filter((k) => /^(?:claude|anthropic)_/i.test(k)).sort(), ['ANTHROPIC_BASE_URL', 'CLAUDE_CODE_DISABLE_AUTO_MEMORY', 'CLAUDE_CONFIG_DIR']);
   assert.equal(s.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY, '1', "the launch's own, over the caller's");
-  assert.equal(s.env.KEEP_ME, 'yes', 'anything else passes');
+  for (const k of ['BUN_OPTIONS', 'BUN_INSPECT_PRELOAD', 'NODE_OPTIONS', 'LD_PRELOAD', 'DYLD_INSERT_LIBRARIES', 'SOME_TOOL_SETTING']) assert.equal(s.env[k], undefined, `${k}: not on the launch's list, so it never reaches claude`);
+  assert.deepEqual([s.env.LANG, s.env.GIT_CONFIG_KEY_0, s.env.GIT_AUTHOR_NAME, s.env.HOME], ['C.UTF-8', 'credential.helper', 'engine-bot', dir], 'what the runner sets passes');
   assert.ok(s.env.PATH!.split(':').every((d) => d.startsWith('/')), `PATH holds absolute entries only: ${s.env.PATH}`);
   assert.deepEqual(launchEnv(env).CLAUDE_CODE_PLUGIN_DIRS, undefined);
   // The launch's own variables keep the caller's place (a sudo `env -i` list keeps its order: runner-golden).
-  assert.deepEqual(Object.keys(launchEnv({ A: '1', CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0', B: '2' })), ['A', 'CLAUDE_CODE_DISABLE_AUTO_MEMORY', 'B']);
+  assert.deepEqual(Object.keys(launchEnv({ PATH: '/bin', CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0', HOME: '/h' })), ['PATH', 'CLAUDE_CODE_DISABLE_AUTO_MEMORY', 'HOME']);
   // P1b: the login proof, with the variable in the environment the probe hands it (probeEnv: the process's own).
   assert.equal(claudeProbeRun(LOGIN_PROOF, env, 30_000, join(bins, 'claude')).status, 0);
   assert.equal(seen().env.CLAUDE_CODE_PLUGIN_DIRS, undefined, 'the login proof drops it too');
+  for (const k of ['BUN_OPTIONS', 'NODE_OPTIONS', 'LD_PRELOAD', 'SOME_TOOL_SETTING']) assert.equal(seen().env[k], undefined, `${k}: the login proof (the process's whole environment) drops it too`);
   // A relative binary path is refused.
   assert.throws(() => launchClaudeSync({ ...LOGIN_PROOF, bin: './claude', cwd: checkout, env }, { timeoutMs: 30_000 }), /relative path/);
 });
@@ -126,4 +138,51 @@ test('R1185ac (the organizer, 2026-11-11): the plugin cache folder is the launch
   assert.equal(launchClaudeSync({ ...LOGIN_PROOF, bin, cwd: dir, env, pluginCacheDir: root }, { timeoutMs: 30_000 }).status, 0);
   assert.equal(seen().CLAUDE_CODE_PLUGIN_CACHE_DIR, root, "the launch's own field");
   assert.throws(() => launchEnv(env, 'relative/root'), /isn't an absolute path/);
+});
+
+test('R1185ae D2: a project variable reaches claude only by name, and a name the project may not set throws at the launch', { skip: !posix && 'a POSIX stand-in claude' }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'launch-project-'));
+  const log = join(dir, 'seen.json');
+  const bin = join(dir, 'claude');
+  writeFileSync(bin, `#!/usr/bin/env node\nrequire('node:fs').writeFileSync(${JSON.stringify(log)}, JSON.stringify(process.env));\nconsole.log(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'ok' }));\n`);
+  chmodSync(bin, 0o755);
+  const env = { PATH: process.env.PATH ?? '', HOME: dir, TEST_WORKERS: '2', OTHER: 'x', BUN_OPTIONS: '--preload ./.ci/warm.js' };
+  const seen = () => JSON.parse(readFileSync(log, 'utf8')) as Record<string, string>;
+  assert.equal(launchClaudeSync({ ...LOGIN_PROOF, bin, cwd: dir, env, projectEnv: ['TEST_WORKERS'] }, { timeoutMs: 30_000 }).status, 0);
+  assert.deepEqual([seen().TEST_WORKERS, seen().OTHER, seen().BUN_OPTIONS], ['2', undefined, undefined], 'the named one only');
+  for (const k of ['BUN_OPTIONS', 'BUNFIG_PRELOAD', 'JSC_useJIT', 'NODE_OPTIONS', 'LD_PRELOAD', 'PATH', 'CLAUDE_CODE_PLUGIN_DIRS']) {
+    assert.throws(() => launchClaudeSync({ ...LOGIN_PROOF, bin, cwd: dir, env, projectEnv: [k] }, { timeoutMs: 30_000 }), /can't reach claude/, k);
+  }
+});
+
+test('R1185ae D3: a bare claude is resolved to an absolute path, never from a node_modules/.bin or an entry inside the run\'s folder', { skip: !posix && 'a POSIX stand-in claude' }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'launch-bin-'));
+  const log = join(dir, 'who.txt');
+  const make = (folder: string, who: string) => {
+    mkdirSync(folder, { recursive: true });
+    writeFileSync(join(folder, 'claude'), `#!/usr/bin/env node\nrequire('node:fs').writeFileSync(${JSON.stringify(log)}, ${JSON.stringify(who)});\nconsole.log(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'ok' }));\n`);
+    chmodSync(join(folder, 'claude'), 0o755);
+  };
+  const repo = join(dir, 'repo');
+  const pinned = join(dir, 'tools', 'bin');
+  make(join(repo, 'node_modules', '.bin'), "the checkout's package");
+  make(join(dir, 'node_modules', '.bin'), "a parent's package");
+  make(join(repo, 'scripts'), "the checkout's file");
+  make(pinned, 'the installed claude');
+  // As npm exec (and so `npx … init`) leaves PATH: the checkout's and its parents' node_modules/.bin first.
+  const env = { PATH: [join(repo, 'node_modules', '.bin'), join(dir, 'node_modules', '.bin'), join(repo, 'scripts'), pinned, process.env.PATH ?? ''].join(delimiter), HOME: dir };
+  assert.equal(claudeBin('claude', env, repo), join(pinned, 'claude'));
+  assert.equal(launchClaudeSync({ ...LOGIN_PROOF, bin: 'claude', cwd: repo, env }, { timeoutMs: 30_000 }).status, 0);
+  assert.equal(readFileSync(log, 'utf8'), 'the installed claude');
+  // The login proof runs in a folder of its own, so only the package folders npm exec puts first are left out there.
+  const proofEnv = { ...env, PATH: [join(repo, 'node_modules', '.bin'), join(dir, 'node_modules', '.bin'), pinned, process.env.PATH ?? ''].join(delimiter) };
+  assert.equal(claudeProbeRun(LOGIN_PROOF, proofEnv, 30_000).status, 0, 'the login proof resolves the same way');
+  assert.equal(readFileSync(log, 'utf8'), 'the installed claude');
+  assert.throws(() => claudeBin(join(repo, 'node_modules', '.bin', 'claude'), env, repo), /node_modules\/\.bin/, "a package's binary given by path");
+  assert.throws(() => claudeBin('claude', { PATH: join(repo, 'node_modules', '.bin') }, repo), /isn't on PATH outside/, 'found nowhere else: refused, never the checkout\'s');
+});
+
+test("R1185ae D1: every variable the runner passes through is one the launch passes on (the allowlist can't drop it unseen)", () => {
+  const names = new Set<string>([...LAUNCH_ENV_PASS, ...LAUNCH_ENV_KEEP]);
+  assert.deepEqual(PASS_THROUGH.filter((k) => !names.has(k)), []);
 });

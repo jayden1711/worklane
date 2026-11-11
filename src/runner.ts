@@ -29,7 +29,7 @@ import { mcpRunArgs, type McpRun } from './mcp/client.js';
 import { limitHit, USAGE_LIMIT_TEXT, type LimitHit, type RateLimitInfo } from './usage-limit.js';
 import { authFailedDetail, isAuthFailure } from './claude-auth-failure.js';
 import { EFFORTS, type Effort } from './roles.js';
-import { claudeArgv, launchClaude } from './claude-launch.js';
+import { claudeArgv, claudeBin, launchClaude } from './claude-launch.js';
 import { redactCut, redactString } from './events/redact.js';
 
 export type TerminalReason = 'succeeded' | 'failed' | 'timed_out' | 'stalled' | 'rate_limited' | 'canceled_by_reconciliation' | 'budget_exhausted' | 'auth_mismatch' | 'auth_failed' | 'stopped' | 'stuck';
@@ -175,7 +175,7 @@ export interface AgentRunner {
 
 // CLAUDE_CONFIG_DIR: an instance's own Claude login (a path, not a secret). No CA bundle: a custom CA comes only from
 // root's network.json (src/network.ts outboundEnv, applied below).
-const PASS_THROUGH = ['CLAUDE_CONFIG_DIR', 'PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'LC_ALL', 'TERM', 'TMPDIR', 'TZ', 'XDG_RUNTIME_DIR', 'SystemRoot', 'ComSpec', 'PATHEXT', 'APPDATA', 'LOCALAPPDATA', 'USERPROFILE', 'ProgramData', 'ProgramFiles'];
+export const PASS_THROUGH = ['CLAUDE_CONFIG_DIR', 'PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'LC_ALL', 'TERM', 'TMPDIR', 'TZ', 'XDG_RUNTIME_DIR', 'SystemRoot', 'ComSpec', 'PATHEXT', 'APPDATA', 'LOCALAPPDATA', 'USERPROFILE', 'ProgramData', 'ProgramFiles'];
 
 /** An agent_runtime kind (config.yaml agent_runtime.kind; `sdk` is read as api_key). */
 export type RuntimeKind = 'cli' | 'api_key';
@@ -753,7 +753,14 @@ export class CliRunner implements AgentRunner {
     if ('error' in ownDenials) return { reason: 'failed', detail: `${ownDenials.error}; not starting`, costUsd: 0, turns: 0, model: req.model };
     // Preflight, inside the login's start lock: an unreadable status that mentions a token refresh (or any other
     // transient error) is reported with its text, and run() waits it out instead of starting claude.
-    const status = req.provider ? { method: 'provider', text: '' } : claudeAuthStatus(runEnv, runAs, this.bin);
+    // The binary as an absolute path, never the checkout's own (R1185ae D3): the status check and the session start it.
+    let bin: string;
+    try {
+      bin = claudeBin(this.bin, runEnv, req.cwd);
+    } catch (e) {
+      return { reason: 'failed', detail: `${(e as Error).message}; not starting`, costUsd: 0, turns: 0, model: req.model };
+    }
+    const status = req.provider ? { method: 'provider', text: '' } : claudeAuthStatus(runEnv, runAs, bin);
     const auth = status.method;
     const want: readonly string[] = req.provider ? ['provider'] : RUNTIME_LOGINS[this.runtime];
     if (!want.includes(auth)) {
@@ -832,7 +839,8 @@ export class CliRunner implements AgentRunner {
       } : undefined;
       // The plugins root moved to root's empty directory: the agent user's own installs never load, and it can't
       // install. The launch sets it from this field alone (a caller's environment never names it).
-      const child = launchClaude({ bin: this.bin, cwd: req.cwd, env: runEnv, detached: spawnDetached, ...fields, ...(plugins?.pluginRoot ? { pluginCacheDir: plugins.pluginRoot } : {}), ...(viaUser ? { asUser: viaUser } : {}) });
+      // The project's own variables (tests.yaml env) reach claude by name only, each checked again at the launch.
+      const child = launchClaude({ bin, cwd: req.cwd, env: runEnv, projectEnv: Object.keys(safeProjectEnv(req.env)), detached: spawnDetached, ...fields, ...(plugins?.pluginRoot ? { pluginCacheDir: plugins.pluginRoot } : {}), ...(viaUser ? { asUser: viaUser } : {}) });
       child.stdin.on('error', () => {}); // a run that exits before reading its prompt reports that itself
       child.on('error', cleanup);
       // The prompt is the first user message; the input stays open for console messages until a turn

@@ -143,6 +143,7 @@ const AXES = {
   pluginDirs: 'limit: an approved plugin needs a reviewed store; every guarded run gets the plugin locks and the plugin cache folder instead',
   mcpConfigFile: 'limit: an approved MCP server needs the broker; every run gets --strict-mcp-config, and the planted .mcp.json is refused',
   pluginCacheDir: "the instance's plugins root, on every guarded run (shaped() reads it in the run's environment)",
+  projectEnv: "limit: a project variable's value is the project's (tests.yaml env); launchEnv passes only the names given, each checked by projectEnvProblem, which test/claude-launch.test.ts drives",
 };
 for (const f of LAUNCH_FIELDS) if (!(f in AXES)) {
   console.error(`the launch's field ${f} isn't one this probe names (AXES): drive it, or name it a limit`);

@@ -104,12 +104,15 @@ export type LoginProofSpec = Omit<ClaudeLaunch, 'bin' | 'cwd' | 'env' | 'asUser'
  * MCP config and no auto memory, in an empty folder of its own (no checkout's files around it), with the environment
  * the probe would give `claude` (its login).
  */
-export function claudeProbeRun(spec: LoginProofSpec, env: NodeJS.ProcessEnv, timeoutMs: number, bin = findTool('claude') ?? 'claude'): RunResult {
+export function claudeProbeRun(spec: LoginProofSpec, env: NodeJS.ProcessEnv, timeoutMs: number, bin = 'claude'): RunResult {
   const cwd = mkdtempSync(join(tmpdir(), 'login-proof-'));
   try {
     const { prompt, ...launch } = spec;
+    // A bare `claude` is resolved by the launch, never from the checkout or a node_modules/.bin (R1185ae D3).
     const r = launchClaudeSync({ ...launch, bin, cwd, env }, { timeoutMs, input: prompt });
     return { status: r.error ? null : r.status, stdout: r.stdout, stderr: r.error ? r.error.message : r.stderr };
+  } catch (e) {
+    return { status: null, stdout: '', stderr: (e as Error).message };
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

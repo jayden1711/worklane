@@ -12,12 +12,15 @@
 //   id, an event field). So `findTool('claude') ?? 'claude'`, a template `${dir}/claude`, `join(bin, 'claude')`, a
 //   ternary, `{ file: 'claude' }`, a tuple, `promisify(exec)`, a dynamic import or `Reflect.apply` are all refused,
 //   whatever calls them; a new launch must go through the launch function, or be pinned with its reason in review.
-// - `this.bin` (the runner's binary) may go nowhere but `bin: this.bin` in a launchClaude call, or the three
-//   auth-status helpers' binary argument.
+// - `this.bin` (the runner's binary) may go nowhere but `bin: this.bin` in a launchClaude call, the three
+//   auth-status helpers' binary argument, or claudeBin's first (the launch's resolver: it starts nothing).
+// - The names are read in any case and with Windows' `.exe` and `.cmd` (R1185ae D4: `Claude` is `claude` on a
+//   case-insensitive volume, and the npm package's file is bin/claude.exe), and a pin covers as many lines with its
+//   exact text as it says (one by default), so a pinned line copied into new code is refused.
 //
 // What it can't see (named limits):
-// - a pinned line's value used somewhere else (a lookup's result handed to a launch): the pin's reason says where it
-//   goes, and review holds it;
+// - a pinned line's value used somewhere else (a lookup's result handed to a launch), or claudeBin's result: the pin's
+//   reason says where it goes, and review holds it;
 // - a binary name built at run time from parts (`'clau' + 'de'`) or from data with no `claude` in it (a config value,
 //   an env variable);
 // - a launch through a module outside src/ (scripts/: test/claude-launch-shell-lint.test.ts reads those), or a child
@@ -34,15 +37,15 @@ type Node = any;
 const ts = createRequire(join(repoRoot, 'package.json'))('typescript') as Node;
 
 /** A text that IS the claude binary: its name, a path to it, its npm package, or its cli.js. */
-const BINARY = /^claude$|\/claude$|@anthropic-ai\/claude-code|claude-code\/cli\.js/;
+const BINARY = /^claude(?:\.exe|\.cmd)?$|[\/\\]claude(?:\.exe|\.cmd)?$|@anthropic-ai[\/\\]claude-code|claude-code[\/\\]cli\.js/i;
 /** A string that runs claude as a shell command: the binary as a word, then a flag (`sh -c 'claude -p hi'`). */
-const COMMAND = /(?:^|[\s;&|(`])(?:\S*\/)?claude\s+-/;
+const COMMAND = /(?:^|[\s;&|(`])(?:\S*[\/\\])?claude(?:\.exe|\.cmd)?\s+-/i;
 const LAUNCHER = 'src/claude-launch.ts';
 const AUTH_HELPERS = /^(?:claudeAuthStatus|claudeAuthMethod|claudeAuthStatusJson)$/;
 
-/** Lines that name the claude binary and may: file, the line's whole text (trimmed), why. */
+/** Lines that name the claude binary and may: file, the line's whole text (trimmed), why, and how many lines have it (1 when absent). */
 // check-table: never-grow
-export const PINS: [string, string, string][] = [
+export const PINS: ([string, string, string] | [string, string, string, number])[] = [
   ["src/claude-auth-failure.ts", "export const DEFAULT_LOGIN_KEY = 'claude';", "a login key (data), never run"],
   ["src/claude-signin.ts", "const c = spawn('claude', ['auth', 'login'], { env, stdio: 'ignore' });", "`claude auth login`: the sign-in, no session"],
   ["src/claude-signin.ts", "execFile('claude', ['auth', 'status', '--json'], { encoding: 'utf8', timeout: 30_000, env: signinEnv(null) }, (_e, stdout) => resolve(parseClaudeStatus(stdout ?? '')));", "`claude auth status --json`: no session"],
@@ -59,12 +62,12 @@ export const PINS: [string, string, string][] = [
   ["src/runner.ts", "export function claudeAuthStatusJson(env: NodeJS.ProcessEnv, runAs?: RunAs, bin = 'claude'): { loggedIn: boolean; expiresAt?: unknown } | null {", "the default binary of `claude auth status --json`"],
   ["src/runner.ts", "private bin = 'claude',", "the runner's binary: it reaches only launchClaude and the auth-status helpers (the `this.bin` rule)"],
   ["src/service.ts", "const claude = new CliRunner(instanceRuntime(i).runtime, process.env, 'claude', i.runAs ?? undefined, allLanes(i), identity, {}, () => guardrailSettings(i.home, i.name, i.repo.path), agentKeyFile, login, plugins, { instance: i.name, register: (role, ttlMs) => registerRun(i.name, role, ttlMs), end: (ticket) => endRun(i.name, ticket) }, i.repo.path, start.cfg.project.project.default_branch, start.note === null ? undefined : start.cfg.guardrails.secret_paths, worktreePlaces(i.repo.path, start.cfg.tests.worktree.root, agentTasksDir(i.repo.path, i.stateDir, i.runAs ?? undefined)));", "an instance runner's binary (CliRunner's `bin`)"],
-  ["src/setup-steps.ts", "export function claudeProbeRun(spec: LoginProofSpec, env: NodeJS.ProcessEnv, timeoutMs: number, bin = findTool('claude') ?? 'claude'): RunResult {", "the login proof's binary: handed only to launchClaudeSync, in this function"],
+  ["src/setup-steps.ts", "export function claudeProbeRun(spec: LoginProofSpec, env: NodeJS.ProcessEnv, timeoutMs: number, bin = 'claude'): RunResult {", "the login proof's binary: handed only to launchClaudeSync, in this function"],
   ["src/setup-steps.ts", "{ id: 'claude', title: 'Claude login', optional: false, modes: MODES, walked: true },", "a setup group id (data)"],
   ["src/setup-steps.ts", "export const REQUIRED_TOOLS: Record<Mode, string[]> = { local: ['git', 'gitleaks', 'claude', 'gh'], server: ['git', 'gitleaks', 'claude'] };", "tool names the tools step looks up (data)"],
   ["src/setup-steps.ts", "if (!p.which('claude')) return no('claude is not installed (the tools step)');", "a lookup"],
   ["src/setup-steps.ts", "const r = p.run('claude', ['auth', 'status'], as);", "`claude auth status`: no session"],
-  ["src/setup-steps.ts", "group: 'claude',", "a setup group id (data)"],
+  ["src/setup-steps.ts", "group: 'claude',", "a setup group id (data), on two steps", 2],
   ["src/skilleval.ts", "const child = launchClaude({ bin: 'claude', cwd: req.cwd, env: agentEnv(ownEnv(), 'cli'), settings: {}, mode: 'json', model: req.model, maxTurns: 3, maxBudgetUsd: req.maxBudgetUsd, allowedTools: [], disallowedTools: NO_TOOLS, jsonSchema: req.schema, ...(req.system ? { appendSystemPrompt: req.system } : {}) });", "skill-eval's binary, handed to launchClaude on this line"],
   ["src/tool-install.ts", "if (tool === 'claude') {", "a tool name (data)"],
   ["src/tool-install.ts", "return { tool, version: v, url: `https://registry.npmjs.org/@anthropic-ai/claude-code/-/claude-code-${v}.tgz`, checksum: { algo: 'sha512', value: PINS.claude.integrity.slice('sha512-'.length) }, archive: 'npm', member: '', dest, prefix };", "the pinned package's download URL (data)"],
@@ -83,12 +86,21 @@ export function launchProblems(path: string, text: string): string[] {
     for (let p = n.parent; p; p = p.parent) if (ts.isTypeNode(p)) return true;
     return false;
   };
+  // The lines each pin covers, so far: past its count, a copy is refused.
+  const used = new Map<(typeof PINS)[number], Set<number>>();
   const visit = (n: Node) => {
     const t = ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n) || ts.isTemplateHead(n) || ts.isTemplateMiddle(n) || ts.isTemplateTail(n) ? n.text : null;
     if (t !== null && (BINARY.test(t) || COMMAND.test(t)) && path !== LAUNCHER && !inType(n)) {
       const at = lineOf(n);
       const line = lines[at - 1]!.trim();
-      if (!PINS.some(([f, l]) => f === path && l === line)) out.push(`${path}:${at}: names the claude binary (${n.getText(sf).slice(0, 60)}) outside ${LAUNCHER}: start every session with launchClaude; a lookup, an auth call or data is pinned in PINS with why (\`${line.slice(0, 100)}\`)`);
+      const pin = PINS.find(([f, l]) => f === path && l === line);
+      const seen = pin ? (used.get(pin) ?? new Set<number>()) : null;
+      if (pin && seen) {
+        seen.add(at);
+        used.set(pin, seen);
+      }
+      if (pin && seen && seen.size > (pin[3] ?? 1)) out.push(`${path}:${at}: a copy of a pinned line (\`${line.slice(0, 100)}\`): its pin covers ${pin[3] ?? 1} line(s); start every session with launchClaude`);
+      else if (!pin) out.push(`${path}:${at}: names the claude binary (${n.getText(sf).slice(0, 60)}) outside ${LAUNCHER}: start every session with launchClaude; a lookup, an auth call or data is pinned in PINS with why (\`${line.slice(0, 100)}\`)`);
     }
     // The runner's binary reaches nothing but launchClaude (and the auth-status helpers, which start no session).
     if (ts.isPropertyAccessExpression(n) && n.expression.kind === ts.SyntaxKind.ThisKeyword && n.name.text === 'bin' && path !== LAUNCHER) {
@@ -97,7 +109,8 @@ export function launchProblems(path: string, text: string): string[] {
       while (call && (ts.isAsExpression(call.parent) || ts.isSatisfiesExpression(call.parent) || ts.isParenthesizedExpression(call.parent))) call = call.parent;
       const intoLaunch = ts.isPropertyAssignment(p) && p.name.getText(sf) === 'bin' && ts.isObjectLiteralExpression(p.parent) && call?.parent && ts.isCallExpression(call.parent) && call.parent.expression.getText(sf) === 'launchClaude';
       const intoAuth = ts.isCallExpression(p) && AUTH_HELPERS.test(p.expression.getText(sf)) && p.arguments.includes(n);
-      if (!intoLaunch && !intoAuth) out.push(`${path}:${lineOf(n)}: the runner's binary (\`${p.getText(sf).replace(/\s+/g, ' ').slice(0, 100)}\`) goes somewhere but launchClaude`);
+      const intoResolver = ts.isCallExpression(p) && p.expression.getText(sf) === 'claudeBin' && p.arguments[0] === n;
+      if (!intoLaunch && !intoAuth && !intoResolver) out.push(`${path}:${lineOf(n)}: the runner's binary (\`${p.getText(sf).replace(/\s+/g, ' ').slice(0, 100)}\`) goes somewhere but launchClaude`);
     }
     ts.forEachChild(n, visit);
   };
@@ -113,7 +126,7 @@ test('#958: no module in src/ names the claude binary but src/claude-launch.ts a
   // It reads the real launch, and no pin is stale: each still names a line that is there.
   assert.match(readFileSync(join(repoRoot, LAUNCHER), 'utf8'), /return spawn\(w\.file, w\.args/);
   const text = new Map(files);
-  for (const [f, l] of PINS) assert.ok((text.get(f) ?? '').split('\n').some((x) => x.trim() === l), `${f}: the pinned line is still there: ${l.slice(0, 80)}`);
+  for (const [f, l, , n = 1] of PINS) assert.equal((text.get(f) ?? '').split('\n').filter((x) => x.trim() === l).length, n, `${f}: the pinned line is there as many times as its pin says: ${l.slice(0, 80)}`);
 });
 
 test('#958: every way of naming claude outside the launch function is refused (fixtures), and the controls pass', () => {
@@ -129,6 +142,12 @@ test('#958: every way of naming claude outside the launch function is refused (f
     'default-import',
     'destructure-namespace',
     'direct-spawn',
+    'case-folded-name',
+    'cmd-name',
+    'copied-pinned-line',
+    'exe-join',
+    'exe-name',
+    'exe-sh-c',
     'doctor-unpinned-line',
     'dyn-import',
     'element-access',
