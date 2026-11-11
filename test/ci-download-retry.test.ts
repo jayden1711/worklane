@@ -267,7 +267,8 @@ export function shellFileOf(w: readonly string[]): string | null {
     // Redirections, anywhere after bash (R1228ao D1, R1228an D2: `bash -s -- a < f`, `bash -- < f`): read past, and a
     // file on stdin kept.
     // A here-document or here-string (R1228aq D3: `bash << EOF`, `bash <<< "$x"`): its word is no file.
-    if (/^\d*<<[-<]?$/.test(t)) {
+    // R1228at D3: a here-string of a command substitution (`bash <<< "$(cat tools/get)"`) runs that file's text: kept.
+    if (/^\d*<<-?$/.test(t) || (/^\d*<<<$/.test(t) && !/\$\(|`/.test(w[i + 1] ?? ''))) {
       i++;
       continue;
     }
@@ -349,11 +350,14 @@ function unreadShellFile(l: string, o: { wsFromEnvFile?: boolean; anchored?: boo
     const c = raw.replace(/\$\{\{\s*github\.workspace\s*\}\}/g, '$GITHUB_WORKSPACE').replace(/(^|[\s;&|(])((?:\S*\/)?(?:ba)?sh)(<)/g, '$1$2 $3').replace(/^\s*(?:[({!]\s*)+/, '');
     // R1228as D3: the program, past `NAME=value` assignments.
     const w0 = words(c);
-    const first = (w0.find((x) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(x)) ?? '').replace(/^[@+-]+/, '');
+    // R1228at D1, R1228au D1: the program's index, so the file is read after it, not after the assignments' first.
+    const k = Math.max(0, w0.findIndex((x) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(x)));
+    // R1228at D4b: a quoted or backslashed program name (`"bash"`, `\bash`) is that program.
+    const first = (w0[k] ?? '').replace(/^[@+-]+/, '').replace(/^\\/, '');
     if (/^(?:\S*\/)?(?:shellcheck|shfmt)$/.test(first)) continue;
-    const anchored = o.anchored !== false && /^(?:\S*\/)?(?:bash|sh)$/.test(first) && c.trim().startsWith(w0[0]!);
+    const anchored = o.anchored !== false && /^(?:\S*\/)?(?:bash|sh)$/.test(first) && c.trim().replace(/["'\\]/g, '').startsWith(w0[0]!.replace(/\\/g, ''));
     if (anchored) {
-      const file = shellFileOf(w0);
+      const file = shellFileOf(w0.slice(k));
       if (file !== null) {
         const fromWs = WS_ENV_ROOT.test(file) && !!o.wsFromEnvFile;
         if (!fromWs && !(SHELL_FILE_ROOT.test(file) && !/(^|\/)\.\.(\/|$)/.test(file))) return unread(c);
@@ -749,10 +753,17 @@ export function fileDownloadProblems(rel: string, text: string, probes: string[]
   // R1228ak D2: a package.json script, a Makefile recipe or a shell script running an unread shell file is refused, as
   // a workflow run is. A Dockerfile's RUN runs paths inside the image (a COPY's target), which the lint can't map: a
   // stated limit.
-  const cdSkipped = new RegExp(`(^|[\\s;&|(])cd\\s+["']?(?:[^\\s;&|"']*/)?(?:${[...SCAN_SKIP].map((x) => x.replace('.', '\\.')).join('|')})(/|["'\\s;&|]|$)`, 'm').test(t);
+  // R1228as D1, R1228at D2, R1228au D2/D3: a `cd` or `pushd` (options, quotes and backticks around it included) into a
+  // folder the walk skips, outside comments, ends the sibling rule on its line; one that starts a logical line ends it
+  // for the rest of the file.
+  const skip = [...SCAN_SKIP].map((x) => x.replace('.', '\\.')).join('|');
+  const cdInto = new RegExp(`(^|[\\s;&|(\`'"])(?:cd|pushd)\\s+(?:-[A-Za-z@]+\\s+|--\\s+)*["']?(?:[^\\s;&|"'\`]*/)?(?:${skip})(/|["'\\s;&|\`)]|$)`);
+  const cdTop = new RegExp(`^\\s*(?:cd|pushd)\\s+(?:-[A-Za-z@]+\\s+|--\\s+)*["']?(?:[^\\s;&|"'\`]*/)?(?:${skip})(/|["'\\s;&|]|$)`);
+  let cdSkipped = false;
   if (!DOCKERFILE.test(n)) for (const l of logicalLines(t)) {
-    // R1228as D1: a file that `cd`s into a folder the walk skips runs its relative .sh from there: no sibling rule.
-    const why = /^\s*#/.test(l) ? null : unreadShellFile(l, cdSkipped ? { anchored: false } : { anchored: false, name: rel });
+    if (/^\s*#/.test(l)) continue;
+    if (cdTop.test(l)) cdSkipped = true;
+    const why = unreadShellFile(l, cdSkipped || cdInto.test(l) ? { anchored: false } : { anchored: false, name: rel });
     if (why) problems.push(why);
   }
   const r = scriptProblems(t, probes);
@@ -1610,6 +1621,27 @@ test('R1228aq, R1228as: an opening ( { ! keeps the anchoring; unspaced ; && insi
   assert.deepEqual(fileDownloadProblems('scripts/ci/a.sh', 'cd "$(dirname "$0")"\nbash b.sh\n').problems, [], 'a cd elsewhere: the sibling rule holds');
 });
 
+test('R1228at, R1228au: an assignment before bash is read past (no false refusal); a cd or pushd into a skipped folder, per line and outside comments; a here-string of a substitution; a quoted program name', () => {
+  const refused = (c: string) => /a shell file the download lint doesn't read/.test(runProblems(c).join());
+  // at D1, au D1 (N1a-N1g kept, N1h refused): false refusals at cfb4e415.
+  for (const c of ['CI=1 bash scripts/ci/x.sh', 'NODE_OPTIONS=--x bash "$GITHUB_WORKSPACE/scripts/ci/x.sh"', "LC_ALL=C bash -c 'sort x'", 'DEBIAN_FRONTEND=noninteractive sh -c "apt-get update -qq"', 'TZ=UTC bash --version', 'A=1 B=2 bash .github/x.sh', 'X=1 bash ./scripts/ci/x']) assert.ok(!refused(c), `kept: ${c}`);
+  assert.ok(refused('CI=1 bash tools/get'), 'N1h refused');
+  // at D3: a here-string of a command substitution runs that text.
+  assert.ok(refused('bash <<< "$(cat tools/get)"'), 'W28 refused again');
+  assert.ok(!refused('bash <<< "$x"'), 'a plain here-string: kept');
+  // at D4b: a quoted or backslashed program name.
+  for (const c of ['"bash" "$GET"', '\\bash "$GET"']) assert.ok(refused(c), `refused: ${c}`);
+  // at D2, au D3: cd or pushd with options, in quotes or backticks, into a skipped folder.
+  for (const line of ['cd -P .claude/hooks && bash get.sh', 'cd -- .claude/hooks && bash get.sh', "sh -c 'cd .claude/hooks && bash get.sh'", 'sh -c "cd .claude/hooks && bash get.sh"', 'pushd .claude/hooks >/dev/null\nbash get.sh']) {
+    assert.match(fileDownloadProblems('scripts/ci/a.sh', `${line}\n`).problems.join(), /a shell file/, `refused: ${line}`);
+  }
+  // au D2, at D4a: false refusals at cfb4e415, a cd into a skipped folder elsewhere in the file.
+  for (const text of ['bash b.sh\n(cd ../../dist && tar czf ../out.tgz .)\n', '# then cd dist and pack it by hand\nbash b.sh\n', 'bash b.sh\ncd "$tmp/node_modules" && npm ls\n', 'bash b.sh\n# never cd dist here\n', '(cd ../../dist && tar czf ../out.tgz .)\nbash b.sh\n', 'echo "run: cd dist && npm pack"\nbash b.sh\n']) {
+    assert.deepEqual(fileDownloadProblems('scripts/ci/a.sh', text).problems, [], `kept: ${JSON.stringify(text)}`);
+  }
+  assert.deepEqual(fileDownloadProblems('package.json', JSON.stringify({ scripts: { build: 'bash build.sh', pack: 'cd dist && npm pack' } })).problems.filter((p) => /a shell file/.test(p)), [], 'package.json: pack after build');
+});
+
 // Limits (owner decision (c): stated, not closed; the helper's digest check holds for each download it handles):
 // - What the lint reads (R1228ai D1, closing R1228i L9-L11; R1228aj, R1228ak): workflow and action YAML, a shell
 //   script anywhere, every file under scripts/ whatever its name (a pinned URL, prose in a .md aside; the retry rule in
@@ -1630,7 +1662,11 @@ test('R1228aq, R1228as: an opening ( { ! keeps the anchoring; unspaced ; && insi
 //   can't be mapped to the checkout; elsewhere, a bare name with no `/` and no `.sh` (`sudo bash get`); a file piped in
 //   (`cat tools/get | bash`); a Dockerfile RUN running a path inside the image (a COPY's target); a file elsewhere
 //   that a workflow runs another way; a `cd` into a folder by a variable or built name before a relative .sh in a read
-//   file (only a literal `cd` into a folder the walk skips ends the sibling rule, R1228as D1); a GitHub expression
+//   file (a `cd` or `pushd` whose target names a folder the walk skips, with options, quoted or in backticks, ends the
+//   sibling rule on its line, and one that starts a line ends it for the rest of the file: R1228as D1, R1228at D2,
+//   R1228au D2/D3; not seen: a target built by a command substitution, `cd "$(dirname "$0")/../.claude/hooks"` or
+//   `cd "$(git rev-parse --show-toplevel)/.claude/hooks"` (R1228at D2's C2 rows), a cd after the .sh's own line, or a
+//   folder reached another way); a GitHub expression
 //   other than `${{ github.workspace }}` before a path (`${{ env.ROOT }}/x.sh`: a variable, so outside a command that
 //   starts with bash, a stated limit); and a shell keyword or builtin running a file we don't list (`eval`, `exec`
 //   after a redirection). This lint is a hint against accidents (R1228aq: round ~20 of new shell shapes); the
