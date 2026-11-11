@@ -1044,6 +1044,24 @@ test("R1169ab D2: a gate opens with node's own count; a sign test's own function
     [`  for (let i = 0; i < 0; ${unit}) {\n    void i;\n  }`, "a for loop's update"],
   ] as const) assert.match(String(refused(body)), new RegExp(`in ${what.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}.*where V8 keeps no count`), what);
   assert.equal(refused(`  let a = 1;\n  a = ${unit};`), null, 'a plain assignment: read');
+  // R1169ak/al: control flow refused before the run, in the test's function and every function inside it.
+  for (const [body, why, what] of [
+    [`  if (x) return;\n  ${unit};`, /line 3 returns before its function's end/, 'an early return'],
+    [`  try {\n    if (x) return;\n    ${unit};\n  } finally {\n    done();\n  }`, /line 4 returns before/, "a return inside the last statement (V8: no count after it before a finally)"],
+    [`  [1].forEach((u) => {\n    if (x) return;\n    ${unit};\n  });`, /a function inside it \(line 3\): line 4 returns before/, "a callback's early return"],
+    [`  p.then((r) => {\n    if (x) return;\n    check(r);\n  });\n  ${unit};`, /a function inside it \(line 3\): line 4 returns before/, 'a callback holding only the checks'],
+    [`  for (const u of us) {\n    ${unit};\n    if (x) break;\n    check(u);\n  }`, /line 5's break can skip systemd's sign in its loop/, 'a break in a loop holding the sign'],
+    [`  for (const u of us) {\n    if (x) continue;\n    ${unit};\n  }`, /line 4's continue can skip/, 'a continue'],
+    [`  bus?.journal.${sd.slice(0, 6)}ctl('x');`, /in an optional chain past its receiver/, 'an optional chain past its receiver'],
+    [`  do {\n    wait();\n  } while (!${unit});`, /in a do…while condition/, 'a do…while condition'],
+  ] as const) assert.match(String(refused(body)), why, what);
+  for (const [body, what] of [
+    [`  if (x) return t.skip('not here');\n  ${unit};`, 'return <ctx>.skip(…): the run reads the skip'],
+    [`  ${unit};\n  return done();`, 'the last statement may return'],
+    [`  switch (k) {\n    case 1:\n      ${unit};\n      break;\n  }`, "a switch's break"],
+    [`  for (const u of us) {\n    if (x) break;\n  }\n  ${unit};`, 'a break in a loop without the sign'],
+    [`  const f = (u) => (u ? 1 : 2);\n  ${unit};`, 'an expression body'],
+  ] as const) assert.equal(refused(body), null, what);
   assert.match(String(sa.mustRun(ts, file, `import { test } from 'node:test';\ntest('s', () => { ${unit};});\n`, 2, 1)!.refused), /ends at its closing brace/, "a last statement touching its function's closing brace");
   assert.equal(sa.mustRun(ts, file, `import { test } from 'node:test';\ntest('s', () => { ${unit}; });\n`, 2, 1)!.refused, null, 'a space before the brace: read');
   // problems(): judged on the run's block coverage of the file (one process), each point by the innermost range around it.

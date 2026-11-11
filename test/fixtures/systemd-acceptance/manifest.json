@@ -202,17 +202,16 @@
     "test/y\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside"
   ],
   "r1169n-n07-early-return": [
-    0,
-    "^$",
-    "test/y\\.test\\.ts:\\d+: acceptance: the engine unit restarts after a crash"
+    2,
+    "returns before its function's end"
   ],
   "r1169n-n08-t-todo": [
-    1,
-    "acceptance: the engine unit restarts after a crash: TODO needs systemd"
+    2,
+    "returns before its function's end"
   ],
   "r1169n-n09-skip-helper": [
-    1,
-    "acceptance: the engine unit restarts after a crash: SKIP needs systemd"
+    2,
+    "returns before its function's end"
   ],
   "r1169n-n10-describe-proxy": [
     1,
@@ -231,8 +230,8 @@
     "a skip reads test/y\\.test\\.ts: booted, which carries"
   ],
   "r1169n-n14-bracket-skip": [
-    1,
-    "acceptance: the engine unit restarts after a crash: SKIP needs systemd"
+    2,
+    "returns before its function's end"
   ],
   "r1169n-n15-unicode-escape": [
     2,
@@ -255,9 +254,8 @@
     "a skip reads test/y\\.test\\.ts: UNITS, which carries"
   ],
   "r1169m-m04-early-return": [
-    1,
-    "test/y\\.test\\.ts: y: a unit restarts: its function's last statement \\(line 5\\) never ran",
-    "test/y\\.test\\.ts:\\d+: y: a unit restarts"
+    2,
+    "returns before its function's end"
   ],
   "r1169o-o01-helper-registers": [
     2,
@@ -280,28 +278,24 @@
     "acceptance: the engine unit restarts after a crash: SKIP needs passwordless sudo"
   ],
   "r1169p-p2-src-holder-body-skip": [
-    1,
-    "acceptance: the engine keeps running after its user logs out \\(linger\\): (didn't run|SKIP)",
-    "test/y\\.test\\.ts:\\d+: acceptance: the engine keeps running after its user logs out"
+    2,
+    "returns before its function's end"
   ],
   "r1169p-p2b-src-holder-early-return": [
-    1,
-    "acceptance: the engine keeps running after its user logs out \\(linger\\): (didn't run|failed)",
-    "test/y\\.test\\.ts:\\d+: acceptance: the engine keeps running after its user logs out"
+    2,
+    "returns before its function's end"
   ],
   "r1169p-p2c-control-options-skip": [
     2,
     "a skip reads src/os/probe\\.ts: lingerEnabled, which carries"
   ],
   "r1169p-p3-allowlisted-local-body-skip": [
-    1,
-    "acceptance: units are installed in the system folder: SKIP no service manager here",
-    "test/y\\.test\\.ts:\\d+: acceptance: units are installed in the system folder"
+    2,
+    "returns before its function's end"
   ],
   "r1169p-p3b-allowlisted-local-early-return": [
-    1,
-    "test/y\\.test\\.ts: acceptance: units are installed in the system folder: its function's last statement \\(line 8\\) never ran",
-    "test/y\\.test\\.ts:\\d+: acceptance: units are installed in the system folder"
+    2,
+    "returns before its function's end"
   ],
   "r1169p-p3c-control-options-skip": [
     2,
@@ -370,9 +364,8 @@
     "test/y\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside"
   ],
   "r1169r-r1-test-name-read": [
-    1,
-    "/run/systemd/system: SKIP no init here",
-    "test/y\\.test\\.ts:4: /run/systemd/system"
+    2,
+    "returns before its function's end"
   ],
   "r1169r-r1b-suite-name-options": [
     2,
@@ -482,9 +475,8 @@
     "a skip reads src/os/probe\\.ts: lingerEnabled, which carries systemd's sign"
   ],
   "r1169t-t6c-control-test-body-return": [
-    1,
-    "acceptance: the engine keeps running after its user logs out: (didn't run|failed)",
-    "test/y\\.test\\.ts:\\d+: acceptance: the engine keeps running after its user logs out"
+    2,
+    "returns before its function's end"
   ],
   "r1169t-t7-options-getter": [
     2,
@@ -511,18 +503,16 @@
     "a skip reads test/y\\.test\\.ts: dir, which carries systemd's sign"
   ],
   "r1169t-t9b-forof-body-guard": [
-    1,
-    "acceptance: the engine unit starts: SKIP",
-    "test/y\\.test\\.ts:\\d+: acceptance: the engine unit starts"
+    2,
+    "returns before its function's end"
   ],
   "r1169t-t9c-control-const": [
     2,
     "a skip reads test/y\\.test\\.ts: dir, which carries systemd's sign"
   ],
   "r1169t-t9d-control-const-body-guard": [
-    1,
-    "acceptance: the engine unit starts: SKIP",
-    "test/y\\.test\\.ts:\\d+: acceptance: the engine unit starts"
+    2,
+    "returns before its function's end"
   ],
   "r1169u-u0-control-ternary-member": [
     2,
@@ -569,9 +559,8 @@
     "uses node:test's (test|describe) as a value"
   ],
   "r1169v-b0-control-if-skip": [
-    1,
-    "acceptance: the engine unit starts: SKIP not a booted host",
-    "test/y\\.test\\.ts:\\d+: acceptance: the engine unit starts"
+    2,
+    "returns before its function's end"
   ],
   "r1169v-b9-conditional-subtest": [
     2,
@@ -753,28 +742,24 @@
     "uses node:test's nt as a value"
   ],
   "r1169w-x0-control-b0": [
-    1,
-    "acceptance: the engine unit starts: SKIP not a booted host",
-    "test/y\\.test\\.ts:\\d+: acceptance: the engine unit starts"
+    2,
+    "returns before its function's end"
   ],
   "r1169w-x1-toplevel-beforeeach": [
     1,
     "probe: SKIP not a booted host"
   ],
   "r1169w-x4-named-function-body": [
-    1,
-    "acceptance: the engine unit starts: SKIP not a booted host",
-    "test/y\\.test\\.ts:\\d+: acceptance: the engine unit starts"
+    2,
+    "returns before its function's end"
   ],
   "r1169w-x4b-const-arrow-body": [
-    1,
-    "acceptance: the engine unit starts: SKIP not a booted host",
-    "test/y\\.test\\.ts:\\d+: acceptance: the engine unit starts"
+    2,
+    "returns before its function's end"
   ],
   "r1169w-x4c-named-body-in-describe": [
-    1,
-    "acceptance: the engine unit starts: SKIP not a booted host",
-    "test/y\\.test\\.ts:\\d+: acceptance: the engine unit starts"
+    2,
+    "returns before its function's end"
   ],
   "r1169w-x4d-named-body-holds-sign": [
     2,
@@ -809,9 +794,8 @@
     "test/y\\.test\\.ts:\\d+: the user services"
   ],
   "r1169w-y1b-control-subtest-return": [
-    1,
-    "the user services: (didn't run|failed|ran no subtest)",
-    "test/y\\.test\\.ts:\\d+: the user services"
+    2,
+    "returns before its function's end"
   ],
   "r1169w-y1c-control-subtest-if": [
     2,
@@ -886,9 +870,8 @@
     "uses reg, a function that registers tests, as a value"
   ],
   "r1169y-x10-holder-via-this": [
-    1,
-    "acceptance: the engine unit starts: SKIP not a booted host",
-    "test/y\\.test\\.ts:\\d+: acceptance: the engine unit starts"
+    2,
+    "returns before its function's end"
   ],
   "r1169y-x11-function-in-array": [
     1,
@@ -905,9 +888,8 @@
     "test/y\\.test\\.ts:\\d+: acceptance: the engine unit starts"
   ],
   "r1169y-x9c-control-const-body": [
-    1,
-    "acceptance: the engine unit starts: SKIP not a booted host",
-    "test/y\\.test\\.ts:\\d+: acceptance: the engine unit starts"
+    2,
+    "returns before its function's end"
   ],
   "r1169z-q1-loader-named-includes": [
     2,
@@ -1004,8 +986,8 @@
     "test/x\\.test\\.ts: base: failed"
   ],
   "r1169ab-a2-sign-early-return": [
-    1,
-    "test/x\\.test\\.ts: the watchdog reads unit states from the real service manager: its function's last statement \\(line \\d+\\) never ran"
+    2,
+    "returns before its function's end"
   ],
   "r1169ab-a3-conditional-subtest": [
     1,
@@ -1040,36 +1022,36 @@
     "^$"
   ],
   "r1169ad-subtest-early-return": [
-    1,
-    "test/y\\.test\\.ts: unit states, in a subtest: the subtest at line \\d+'s last statement \\(line \\d+\\) never ran"
+    2,
+    "returns before its function's end"
   ],
   "r1169ad-subtest-early-return-control": [
-    0,
-    "^$"
+    2,
+    "returns before its function's end"
   ],
   "r1169ac-element-access-subtest": [
-    1,
-    "test/y\\.test\\.ts: unit states, t\\[test\\]: the subtest at line \\d+'s last statement"
+    2,
+    "returns before its function's end"
   ],
   "r1169ac-element-access-subtest-control": [
-    0,
-    "^$"
+    2,
+    "returns before its function's end"
   ],
   "r1169ac-aliased-subtest": [
-    1,
-    "test/y\\.test\\.ts: unit states, an alias: the subtest at line \\d+'s last statement"
+    2,
+    "returns before its function's end"
   ],
   "r1169ac-aliased-subtest-control": [
-    0,
-    "^$"
+    2,
+    "returns before its function's end"
   ],
   "r1169ac-named-function": [
-    1,
-    "test/y\\.test\\.ts: the systemctl unit, by name: its function's last statement \\(line \\d+\\) never ran"
+    2,
+    "returns before its function's end"
   ],
   "r1169ac-named-function-control": [
-    0,
-    "^$"
+    2,
+    "returns before its function's end"
   ],
   "r1169ac-named-function-elsewhere": [
     2,
@@ -1124,8 +1106,8 @@
     "^$"
   ],
   "r1169ah-block-s06-finally-return": [
-    0,
-    "^$"
+    2,
+    "returns before its function's end"
   ],
   "r1169ah-block-s07-try-catch-around-sign": [
     2,
@@ -1216,12 +1198,12 @@
     "the watchdog reads unit states from the real service manager: line \\d+, holding systemd's sign, never ran"
   ],
   "r1169ah-block-s29-same-line-return": [
-    1,
-    "the watchdog reads unit states from the real service manager: line \\d+, holding systemd's sign, never ran"
+    2,
+    "returns before its function's end"
   ],
   "r1169ah-block-s30-early-return": [
-    1,
-    "the watchdog reads unit states from the real service manager: line \\d+, holding systemd's sign, never ran"
+    2,
+    "returns before its function's end"
   ],
   "r1169ah-block-s31-callback-same-line-never-called": [
     1,
@@ -1236,24 +1218,24 @@
     "the watchdog reads unit states from the real service manager: line \\d+, holding systemd's sign, never ran"
   ],
   "r1169ah-block-s34-labeled-break": [
-    1,
-    "the watchdog reads unit states from the real service manager: line \\d+, holding systemd's sign, never ran"
+    2,
+    "can skip systemd's sign"
   ],
   "r1169ah-block-s35-continue": [
-    1,
-    "the watchdog reads unit states from the real service manager: line \\d+, holding systemd's sign, never ran"
+    2,
+    "can skip systemd's sign"
   ],
   "r1169ah-block-s36-some-short-circuit": [
-    1,
-    "the watchdog reads unit states from the real service manager: line \\d+, holding systemd's sign, never ran"
+    2,
+    "returns before its function's end"
   ],
   "r1169ah-block-s37-unawaited-promise": [
     0,
     "^$"
   ],
   "r1169ah-block-s38-ran-control": [
-    1,
-    "the watchdog reads unit states from the real service manager: failed"
+    2,
+    "returns before its function's end"
   ],
   "r1169ai-i1-child-process-same-file": [
     1,
@@ -1264,28 +1246,28 @@
     "its file was loaded by 2 processes"
   ],
   "r1169aj-j02-helper-registers-twice": [
-    1,
-    "last statement \\(line \\d+\\) never ran: it returned early"
+    2,
+    "returns before its function's end"
   ],
   "r1169aj-j04-shared-subtest-fn": [
-    1,
-    "the subtest at line \\d+'s last statement \\(line \\d+\\) never ran: it returned early"
+    2,
+    "returns before its function's end"
   ],
   "r1169aj-j05-trailing-hoisted-helper": [
-    1,
-    "the watchdog reads unit states from the real service manager: .*last statement \\(line \\d+\\) never ran: it returned early"
+    2,
+    "returns before its function's end"
   ],
   "r1169aj-j05f-trailing-helper-subtest": [
-    1,
-    "the subtest at line \\d+'s last statement \\(line \\d+\\) never ran: it returned early"
+    2,
+    "returns before its function's end"
   ],
   "r1169aj-j16-trailing-async-helper": [
-    1,
-    "the watchdog reads unit states from the real service manager: .*last statement \\(line \\d+\\) never ran: it returned early"
+    2,
+    "returns before its function's end"
   ],
   "r1169aj-j17b-return-in-later-iteration-last": [
-    1,
-    "the watchdog reads unit states from the real service manager: .*last statement \\(line \\d+\\) never ran: it returned early"
+    2,
+    "returns before its function's end"
   ],
   "r1169aj-j19-object-destructuring-default": [
     2,
@@ -1312,6 +1294,98 @@
     "^$"
   ],
   "r1169aj-j17d-legit-loop-last-control": [
+    2,
+    "can skip systemd's sign"
+  ],
+  "r1169ak-k01-try-finally-last": [
+    2,
+    "returns before its function's end"
+  ],
+  "r1169ak-k02-if-block-last": [
+    2,
+    "returns before its function's end"
+  ],
+  "r1169ak-k03-try-catch-last": [
+    2,
+    "returns before its function's end"
+  ],
+  "r1169ak-k04-sign-in-try-finally-cleanup": [
+    2,
+    "returns before its function's end"
+  ],
+  "r1169ak-k05-subtest-try-finally-last": [
+    2,
+    "returns before its function's end"
+  ],
+  "r1169ak-k06-else-block-last": [
+    2,
+    "returns before its function's end"
+  ],
+  "r1169ak-k07-loop-break-skips-assertions": [
+    2,
+    "can skip systemd's sign"
+  ],
+  "r1169ak-k08-loop-continue-skips-assertions": [
+    2,
+    "can skip systemd's sign"
+  ],
+  "r1169ak-k09-labeled-block-break": [
+    0,
+    "^$"
+  ],
+  "r1169al-l01-foreach-return-after-sign": [
+    2,
+    "returns before its function's end"
+  ],
+  "r1169al-l02-promise-all-map-return": [
+    2,
+    "returns before its function's end"
+  ],
+  "r1169al-l03b-optional-member-sign": [
+    2,
+    "in an optional chain past its receiver"
+  ],
+  "r1169al-l04-do-while-condition": [
+    2,
+    "in a do…while condition"
+  ],
+  "r1169al-l05-for-continue-after-sign": [
+    2,
+    "can skip systemd's sign"
+  ],
+  "r1169al-l07-return-in-try-finally": [
+    2,
+    "returns before its function's end"
+  ],
+  "r1169al-l10-subtest-fn-twice": [
+    2,
+    "returns before its function's end"
+  ],
+  "r1169al-l11-then-callback-return": [
+    2,
+    "returns before its function's end"
+  ],
+  "r1169al-l14-return-then-or-last": [
+    2,
+    "returns before its function's end"
+  ],
+  "r1169al-l15-try-finally-cleanup": [
+    2,
+    "returns before its function's end"
+  ],
+  "r1169al-l17-subtest-try-finally": [
+    2,
+    "returns before its function's end"
+  ],
+  "r1169al-l18-helper-registers-twice-ternary": [
+    2,
+    "returns before its function's end"
+  ],
+  "r1169al-l19-return-nullish-then-sign": [
+    2,
+    "returns before its function's end"
+  ],
+  "r1169al-l12-final-return": [
     0,
     "^$"
   ]

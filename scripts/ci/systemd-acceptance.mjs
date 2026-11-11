@@ -103,9 +103,13 @@
 // again fails the run.
 // Refused before the run (exit 2), where V8 keeps no count of its own (measured, R1169ae/af/ah/aj): a sign in a `try`
 // that has a `catch` (a throwing call before it), in an optional call's arguments (a short-circuit), in a default
-// value (a parameter's or a destructuring's), on the right of `??=`, `||=` or `&&=`, or in a for loop's update; a
-// function whose last statement ends at its closing brace (where it ended can't be read); and a test or subtest
-// function given by a name the file declares more than once (which one is meant can't be read without scope).
+// value (a parameter's or a destructuring's), on the right of `??=`, `||=` or `&&=`, in a for loop's update, past an
+// optional chain's receiver or in a do…while condition; a function whose last statement ends at its closing brace
+// (where it ended can't be read); and a test or subtest function given by a name the file declares more than once
+// (which one is meant can't be read without scope). Control flow is read before the run, not from coverage (the
+// organizer's direction on R1169ak/al: V8 gives a taken `return` no count before an operand or a `try … finally`):
+// in the test's function, each subtest's and every function inside them, a `return` that isn't its function's last
+// statement (but `return <ctx>.skip(…)`/`.todo(…)`), and a `break` or `continue` whose loop or label holds the sign.
 // Named limits of that check, each measured on real block coverage (R1169ac-aj; the r1169ah-block-* fixtures):
 // - a call that throws before the sign, when something other than a `try` around the sign takes the throw (a caller's
 //   try, assert.throws/rejects, a promise's catch, Promise.allSettled, a `finally` that returns, an unawaited
@@ -114,7 +118,8 @@
 // - one function run for more than one test or subtest (a loop, a helper that registers, one function given to two
 //   subtests) shares its counts: a sign in a branch only some of its runs take reads as run (an early return in any
 //   of them doesn't: the end count is per call);
-// - a branch, loop, catch or never-called callback around assertions alone (no sign in it);
+// - a branch, loop, catch or never-called callback around assertions alone (no sign in it), and a `break` or
+//   `continue` out of a loop or block that holds assertions alone (R1169ak D2);
 // - code in a helper the test calls in another function; and an excused test (it skips here) isn't judged on it.
 //
 // Results come from node's test events (systemd-acceptance-reporter.mjs, R1169f), not from TAP text: each gate is
@@ -1658,6 +1663,9 @@ export function mustRun(ts, path, text, line, column) {
             : ts.isBinaryExpression(p) && x === p.right && [ts.SyntaxKind.QuestionQuestionEqualsToken, ts.SyntaxKind.BarBarEqualsToken, ts.SyntaxKind.AmpersandAmpersandEqualsToken].includes(p.operatorToken.kind) ? 'the right side of `??=`, `||=` or `&&=`'
             : ts.isForStatement(p) && x === p.incrementor ? "a for loop's update" : null;
           if (noCount) out.refused ??= `line ${lineOf(n)} holds systemd's sign in ${noCount}, where V8 keeps no count of its own: do the systemd work in a statement of its own`;
+          // R1169al D3, D4: past an optional chain's first segment, and in a do…while condition, V8 keeps no count.
+          if ((ts.isPropertyAccessExpression(p) || ts.isElementAccessExpression(p) || ts.isCallExpression(p)) && ts.isOptionalChain(p) && x !== p.expression && !(ts.isCallExpression(p) && p.arguments.includes(x))) out.refused ??= `line ${lineOf(n)} holds systemd's sign in an optional chain past its receiver (a short-circuit leaves no count): call it plainly`;
+          if (ts.isDoStatement(p) && x === p.expression) out.refused ??= `line ${lineOf(n)} holds systemd's sign in a do…while condition, where V8 keeps no count of its own: do the systemd work in the body`;
           if (ts.isTryStatement(p) && x === p.tryBlock && p.catchClause) out.refused ??= `line ${lineOf(n)} holds systemd's sign in a try whose catch would take a throw before it (coverage would count it as run): keep the systemd work out of the try`;
           if ((ts.isCallExpression(p) || ts.isElementAccessExpression(p)) && (p.questionDotToken || ts.isOptionalChain(p)) && x !== p.expression) out.refused ??= `line ${lineOf(n)} holds systemd's sign in an optional call's arguments (a short-circuit leaves no count): call it plainly`;
         }
@@ -1671,6 +1679,9 @@ export function mustRun(ts, path, text, line, column) {
       if (!sub) out.refused ??= `the subtest at line ${lineOf(c)} is given a function this file doesn't declare once`;
       else walk(sub, `the subtest at line ${lineOf(c)}`);
     }
+    // After the subtests, so a refusal of what can't be read comes first.
+    const flow = flowProblem(ts, sf, fn, (x) => holdsSign(ts, sf, x, sign));
+    if (flow) out.refused ??= `${what}: ${flow}`;
   };
   const call = callAt(ts, sf, line, column);
   const fn = functionOf(ts, sf, call?.arguments.at(-1));
@@ -1678,6 +1689,62 @@ export function mustRun(ts, path, text, line, column) {
   walk(fn, 'its function');
   out.sign = [...new Map(out.sign.map((s) => [s.pos, s])).values()].sort((a, b) => a.pos - b.pos);
   return out;
+}
+
+/** Whether `node` holds systemd's sign (as mustRun reads one: a string, a name or a regex). */
+function holdsSign(ts, sf, node, sign) {
+  let hit = false;
+  const v = (n) => {
+    if (hit) return;
+    if ((ts.isStringLiteralLike(n) || ts.isTemplateHead(n) || ts.isTemplateMiddle(n) || ts.isTemplateTail(n) || ts.isIdentifier(n) || ts.isRegularExpressionLiteral(n)) && sign.test(ts.isIdentifier(n) ? n.text : n.getText(sf))) hit = true;
+    else ts.forEachChild(n, v);
+  };
+  v(node);
+  return hit;
+}
+
+/**
+ * Control flow, read before the run (the organizer's direction on R1169ak/al, 2026-11-11: V8 gives a taken `return`
+ * no range of its own before an operand or a `try … finally`, so coverage can't be trusted to see it). In `fn`, and in
+ * each function inside it (a callback the test passes, R1169al D2, holding the sign or only the checks on it): a `return` that isn't its
+ * function's last statement (but `return <ctx>.skip(…)` or `.todo(…)`, which the run reads as a skip), and a `break` or
+ * `continue` whose loop or label holds the sign (it can skip that work). null when there's none.
+ */
+function flowProblem(ts, sf, fn, hasSign) {
+  const lineOf = (n) => sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1;
+  const fns = [fn];
+  const nested = (n) => {
+    if (n !== fn && ts.isFunctionLike(n) && n.body) fns.push(n);
+    ts.forEachChild(n, nested);
+  };
+  if (fn.body) nested(fn.body);
+  for (const f of fns) {
+    if (!f.body || !ts.isBlock(f.body)) continue;
+    const last = f.body.statements.at(-1);
+    let found = null;
+    const visit = (n) => {
+      if (found || (n !== f && ts.isFunctionLike(n))) return;
+      if (ts.isReturnStatement(n) && n !== last) {
+        const e = n.expression;
+        const skip = e && ts.isCallExpression(e) && ts.isPropertyAccessExpression(e.expression) && ['skip', 'todo'].includes(e.expression.name.text);
+        if (!skip) found = `line ${lineOf(n)} returns before its function's end (only its last statement may: an early return skips what follows, which coverage can't always see), so make the rest conditional instead`;
+      }
+      if ((ts.isBreakStatement(n) || ts.isContinueStatement(n)) && !found) {
+        let target = null;
+        for (let p = n.parent; p && p !== f; p = p.parent) {
+          if (n.label ? ts.isLabeledStatement(p) && p.label.text === n.label.text : ts.isIterationStatement(p, false) || (ts.isBreakStatement(n) && ts.isSwitchStatement(p))) {
+            target = ts.isLabeledStatement(p) ? p.statement : p;
+            break;
+          }
+        }
+        if (target && !ts.isSwitchStatement(target) && hasSign(target)) found = `line ${lineOf(n)}'s ${ts.isBreakStatement(n) ? 'break' : 'continue'} can skip systemd's sign in its ${ts.isIterationStatement(target, false) ? 'loop' : 'block'} (coverage can't always see that), so make the rest conditional instead`;
+      }
+      ts.forEachChild(n, visit);
+    };
+    visit(f.body);
+    if (found) return f === fn ? found : `a function inside it (line ${lineOf(f)}): ${found}`;
+  }
+  return null;
 }
 
 /** Whether `e`, an `a = b`, is a default inside a destructuring assignment's pattern (`[a = b] = x`, `({ k: a = b } = x)`). */

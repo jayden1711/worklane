@@ -1,0 +1,15 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.
+const VM = true;
+
+test('the watchdog reads unit states from the real service manager', async () => {
+  const r = spawnSync('systemctl', ['is-active', 'x']);
+  try {
+    if (VM) return;
+    assert.equal(r.status, -7);
+  } catch (e) {
+    throw e;
+  }
+});
