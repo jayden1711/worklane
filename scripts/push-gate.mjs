@@ -233,8 +233,8 @@ const BLANK = /^[ \t\n\v\f\r]*$/;
  * picks a character (by a rule that differs between versions: 2.48 skips one a line of the message starts with, 2.56
  * didn't for `-e -m`, measured in CI) and writes its scissors line and help lines with it, so the hook reads git's
  * choice from what git wrote: the scissors line, or the help block at the end (lines starting with one candidate, after
- * a blank line, below the message), when the block is git's (3 lines or more) or git's 2.48 rule over the lines above
- * gives that candidate. Otherwise (no help lines to read it from) both readings, `#` stripped and nothing stripped: the
+ * a blank line, below the message), when the block is git's (3 lines or more, the message's own lines that start with
+ * the same character joining it) or git's 2.48 rule over the lines above gives that candidate. Otherwise (no help lines to read it from) both readings, `#` stripped and nothing stripped: the
  * hook refuses when either fails, never passing what git might commit differently.
  */
 function commentPrefixes(text, setting) {
@@ -249,8 +249,11 @@ function commentPrefixes(text, setting) {
     const above = lines.slice(0, b);
     const separated = b < lines.length && BLANK.test(lines[b]) && above.some((l) => !BLANK.test(l));
     const gits = [...AUTO_COMMENT].find((x) => !above.some((l) => l.startsWith(x)));
+    // A block of 3 or more is git's help text: its character is git's, and git strips every line it starts, the
+    // message's own included (git 2.56 picks `#` with a `#` line in the message, which then joins the block: CI).
     const block = lines.slice(b).filter((l) => l.startsWith(c)).length;
-    if (separated && (block >= 3 || gits === c)) return [c];
+    if (block >= 3 && above.some((l) => !BLANK.test(l))) return [c];
+    if (separated && gits === c) return [c];
   }
   return ['#', null];
 }

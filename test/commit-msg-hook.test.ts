@@ -235,6 +235,26 @@ test("the commit-msg hook and the push gate agree on what git commits, by git's 
   assert.deepEqual(seen, [], 'every row the hook can see agrees with the gate');
 });
 
+test("core.commentChar=auto: the hook reads git's choice from git's own help block, as git 2.48 and 2.56 each write it (#1260, CI at ae2bcf69)", () => {
+  const r = repo();
+  r.git('config', 'core.commentChar', 'auto');
+  const judge = (text: string) => {
+    const f = join(r.dir, '.git', 'COMMIT_EDITMSG');
+    writeFileSync(f, text);
+    return spawnSync(process.execPath, [installedGate, '--commit-msg', f], { cwd: r.dir, encoding: 'utf8', env: { ...process.env, PUSH_GATE_COMMIT_MSG: f, GIT_EDITOR: 'true', GIT_DIR: join(r.dir, '.git') } }).status;
+  };
+  const help = (c: string) => `${c} Please enter the commit message for your changes. Lines starting\n${c} with '${c}' will be ignored, and an empty message aborts the commit.\n${c}\n${c} On branch main\n`;
+  // git 2.56 (the runner's): `#` chosen, the message's #1259 line joins the block and is stripped: line 2 is blank.
+  assert.equal(judge(`subj\n#1259 follow-up\n\n${help('#')}`), 0, '2.56: the # line is a comment');
+  // git 2.48: `;` chosen, the #1259 line is kept as line 2.
+  assert.equal(judge(`subj\n#1259 follow-up\n\n${help(';')}`), 1, '2.48: the # line is line 2');
+  // A #NNN subject: kept under `;`, stripped under `#`, whose next line is then the subject.
+  assert.equal(judge(`#1259: ${'a'.repeat(200)}\n\nBody.\n\n${help(';')}`), 1, 'a long #NNN subject kept');
+  assert.equal(judge(`#1259: short subject\n\n${'a'.repeat(200)}\n\n${help(';')}`), 0, 'a short #NNN subject kept, the long line is the body');
+  // No help block (commit.status=false): both readings, refused if either fails.
+  assert.equal(judge(`#1259: ${'a'.repeat(200)}\n`), 1, 'no block: strict');
+});
+
 test('a remote named --commit-msg is judged as a push, never as a message (#1260 R1260a D2)', () => {
   const r = repo();
   const base = r.git('rev-parse', 'HEAD');
