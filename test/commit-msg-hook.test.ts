@@ -427,6 +427,42 @@ test('a noncharacter is refused by the hook, as git rewrites it; a commit whose 
   }
 });
 
+test("the gate reads a commit's header block strictly, as git splits it: a CR-hidden decoy, a NUL, a non-ASCII byte, two encoding headers or any value but UTF-8 is refused (#1260 R1260p D1)", () => {
+  const g = repo();
+  const gateOn = (base: string) => spawnSync(process.execPath, [gate, '--range', `${base}..HEAD`], { cwd: repoRoot, encoding: 'utf8', env: { ...process.env, GIT_DIR: join(g.dir, '.git') } });
+  /** A commit made with plumbing (as a revert or a rebase pick is: no commit-msg hook), its header lines as given. */
+  const craft = (headers: string[], msg: string, literally = false) => {
+    const base = g.git('rev-parse', 'HEAD');
+    const text = [`tree ${g.git('rev-parse', 'HEAD^{tree}')}`, `parent ${base}`, 'author Ada <ada@example.com> 1700000000 -0100', 'committer Ada <ada@example.com> 1700000000 -0100', ...headers].join('\n') + `\n\n${msg}`;
+    const made = spawnSync('git', ['hash-object', '-t', 'commit', ...(literally ? ['--literally'] : []), '-w', '--stdin'], { cwd: g.dir, input: Buffer.from(text, 'latin1'), encoding: 'utf8' });
+    assert.equal(made.status, 0, made.stderr);
+    g.git('update-ref', 'HEAD', made.stdout.trim());
+    return base;
+  };
+  // UTF-7 for `Co`: git log shows `Co-Authored-By: …` under `encoding UTF-7`; the raw bytes match no attribution pattern.
+  const utf7 = 'Add a thing\n\n+AEMAbw--Authored-By: Someone <noreply@example.com>\n';
+  for (const [what, headers, msg, why, literally] of [
+    ['decoy-attr: an extra header hiding `encoding utf8` behind a CR', ['x-note a\rencoding utf8', 'encoding UTF-7'], utf7, /a CR, a NUL or a byte that isn't ASCII/, false],
+    ['decoy-gpgsig-cont: the decoy in a signature continuation', ['gpgsig -----BEGIN PGP SIGNATURE-----', ' \rencoding utf8', ' -----END PGP SIGNATURE-----', 'encoding UTF-7'], utf7, /a CR, a NUL or a byte that isn't ASCII/, false],
+    ['the real one first, then the decoy', ['encoding UTF-7', 'x-note a\rencoding utf8'], utf7, /a CR, a NUL or a byte that isn't ASCII/, false],
+    ['two encoding headers', ['encoding UTF-8', 'encoding UTF-8'], 'Add a thing\n', /has 2 encoding headers/, false],
+    ['encoding utf8 (not exactly UTF-8)', ['encoding utf8'], 'Add a thing\n', /declares its message encoding as "utf8"/, false],
+    ['an extra space', ['encoding  UTF-8'], 'Add a thing\n', /declares its message encoding as " UTF-8"/, false],
+    ['an empty value', ['encoding '], 'Add a thing\n', /declares its message encoding as ""/, false],
+    ['a NUL in a header', ['x-note a\0b'], 'Add a thing\n', /a CR, a NUL or a byte that isn't ASCII/, true],
+    ['a byte that is not ASCII in a header', ['x-note café'], 'Add a thing\n', /a CR, a NUL or a byte that isn't ASCII/, false],
+  ] as const) {
+    const got = gateOn(craft([...headers], msg, literally));
+    assert.notEqual(got.status, 0, `refused: ${what}`);
+    assert.match(got.stderr, why, what);
+  }
+  // Accepted and judged: no header, and `encoding UTF-8` in any case.
+  for (const headers of [[], ['encoding UTF-8'], ['encoding utf-8']]) {
+    const got = gateOn(craft(headers, 'Subject\nnot blank\n'));
+    assert.match(got.stderr, /line 2 is not blank/, `judged: ${headers.join() || 'no header'}`);
+  }
+});
+
 test('a remote named --commit-msg is judged as a push, never as a message (#1260 R1260a D2)', () => {
   const r = repo();
   const base = r.git('rev-parse', 'HEAD');

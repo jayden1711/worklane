@@ -188,9 +188,19 @@ function commitMessage(sha) {
   const end = raw.indexOf('\n\n');
   const head = (end === -1 ? raw : raw.subarray(0, end)).toString('latin1');
   const body = end === -1 ? Buffer.alloc(0) : raw.subarray(end + 2);
-  const enc = /^encoding (.+)$/m.exec(head)?.[1]?.trim();
+  // R1260p D1: the header block read strictly, as git reads it and no other way. git splits header lines on LF only,
+  // so a CR inside a line (`x-note a\rencoding utf8`, or in a gpgsig continuation) hid a decoy `encoding` line from git
+  // while a multiline regex took it first. Refused: a header line holding a CR, a NUL or a byte that isn't ASCII; more
+  // than one `encoding` header; any `encoding` value but exactly UTF-8 (in any case).
+  const lines = head.split('\n');
+  const odd = lines.find((l) => /[\r\0\x80-\xff]/.test(l));
+  if (odd !== undefined) throw new Error(`commit ${sha.slice(0, 8)}'s header has a CR, a NUL or a byte that isn't ASCII (${JSON.stringify(odd.slice(0, 60))}): the gate reads plain ASCII headers only`);
+  const encs = lines.filter((l) => /^encoding( |$)/.test(l));
+  if (encs.length > 1) throw new Error(`commit ${sha.slice(0, 8)} has ${encs.length} encoding headers: the gate reads at most one, exactly "encoding UTF-8"`);
+  const enc = encs.length ? encs[0].slice('encoding '.length) : undefined;
+  if (enc !== undefined && !/^UTF-8$/i.test(enc)) throw new Error(`commit ${sha.slice(0, 8)} declares its message encoding as ${JSON.stringify(enc)}: the gate reads UTF-8 messages only. Re-make the commit with i18n.commitEncoding unset or UTF-8`);
   if (!enc || /^utf-?8$/i.test(enc)) return body.toString('utf8');
-  throw new Error(`commit ${sha.slice(0, 8)} declares its message encoding as ${JSON.stringify(enc)}: the gate reads UTF-8 messages only. Re-make the commit with i18n.commitEncoding unset or UTF-8`);
+  throw new Error(`commit ${sha.slice(0, 8)} declares its message encoding as ${JSON.stringify(enc)}: the gate reads UTF-8 messages only`);
 }
 
 /** A pushed commit's message shape. Only the pushed commits are judged, never what's already on main. */
