@@ -230,6 +230,8 @@ const ROWS: Row[] = [
   ['enc-logout', { 'i18n.commitEncoding': 'ISO-8859-1', 'i18n.logOutputEncoding': 'UTF-8' }, `${'\u00e9'.repeat(100)}\n`, ['-F', 'MSG']],
   ['enc-logout-e', { 'i18n.commitEncoding': 'ISO-8859-1', 'i18n.logOutputEncoding': 'UTF-8' }, `${'\u00e9'.repeat(100)}\n`, ['-e', '-F', 'MSG']],
   ['enc-repo', { 'i18n.commitEncoding': 'ISO-8859-1' }, `${'\u00e9'.repeat(100)}\n`, ['-F', 'MSG']],
+  // R1260m D1, R1260n D1: a noncharacter is valid UTF-8, but git rewrites its bytes: 61 x U+FDD0 commit as 183.
+  ['nonchar-fdd0', {}, `${'\ufdd0'.repeat(61)}\n`, ['-F', 'MSG']],
   ['enc-utf8', {}, `${'\u00e9'.repeat(100)}\n`, ['-F', 'MSG']],
   // R1260j D3: more --cleanup= on the command line, which no hook can see.
   ['cli-strip-F', {}, `# c\n\n${L}\n`, ['--cleanup=strip', '-F', 'MSG']],
@@ -260,7 +262,8 @@ test("the commit-msg hook and the push gate agree on what git commits, by git's 
     const made = spawnSync('git', ['commit', '-q', '--allow-empty', '--no-verify', ...argv], { cwd: b.dir, encoding: 'utf8', env: { ...env, ...rowEnv } });
     assert.equal(made.status, 0, `${name}: git made the commit: ${made.stderr}`);
     const g = spawnSync(process.execPath, [gate, '--range', 'HEAD~1..HEAD'], { cwd: repoRoot, encoding: 'utf8', env: { ...process.env, GIT_DIR: join(b.dir, '.git') } });
-    if (g.status !== 0) assert.match(g.stderr, /subject is not one short line/, `${name}: the gate refused for the message's shape, not something else: ${g.stderr}`);
+    // A commit encoding but UTF-8 is refused outright by the gate (R1260m D2, R1260n D2), as by the hook.
+    if (g.status !== 0) assert.match(g.stderr, /subject is not one short line|declares its message encoding as/, `${name}: the gate refused for the message's shape or its encoding, not something else: ${g.stderr}`);
     const verdict = `hook=${hookOk ? 'pass' : 'refuse'} gate=${g.status === 0 ? 'pass' : 'refuse'}`;
     if (name in CLI_RESIDUAL) assert.equal(verdict, CLI_RESIDUAL[name], `${name}: the stated residual`);
     // R1260g/h: with core.commentChar=auto the hook can't know git's pick, so it judges every reading: it may refuse
@@ -365,18 +368,18 @@ test('the hook fails closed on a comment setting or an encoding it would have to
   const bad = judge(Buffer.from([0x73, 0x75, 0x62, 0x6a, 0xff, 0x0a]));
   assert.equal(bad.status, 1);
   assert.match(bad.stderr, /the message is not valid UTF-8/);
-  // l D2: the gate reads the raw commit object, decoded by its own encoding header, whatever log.showSignature or
-  // i18n.logOutputEncoding say at push time.
+  // l D2: the gate reads the raw commit object as UTF-8, whatever log.showSignature or i18n.logOutputEncoding say at
+  // push time; and (R1260m D2, R1260n D2) refuses a commit whose encoding header isn't UTF-8, never decoding it.
   const g = repo();
   const base = g.git('rev-parse', 'HEAD');
   writeFileSync(join(g.dir, 'ok.md'), 'x\n');
   g.git('add', 'ok.md');
-  g.git('-c', 'i18n.commitEncoding=ISO-8859-1', 'commit', '-q', '--no-verify', '-m', 'é'.repeat(100));
+  g.git('commit', '-q', '--no-verify', '-m', 'é'.repeat(181));
   const gate1 = (cfg: string[]) => spawnSync(process.execPath, [gate, '--range', `${base}..HEAD`], { cwd: repoRoot, encoding: 'utf8', env: { ...process.env, GIT_DIR: join(g.dir, '.git'), GIT_CONFIG_COUNT: String(cfg.length / 2), ...Object.fromEntries(cfg.flatMap((x, i) => (i % 2 ? [] : [[`GIT_CONFIG_KEY_${i / 2}`, x], [`GIT_CONFIG_VALUE_${i / 2}`, cfg[i + 1]!]]))) } });
   for (const cfg of [[], ['i18n.logOutputEncoding', 'ISO-8859-1'], ['i18n.logOutputEncoding', 'UTF-8'], ['log.showSignature', 'true']]) {
     const got = gate1(cfg);
     assert.notEqual(got.status, 0, `refused under ${cfg.join('=') || 'no setting'}`);
-    assert.match(got.stderr, /the subject is 200 characters, over 180/, `as stored, 200 Latin-1 characters: ${cfg.join('=')}`);
+    assert.match(got.stderr, /the subject is 181 characters, over 180/, `as stored, 181 UTF-8 characters: ${cfg.join('=')}`);
   }
   // A signed commit (ssh, where ssh-keygen is here) with log.showSignature on: the signature isn't the message.
   if (spawnSync('ssh-keygen', ['-?'], { stdio: 'ignore' }).error) return t.diagnostic('no ssh-keygen: the signed case not run');
@@ -388,6 +391,40 @@ test('the hook fails closed on a comment setting or an encoding it would have to
   g.git('-c', 'gpg.format=ssh', '-c', `user.signingkey=${key}`, 'commit', '-q', '--no-verify', '-S', '-m', 'Add ok2');
   const signed = spawnSync(process.execPath, [gate, '--range', `${s1}..HEAD`], { cwd: repoRoot, encoding: 'utf8', env: { ...process.env, GIT_DIR: join(g.dir, '.git'), GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'log.showSignature', GIT_CONFIG_VALUE_0: 'true' } });
   assert.doesNotMatch(signed.stderr, /subject is not one short line|line 2 is not blank/, `a signed commit's message as stored: ${signed.stderr}`);
+});
+
+test('a noncharacter is refused by the hook, as git rewrites it; a commit whose encoding header is not UTF-8 is refused by the gate, never decoded (#1260 R1260m D1, D2, R1260n D1, D2)', () => {
+  const r = repo();
+  const judge = (text: string) => {
+    const f = join(r.dir, '.git', 'COMMIT_EDITMSG');
+    writeFileSync(f, text);
+    return spawnSync(process.execPath, [installedGate, '--commit-msg', f], { cwd: r.dir, encoding: 'utf8', env: { ...process.env, PUSH_GATE_COMMIT_MSG: f, GIT_EDITOR: 'true', GIT_DIR: join(r.dir, '.git') } });
+  };
+  for (const [what, text] of [['61 x U+FDD0', `${'﷐'.repeat(61)}\n`], ['U+FDEF', 'subj ﷯\n'], ['U+FFFE', 'subj ￾\n'], ['U+FFFF', 'subj\n\nbody ￿\n'], ['U+1FFFE', 'subj \u{1fffe}\n'], ['U+10FFFF', 'subj \u{10ffff}\n']] as const) {
+    const got = judge(text);
+    assert.equal(got.status, 1, `refused: ${what}`);
+    assert.match(got.stderr, /a Unicode noncharacter/, what);
+  }
+  for (const [what, text] of [['U+FDCF', 'subj ﷏\n'], ['U+FDF0', 'subj ﷰ\n'], ['U+FFFD', 'subj �\n'], ['U+FFFC', 'subj ￼\n'], ['U+1FFFD', 'subj \u{1fffd}\n']] as const) assert.equal(judge(text).status, 0, `kept: ${what}`);
+  // The gate: an encoding header other than UTF-8, in any spelling, is refused before any check reads the message.
+  const g = repo();
+  const gateOn = (base: string) => spawnSync(process.execPath, [gate, '--range', `${base}..HEAD`], { cwd: repoRoot, encoding: 'utf8', env: { ...process.env, GIT_DIR: join(g.dir, '.git') } });
+  for (const enc of ['unicodefeff', 'iso-10646-ucs-2', 'unicode', 'UTF-16', 'ISO-8859-1', 'x-no-such-encoding']) {
+    for (const [what, args] of [['ufeff-attr-even', ['-m', 'Add a file', '-m', 'Body.', '-m', 'Co-Authored-By: Someone <noreply@example.com>\nxx']], ['ufeff-line2', ['-m', 'Subject\nnot blank']]] as const) {
+      const base = g.git('rev-parse', 'HEAD');
+      g.git('-c', `i18n.commitEncoding=${enc}`, 'commit', '-q', '--allow-empty', '--no-verify', ...args);
+      const got = gateOn(base);
+      assert.notEqual(got.status, 0, `refused: ${enc} ${what}`);
+      assert.match(got.stderr, new RegExp(`declares its message encoding as "${enc}": the gate reads UTF-8 messages only`), `${enc} ${what}`);
+    }
+  }
+  // UTF-8 in any spelling is read and judged as usual: the shape check sees it.
+  for (const enc of ['UTF-8', 'utf8', 'Utf-8']) {
+    const base = g.git('rev-parse', 'HEAD');
+    g.git('-c', `i18n.commitEncoding=${enc}`, 'commit', '-q', '--allow-empty', '--no-verify', '-m', 'Subject\nnot blank');
+    const got = gateOn(base);
+    assert.match(got.stderr, /line 2 is not blank/, `judged: ${enc}`);
+  }
 });
 
 test('a remote named --commit-msg is judged as a push, never as a message (#1260 R1260a D2)', () => {

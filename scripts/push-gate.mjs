@@ -177,10 +177,11 @@ function messageShapeProblems(message) {
 }
 
 /**
- * A commit's message as git stored it (R1260l D2): the raw commit object's text after its headers, decoded by its own
- * `encoding` header (UTF-8 when there is none), never git's formatted log, which log.showSignature,
- * i18n.logOutputEncoding and the like change at push time. Throws when the encoding can't be decoded, so the gate
- * fails closed.
+ * A commit's message as git stored it (R1260l D2): the raw commit object's text after its headers, as UTF-8, never
+ * git's formatted log, which log.showSignature, i18n.logOutputEncoding and the like change at push time. A commit with
+ * an `encoding` header other than UTF-8 is refused, never decoded (R1260m D2, R1260n D2: a label a decoder maps one way
+ * and glibc another, `unicodefeff` or `UTF-16`, turned an ASCII message into one line of CJK that no check matched).
+ * Throws, so the gate fails closed.
  */
 function commitMessage(sha) {
   const raw = runGit(['cat-file', 'commit', sha], { maxBuffer: READ_MAX });
@@ -189,11 +190,7 @@ function commitMessage(sha) {
   const body = end === -1 ? Buffer.alloc(0) : raw.subarray(end + 2);
   const enc = /^encoding (.+)$/m.exec(head)?.[1]?.trim();
   if (!enc || /^utf-?8$/i.test(enc)) return body.toString('utf8');
-  try {
-    return new TextDecoder(enc, { fatal: true, ignoreBOM: true }).decode(body);
-  } catch {
-    throw new Error(`commit ${sha.slice(0, 8)}'s message is in ${enc}, which the gate can't decode`);
-  }
+  throw new Error(`commit ${sha.slice(0, 8)} declares its message encoding as ${JSON.stringify(enc)}: the gate reads UTF-8 messages only. Re-make the commit with i18n.commitEncoding unset or UTF-8`);
 }
 
 /** A pushed commit's message shape. Only the pushed commits are judged, never what's already on main. */
@@ -258,7 +255,8 @@ function commentSetting() {
   // bytes that aren't UTF-8, U+FFFD, a space) is refused rather than modelled.
   const text = value.toString('latin1');
   if (text.toLowerCase() === 'auto' || /^[\x21-\x7e]+$/.test(text)) return text;
-  throw new Refusal(`core.commentChar or core.commentString is ${JSON.stringify(value.toString('utf8'))}, which the commit-msg hook won't model: set it to printable ASCII with no whitespace (# by default), or auto`);
+  const shown = [...value].map((b) => (b >= 0x21 && b <= 0x7e && b !== 0x5c ? String.fromCharCode(b) : `\\x${b.toString(16).padStart(2, '0')}`)).join('');
+  throw new Refusal(`core.commentChar or core.commentString is "${shown}", which the commit-msg hook won't model: set it to printable ASCII with no whitespace (# by default), or auto`);
 }
 
 /** A refusal the commit-msg hook gives with its own words (no "could not read" prefix). */
@@ -401,6 +399,9 @@ if (process.argv[2] === '--commit-msg' && installedCopy && process.argv.length =
     } catch {
       throw new Refusal('the message is not valid UTF-8: write it in UTF-8 (and set i18n.commitEncoding to UTF-8 or unset it)');
     }
+    // R1260m D1, R1260n D1: the rest of git's find_invalid_utf8: a noncharacter (U+FDD0-U+FDEF, U+xxFFFE, U+xxFFFF) is
+    // valid UTF-8 to a decoder, but git rewrites its bytes one by one as Latin-1, so the gate would read another message.
+    if ([...text].some((ch) => { const cp = ch.codePointAt(0); return (cp >= 0xfdd0 && cp <= 0xfdef) || (cp & 0xfffe) === 0xfffe; })) throw new Refusal('the message holds a Unicode noncharacter (U+FDD0-U+FDEF, or one ending in FFFE or FFFF), which git rewrites byte by byte: remove it');
     const texts = [text];
     const mode = cleanupMode();
     const readings = texts.flatMap((text) => commentPrefixes(text, commentSetting()).flatMap((c) => cutReadings(mode).map((cut) => asCommitted(text, mode, c, cut))));
