@@ -107,22 +107,22 @@
 // optional chain's receiver or in a do…while condition; a function whose last statement ends at its closing brace
 // (where it ended can't be read); and a test or subtest function given by a name the file declares more than once
 // (which one is meant can't be read without scope). Control flow is read before the run, not from coverage (the
-// organizer's direction on R1169ak/al: V8 gives a taken `return` no count before an operand or a `try … finally`):
-// in the test's function, each subtest's and every function inside them, a `return` that isn't its function's last
-// statement (but `return <ctx>.skip(…)`/`.todo(…)`, its receiver a parameter of a function around it), a `throw` with
-// the sign or a subtest after it in its function that no try with a catch in that function takes, a `break` or
-// `continue` whose loop or label holds the sign, and a switch's `break` before the end of its case when the switch
-// holds the sign (R1169am, R1169an).
-// Named limits of that check, each measured on real block coverage (R1169ac-aj; the r1169ah-block-* fixtures):
-// - a call that throws before the sign, when something other than a `try` around the sign takes the throw (a caller's
-//   try, assert.throws/rejects, a promise's catch, Promise.allSettled, a `finally` that returns, an unawaited
-//   Promise): V8 starts no new count after a call, so the rest of its block reads as run;
+// organizer's direction on R1169ak-ap: V8 gives a jump no count of its own before an operand or a `try … finally`),
+// one rule, not per shape: in the test's function, each subtest's and every function inside them, any `return`,
+// `throw`, `break` or `continue`, labeled or not, that isn't its function's last statement, but `return <ctx>.skip(…)`
+// or `.todo(…)` whose `<ctx>` the checker binds to a parameter of a function around it. And at run time (R1169ap F3), a
+// sign also reads as never run when a count-0 range starts at the end of an earlier statement in a block around it:
+// the continuation after a jump there, a rejected `await` included, wherever V8 ended that range.
+// Named limits of that check, each measured on real block coverage (R1169ac-ap; the r1169ah-block-* fixtures):
+// - a call, a member read or a destructuring that throws before the sign (R1169ap D4), when something other than a
+//   `try` around the sign takes the throw without a jump of its own (a caller's try, assert.throws/rejects, a promise's
+//   catch, Promise.allSettled, an unawaited Promise): V8 starts no new count after it, so the rest of its block reads
+//   as run;
 // - a generator's body (`function*`, `async function*`) when the generator is made but never iterated;
 // - one function run for more than one test or subtest (a loop, a helper that registers, one function given to two
 //   subtests) shares its counts: a sign in a branch only some of its runs take reads as run (an early return in any
 //   of them doesn't: the end count is per call);
-// - a branch, loop, catch or never-called callback around assertions alone (no sign in it), and a `break` or
-//   `continue` out of a loop or block that holds assertions alone (R1169ak D2);
+// - a branch, loop, catch or never-called callback around assertions alone (no sign in it);
 // - code in a helper the test calls in another function; and an excused test (it skips here) isn't judged on it.
 //
 // Results come from node's test events (systemd-acceptance-reporter.mjs, R1169f), not from TAP text: each gate is
@@ -1638,6 +1638,8 @@ export function mustRun(ts, path, text, line, column) {
   const at = (n) => ({ line: lineOf(n), pos: n.getStart(sf) });
   const sign = new RegExp(SIGN.source);
   const out = { ends: [], subtests: [], sign: [], refused: null };
+  let chk = null;
+  const checker = () => (chk ??= checkerOf(ts, sf));
   const seen = new Set();
   const walk = (fn, what) => {
     if (seen.has(fn)) return;
@@ -1653,7 +1655,15 @@ export function mustRun(ts, path, text, line, column) {
     } else if (fn.body) out.ends.push({ ...at(fn.body), what });
     const signs = (n) => {
       if ((ts.isStringLiteralLike(n) || ts.isTemplateHead(n) || ts.isTemplateMiddle(n) || ts.isTemplateTail(n) || ts.isIdentifier(n) || ts.isRegularExpressionLiteral(n)) && sign.test(ts.isIdentifier(n) ? n.text : n.getText(sf))) {
-        out.sign.push(at(n));
+        // R1169ap F3: the end of every earlier statement in each block or case around it, up to its function. A count-0
+        // range that starts at one is the continuation after a jump there (a return, a throw, a rejected await): the
+        // sign after it never ran, wherever V8 ended that range.
+        const after = [];
+        for (let x = n; x.parent && x !== fn; x = x.parent) {
+          const list = ts.isBlock(x.parent) || ts.isCaseClause(x.parent) || ts.isDefaultClause(x.parent) ? x.parent.statements : null;
+          if (list) for (const st of list) if (st.end <= x.pos) after.push(st.end);
+        }
+        out.sign.push({ ...at(n), after });
         // Where V8's block coverage counts the sign as run though it wasn't (measured, R1169ag/ah): after a call
         // that throws in a try whose catch takes it (V8 starts no counter after a call), and in the arguments of an
         // optional call that short-circuits (V8 has no counter there). Refused, not judged: 0 picked tests have either.
@@ -1683,7 +1693,7 @@ export function mustRun(ts, path, text, line, column) {
       else walk(sub, `the subtest at line ${lineOf(c)}`);
     }
     // After the subtests, so a refusal of what can't be read comes first.
-    const flow = flowProblem(ts, sf, fn, (x) => holdsSign(ts, sf, x, sign));
+    const flow = flowProblem(ts, sf, fn, checker());
     if (flow) out.refused ??= `${what}: ${flow}`;
   };
   const call = callAt(ts, sf, line, column);
@@ -1707,68 +1717,40 @@ function holdsSign(ts, sf, node, sign) {
 }
 
 /**
- * Control flow, read before the run (the organizer's direction on R1169ak/al, 2026-11-11: V8 gives a taken `return`
- * no range of its own before an operand or a `try … finally`, so coverage can't be trusted to see it). In `fn`, and in
- * each function inside it (a callback the test passes, R1169al D2, holding the sign or only the checks on it): a `return` that isn't its
- * function's last statement (but `return <ctx>.skip(…)` or `.todo(…)`, which the run reads as a skip), and a `break` or
- * `continue` whose loop or label holds the sign (it can skip that work). null when there's none.
+ * Control flow, read before the run (the organizer's direction on R1169ak-ap, 2026-11-11: V8 gives a jump no count of
+ * its own before an operand or a `try … finally`, so coverage can't be trusted to see one; the rule is general, not per
+ * shape). In `fn` and every function inside it: any `return`, `throw`, `break` or `continue`, labeled or not, that
+ * isn't its function's last statement, but `return <ctx>.skip(…)`/`.todo(…)` whose `<ctx>` the checker resolves to a
+ * parameter of a function around it (R1169ao D3: not a local that shadows one). A rejected `await` is read at run time
+ * instead (problems(): the count-0 range that starts after it). null when there's none.
  */
-function flowProblem(ts, sf, fn, hasSign) {
+function flowProblem(ts, sf, fn, checker) {
   const lineOf = (n) => sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1;
-  // Whether `f` holds systemd's sign, or starts a subtest (`<x>.test(…)`, `<x>['test'](…)`), after `n` ends.
-  const laterWork = (n, f) => {
-    let hit = false;
-    const v = (x) => {
-      if (hit) return;
-      if (x.getStart(sf) >= n.getEnd() && ((ts.isCallExpression(x) && ((ts.isPropertyAccessExpression(x.expression) && x.expression.name.text === 'test') || (ts.isElementAccessExpression(x.expression) && ts.isStringLiteralLike(x.expression.argumentExpression) && x.expression.argumentExpression.text === 'test'))) || hasSign(x) && (ts.isStringLiteralLike(x) || ts.isIdentifier(x) || ts.isTemplateHead(x) || ts.isRegularExpressionLiteral(x)))) hit = true;
-      else ts.forEachChild(x, v);
-    };
-    v(f.body);
-    return hit;
-  };
   const fns = [fn];
   const nested = (n) => {
     if (n !== fn && ts.isFunctionLike(n) && n.body) fns.push(n);
     ts.forEachChild(n, nested);
   };
   if (fn.body) nested(fn.body);
+  const kind = (n) => (ts.isReturnStatement(n) ? 'return' : ts.isThrowStatement(n) ? 'throw' : ts.isBreakStatement(n) ? 'break' : 'continue');
+  // `return <x>.skip(…)`/`.todo(…)`, <x> a parameter of a function around it, as the checker binds the name.
+  const exemptSkip = (n) => {
+    const e = n.expression;
+    if (!ts.isReturnStatement(n) || !e || !ts.isCallExpression(e) || !ts.isPropertyAccessExpression(e.expression) || !['skip', 'todo'].includes(e.expression.name.text) || !ts.isIdentifier(e.expression.expression)) return false;
+    const decl = checker.getSymbolAtLocation(e.expression.expression)?.valueDeclaration;
+    if (!decl || !ts.isParameter(decl)) return false;
+    for (let p = n.parent; p; p = p.parent) if (ts.isFunctionLike(p) && p.parameters.includes(decl)) return true;
+    return false;
+  };
   for (const f of fns) {
     if (!f.body || !ts.isBlock(f.body)) continue;
     const last = f.body.statements.at(-1);
     let found = null;
     const visit = (n) => {
       if (found || (n !== f && ts.isFunctionLike(n))) return;
-      if (ts.isReturnStatement(n) && n !== last) {
-        const e = n.expression;
-        // Only a test context's skip or todo (R1169am D2): its receiver a parameter of a function around it.
-        const recv = e && ts.isCallExpression(e) && ts.isPropertyAccessExpression(e.expression) && ['skip', 'todo'].includes(e.expression.name.text) && ts.isIdentifier(e.expression.expression) ? e.expression.expression.text : null;
-        let skip = false;
-        for (let p = n.parent; recv && p && !skip; p = p.parent) if (ts.isFunctionLike(p) && p.parameters.some((q) => ts.isIdentifier(q.name) && q.name.text === recv)) skip = true;
-        if (!skip) found = `line ${lineOf(n)} returns before its function's end (only its last statement may: an early return skips what follows, which coverage can't always see), so make the rest conditional instead`;
-      }
-      // A throw with the sign, or a subtest, after it in its function (R1169an D1): an exit as early as a return, when
-      // something catches it (a sentinel the test catches). A rethrow after the sign is no early exit.
-      // One its own function catches (in a try with a catch, around it, in this function) carries on after the try.
-      let caught = false;
-      for (let x = n; x.parent && x !== f && !caught; x = x.parent) if (ts.isTryStatement(x.parent) && x.parent.catchClause && x === x.parent.tryBlock) caught = true;
-      if (ts.isThrowStatement(n) && !found && !caught && laterWork(n, f)) found = `line ${lineOf(n)} throws before systemd's sign or a subtest that comes after it (an early exit when something catches it, which coverage can't always see), so make the rest conditional instead`;
-      if ((ts.isBreakStatement(n) || ts.isContinueStatement(n)) && !found) {
-        let target = null;
-        for (let p = n.parent; p && p !== f; p = p.parent) {
-          if (n.label ? ts.isLabeledStatement(p) && p.label.text === n.label.text : ts.isIterationStatement(p, false) || (ts.isBreakStatement(n) && ts.isSwitchStatement(p))) {
-            target = ts.isLabeledStatement(p) ? p.statement : p;
-            break;
-          }
-        }
-        // A switch's break skips the rest of its case (R1169am D1, R1169an D2): refused when the switch holds the sign,
-        // unless it is its clause's last statement (or the last of a block that is the clause's last).
-        const closing = (b) => {
-          const c = b.parent;
-          if ((ts.isCaseClause(c) || ts.isDefaultClause(c)) && c.statements.at(-1) === b) return true;
-          return ts.isBlock(c) && c.statements.at(-1) === b && (ts.isCaseClause(c.parent) || ts.isDefaultClause(c.parent)) && c.parent.statements.at(-1) === c;
-        };
-        if (target && ts.isSwitchStatement(target) && !n.label && hasSign(target) && !closing(n)) found = `line ${lineOf(n)}'s break leaves its case early in a switch that holds systemd's sign (coverage can't always see that), so make the rest conditional instead`;
-        else if (target && !ts.isSwitchStatement(target) && hasSign(target)) found = `line ${lineOf(n)}'s ${ts.isBreakStatement(n) ? 'break' : 'continue'} can skip systemd's sign in its ${ts.isIterationStatement(target, false) ? 'loop' : 'block'} (coverage can't always see that), so make the rest conditional instead`;
+      if ((ts.isReturnStatement(n) || ts.isThrowStatement(n) || ts.isBreakStatement(n) || ts.isContinueStatement(n)) && n !== last && !exemptSkip(n)) {
+        found = `line ${lineOf(n)}'s ${kind(n)} leaves before its function's end (only its last statement may: a jump skips what follows, which coverage can't always see), so make the rest conditional instead`;
+        return;
       }
       ts.forEachChild(n, visit);
     };
@@ -1776,6 +1758,18 @@ function flowProblem(ts, sf, fn, hasSign) {
     if (found) return f === fn ? found : `a function inside it (line ${lineOf(f)}): ${found}`;
   }
   return null;
+}
+
+/** `e` without the parentheses around it. */
+function skipParens(ts, e) {
+  while (ts.isParenthesizedExpression(e)) e = e.expression;
+  return e;
+}
+
+/** A type checker over one parsed file alone (no lib, no imports resolved): enough to bind a name to its declaration. */
+function checkerOf(ts, sf) {
+  const host = { getSourceFile: (n) => (n === sf.fileName ? sf : undefined), writeFile: () => {}, getDefaultLibFileName: () => 'lib.d.ts', useCaseSensitiveFileNames: () => true, getCanonicalFileName: (f) => f, getCurrentDirectory: () => '/', getNewLine: () => '\n', fileExists: (f) => f === sf.fileName, readFile: () => undefined };
+  return ts.createProgram([sf.fileName], { noResolve: true, noLib: true, allowJs: true, types: [] }, host).getTypeChecker();
 }
 
 /** Whether `e`, an `a = b`, is a default inside a destructuring assignment's pattern (`[a = b] = x`, `({ k: a = b } = x)`). */
@@ -1913,7 +1907,8 @@ export function problems(runs) {
           for (const e of t.mustRun.ends) if (!ended(e)) out.push(`${at}: ${e.what}'s last statement (line ${e.line}) never ran: it returned early, having checked less`);
           const notStarted = t.mustRun.subtests.filter((p) => !ran(p));
           if (notStarted.length) out.push(`${at}: the subtest at line ${lines(notStarted)} never started: started only sometimes, it checked less`);
-          const unrun = t.mustRun.sign.filter((p) => !ran(p));
+          // R1169ap F3: or after a jump, read by where its zero range starts.
+          const unrun = t.mustRun.sign.filter((p) => !ran(p) || ranges.some((r) => r.count === 0 && (p.after ?? []).includes(r.startOffset)));
           if (unrun.length) out.push(`${at}: line ${lines(unrun)}, holding systemd's sign, never ran: a branch, a loop over nothing or a catch left the systemd work unchecked`);
         }
         for (let j = k - 1; j >= 0 && events[j].nesting > r.nesting; j--) {

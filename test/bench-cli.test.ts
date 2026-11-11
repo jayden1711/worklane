@@ -254,10 +254,12 @@ test('round 2: the held-out store fails on a linked parent (made or not) and on 
     const held = benchLayout(join(k.home, 'bench')).heldOut;
     mkdirSync(held, { recursive: true, mode: 0o700 });
     chmodSync(held, mode);
-    if ((lstatSync(held).mode & 0o7777) !== mode) continue;
-    const r = await run(k);
-    assert.equal(statusOf(r.text, 'held-out store'), 'FAIL', `0${mode.toString(8)}\n${r.text}`);
-    chmodSync(held, 0o700);
+    // One exit only (R1169ao/ap: a sign test's functions jump nowhere but at their end); the same checks.
+    if ((lstatSync(held).mode & 0o7777) === mode) {
+      const r = await run(k);
+      assert.equal(statusOf(r.text, 'held-out store'), 'FAIL', `0${mode.toString(8)}\n${r.text}`);
+      chmodSync(held, 0o700);
+    }
   }
 });
 

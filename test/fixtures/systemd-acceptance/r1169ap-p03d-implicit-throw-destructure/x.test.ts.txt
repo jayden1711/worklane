@@ -1,0 +1,20 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { setTimeout as delay } from 'node:timers/promises';
+// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.
+const VM = true;
+
+const config = VM ? {} : { service: { unit: 'worklane-runner.service' } };
+test('the configured unit is active under the real service manager', (t) => {
+  const probe = () => {
+    const { unit } = config.service;
+    assert.equal(spawnSync('systemctl', ['is-active', unit]).status, -7);
+  };
+  try {
+    probe();
+  } catch (e) {
+    if (!(e instanceof TypeError)) throw e;
+    t.diagnostic('no service section in the config');
+  }
+});

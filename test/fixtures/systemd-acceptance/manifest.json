@@ -186,8 +186,8 @@
     "a skip reads test/y\\.test\\.ts: booted, which carries"
   ],
   "r1169n-n03-sudo-proxy": [
-    1,
-    "acceptance: the engine unit restarts after a crash: SKIP needs passwordless sudo"
+    2,
+    "'s throw leaves before its function's end"
   ],
   "r1169n-n04-root-cgroup": [
     0,
@@ -203,27 +203,27 @@
   ],
   "r1169n-n07-early-return": [
     2,
-    "returns before its function's end"
+    "'s return leaves before its function's end"
   ],
   "r1169n-n08-t-todo": [
     2,
-    "returns before its function's end"
+    "'s return leaves before its function's end"
   ],
   "r1169n-n09-skip-helper": [
     2,
-    "returns before its function's end"
+    "'s return leaves before its function's end"
   ],
   "r1169n-n10-describe-proxy": [
-    1,
-    "restarts after a crash: didn't run"
+    2,
+    "'s throw leaves before its function's end"
   ],
   "r1169n-n11-conditional-reg": [
-    1,
-    "acceptance: the engine unit restarts after a crash: didn't run"
+    2,
+    "'s throw leaves before its function's end"
   ],
   "r1169n-n12-test-skip-method": [
-    1,
-    "acceptance: the engine unit restarts after a crash: didn't run"
+    2,
+    "'s throw leaves before its function's end"
   ],
   "r1169n-n13-subtest-todo": [
     2,
@@ -231,7 +231,7 @@
   ],
   "r1169n-n14-bracket-skip": [
     2,
-    "returns before its function's end"
+    "'s return leaves before its function's end"
   ],
   "r1169n-n15-unicode-escape": [
     2,
@@ -255,7 +255,7 @@
   ],
   "r1169m-m04-early-return": [
     2,
-    "returns before its function's end"
+    "'s return leaves before its function's end"
   ],
   "r1169o-o01-helper-registers": [
     2,
@@ -274,16 +274,16 @@
     "test/helpers/unit-cases\\.ts: \\d+ use\\(s\\) of systemd's sign outside"
   ],
   "r1169p-p1c-control-in-test-file": [
-    1,
-    "acceptance: the engine unit restarts after a crash: SKIP needs passwordless sudo"
+    2,
+    "'s throw leaves before its function's end"
   ],
   "r1169p-p2-src-holder-body-skip": [
     2,
-    "returns before its function's end"
+    "'s return leaves before its function's end"
   ],
   "r1169p-p2b-src-holder-early-return": [
     2,
-    "returns before its function's end"
+    "'s return leaves before its function's end"
   ],
   "r1169p-p2c-control-options-skip": [
     2,
@@ -291,11 +291,11 @@
   ],
   "r1169p-p3-allowlisted-local-body-skip": [
     2,
-    "returns before its function's end"
+    "'s return leaves before its function's end"
   ],
   "r1169p-p3b-allowlisted-local-early-return": [
     2,
-    "returns before its function's end"
+    "'s return leaves before its function's end"
   ],
   "r1169p-p3c-control-options-skip": [
     2,
@@ -314,21 +314,20 @@
     "test/y\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside"
   ],
   "r1169p-p5-gate-namesake": [
-    1,
-    "acceptance: the engine unit restarts: (failed|TODO)",
-    "test/y\\.test\\.ts:6: acceptance: the engine unit restarts\\n"
+    2,
+    "'s throw leaves before its function's end"
   ],
   "r1169p-p5c-control-renamed": [
-    1,
-    "acceptance: the engine unit restarts \\(journal\\): (failed|TODO)"
+    2,
+    "'s throw leaves before its function's end"
   ],
   "r1169p-p6-zero-subtests": [
-    1,
-    "acceptance: every installed unit restarts: ran no subtest"
+    2,
+    "'s throw leaves before its function's end"
   ],
   "r1169p-p6c-control-subtest-skips": [
-    1,
-    "its subtest \"worklane\\.service\" SKIP linux"
+    2,
+    "'s throw leaves before its function's end"
   ],
   "r1169p-p7-journal-stream": [
     2,
@@ -365,7 +364,7 @@
   ],
   "r1169r-r1-test-name-read": [
     2,
-    "returns before its function's end"
+    "'s return leaves before its function's end"
   ],
   "r1169r-r1b-suite-name-options": [
     2,
@@ -476,7 +475,7 @@
   ],
   "r1169t-t6c-control-test-body-return": [
     2,
-    "returns before its function's end"
+    "'s return leaves before its function's end"
   ],
   "r1169t-t7-options-getter": [
     2,
@@ -504,7 +503,7 @@
   ],
   "r1169t-t9b-forof-body-guard": [
     2,
-    "returns before its function's end"
+    "'s return leaves before its function's end"
   ],
   "r1169t-t9c-control-const": [
     2,
@@ -512,7 +511,7 @@
   ],
   "r1169t-t9d-control-const-body-guard": [
     2,
-    "returns before its function's end"
+    "'s return leaves before its function's end"
   ],
   "r1169u-u0-control-ternary-member": [
     2,
@@ -560,7 +559,7 @@
   ],
   "r1169v-b0-control-if-skip": [
     2,
-    "returns before its function's end"
+    "'s return leaves before its function's end"
   ],
   "r1169v-b9-conditional-subtest": [
     2,
@@ -655,14 +654,12 @@
     "test/y\\.test\\.ts:\\d+: acceptance: the engine unit starts"
   ],
   "r1169v-b5-loop-guard": [
-    1,
-    "acceptance: the engine unit starts: SKIP not a booted host",
-    "test/y\\.test\\.ts:\\d+: acceptance: the engine unit starts"
+    2,
+    "'s break leaves before its function's end"
   ],
   "r1169v-b6-labelled-block": [
-    1,
-    "acceptance: the engine unit starts: SKIP not a booted host",
-    "test/y\\.test\\.ts:\\d+: acceptance: the engine unit starts"
+    2,
+    "'s break leaves before its function's end"
   ],
   "r1169v-b8-beforeeach-hook": [
     1,
@@ -743,7 +740,7 @@
   ],
   "r1169w-x0-control-b0": [
     2,
-    "returns before its function's end"
+    "'s return leaves before its function's end"
   ],
   "r1169w-x1-toplevel-beforeeach": [
     1,
@@ -751,15 +748,15 @@
   ],
   "r1169w-x4-named-function-body": [
     2,
-    "returns before its function's end"
+    "'s return leaves before its function's end"
   ],
   "r1169w-x4b-const-arrow-body": [
     2,
-    "returns before its function's end"
+    "'s return leaves before its function's end"
   ],
   "r1169w-x4c-named-body-in-describe": [
     2,
-    "returns before its function's end"
+    "'s return leaves before its function's end"
   ],
   "r1169w-x4d-named-body-holds-sign": [
     2,
@@ -795,7 +792,7 @@
   ],
   "r1169w-y1b-control-subtest-return": [
     2,
-    "returns before its function's end"
+    "'s return leaves before its function's end"
   ],
   "r1169w-y1c-control-subtest-if": [
     2,
@@ -871,7 +868,7 @@
   ],
   "r1169y-x10-holder-via-this": [
     2,
-    "returns before its function's end"
+    "'s return leaves before its function's end"
   ],
   "r1169y-x11-function-in-array": [
     1,
@@ -889,7 +886,7 @@
   ],
   "r1169y-x9c-control-const-body": [
     2,
-    "returns before its function's end"
+    "'s return leaves before its function's end"
   ],
   "r1169z-q1-loader-named-includes": [
     2,
@@ -987,7 +984,7 @@
   ],
   "r1169ab-a2-sign-early-return": [
     2,
-    "returns before its function's end"
+    "'s return leaves before its function's end"
   ],
   "r1169ab-a3-conditional-subtest": [
     1,
@@ -1018,40 +1015,40 @@
     "test/y\\.test\\.ts: unit states, swallowing-catch: line \\d+ holds systemd's sign in a try whose catch"
   ],
   "r1169ad-swallowing-catch-control": [
-    0,
-    "^$"
+    2,
+    "'s throw leaves before its function's end"
   ],
   "r1169ad-subtest-early-return": [
     2,
-    "returns before its function's end"
+    "'s return leaves before its function's end"
   ],
   "r1169ad-subtest-early-return-control": [
     2,
-    "returns before its function's end"
+    "'s return leaves before its function's end"
   ],
   "r1169ac-element-access-subtest": [
     2,
-    "returns before its function's end"
+    "'s return leaves before its function's end"
   ],
   "r1169ac-element-access-subtest-control": [
     2,
-    "returns before its function's end"
+    "'s return leaves before its function's end"
   ],
   "r1169ac-aliased-subtest": [
     2,
-    "returns before its function's end"
+    "'s return leaves before its function's end"
   ],
   "r1169ac-aliased-subtest-control": [
     2,
-    "returns before its function's end"
+    "'s return leaves before its function's end"
   ],
   "r1169ac-named-function": [
     2,
-    "returns before its function's end"
+    "'s return leaves before its function's end"
   ],
   "r1169ac-named-function-control": [
     2,
-    "returns before its function's end"
+    "'s return leaves before its function's end"
   ],
   "r1169ac-named-function-elsewhere": [
     2,
@@ -1086,16 +1083,16 @@
     "test/y\\.test\\.ts: the watchdog reads unit states from the real service manager: line \\d+ holds systemd's sign in an optional call's arguments"
   ],
   "r1169ah-block-s01-caller-try": [
-    0,
-    "^$"
+    2,
+    "'s throw leaves before its function's end"
   ],
   "r1169ah-block-s02-promise-catch": [
-    0,
-    "^$"
+    2,
+    "'s throw leaves before its function's end"
   ],
   "r1169ah-block-s03-allsettled": [
-    0,
-    "^$"
+    2,
+    "'s throw leaves before its function's end"
   ],
   "r1169ah-block-s04-assert-throws": [
     0,
@@ -1107,19 +1104,19 @@
   ],
   "r1169ah-block-s06-finally-return": [
     2,
-    "returns before its function's end"
+    "'s return leaves before its function's end"
   ],
   "r1169ah-block-s07-try-catch-around-sign": [
     2,
     "in a try whose catch would take a throw before it"
   ],
   "r1169ah-block-s08-await-rejects-before-sign": [
-    1,
-    "the watchdog reads unit states from the real service manager: line \\d+, holding systemd's sign, never ran"
+    2,
+    "'s throw leaves before its function's end"
   ],
   "r1169ah-block-s09-throw-statement-before-sign": [
     2,
-    "throws before systemd's sign or a subtest that comes after it"
+    "'s throw leaves before its function's end"
   ],
   "r1169ah-block-s10-generator-not-iterated": [
     0,
@@ -1199,11 +1196,11 @@
   ],
   "r1169ah-block-s29-same-line-return": [
     2,
-    "returns before its function's end"
+    "'s return leaves before its function's end"
   ],
   "r1169ah-block-s30-early-return": [
     2,
-    "returns before its function's end"
+    "'s return leaves before its function's end"
   ],
   "r1169ah-block-s31-callback-same-line-never-called": [
     1,
@@ -1214,20 +1211,20 @@
     "the watchdog reads unit states from the real service manager: line \\d+, holding systemd's sign, never ran"
   ],
   "r1169ah-block-s33-switch-default": [
-    1,
-    "the watchdog reads unit states from the real service manager: line \\d+, holding systemd's sign, never ran"
+    2,
+    "'s break leaves before its function's end"
   ],
   "r1169ah-block-s34-labeled-break": [
     2,
-    "can skip systemd's sign"
+    "'s break leaves before its function's end"
   ],
   "r1169ah-block-s35-continue": [
     2,
-    "can skip systemd's sign"
+    "'s continue leaves before its function's end"
   ],
   "r1169ah-block-s36-some-short-circuit": [
     2,
-    "returns before its function's end"
+    "'s return leaves before its function's end"
   ],
   "r1169ah-block-s37-unawaited-promise": [
     0,
@@ -1235,7 +1232,7 @@
   ],
   "r1169ah-block-s38-ran-control": [
     2,
-    "returns before its function's end"
+    "'s return leaves before its function's end"
   ],
   "r1169ai-i1-child-process-same-file": [
     1,
@@ -1247,27 +1244,27 @@
   ],
   "r1169aj-j02-helper-registers-twice": [
     2,
-    "returns before its function's end"
+    "'s return leaves before its function's end"
   ],
   "r1169aj-j04-shared-subtest-fn": [
     2,
-    "returns before its function's end"
+    "'s return leaves before its function's end"
   ],
   "r1169aj-j05-trailing-hoisted-helper": [
     2,
-    "returns before its function's end"
+    "'s return leaves before its function's end"
   ],
   "r1169aj-j05f-trailing-helper-subtest": [
     2,
-    "returns before its function's end"
+    "'s return leaves before its function's end"
   ],
   "r1169aj-j16-trailing-async-helper": [
     2,
-    "returns before its function's end"
+    "'s return leaves before its function's end"
   ],
   "r1169aj-j17b-return-in-later-iteration-last": [
     2,
-    "returns before its function's end"
+    "'s return leaves before its function's end"
   ],
   "r1169aj-j19-object-destructuring-default": [
     2,
@@ -1295,51 +1292,51 @@
   ],
   "r1169aj-j17d-legit-loop-last-control": [
     2,
-    "can skip systemd's sign"
+    "'s continue leaves before its function's end"
   ],
   "r1169ak-k01-try-finally-last": [
     2,
-    "returns before its function's end"
+    "'s return leaves before its function's end"
   ],
   "r1169ak-k02-if-block-last": [
     2,
-    "returns before its function's end"
+    "'s return leaves before its function's end"
   ],
   "r1169ak-k03-try-catch-last": [
     2,
-    "returns before its function's end"
+    "'s return leaves before its function's end"
   ],
   "r1169ak-k04-sign-in-try-finally-cleanup": [
     2,
-    "returns before its function's end"
+    "'s return leaves before its function's end"
   ],
   "r1169ak-k05-subtest-try-finally-last": [
     2,
-    "returns before its function's end"
+    "'s return leaves before its function's end"
   ],
   "r1169ak-k06-else-block-last": [
     2,
-    "returns before its function's end"
+    "'s return leaves before its function's end"
   ],
   "r1169ak-k07-loop-break-skips-assertions": [
     2,
-    "can skip systemd's sign"
+    "'s break leaves before its function's end"
   ],
   "r1169ak-k08-loop-continue-skips-assertions": [
     2,
-    "can skip systemd's sign"
+    "'s continue leaves before its function's end"
   ],
   "r1169ak-k09-labeled-block-break": [
-    0,
-    "^$"
+    2,
+    "'s break leaves before its function's end"
   ],
   "r1169al-l01-foreach-return-after-sign": [
     2,
-    "returns before its function's end"
+    "'s return leaves before its function's end"
   ],
   "r1169al-l02-promise-all-map-return": [
     2,
-    "returns before its function's end"
+    "'s return leaves before its function's end"
   ],
   "r1169al-l03b-optional-member-sign": [
     2,
@@ -1351,39 +1348,39 @@
   ],
   "r1169al-l05-for-continue-after-sign": [
     2,
-    "can skip systemd's sign"
+    "'s continue leaves before its function's end"
   ],
   "r1169al-l07-return-in-try-finally": [
     2,
-    "returns before its function's end"
+    "'s return leaves before its function's end"
   ],
   "r1169al-l10-subtest-fn-twice": [
     2,
-    "returns before its function's end"
+    "'s return leaves before its function's end"
   ],
   "r1169al-l11-then-callback-return": [
     2,
-    "returns before its function's end"
+    "'s return leaves before its function's end"
   ],
   "r1169al-l14-return-then-or-last": [
     2,
-    "returns before its function's end"
+    "'s return leaves before its function's end"
   ],
   "r1169al-l15-try-finally-cleanup": [
     2,
-    "returns before its function's end"
+    "'s return leaves before its function's end"
   ],
   "r1169al-l17-subtest-try-finally": [
     2,
-    "returns before its function's end"
+    "'s return leaves before its function's end"
   ],
   "r1169al-l18-helper-registers-twice-ternary": [
     2,
-    "returns before its function's end"
+    "'s return leaves before its function's end"
   ],
   "r1169al-l19-return-nullish-then-sign": [
     2,
-    "returns before its function's end"
+    "'s return leaves before its function's end"
   ],
   "r1169al-l12-final-return": [
     0,
@@ -1391,23 +1388,23 @@
   ],
   "r1169am-m01-switch-break-nullish-then-sign": [
     2,
-    "break leaves its case early in a switch that holds systemd's sign"
+    "'s break leaves before its function's end"
   ],
   "r1169am-m02-switch-break-after-sign-or": [
     2,
-    "break leaves its case early in a switch that holds systemd's sign"
+    "'s break leaves before its function's end"
   ],
   "r1169am-m03-switch-break-try-finally": [
     2,
-    "break leaves its case early in a switch that holds systemd's sign"
+    "'s break leaves before its function's end"
   ],
   "r1169am-m04-callback-switch-break": [
     2,
-    "break leaves its case early in a switch that holds systemd's sign"
+    "'s break leaves before its function's end"
   ],
   "r1169am-m07-return-nonctx-skip": [
     2,
-    "returns before its function's end"
+    "'s return leaves before its function's end"
   ],
   "r1169am-m06-subtest-returns-parent-skip": [
     1,
@@ -1415,26 +1412,114 @@
   ],
   "r1169an-n01-throw-sentinel-nullish": [
     2,
-    "throws before systemd's sign or a subtest"
+    "'s throw leaves before its function's end"
   ],
   "r1169an-n01b-throw-sentinel-plain": [
     2,
-    "throws before systemd's sign or a subtest"
+    "'s throw leaves before its function's end"
   ],
   "r1169an-n02-throw-try-finally": [
     2,
-    "throws before systemd's sign or a subtest"
+    "'s throw leaves before its function's end"
   ],
   "r1169an-n15-throw-or-then-sign": [
     2,
-    "throws before systemd's sign or a subtest"
+    "'s throw leaves before its function's end"
   ],
   "r1169an-n03-switch-break-nullish": [
     2,
-    "break leaves its case early in a switch that holds systemd's sign"
+    "'s break leaves before its function's end"
   ],
   "r1169an-n03t-switch-break-ternary": [
     2,
-    "break leaves its case early in a switch that holds systemd's sign"
+    "'s break leaves before its function's end"
+  ],
+  "r1169ap-f3-await-rejected": [
+    1,
+    "line \\d+, holding systemd's sign, never ran"
+  ],
+  "r1169ap-f3-await-rejected-control": [
+    0,
+    "^$"
+  ],
+  "r1169ao-o01-throw-template-middle": [
+    2,
+    "'s throw leaves before its function's end"
+  ],
+  "r1169ao-o01t-throw-template-tail": [
+    2,
+    "'s throw leaves before its function's end"
+  ],
+  "r1169ao-o02-labeled-switch-break-callback": [
+    2,
+    "'s break leaves before its function's end"
+  ],
+  "r1169ao-o02p-labeled-switch-break-plain": [
+    2,
+    "'s break leaves before its function's end"
+  ],
+  "r1169ao-o03-return-param-cursor-skip": [
+    1,
+    "holding systemd's sign, never ran"
+  ],
+  "r1169ao-o04-return-shadowed-t-skip": [
+    2,
+    "'s return leaves before its function's end"
+  ],
+  "r1169ao-o05-switch-case-selected-away": [
+    2,
+    "'s break leaves before its function's end"
+  ],
+  "r1169ao-o05n-switch-no-case-matches": [
+    1,
+    "holding systemd's sign, never ran"
+  ],
+  "r1169ap-p01-labelled-switch-break-from-loop": [
+    2,
+    "'s break leaves before its function's end"
+  ],
+  "r1169ap-p01b-labelled-switch-break": [
+    2,
+    "'s break leaves before its function's end"
+  ],
+  "r1169ap-p02-throw-after-sign-then-assert": [
+    2,
+    "'s throw leaves before its function's end"
+  ],
+  "r1169ap-p02b-throw-after-sign-plain": [
+    2,
+    "'s throw leaves before its function's end"
+  ],
+  "r1169ap-p02n-throw-after-sign-nullish": [
+    2,
+    "'s throw leaves before its function's end"
+  ],
+  "r1169ap-p03-implicit-throw-member": [
+    2,
+    "'s throw leaves before its function's end"
+  ],
+  "r1169ap-p03d-implicit-throw-destructure": [
+    2,
+    "'s throw leaves before its function's end"
+  ],
+  "r1169ap-p04-await-rejected": [
+    2,
+    "'s throw leaves before its function's end"
+  ],
+  "r1169ap-p04b-await-rejected-plain": [
+    2,
+    "'s throw leaves before its function's end"
+  ],
+  "r1169ap-p04x-await-started-listing": [
+    2,
+    "'s throw leaves before its function's end"
+  ],
+  "r1169ap-p05-switch-other-case": [
+    2,
+    "'s break leaves before its function's end"
+  ],
+  "r1169ap-p06-throw-caught-locally": [
+    2,
+    "'s throw leaves before its function's end"
   ]
 }

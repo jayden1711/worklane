@@ -304,9 +304,11 @@ test('#991 round 4: a machine host tool under another name (a link) is stood in 
     // The machine's own aliases (sudoedit -> sudo on Debian and Ubuntu), where there are any: resolution only.
     for (const alias of ['sudoedit', 'reboot', 'poweroff']) {
       const f = findOn(alias, SYSTEM);
-      if (f === null || !g.hostToolPath(f)) continue;
-      const found = String(cp.spawnSync('/bin/sh', ['-c', `command -v ${alias}`], { encoding: 'utf8', env: { PATH: SYSTEM } }).stdout).trim();
-      assert.ok(found.startsWith(`${g.standInRoot}/`), `${alias}: ${found}`);
+      // One exit only (R1169ao/ap: a sign test's functions jump nowhere but at their end); the same checks.
+      if (f !== null && g.hostToolPath(f)) {
+        const found = String(cp.spawnSync('/bin/sh', ['-c', `command -v ${alias}`], { encoding: 'utf8', env: { PATH: SYSTEM } }).stdout).trim();
+        assert.ok(found.startsWith(`${g.standInRoot}/`), `${alias}: ${found}`);
+      }
     }
   }
 });
