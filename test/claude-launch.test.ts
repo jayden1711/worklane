@@ -99,6 +99,8 @@ test('R1185ac D1/D3: the launch owns its environment: no CLAUDE_*/ANTHROPIC_* it
   assert.equal(s.env.KEEP_ME, 'yes', 'anything else passes');
   assert.ok(s.env.PATH!.split(':').every((d) => d.startsWith('/')), `PATH holds absolute entries only: ${s.env.PATH}`);
   assert.deepEqual(launchEnv(env).CLAUDE_CODE_PLUGIN_DIRS, undefined);
+  // The launch's own variables keep the caller's place (a sudo `env -i` list keeps its order: runner-golden).
+  assert.deepEqual(Object.keys(launchEnv({ A: '1', CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0', B: '2' })), ['A', 'CLAUDE_CODE_DISABLE_AUTO_MEMORY', 'B']);
   // P1b: the login proof, with the variable in the environment the probe hands it (probeEnv: the process's own).
   assert.equal(claudeProbeRun(LOGIN_PROOF, env, 30_000, join(bins, 'claude')).status, 0);
   assert.equal(seen().env.CLAUDE_CODE_PLUGIN_DIRS, undefined, 'the login proof drops it too');

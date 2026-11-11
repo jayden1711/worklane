@@ -74,7 +74,9 @@ export const LAUNCH_ENV_KEEP = ['CLAUDE_CONFIG_DIR', 'ANTHROPIC_API_KEY', 'ANTHR
  */
 export function launchEnv(env: NodeJS.ProcessEnv, pluginCacheDir?: string): NodeJS.ProcessEnv {
   if (pluginCacheDir !== undefined && !isAbsolute(pluginCacheDir)) throw new Error(`launchClaude: the plugin cache folder ${JSON.stringify(pluginCacheDir)} isn't an absolute path`);
-  const keep = new Set<string>(LAUNCH_ENV_KEEP);
+  // The launch's own variables stay where the caller had them (the order a sudo `env -i` list shows), with the
+  // launch's value; a caller's plugin cache folder never.
+  const keep = new Set<string>([...LAUNCH_ENV_KEEP, ...Object.keys(LAUNCH_ENV)]);
   const out: NodeJS.ProcessEnv = {};
   for (const [k, v] of Object.entries(env)) {
     if (v === undefined) continue;
