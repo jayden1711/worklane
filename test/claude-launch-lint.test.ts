@@ -40,8 +40,8 @@ import { repoRoot } from './helpers.js';
 type Node = any;
 const ts = createRequire(join(repoRoot, 'package.json'))('typescript') as Node;
 
-/** A text that IS the claude binary: its name, a path to it, its npm package, or its cli.js. */
-const BINARY = /^claude(?:\.exe|\.cmd|\.ps1)?$|[\/\\]claude(?:\.exe|\.cmd|\.ps1)?$|^claude-code$|@anthropic-ai[\/\\]claude-code|claude-code[\/\\]cli\.js|cli-wrapper\.cjs|@anthropic-ai[\/\\]claude-agent-sdk|^claude-agent-sdk$/i;
+/** A text that IS the claude binary: its name, a path to it (the native installer's `claude/versions/<v>` too: R1185ak K1/K2), its npm package, or its cli.js. */
+const BINARY = /^claude(?:\.exe|\.cmd|\.ps1)?$|[\/\\]claude(?:\.exe|\.cmd|\.ps1)?$|^claude-code$|@anthropic-ai[\/\\]claude-code|claude-code[\/\\]cli\.js|cli-wrapper\.cjs|@anthropic-ai[\/\\]claude-agent-sdk|^claude-agent-sdk$|(?:^|[\/\\])claude[\/\\]versions(?:[\/\\]|$)/i;
 /**
  * A string that runs claude as a shell command (R1185ag D1, as R1185ag measured it): the binary as a word, quoted or
  * from a `$(…)`, then any words and a flag (`claude "$1" -p`, `exec "claude" -p`, `"$(command -v claude)" -p`), or a
@@ -53,12 +53,36 @@ const BINARY = /^claude(?:\.exe|\.cmd|\.ps1)?$|[\/\\]claude(?:\.exe|\.cmd|\.ps1)
  */
 const COMMAND = /(?:^|[\s;&|(`"'])(?:\S*[\/\\])?claude(?:\.exe|\.cmd|\.ps1)?["'`)]*(?:\s+[^\s;&|]+)*?\s+--?[a-z]|\|\s*(?:\S*[\/\\])?claude(?:\.exe|\.cmd|\.ps1)?\b|(?:^|[;&|(`\n]|\$\()\s*(?:(?:exec|nohup|xargs|command|env|time|sudo|then|do)\s+(?:[^\s;&|]+\s+)*?)?["']?(?:\S*[\/\\])?claude(?:\.exe|\.cmd|\.ps1)?["']?(?=\s*(?:$|[<>;&|)])|\s+["'$<X])/i;
 /**
- * A shell string that runs claude in a command's position, flags or not (R1185ai D1, as R1185ai measured it): after
- * `;` `&&` `||` `$(`, or a launcher word (`exec`, `nohup`, `command`, `xargs`, `npx …`, `timeout N`, `env K=V…`,
- * `nice -n N`, `stdbuf X`); or at the string's start, when a shell variable or the end follows. Case-sensitive: prose
- * (`claude exited …`) doesn't run anything.
+ * A token of a shell string that is the binary (R1185aj/ak D1: no launcher list, so `setsid claude`, `FOO=1 claude` and
+ * `timeout -k 5 3600 claude` are read too): exactly `claude`, or ending in `/claude`, `.exe`, `.cmd` or `.ps1`, once its
+ * quotes, a `$(` or a `(` before it and a `)` `;` `&` `|` after it are taken off. Read only in a shell context
+ * (shellContext), so prose elsewhere is untouched.
  */
-const SHELL = /(?:;|&&|\|\||\$\(|\b(?:exec|nohup|command|xargs|npx(?:\s+-\S+)*|timeout\s+\S+|env(?:\s+\w+=\S*)*|nice(?:\s+-n\s*\S+)?|stdbuf\s+\S+))\s*["']?(?:\S*[\/\\])?claude(?:\.exe|\.cmd|\.ps1)?["')]*(?:\s|$)|^\s*["']?(?:\S*[\/\\])?claude(?:\.exe|\.cmd|\.ps1)?["']?\s+(?:"?\$|$)/;
+const SHELL_TOKEN = /^(?:.*[\/\\])?claude(?:\.exe|\.cmd|\.ps1)?$/i;
+const shellTokens = (t: string) => t.split(/\s+/).map((w) => w.replace(/^(?:\$\(|[("'`])+/, '').replace(/[)"'`;&|]+$/, '')).filter(Boolean);
+
+/**
+ * Whether `n` is in a string a shell runs: inside an argv element after a `-c`-style flag (`sh -c`, `bash -lc`), the
+ * first argument of `exec`/`execSync`, the first argument of a call given `{ shell: true }`, or a `$`-tagged template
+ * (zx, execa). Anything inside that argument counts (a concatenation, a template, an array joined into it).
+ */
+function shellContext(n: Node): boolean {
+  for (let x = n; x.parent && !ts.isFunctionLike(x.parent); x = x.parent) {
+    const p = x.parent;
+    if (ts.isTaggedTemplateExpression(p) && p.tag.getText() === '$') return true;
+    if (ts.isArrayLiteralExpression(p)) {
+      const k = p.elements.indexOf(x);
+      const prev = k > 0 ? p.elements[k - 1] : null;
+      if (prev && ts.isStringLiteralLike(prev) && /^-[A-Za-z]*c$/.test(prev.text)) return true;
+    }
+    if (ts.isCallExpression(p) && p.arguments[0] === x) {
+      const callee = p.expression.getText();
+      if (/(?:^|\.)exec(?:Sync)?$/.test(callee)) return true;
+      if (p.arguments.some((a: Node) => ts.isObjectLiteralExpression(a) && a.properties.some((q: Node) => ts.isPropertyAssignment(q) && q.name.getText() === 'shell' && q.initializer.kind === ts.SyntaxKind.TrueKeyword))) return true;
+    }
+  }
+  return false;
+}
 const LAUNCHER = 'src/claude-launch.ts';
 const AUTH_HELPERS = /^(?:claudeAuthStatus|claudeAuthMethod|claudeAuthStatusJson)$/;
 
@@ -119,7 +143,7 @@ export function launchProblems(path: string, text: string): string[] {
   const visit = (n: Node) => {
     // A template is read whole too, each substitution as one word (R1185ag D1: a flag in its tail), besides its parts.
     const t = ts.isTemplateExpression(n) ? n.head.text + n.templateSpans.map((s: Node) => `X${s.literal.text}`).join('') : ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n) || ts.isTemplateHead(n) || ts.isTemplateMiddle(n) || ts.isTemplateTail(n) ? n.text : null;
-    if (t !== null && (BINARY.test(t) || COMMAND.test(t) || SHELL.test(t)) && path !== LAUNCHER && !inType(n)) {
+    if (t !== null && (BINARY.test(t) || COMMAND.test(t) || (shellContext(n) && shellTokens(t).some((w) => SHELL_TOKEN.test(w)))) && path !== LAUNCHER && !inType(n)) {
       const at = lineOf(n);
       const line = lines[at - 1]!.trim();
       const pin = PINS.find(([f, l]) => f === path && l === line);
@@ -196,6 +220,8 @@ test('#958: every way of naming claude outside the launch function is refused (f
     'helper-object-bin',
     'helper-tuple-file',
     'namespace-import',
+    'native-versions-join',
+    'native-versions-template',
     'object-file',
     'os-wrapper',
     'npx-bare',
@@ -211,14 +237,18 @@ test('#958: every way of naming claude outside the launch function is refused (f
     'runner-bin-escapes',
     'runner-bin-spawn',
     'sh-arg-before-flag',
+    'sh-assignment-prefix',
     'sh-args-variable',
     'sh-c',
     'sh-exec-args',
     'sh-lookup',
     'sh-pipe',
     'sh-quoted-name',
+    'sh-setsid',
     'sh-template-tail',
     'sh-timeout-args',
+    'sh-timeout-k',
+    'shell-true-template',
     'sh-xargs',
     'signin-session',
     'src-helper',

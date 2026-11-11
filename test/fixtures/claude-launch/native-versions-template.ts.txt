@@ -1,0 +1,7 @@
+// as src/new-module.ts
+import { spawn } from 'node:child_process';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+declare const prompt: string, version: string;
+// R1185ak K1: the native installer's binary, as a template.
+spawn(`${homedir()}/.local/share/claude/versions/${version}`, ['-p', prompt, '--output-format', 'json']);
