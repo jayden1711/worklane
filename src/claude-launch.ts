@@ -2,12 +2,15 @@
 // run, and every other session the engine starts, goes through launchClaude, which always loads no setting source
 // (`--setting-sources ''`), reads no MCP config but what it's given (`--strict-mcp-config`), takes its settings only
 // from `--settings` (required: there is no launch without them) and keeps Claude's auto memory off
-// (CLAUDE_CODE_DISABLE_AUTO_MEMORY=1). Nothing a caller passes can change those: ClaudeLaunch has no field for them.
+// (CLAUDE_CODE_DISABLE_AUTO_MEMORY=1). Nothing a caller passes can change those: ClaudeLaunch has no field for them,
+// and the launch owns its environment (launchEnv): no CLAUDE_* or ANTHROPIC_* variable it doesn't name reaches claude,
+// and PATH keeps only absolute entries.
 //
 // test/claude-launch-lint.test.ts holds src/ to it: no other module starts the claude binary, or Claude Code's
 // cli.js under node, by any spelling the lint reads (its limits are in that test). scripts/ci/setting-sources-probe.mjs
 // drives this function on the real binary, over every field of ClaudeLaunch (LAUNCH_FIELDS) and the shapes production's
 // call sites make, so the boundary is proven at this one choke point.
+import { delimiter, isAbsolute } from 'node:path';
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from './os/child-process.js';
 
 export type ClaudeLaunch = {
@@ -47,6 +50,40 @@ export const NO_TOOLS = ['Bash', 'Edit', 'Write', 'MultiEdit', 'Read', 'Glob', '
 
 /** What every launch adds to its environment. */
 export const LAUNCH_ENV = { CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' } as const;
+
+/**
+ * The only CLAUDE_* and ANTHROPIC_* variables a launch passes on (R1185ac D1): the login (its config dir, a key or a
+ * token, as the runtime and the login proof give them), a provider's endpoint, the runner's own plugin root, and
+ * Windows' git bash. Every other one is dropped, whoever put it in the environment: Claude Code reads some to load
+ * content outside its setting sources (CLAUDE_CODE_PLUGIN_DIRS loads a plugin's hooks and skills, measured on 2.1.296).
+ */
+// check-table: never-grow
+export const LAUNCH_ENV_KEEP = ['CLAUDE_CONFIG_DIR', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'CLAUDE_CODE_PLUGIN_CACHE_DIR', 'CLAUDE_CODE_GIT_BASH_PATH'] as const;
+
+/**
+ * The environment a launch gives claude: the caller's, less every CLAUDE_* and ANTHROPIC_* variable LAUNCH_ENV_KEEP
+ * doesn't name (case aside: Windows' names aren't case-sensitive), with PATH's empty and relative entries dropped (an
+ * empty entry is the working directory: a bare `claude` would then run the checkout's own file, R1185ac D3), and
+ * LAUNCH_ENV over it.
+ */
+export function launchEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const keep = new Set<string>(LAUNCH_ENV_KEEP);
+  const out: NodeJS.ProcessEnv = {};
+  for (const [k, v] of Object.entries(env)) {
+    if (v === undefined) continue;
+    if (/^(?:CLAUDE|ANTHROPIC)_/i.test(k) && !keep.has(k.toUpperCase())) continue;
+    out[k] = /^path$/i.test(k) ? v.split(delimiter).filter((d) => d !== '' && isAbsolute(d)).join(delimiter) : v;
+  }
+  return { ...out, ...LAUNCH_ENV };
+}
+
+/** The binary a launch starts: a bare name (found on its PATH, as launchEnv leaves it), or an absolute path. */
+function launchBin(bin: string): string {
+  if (bin.includes('/') || bin.includes('\\')) {
+    if (!isAbsolute(bin)) throw new Error(`launchClaude: the binary ${JSON.stringify(bin)} is a relative path: give its absolute path`);
+  }
+  return bin;
+}
 
 /** The guards every launch ends with: Claude Code takes the last `--settings` and `--setting-sources` it is given. */
 export const launchGuards = (settings: object): string[] => ['--settings', JSON.stringify(settings), '--setting-sources', '', '--strict-mcp-config'];
@@ -102,14 +139,14 @@ export function claudeArgv(spec: Omit<ClaudeLaunch, 'bin' | 'cwd' | 'env' | 'asU
  * proves.
  */
 export function launchClaudeSync(spec: Omit<ClaudeLaunch, 'asUser' | 'detached'>, o: { timeoutMs: number; input?: string }): { status: number | null; stdout: string; stderr: string; error?: Error } {
-  const r = spawnSync(spec.bin, claudeArgv(spec), { cwd: spec.cwd, env: { ...spec.env, ...LAUNCH_ENV }, encoding: 'utf8', timeout: o.timeoutMs, input: o.input ?? '' });
+  const r = spawnSync(launchBin(spec.bin), claudeArgv(spec), { cwd: spec.cwd, env: launchEnv(spec.env), encoding: 'utf8', timeout: o.timeoutMs, input: o.input ?? '' });
   return { status: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '', ...(r.error ? { error: r.error } : {}) };
 }
 
 /** Start a Claude Code session: the only way the engine does (see the top of this file). */
 export function launchClaude(spec: ClaudeLaunch): ChildProcessWithoutNullStreams {
   const argv = claudeArgv(spec);
-  const env = { ...spec.env, ...LAUNCH_ENV };
-  const w = spec.asUser ? spec.asUser(spec.bin, argv, env) : { file: spec.bin, args: argv, env };
+  const env = launchEnv(spec.env);
+  const w = spec.asUser ? spec.asUser(launchBin(spec.bin), argv, env) : { file: launchBin(spec.bin), args: argv, env };
   return spawn(w.file, w.args, { cwd: spec.cwd, env: w.env, stdio: ['pipe', 'pipe', 'pipe'], ...(spec.detached ? { detached: true } : {}) }) as ChildProcessWithoutNullStreams;
 }

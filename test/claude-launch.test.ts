@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { claudeArgv, launchClaudeSync, launchGuards, LAUNCH_ENV } from '../src/claude-launch.js';
+import { claudeArgv, launchClaudeSync, launchEnv, launchGuards, LAUNCH_ENV } from '../src/claude-launch.js';
 import { PermissionRule } from '../src/config/permission-rule.js';
 import { claudeProbeRun, LOGIN_PROOF, proveClaudeLogin } from '../src/setup-steps.js';
 
@@ -60,4 +60,48 @@ test('R1185z D1: the login proof goes through the launch, in an empty folder of 
   // launchClaudeSync itself: the same argv and environment as launchClaude.
   const s = launchClaudeSync({ ...LOGIN_PROOF, bin, cwd: dir, env: { PATH: process.env.PATH ?? '' } }, { timeoutMs: 30_000, input: 'x' });
   assert.equal(s.status, 0, s.stderr);
+});
+
+test('R1185ac D1/D3: the launch owns its environment: no CLAUDE_*/ANTHROPIC_* it doesn\'t name, and PATH only absolute', { skip: !posix && 'a POSIX stand-in claude' }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'launch-env-'));
+  const bins = join(dir, 'bin');
+  const checkout = join(dir, 'checkout');
+  mkdirSync(bins);
+  mkdirSync(checkout);
+  const log = join(dir, 'seen.json');
+  const standIn = (file: string, who: string) => {
+    writeFileSync(file, `#!/usr/bin/env node\nrequire('node:fs').writeFileSync(${JSON.stringify(log)}, JSON.stringify({ who: ${JSON.stringify(who)}, env: process.env }));\nconsole.log(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'ok' }));\n`);
+    chmodSync(file, 0o755);
+  };
+  standIn(join(bins, 'claude'), 'the claude on PATH');
+  // The checkout's own `claude`, which an empty PATH entry (the working directory) would run (D3).
+  standIn(join(checkout, 'claude'), "the checkout's claude");
+  const env = {
+    PATH: `:${bins}:.:relative/bin:${process.env.PATH ?? ''}`,
+    HOME: dir,
+    CLAUDE_CONFIG_DIR: join(dir, 'login'),
+    ANTHROPIC_BASE_URL: 'https://models.example.test',
+    CLAUDE_CODE_PLUGIN_DIRS: join(dir, 'planted-plugin'),
+    CLAUDE_CODE_PLUGIN_SEED_DIR: join(dir, 'seed'),
+    CLAUDE_CODE_MANAGED_SETTINGS_PATH: join(dir, 'managed.json'),
+    claude_code_plugin_dirs: join(dir, 'lower'),
+    ANTHROPIC_CUSTOM_HEADERS: 'x: y',
+    CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0',
+    KEEP_ME: 'yes',
+  };
+  const seen = () => JSON.parse(readFileSync(log, 'utf8')) as { who: string; env: Record<string, string> };
+  // P1: a launch given the variables.
+  assert.equal(launchClaudeSync({ ...LOGIN_PROOF, bin: 'claude', cwd: checkout, env }, { timeoutMs: 30_000 }).status, 0);
+  const s = seen();
+  assert.equal(s.who, 'the claude on PATH', "an empty or relative PATH entry never runs the checkout's own claude");
+  assert.deepEqual(Object.keys(s.env).filter((k) => /^(?:claude|anthropic)_/i.test(k)).sort(), ['ANTHROPIC_BASE_URL', 'CLAUDE_CODE_DISABLE_AUTO_MEMORY', 'CLAUDE_CONFIG_DIR']);
+  assert.equal(s.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY, '1', "the launch's own, over the caller's");
+  assert.equal(s.env.KEEP_ME, 'yes', 'anything else passes');
+  assert.ok(s.env.PATH!.split(':').every((d) => d.startsWith('/')), `PATH holds absolute entries only: ${s.env.PATH}`);
+  assert.deepEqual(launchEnv(env).CLAUDE_CODE_PLUGIN_DIRS, undefined);
+  // P1b: the login proof, with the variable in the environment the probe hands it (probeEnv: the process's own).
+  assert.equal(claudeProbeRun(LOGIN_PROOF, env, 30_000, join(bins, 'claude')).status, 0);
+  assert.equal(seen().env.CLAUDE_CODE_PLUGIN_DIRS, undefined, 'the login proof drops it too');
+  // A relative binary path is refused.
+  assert.throws(() => launchClaudeSync({ ...LOGIN_PROOF, bin: './claude', cwd: checkout, env }, { timeoutMs: 30_000 }), /relative path/);
 });
