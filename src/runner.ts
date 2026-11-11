@@ -29,7 +29,7 @@ import { mcpRunArgs, type McpRun } from './mcp/client.js';
 import { limitHit, USAGE_LIMIT_TEXT, type LimitHit, type RateLimitInfo } from './usage-limit.js';
 import { authFailedDetail, isAuthFailure } from './claude-auth-failure.js';
 import { EFFORTS, type Effort } from './roles.js';
-import { claudeArgv, claudeBin, launchClaude } from './claude-launch.js';
+import { claudeArgv, claudeBin, launchClaude, launchPath } from './claude-launch.js';
 import { redactCut, redactString } from './events/redact.js';
 
 export type TerminalReason = 'succeeded' | 'failed' | 'timed_out' | 'stalled' | 'rate_limited' | 'canceled_by_reconciliation' | 'budget_exhausted' | 'auth_mismatch' | 'auth_failed' | 'stopped' | 'stuck';
@@ -314,10 +314,11 @@ export function runAsEnv(env: NodeJS.ProcessEnv, r: RunAs): NodeJS.ProcessEnv {
  * How to run `claude auth status --json`: as the agent user (through sudo, with that user's environment from
  * agentUserEnv, as its runs get it), else as this process. The command, its arguments and spawn's own env.
  */
-export function authStatusCommand(env: NodeJS.ProcessEnv, runAs?: RunAs, bin = 'claude'): { file: string; args: string[]; env: NodeJS.ProcessEnv } {
+export function authStatusCommand(env: NodeJS.ProcessEnv, runAs?: RunAs, bin = 'claude', agentPath?: string): { file: string; args: string[]; env: NodeJS.ProcessEnv } {
   const argv = ['auth', 'status', '--json'];
   if (!runAs) return { file: bin, args: argv, env };
-  const [file, args] = asUser(runAs.user, bin, argv, { ...env, ...agentUserEnv(runAs) });
+  // `agentPath`: the PATH the agent user's `env -i` looks the binary up on (a run's: launchPath's, R1185ae D3).
+  const [file, args] = asUser(runAs.user, bin, argv, { ...env, ...(agentPath !== undefined ? { PATH: agentPath } : {}), ...agentUserEnv(runAs) });
   // As another user, sudo gets only PATH; the probe's environment is passed explicitly through env -i.
   return { file, args, env: { PATH: ownEnv(env).get('PATH') ?? '' } };
 }
@@ -331,8 +332,8 @@ export function claudeAuthMethod(env: NodeJS.ProcessEnv, runAs?: RunAs, bin = 'c
  * claude auth status: the auth method ('none' when signed out, 'unknown' when unreadable) and what it printed
  * otherwise, and the account as it names it (its email, else its org; never the token).
  */
-export function claudeAuthStatus(env: NodeJS.ProcessEnv, runAs?: RunAs, bin = 'claude'): { method: string; text: string; account?: string | null } {
-  const c = authStatusCommand(env, runAs, bin);
+export function claudeAuthStatus(env: NodeJS.ProcessEnv, runAs?: RunAs, bin = 'claude', agentPath?: string): { method: string; text: string; account?: string | null } {
+  const c = authStatusCommand(env, runAs, bin, agentPath);
   const r = spawnSync(c.file, c.args, { encoding: 'utf8', env: c.env, timeout: 30_000 });
   try {
     const j = JSON.parse(r.stdout) as { loggedIn?: boolean; authMethod?: string; email?: unknown; orgName?: unknown };
@@ -756,11 +757,13 @@ export class CliRunner implements AgentRunner {
     // The binary as an absolute path, never the checkout's own (R1185ae D3): the status check and the session start it.
     let bin: string;
     try {
-      bin = claudeBin(this.bin, runEnv, req.cwd);
+      bin = claudeBin(this.bin, runEnv, req.cwd, !!runAs);
     } catch (e) {
       return { reason: 'failed', detail: `${(e as Error).message}; not starting`, costUsd: 0, turns: 0, model: req.model };
     }
-    const status = req.provider ? { method: 'provider', text: '' } : claudeAuthStatus(runEnv, runAs, bin);
+    // As another user, its `env -i` looks the bare name up on the launch's PATH (launchPath): the same for the check.
+    const agentPath = runAs ? launchPath(ownEnv(runEnv).get('PATH') ?? '', req.cwd) : undefined;
+    const status = req.provider ? { method: 'provider', text: '' } : claudeAuthStatus(runEnv, runAs, bin, agentPath);
     const auth = status.method;
     const want: readonly string[] = req.provider ? ['provider'] : RUNTIME_LOGINS[this.runtime];
     if (!want.includes(auth)) {

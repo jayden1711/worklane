@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
-import { claudeArgv, claudeBin, launchClaudeSync, launchEnv, launchGuards, LAUNCH_ENV, LAUNCH_ENV_KEEP, LAUNCH_ENV_PASS } from '../src/claude-launch.js';
+import { claudeArgv, claudeBin, launchClaude, launchClaudeSync, launchEnv, launchPath, launchGuards, LAUNCH_ENV, LAUNCH_ENV_KEEP, LAUNCH_ENV_PASS } from '../src/claude-launch.js';
 import { PASS_THROUGH } from '../src/runner.js';
 import { PermissionRule } from '../src/config/permission-rule.js';
 import { claudeProbeRun, LOGIN_PROOF, proveClaudeLogin } from '../src/setup-steps.js';
@@ -185,4 +185,21 @@ test('R1185ae D3: a bare claude is resolved to an absolute path, never from a no
 test("R1185ae D1: every variable the runner passes through is one the launch passes on (the allowlist can't drop it unseen)", () => {
   const names = new Set<string>([...LAUNCH_ENV_PASS, ...LAUNCH_ENV_KEEP]);
   assert.deepEqual(PASS_THROUGH.filter((k) => !names.has(k)), []);
+});
+
+test("R1185ae D3, run as another user: the bare name goes to that user's env -i, on a PATH with no node_modules/.bin and nothing in the run's folder", () => {
+  const root = mkdtempSync(join(tmpdir(), 'launch-as-'));
+  const repo = join(root, 'checkout');
+  mkdirSync(repo);
+  const path = [join(repo, 'node_modules', '.bin'), join(root, 'node_modules', '.bin'), join(repo, 'tools'), '', 'rel', '/usr/local/bin', '/usr/bin'].join(delimiter);
+  assert.equal(launchPath(path, repo), ['/usr/local/bin', '/usr/bin'].join(delimiter));
+  assert.equal(claudeBin('claude', { PATH: path }, repo, true), 'claude', "resolved by the agent user's env -i, not the coordinator's PATH");
+  let seen: { bin: string; env: NodeJS.ProcessEnv } | null = null;
+  const child = launchClaude({ ...LOGIN_PROOF, bin: 'claude', cwd: repo, env: { PATH: path, HOME: '/home/user' }, mode: 'json', asUser: (bin, argv, env) => {
+    seen = { bin, env };
+    return { file: process.execPath, args: ['-e', ''], env: { PATH: '/usr/bin' } };
+  } });
+  child.on('error', () => {});
+  child.kill();
+  assert.deepEqual([seen!.bin, seen!.env.PATH], ['claude', ['/usr/local/bin', '/usr/bin'].join(delimiter)]);
 });

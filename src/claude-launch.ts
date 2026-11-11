@@ -97,13 +97,31 @@ export const LAUNCH_ENV_PASS = [
 /** The harness's own variables (its prefix) and git's numbered config keys, by pattern; nothing else is. */
 const LAUNCH_ENV_PASS_PATTERN = new RegExp(`^(?:${BRAND.envPrefix}_[A-Z0-9_]+|GIT_CONFIG_(?:KEY|VALUE)_\\d+)$`, 'i');
 
+/** A path inside a node_modules/.bin folder, which a package installs into (a checkout's own `claude`, R1185ae D3). */
+const IN_PACKAGE_BIN = /(?:^|[\\/])node_modules[\\/]\.bin(?:[\\/]|$)/i;
+
+/** Whether `p` is `dir` or inside it. */
+const within = (p: string, dir: string) => {
+  const r = relative(dir, p);
+  return r === '' || (!r.startsWith('..') && !isAbsolute(r));
+};
+
+/**
+ * A launch's PATH (R1185ac D3, R1185ae D3): only absolute entries, none in a node_modules/.bin (npm exec, and so
+ * `npx … init`, puts the checkout's and its parents' first), and none inside `cwd`, the folder the session runs in.
+ * A bare `claude` looked up on it, here or by another user's `env -i` (asUser), is never the checkout's own.
+ */
+export function launchPath(path: string, cwd?: string): string {
+  return path.split(delimiter).filter((d) => d !== '' && isAbsolute(d) && !IN_PACKAGE_BIN.test(d) && !(cwd !== undefined && within(d, cwd))).join(delimiter);
+}
+
 /**
  * The environment a launch gives claude: of the caller's, only the names LAUNCH_ENV_PASS and LAUNCH_ENV_KEEP list,
  * the harness's own and git's numbered config keys, and the project variables `projectEnv` names (each refused here
- * when projectEnvProblem refuses it), in the caller's order; PATH's empty and relative entries dropped (an empty entry
- * is the working directory, R1185ac D3); LAUNCH_ENV and the launch's plugin cache folder over it.
+ * when projectEnvProblem refuses it), in the caller's order; PATH as launchPath leaves it (`cwd`: the session's folder);
+ * LAUNCH_ENV and the launch's plugin cache folder over it.
  */
-export function launchEnv(env: NodeJS.ProcessEnv, pluginCacheDir?: string, projectEnv: readonly string[] = []): NodeJS.ProcessEnv {
+export function launchEnv(env: NodeJS.ProcessEnv, pluginCacheDir?: string, projectEnv: readonly string[] = [], cwd?: string): NodeJS.ProcessEnv {
   if (pluginCacheDir !== undefined && !isAbsolute(pluginCacheDir)) throw new Error(`launchClaude: the plugin cache folder ${JSON.stringify(pluginCacheDir)} isn't an absolute path`);
   for (const k of projectEnv) {
     const why = projectEnvProblem(k);
@@ -117,36 +135,28 @@ export function launchEnv(env: NodeJS.ProcessEnv, pluginCacheDir?: string, proje
   for (const [k, v] of Object.entries(env)) {
     if (v === undefined) continue;
     if (!pass.has(k.toUpperCase()) && !LAUNCH_ENV_PASS_PATTERN.test(k) && !project.has(k)) continue;
-    out[k] = /^path$/i.test(k) ? v.split(delimiter).filter((d) => d !== '' && isAbsolute(d)).join(delimiter) : v;
+    out[k] = /^path$/i.test(k) ? launchPath(v, cwd) : v;
   }
   return { ...out, ...(pluginCacheDir !== undefined ? { CLAUDE_CODE_PLUGIN_CACHE_DIR: pluginCacheDir } : {}), ...LAUNCH_ENV };
 }
-
-/** A path inside a node_modules/.bin folder, which a package installs into (a checkout's own `claude`, R1185ae D3). */
-const IN_PACKAGE_BIN = /(?:^|[\\/])node_modules[\\/]\.bin(?:[\\/]|$)/i;
-
-/** Whether `p` is `dir` or inside it. */
-const within = (p: string, dir: string) => {
-  const r = relative(dir, p);
-  return r === '' || (!r.startsWith('..') && !isAbsolute(r) && !r.startsWith(`..${sep}`));
-};
 
 /**
  * The claude binary a launch (or a `claude auth status` check) starts, as an absolute path (R1185ae D3): an absolute
  * `bin` as given, unless it is in a node_modules/.bin; a bare name looked up on `env`'s PATH less its empty and
  * relative entries, every node_modules/.bin (npm exec, and so `npx … init`, puts the checkout's and its parents'
  * first) and every entry inside `cwd` (the checkout or worktree the session runs in). A relative path, or a name found
- * nowhere else, throws: never the checkout's own file.
+ * nowhere else, throws: never the checkout's own file. Run as another user (`asUser`), a bare name is left to that
+ * user's `env -i`, which looks it up on the launch's PATH (launchPath): the coordinator's own may not have it.
  */
-export function claudeBin(bin: string, env: NodeJS.ProcessEnv, cwd: string): string {
+export function claudeBin(bin: string, env: NodeJS.ProcessEnv, cwd: string, asUser = false): string {
   if (bin.includes('/') || bin.includes('\\')) {
     if (!isAbsolute(bin)) throw new Error(`launchClaude: the binary ${JSON.stringify(bin)} is a relative path: give its absolute path`);
     if (IN_PACKAGE_BIN.test(bin)) throw new Error(`launchClaude: the binary ${JSON.stringify(bin)} is in a node_modules/.bin: a package's, not the installed claude`);
     return bin;
   }
+  if (asUser) return bin;
   const path = Object.entries(env).find(([k]) => /^path$/i.test(k))?.[1] ?? '';
-  const dirs = path.split(delimiter).filter((d) => d !== '' && isAbsolute(d) && !IN_PACKAGE_BIN.test(d) && !within(d, cwd));
-  const found = which(bin, dirs.join(delimiter));
+  const found = which(bin, launchPath(path, cwd));
   if (!found) throw new Error(`launchClaude: ${JSON.stringify(bin)} isn't on PATH outside the checkout and node_modules/.bin`);
   return found;
 }
@@ -205,15 +215,15 @@ export function claudeArgv(spec: Omit<ClaudeLaunch, 'bin' | 'cwd' | 'env' | 'asU
  * proves.
  */
 export function launchClaudeSync(spec: Omit<ClaudeLaunch, 'asUser' | 'detached'>, o: { timeoutMs: number; input?: string }): { status: number | null; stdout: string; stderr: string; error?: Error } {
-  const r = spawnSync(claudeBin(spec.bin, spec.env, spec.cwd), claudeArgv(spec), { cwd: spec.cwd, env: launchEnv(spec.env, spec.pluginCacheDir, spec.projectEnv), encoding: 'utf8', timeout: o.timeoutMs, input: o.input ?? '' });
+  const r = spawnSync(claudeBin(spec.bin, spec.env, spec.cwd), claudeArgv(spec), { cwd: spec.cwd, env: launchEnv(spec.env, spec.pluginCacheDir, spec.projectEnv, spec.cwd), encoding: 'utf8', timeout: o.timeoutMs, input: o.input ?? '' });
   return { status: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '', ...(r.error ? { error: r.error } : {}) };
 }
 
 /** Start a Claude Code session: the only way the engine does (see the top of this file). */
 export function launchClaude(spec: ClaudeLaunch): ChildProcessWithoutNullStreams {
   const argv = claudeArgv(spec);
-  const env = launchEnv(spec.env, spec.pluginCacheDir, spec.projectEnv);
-  const bin = claudeBin(spec.bin, spec.env, spec.cwd);
+  const env = launchEnv(spec.env, spec.pluginCacheDir, spec.projectEnv, spec.cwd);
+  const bin = claudeBin(spec.bin, spec.env, spec.cwd, !!spec.asUser);
   const w = spec.asUser ? spec.asUser(bin, argv, env) : { file: bin, args: argv, env };
   return spawn(w.file, w.args, { cwd: spec.cwd, env: w.env, stdio: ['pipe', 'pipe', 'pipe'], ...(spec.detached ? { detached: true } : {}) }) as ChildProcessWithoutNullStreams;
 }

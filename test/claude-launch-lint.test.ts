@@ -15,7 +15,8 @@
 // - `this.bin` (the runner's binary) may go nowhere but `bin: this.bin` in a launchClaude call, the three
 //   auth-status helpers' binary argument, or claudeBin's first (the launch's resolver: it starts nothing).
 // - The names are read in any case and with Windows' `.exe` and `.cmd` (R1185ae D4: `Claude` is `claude` on a
-//   case-insensitive volume, and the npm package's file is bin/claude.exe), and a pin covers as many lines with its
+//   case-insensitive volume, and the npm package's file is bin/claude.exe), the package's name as a part of a path
+//   (`join(…, '@anthropic-ai', 'claude-code', …)`) and its launcher cli-wrapper.cjs (R1185ad D1), and a pin covers as many lines with its
 //   exact text as it says (one by default), so a pinned line copied into new code is refused.
 //
 // What it can't see (named limits):
@@ -37,7 +38,7 @@ type Node = any;
 const ts = createRequire(join(repoRoot, 'package.json'))('typescript') as Node;
 
 /** A text that IS the claude binary: its name, a path to it, its npm package, or its cli.js. */
-const BINARY = /^claude(?:\.exe|\.cmd)?$|[\/\\]claude(?:\.exe|\.cmd)?$|@anthropic-ai[\/\\]claude-code|claude-code[\/\\]cli\.js/i;
+const BINARY = /^claude(?:\.exe|\.cmd)?$|[\/\\]claude(?:\.exe|\.cmd)?$|^claude-code$|@anthropic-ai[\/\\]claude-code|claude-code[\/\\]cli\.js|cli-wrapper\.cjs/i;
 /** A string that runs claude as a shell command: the binary as a word, then a flag (`sh -c 'claude -p hi'`). */
 const COMMAND = /(?:^|[\s;&|(`])(?:\S*[\/\\])?claude(?:\.exe|\.cmd)?\s+-/i;
 const LAUNCHER = 'src/claude-launch.ts';
@@ -56,9 +57,9 @@ export const PINS: ([string, string, string] | [string, string, string, number])
   ["src/init.ts", "if (!c.interactive || !c.io.which('claude')) return v.mismatch ? asStep(v) : { status: 'failed', detail: `${v.detail}: run \\`claude auth login\\`, then \\`${BRAND.cli} init\\` again (it picks up here)` };", "a lookup, and a message"],
   ["src/init.ts", "await c.io.interactive('claude', ['auth', 'login']);", "`claude auth login` on the person's terminal: no session"],
   ["src/instance.ts", "throw new ConfigInvalid([{ file: join(home, 'credentials.yaml'), path: 'claude', message: 'agents run as the coordinator user, so set claude.config_dir to the Claude login they use' }]);", "a config key (data)"],
-  ["src/runner.ts", "export function authStatusCommand(env: NodeJS.ProcessEnv, runAs?: RunAs, bin = 'claude'): { file: string; args: string[]; env: NodeJS.ProcessEnv } {", "the default binary of `claude auth status --json` (its only argv)"],
+  ["src/runner.ts", "export function authStatusCommand(env: NodeJS.ProcessEnv, runAs?: RunAs, bin = 'claude', agentPath?: string): { file: string; args: string[]; env: NodeJS.ProcessEnv } {", "the default binary of `claude auth status --json` (its only argv)"],
   ["src/runner.ts", "export function claudeAuthMethod(env: NodeJS.ProcessEnv, runAs?: RunAs, bin = 'claude'): string {", "the default binary of `claude auth status --json`"],
-  ["src/runner.ts", "export function claudeAuthStatus(env: NodeJS.ProcessEnv, runAs?: RunAs, bin = 'claude'): { method: string; text: string; account?: string | null } {", "the default binary of `claude auth status --json`"],
+  ["src/runner.ts", "export function claudeAuthStatus(env: NodeJS.ProcessEnv, runAs?: RunAs, bin = 'claude', agentPath?: string): { method: string; text: string; account?: string | null } {", "the default binary of `claude auth status --json`"],
   ["src/runner.ts", "export function claudeAuthStatusJson(env: NodeJS.ProcessEnv, runAs?: RunAs, bin = 'claude'): { loggedIn: boolean; expiresAt?: unknown } | null {", "the default binary of `claude auth status --json`"],
   ["src/runner.ts", "private bin = 'claude',", "the runner's binary: it reaches only launchClaude and the auth-status helpers (the `this.bin` rule)"],
   ["src/service.ts", "const claude = new CliRunner(instanceRuntime(i).runtime, process.env, 'claude', i.runAs ?? undefined, allLanes(i), identity, {}, () => guardrailSettings(i.home, i.name, i.repo.path), agentKeyFile, login, plugins, { instance: i.name, register: (role, ttlMs) => registerRun(i.name, role, ttlMs), end: (ticket) => endRun(i.name, ticket) }, i.repo.path, start.cfg.project.project.default_branch, start.note === null ? undefined : start.cfg.guardrails.secret_paths, worktreePlaces(i.repo.path, start.cfg.tests.worktree.root, agentTasksDir(i.repo.path, i.stateDir, i.runAs ?? undefined)));", "an instance runner's binary (CliRunner's `bin`)"],
@@ -166,6 +167,8 @@ test('#958: every way of naming claude outside the launch function is refused (f
     'os-wrapper',
     'param-default',
     'pinned-line-plus-launch',
+    'pkg-dir',
+    'pkg-parts',
     'promisify-exec',
     'reflect-apply',
     'renamed-import',
@@ -178,6 +181,7 @@ test('#958: every way of naming claude outside the launch function is refused (f
     'sudo-wrapper',
     'template-path',
     'ternary',
+    'wrapper-cjs',
   ];
   // check-table: never-shrink
   const CONTROLS = ['ok-launch-bin', 'ok-launcher', 'ok-other-tool', 'ok-signin', 'ok-type-position'];
