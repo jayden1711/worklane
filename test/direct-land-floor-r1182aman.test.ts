@@ -188,7 +188,8 @@ for (const [name, body] of ELSEWHERE) {
   test(`${name}: the open id appears again, so nothing answers or queues; one note`, async () => {
     const { f } = await land(body);
     assert.deepEqual([answered(f).length, queued(f), kinds(f).length], [0, 0, 1], JSON.stringify(answered(f)));
-    const want = /^the id spelt/.test(name) ? ['reply_id_elsewhere'] : ['reply_id_elsewhere', 'reply_more_than_one'];
+    // R1182ap: an entity the page draws outside ASCII (&nbsp;, &shy;) voids first, as reply_not_ascii.
+    const want = /^the id spelt/.test(name) ? ['reply_id_elsewhere'] : /&(nbsp|shy);/.test(name) ? ['reply_not_ascii'] : ['reply_id_elsewhere', 'reply_more_than_one'];
     assert.ok(want.includes(kinds(f)[0]!), `${kinds(f)[0]} not in ${want}`);
   });
 }

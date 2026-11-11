@@ -5,7 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { BRAND } from '../src/brand.js';
-import { idsElsewhere, NOT_ASCII, pageText, readReply, replyText, TYPED, UNSAFE } from '../src/decision-reply.js';
+import { idsElsewhere, NAMED_EMPTY, NOT_ASCII, pageReadings, pageText, readReply, replyText, TYPED, UNSAFE } from '../src/decision-reply.js';
 
 const c = `/${BRAND.cli}`;
 const ID = 'd-12-a3f9c1';
@@ -143,5 +143,66 @@ test('rule (c): an open id anywhere outside line 1 slot, as typed or as the page
     `${c} approve not yet ${ID}`,
   ]) assert.deepEqual(elsewhere(body), [ID], JSON.stringify(body));
   assert.equal(pageText('/wor&#108;&lowbar;lane&sol; A&nbsp;b'), '/worllane/ a b');
-  assert.equal(pageText('&bogus; &#0; &#xFFFFFFF;'), '&bogus; &#0; &#xfffffff;', 'unknown or out-of-range entities stay as typed');
+  // R1182ap: NUL and out-of-range numeric entities decode to U+FFFD, as HTML5 decodes them (they stayed as typed before);
+  // an unknown named one stays as typed (and voids, by rule (1) on the page).
+  assert.equal(pageText('&bogus; &#0; &#xFFFFFFF;'), '&bogus; \uFFFD \uFFFD');
+});
+
+// Every HTML5 named character reference whose value is all format (Cf) or default-ignorable characters: the list is fixed
+// by the HTML standard (generated from its table, as Python's html.entities.html5 holds it). R1182ao D1.
+const HTML5_INVISIBLE = ['ApplyFunction', 'InvisibleComma', 'InvisibleTimes', 'NegativeMediumSpace', 'NegativeThickSpace', 'NegativeThinSpace', 'NegativeVeryThinSpace', 'NoBreak', 'ZeroWidthSpace', 'af', 'ic', 'it', 'lrm', 'rlm', 'shy', 'zwj', 'zwnj'];
+
+test('R1182ao D1: every HTML5 entity that prints nothing voids the comment, and the readings read it as nothing', () => {
+  assert.deepEqual([...NAMED_EMPTY].sort(), HTML5_INVISIBLE.map((n) => n.toLowerCase()).sort(), 'the table is the standard list');
+  for (const name of HTML5_INVISIBLE) {
+    const body = `${c} approve ${ID}\nreject d&${name};${ID.slice(1)}`;
+    assert.deepEqual(readReply(body).notAscii, { code: `&${name};`, line: 2 }, name);
+    assert.deepEqual(idsElsewhere(readReply(body), [ID]), [ID], `${name}: the page shows the id`);
+  }
+});
+
+test('R1182ap AP3: rule (1) on the page: an entity decoding outside plain ASCII, an unknown one, or bidi markup voids, naming its line', () => {
+  const na = (body: string) => readReply(body).notAscii;
+  assert.deepEqual(na(`${c} approve ${ID}\nok &#x2215;x`), { code: 'U+2215', line: 2 });
+  assert.deepEqual(na(`${c} approve ${ID}\nok\n&#65295;`), { code: 'U+FF0F', line: 3 });
+  assert.deepEqual(na(`${c} approve ${ID}\nok &hyphen;`), { code: '&hyphen;', line: 2 }, 'a named entity outside the ASCII table');
+  assert.deepEqual(na(`${c} approve ${ID}\nok &nbsp;`), { code: '&nbsp;', line: 2 });
+  assert.deepEqual(na(`${c} approve ${ID}\nok &bogus;`), { code: '&bogus;', line: 2 }, 'unknown');
+  assert.deepEqual(na(`${c} approve ${ID}\nok &#x202E;x`), { code: 'U+202E', line: 2 }, 'a bidi control');
+  assert.deepEqual(na(`${c} approve ${ID}\nok &#7;`), { code: 'U+0007', line: 2 }, 'a control character');
+  assert.deepEqual(na(`${c} approve ${ID}\nok &#0;`), { code: 'U+FFFD', line: 2 }, 'NUL decodes to U+FFFD');
+  assert.deepEqual(na(`${c} approve ${ID}\n\n<bdo dir="rtl">x</bdo>`), { code: '<bdo>', line: 3 });
+  assert.deepEqual(na(`${c} approve ${ID}\n<span dir=rtl>x</span>`), { code: 'dir=', line: 2 });
+  // Not voided: entities that decode to plain ASCII or to the six phone characters; "dir=" or "R&D" as plain text.
+  for (const ok of [`&#100;&#45;&amp;&lt;&gt;&quot;&sol;&fjlig;&#9;`, `&ndash; &mdash; &lsquo;&rsquo;&ldquo;&rdquo; &#8212;`, 'set dir=/tmp and R&D, Q&A', '&AMP; &Tab;']) {
+    assert.equal(na(`${c} approve ${ID}\n${ok}`), null, ok);
+  }
+});
+
+test('R1182ao D2, R1182ap AP1/AP2: every reading of the page, real tags only, alt and title text, and each reversed', () => {
+  const finds = (line2: string) => idsElsewhere(readReply(`${c} approve ${ID}\n${line2}`), [ID]).length === 1;
+  const e = (s: string) => [...s].map((ch) => `&#${ch.codePointAt(0)};`).join('');
+  for (const line2 of [
+    `reject <d&#45;${ID.slice(2)}>`,
+    `reject &lt;d&#45;${ID.slice(2)}&gt;`,
+    `only if 1 < 2, reject d&#45;${ID.slice(2)}\n> quoted`,
+    `<!--> reject d&#45;${ID.slice(2)} -->`,
+    `<!---> reject d&#45;${ID.slice(2)} -->`,
+    `<img alt="reject d&#45;${ID.slice(2)}" src="x">`,
+    `<abbr title='${e(ID)}'>x</abbr>`,
+    `&lt;&#47;worklane reject ${e(ID)}&gt;`,
+    `risk a < b; ${e(ID)} is rejected; c > d`,
+    `x <\n${e(ID)}\n>`,
+    [...ID].reverse().join(''),
+  ]) assert.ok(finds(line2), JSON.stringify(line2));
+  // Real tags and comments are still dropped where the page drops them.
+  // An id split by a real tag, inside text a looser tag or comment pattern would delete (P5, P6 in the PR body): only the
+  // precise patterns find it, since the tags-kept reading holds the tag.
+  assert.ok(finds(`1 < 2 then d<b></b>${ID.slice(1)} > 0`), 'a < before the tag-split id');
+  assert.ok(finds(`<!--> d<b></b>${ID.slice(1)} -->`), 'HTML5 <!--> ends the comment before the tag-split id');
+  for (const line2 of [`d<b></b>${ID.slice(1)}`, `d<!-- x -->${ID.slice(1)}`, `d<span class="x">${ID.slice(1)}</span>`]) assert.ok(finds(line2), line2);
+  // No false voids: a < b > c with nothing hidden, and another id.
+  assert.equal(finds('ok if latency < 5ms and > 1ms'), false);
+  assert.equal(finds('see d-12-bbbbbb'), false);
+  assert.ok(pageReadings('x').length >= 8, 'four readings, each reversed');
 });
