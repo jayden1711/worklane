@@ -214,8 +214,15 @@ for (const [name, body] of NONE) {
 const ANSWER: [string, (id: string) => string][] = [
   ['setext heading under the line', (id) => `/worklane approve ${id}\n===`],
   ['CRLF, on line 1', (id) => `/worklane approve ${id}\r\nLooks right.\r\n`],
-  ['emoji shortcodes around the id', (id) => `/worklane approve :+1:${id}:tada:`],
 ];
+// Changed by R1182an AN3 (the id right after the option): emoji shortcodes glued to the id answered approve; now nothing.
+test('HELD emoji shortcodes around the id: answers nothing, reply_id_not_after_option (changed by AN3; was approve)', async () => {
+  const f = fixture();
+  const q = await ask(f, 'land', LAND);
+  f.backlog.humanComment(1, OWNER, `/worklane approve :+1:${q.id}:tada:`);
+  assert.equal(await commentAnswer(f, q), null);
+  assert.deepEqual(kinds(f), ['reply_id_not_after_option']);
+});
 for (const [name, body] of ANSWER) {
   test(`HELD ${name}: answers approve`, async () => {
     const f = fixture();

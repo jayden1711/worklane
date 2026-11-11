@@ -332,8 +332,13 @@ test("AB1b (not the review's): an id in backticks, parentheses or after a word n
   assert.equal(await commentAnswer(f, d1), null, 'in backticks: refused');
   assert.equal(await commentAnswer(f, d2), null, 'in parentheses: refused');
   assert.deepEqual(notes(f).map((n) => n.kind), ['reply_unsafe_text', 'reply_unsafe_text']);
+  // Changed by R1182an AN3 (the shape is `/worklane <option> <id> [note]`): after a word it answered approve; now it
+  // answers nothing, with reply_id_not_after_option. Right after the option, before a comma, it answers.
   f.backlog.humanComment(1, 'example-owner', `/worklane approve for ${d1.id}, thanks`);
-  assert.equal((await commentAnswer(f, d1))?.answer, 'approve', 'named after a word, before a comma');
+  assert.equal(await commentAnswer(f, d1), null, 'named after a word');
+  assert.ok(notes(f).some((n) => n.kind === 'reply_id_not_after_option'));
+  f.backlog.humanComment(1, 'example-owner', `/worklane approve ${d1.id}, thanks`);
+  assert.equal((await commentAnswer(f, d1))?.answer, 'approve', 'right after the option, before a comma');
   // One open question; the reply names (in parentheses) an id no decision has: no answer, and a note, never bare.
   const g = fixture();
   const e = await ask(g, 'land', LAND);

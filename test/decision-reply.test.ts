@@ -110,3 +110,15 @@ test('the note is the rest of the first line without its ids, in its own case; n
   assert.equal(note(`${c} revise ${ID} keep it smaller\nand drop the cache`), 'keep it smaller', 'the next line is not part of it');
   assert.equal(note(`${c} revise ${ID.toUpperCase()}, keep it smaller`), 'keep it smaller');
 });
+
+test('R1182an AN3: the id must come right after the option (idNext); a comma, colon, semicolon or full stop may follow it', () => {
+  const next = (body: string) => readReply(body).first?.idNext;
+  assert.equal(next(`${c} approve ${ID}`), true);
+  assert.equal(next(`${c} approve ${ID}, thanks`), true);
+  assert.equal(next(`${c} revise ${ID}: keep it smaller`), true);
+  assert.equal(next(`${c} approve ${ID.toUpperCase()}`), true);
+  assert.equal(next(`${c} approve not yet: ${ID} needs tests`), false);
+  assert.equal(next(`${c} revise keep v1 ${ID} tables`), false);
+  assert.equal(next(`${c} approve x${ID}`), false, "a letter glued before the id: no id there");
+  assert.equal(next(`${c} approve`), false);
+});
