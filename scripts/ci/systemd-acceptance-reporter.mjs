@@ -16,12 +16,6 @@ import { writeSync } from 'node:fs';
 
 export default async function* report(source) {
   for await (const event of source) {
-    // Node's line coverage, when the run asks for it (a file with sign tests, R1169ab D2): each covered file's lines,
-    // [line, count], from the runner's own report.
-    if (event.type === 'test:coverage') {
-      for (const f of event.data.summary.files) writeSync(3, `${JSON.stringify({ type: 'coverage', path: f.path, lines: f.lines.map((l) => [l.line, l.count]) })}\n`);
-      continue;
-    }
     if (event.type !== 'test:pass' && event.type !== 'test:fail') continue;
     const d = event.data;
     writeSync(3, `${JSON.stringify({ type: event.type, name: d.name, nesting: d.nesting, file: d.file ?? null, line: d.line ?? null, column: d.column ?? null, skip: d.skip ?? null, todo: d.todo ?? null })}\n`);

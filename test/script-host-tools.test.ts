@@ -112,7 +112,9 @@ test("#991: in every test process, a child's PATH finds a stand-in for each host
 
 test("#991: a test's own stand-in still answers; a link in its own directory that leaves them, and a relative or empty PATH entry, are shadowed", { skip: !posix && 'POSIX' }, () => {
   const g = guard();
-  const machine = findOn('sudo', SYSTEM) ?? findOn('systemctl', SYSTEM);
+  // Both looked up (block coverage judges each use of systemd's sign by its own range: a `??` operand never evaluated
+  // never ran, R1169ag/ah), the first found used.
+  const machine = [findOn('sudo', SYSTEM), findOn('systemctl', SYSTEM)].find((p) => p != null) ?? null;
   const root = mkdtempSync(join(tmpdir(), 'host-tools-'));
   const own = join(root, 'own');
   mkdirSync(own);
@@ -290,7 +292,9 @@ test("#991 round 4: no child a test starts off CI is on CI, and a pinned file's 
 
 test('#991 round 4: a machine host tool under another name (a link) is stood in too', { skip: !posix && 'POSIX' }, () => {
   const g = guard();
-  const machine = findOn('sudo', SYSTEM) ?? findOn('systemctl', SYSTEM);
+  // Both looked up (block coverage judges each use of systemd's sign by its own range: a `??` operand never evaluated
+  // never ran, R1169ag/ah), the first found used.
+  const machine = [findOn('sudo', SYSTEM), findOn('systemctl', SYSTEM)].find((p) => p != null) ?? null;
   if (machine === null) return;
   const dir = mkdtempSync(join(tmpdir(), 'host-alias-'));
   symlinkSync(machine, join(dir, 'zz-alias'));

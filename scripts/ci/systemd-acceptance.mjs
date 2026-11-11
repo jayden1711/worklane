@@ -91,22 +91,24 @@
 // sometimes, on GITHUB_ACTIONS, the uid or PROJECT_SANDBOX_REQUIRED; R1169ab D2), fails here (the owner's decision of
 // 2026-11-10, option (2)). Each gate opens with `t.plan(<n>)` (planProblems: refused statically without it), so node
 // fails it when it made fewer `t.assert` calls and subtests; no t.assert sits in a try with a catch, and each subtest
-// opens with its own count. Each sign test's file runs with node's line coverage of itself (mustRun, the owner's
-// option (b) of 2026-11-10): in the test's own function and, recursively, each subtest's (`t.test`, `t['test']`, an
-// alias; a function given by name is read when this file declares it, else refused), every line that holds the sign
-// must have run, each function must have reached its last statement, and each subtest must have started.
-// Refused before the run (exit 2), since line coverage would read them as run when they weren't (R1169ae, R1169af):
-// a sign line in a `try` that has a `catch` (a throwing call before it leaves no count), a sign line in an optional
-// call's arguments (a short-circuit leaves no count), and a test or subtest function given by a name the file declares
-// more than once (which one is meant can't be read without scope).
-// Named limits of that check (R1169ac, R1169ad, R1169ae, R1169af):
+// opens with its own count. Each sign test's file runs with V8's block coverage (NODE_V8_COVERAGE; mustRun, the
+// owner's option (b) of 2026-11-10, judged by position since R1169ag/ah): in the test's own function and, recursively,
+// each subtest's (`t.test`, `t['test']`, an alias; a function given by name is read when this file declares it once,
+// else refused), every use of the sign must have run, each function must have reached its last statement, and each
+// subtest must have started. Each is judged by the innermost range around its own position, never by its line: a
+// branch not taken, braced or not, a loop body never entered, an operand of `?:` `&&` `||` `??` never evaluated, a
+// function never called and the code after a `return`, `throw`, `break` or `continue` are ranges of their own.
+// Refused before the run (exit 2), where V8 keeps no count of its own (measured, R1169ae/af): a sign in a `try` that
+// has a `catch` (a throwing call before it), a sign in an optional call's arguments (a short-circuit), and a test or
+// subtest function given by a name the file declares more than once (which one is meant can't be read without scope).
+// Named limits of that check, each measured on real block coverage (R1169ac-ah; the r1169ah-block-* fixtures):
+// - a call that throws before the sign, when something other than a `try` around the sign takes the throw (a caller's
+//   try, assert.throws/rejects, a promise's catch, Promise.allSettled, a `finally` that returns, an unawaited
+//   Promise): V8 starts no new count after a call, so the rest of its block reads as run;
+// - a generator's body (`function*`, `async function*`) when the generator is made but never iterated;
+// - the right side of `??=`, `||=` and `&&=`, and a default parameter's value: V8 counts neither on its own;
+// - tests registered by one loop share one function's counts: one registration's run covers another's early return;
 // - a branch, loop or catch around assertions alone (no sign in it);
-// - a line that runs while part of it doesn't: a same-line `return`; any operand of `?:`, `&&`, `||` or `??`, however
-//   it is laid out (an operand on a line of its own keeps that line's count when the operator ran); a one-line test or
-//   loop body; a callback on the line it's passed on;
-// - tests registered by one loop share one function's line counts: one registration's run covers another's early
-//   return;
-// - a callback that is never called (a listener with no event), and an assertion on an unawaited Promise;
 // - code in a helper the test calls in another function; and an excused test (it skips here) isn't judged on it.
 //
 // Results come from node's test events (systemd-acceptance-reporter.mjs, R1169f), not from TAP text: each gate is
@@ -124,10 +126,11 @@
 // naming systemd. Exit 2: no such test was found, a file couldn't be read, a gate isn't one it reads, or the sign is
 // somewhere the rule refuses.
 import { spawnSync } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
+import { tmpdir } from 'node:os';
 import { join, sep } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 /** The suite's isolation preload, as every runner of it passes it (test/isolate.ts). */
@@ -1618,6 +1621,7 @@ function subtestCalls(ts, fn) {
 export function mustRun(ts, path, text, line, column) {
   const sf = parsed(ts, path, text);
   const lineOf = (n) => sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1;
+  const at = (n) => ({ line: lineOf(n), pos: n.getStart(sf) });
   const sign = new RegExp(SIGN.source);
   const out = { ends: [], subtests: [], sign: [], refused: null };
   const seen = new Set();
@@ -1629,16 +1633,16 @@ export function mustRun(ts, path, text, line, column) {
       last = last.statements.at(-1);
       if (ts.isTryStatement(last)) last = last.tryBlock;
     }
-    if (last) out.ends.push({ line: lineOf(last), what });
+    if (last) out.ends.push({ ...at(last), what });
     const signs = (n) => {
       if ((ts.isStringLiteralLike(n) || ts.isTemplateHead(n) || ts.isTemplateMiddle(n) || ts.isTemplateTail(n) || ts.isIdentifier(n) || ts.isRegularExpressionLiteral(n)) && sign.test(ts.isIdentifier(n) ? n.text : n.getText(sf))) {
-        out.sign.push(lineOf(n));
-        // Where line coverage reads a line as run though it didn't (R1169af D1/D2, R1169ae D2): after a call that
-        // throws in a try whose catch takes it (V8 counts no block after a throwing call), and in the arguments of an
-        // optional call that short-circuits (V8 counts no block there). Refused, not judged: 0 picked tests have either.
+        out.sign.push(at(n));
+        // Where V8's block coverage counts the sign as run though it wasn't (measured, R1169ag/ah): after a call
+        // that throws in a try whose catch takes it (V8 starts no counter after a call), and in the arguments of an
+        // optional call that short-circuits (V8 has no counter there). Refused, not judged: 0 picked tests have either.
         for (let x = n; x.parent && x !== fn; x = x.parent) {
           const p = x.parent;
-          if (ts.isTryStatement(p) && x === p.tryBlock && p.catchClause) out.refused ??= `line ${lineOf(n)} holds systemd's sign in a try whose catch would take a throw before it (line coverage would read it as run): keep the systemd work out of the try`;
+          if (ts.isTryStatement(p) && x === p.tryBlock && p.catchClause) out.refused ??= `line ${lineOf(n)} holds systemd's sign in a try whose catch would take a throw before it (coverage would count it as run): keep the systemd work out of the try`;
           if ((ts.isCallExpression(p) || ts.isElementAccessExpression(p)) && (p.questionDotToken || ts.isOptionalChain(p)) && x !== p.expression) out.refused ??= `line ${lineOf(n)} holds systemd's sign in an optional call's arguments (a short-circuit leaves no count): call it plainly`;
         }
       }
@@ -1646,7 +1650,7 @@ export function mustRun(ts, path, text, line, column) {
     };
     signs(fn.body);
     for (const c of subtestCalls(ts, fn)) {
-      out.subtests.push(lineOf(c));
+      out.subtests.push(at(c));
       const sub = functionOf(ts, sf, c.arguments.at(-1));
       if (!sub) out.refused ??= `the subtest at line ${lineOf(c)} is given a function this file doesn't declare once`;
       else walk(sub, `the subtest at line ${lineOf(c)}`);
@@ -1656,8 +1660,39 @@ export function mustRun(ts, path, text, line, column) {
   const fn = functionOf(ts, sf, call?.arguments.at(-1));
   if (!fn) return { ...out, refused: "its function is given by a name this file doesn't declare once" };
   walk(fn, 'its function');
-  out.sign = [...new Set(out.sign)].sort((a, b) => a - b);
+  out.sign = [...new Map(out.sign.map((s) => [s.pos, s])).values()].sort((a, b) => a.pos - b.pos);
   return out;
+}
+
+/**
+ * V8's block coverage of one built file (`url`), from a NODE_V8_COVERAGE folder (the owner's direction on R1169ag/ah,
+ * 2026-11-11): for each process that loaded it, its ranges (function ranges and the block ranges nested in them, each
+ * with how many times it ran). null when no process reported the file.
+ */
+export function blockCoverage(dir, url) {
+  const out = [];
+  for (const f of readdirSync(dir).filter((x) => x.endsWith('.json')).sort()) {
+    for (const s of JSON.parse(readFileSync(join(dir, f), 'utf8')).result ?? []) {
+      if (s.url === url) out.push(s.functions.flatMap((fn) => fn.ranges));
+    }
+  }
+  return out.length ? out : null;
+}
+
+/**
+ * How many times the code at character offset `pos` ran: the count of the innermost range around it, in the process
+ * where it ran most. A branch not taken, a loop body never entered, a function never called and the code after a
+ * `return`, `throw`, `break` or `continue` are each a range of their own, braced or not (the precision line coverage
+ * lacked: R1169ah D1).
+ */
+export function countAt(coverage, pos) {
+  let most = 0;
+  for (const ranges of coverage) {
+    let best = null;
+    for (const r of ranges) if (r.startOffset <= pos && pos < r.endOffset && (!best || r.endOffset - r.startOffset <= best.endOffset - best.startOffset)) best = r;
+    if (best && best.count > most) most = best.count;
+  }
+  return most;
 }
 
 /**
@@ -1736,19 +1771,21 @@ export function problems(runs) {
           continue;
         }
         // Its own function ran to its end, and started every subtest it names (R1169ab D2, the owner's decision of
-        // 2026-11-10): node's line coverage of the built file. An early return, or a subtest started only sometimes, on
-        // what only this VM answers (GITHUB_ACTIONS, the uid, PROJECT_SANDBOX_REQUIRED) passes having checked less.
+        // 2026-11-10): V8's block coverage of the built file, each point judged by the innermost range around its own
+        // position, never by its line (R1169ag/ah). An early return, or a subtest started only sometimes, on what only
+        // this VM answers (GITHUB_ACTIONS, the uid, PROJECT_SANDBOX_REQUIRED) passes having checked less.
         if (!bad && !why && t.mustRun) {
           if (!coverage) {
             out.push(`${at}: no coverage of its file came back, so what of it ran can't be read`);
             continue;
           }
-          const ran = (l) => (coverage.get(l) ?? 0) > 0;
-          for (const e of t.mustRun.ends) if (!ran(e.line)) out.push(`${at}: ${e.what}'s last statement (line ${e.line}) never ran: it returned early, having checked less`);
-          const notStarted = t.mustRun.subtests.filter((l) => !ran(l));
-          if (notStarted.length) out.push(`${at}: the subtest at line ${notStarted.join(', ')} never started: started only sometimes, it checked less`);
-          const unrun = t.mustRun.sign.filter((l) => !ran(l));
-          if (unrun.length) out.push(`${at}: line ${unrun.join(', ')}, holding systemd's sign, never ran: a branch, a loop over nothing or a catch left the systemd work unchecked`);
+          const ran = (p) => countAt(coverage, p.pos) > 0;
+          const lines = (ps) => [...new Set(ps.map((p) => p.line))].join(', ');
+          for (const e of t.mustRun.ends) if (!ran(e)) out.push(`${at}: ${e.what}'s last statement (line ${e.line}) never ran: it returned early, having checked less`);
+          const notStarted = t.mustRun.subtests.filter((p) => !ran(p));
+          if (notStarted.length) out.push(`${at}: the subtest at line ${lines(notStarted)} never started: started only sometimes, it checked less`);
+          const unrun = t.mustRun.sign.filter((p) => !ran(p));
+          if (unrun.length) out.push(`${at}: line ${lines(unrun)}, holding systemd's sign, never ran: a branch, a loop over nothing or a catch left the systemd work unchecked`);
         }
         for (let j = k - 1; j >= 0 && events[j].nesting > r.nesting; j--) {
           matched.add(j);
@@ -1883,7 +1920,8 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
       for (const t of f.signTests ?? []) {
         t.mustRun = mustRun(ts, `test/${f.file}`, built, t.line, t.column);
         // What can't be read can't be judged (R1169ac D1): refused here, unless the allowlist excuses the test.
-        if (t.mustRun.refused && !excused[`test/${f.file}: ${t.name ?? t.label}`]) throw new Error(`test/${f.file}: ${t.name ?? t.label}: ${t.mustRun.refused}: inline it, or declare it in this file, so what of it must run on the VM can be read`);
+        // The advice to inline or declare fits only a function that can't be read (R1169ag D3, R1169ah D6).
+        if (t.mustRun.refused && !excused[`test/${f.file}: ${t.name ?? t.label}`]) throw new Error(`test/${f.file}: ${t.name ?? t.label}: ${t.mustRun.refused}${/declare once/.test(t.mustRun.refused) ? ': inline it, or declare it in this file once, so what of it must run on the VM can be read' : ''}`);
       }
     }
   } catch (e) {
@@ -1906,13 +1944,14 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
       // A file with a sign test runs whole (R1169n): no name filter, so a test registered only sometimes, or under a
       // suite that skips, shows as not run. A file of gates alone runs only its gates, by name, as before.
       const whole = !!f.signTests?.length;
-      // A file with sign tests runs with node's line coverage of that file alone (R1169ab D2): what of each test's
-      // own function ran. Test files are left out of coverage by default; this names the one built file.
-      const coverage = whole ? ['--experimental-test-coverage', `--test-coverage-include=dist/test/${f.file.replace(/\.ts$/, '.js')}`, '--test-coverage-exclude=/dev/null/*'] : [];
-      const args = [...PRELOAD, '--test', ...coverage, '--test-reporter=tap', '--test-reporter-destination=stdout', `--test-reporter=${REPORTER}`, '--test-reporter-destination=stdout', ...(whole ? [] : f.names.map((n) => `--test-name-pattern=^${escapeRe(n)}$`)), `dist/test/${f.file.replace(/\.ts$/, '.js')}`];
+      // A file with sign tests runs with V8's block coverage (NODE_V8_COVERAGE, a fresh folder of this run's alone;
+      // R1169ab D2, R1169ag/ah): what of each test's own function ran, read from that file's ranges.
+      const covDir = whole ? mkdtempSync(join(tmpdir(), 'systemd-acceptance-cov-')) : null;
+      const args = [...PRELOAD, '--test', '--test-reporter=tap', '--test-reporter-destination=stdout', `--test-reporter=${REPORTER}`, '--test-reporter-destination=stdout', ...(whole ? [] : f.names.map((n) => `--test-name-pattern=^${escapeRe(n)}$`)), `dist/test/${f.file.replace(/\.ts$/, '.js')}`];
       // Never a child of another test run (NODE_TEST_CONTEXT), and no NODE_OPTIONS (an --enable-source-maps there would
       // report TS lines, so every gate would read as not run).
-      const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'NODE_TEST_CONTEXT' && k !== 'NODE_OPTIONS'));
+      const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'NODE_TEST_CONTEXT' && k !== 'NODE_OPTIONS' && k !== 'NODE_V8_COVERAGE'));
+      if (covDir) env.NODE_V8_COVERAGE = covDir;
       const r = spawnSync(process.execPath, args, { cwd: root, env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'inherit', 'pipe'] });
       process.stdout.write(r.stdout ?? '');
       let events;
@@ -1922,9 +1961,15 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
         console.error(`test/${f.file}: its results couldn't be read (${e.message})`);
         process.exit(1);
       }
-      const cov = events.find((e) => e.type === 'coverage' && typeof e.path === 'string' && e.path.split(sep).join('/').endsWith(`/dist/test/${f.file.replace(/\.ts$/, '.js')}`));
-      events = events.filter((e) => e.type !== 'coverage');
-      runs.push({ file: f.file, gates: f.gates, events, signTests: f.signTests ?? [], excused: f.excused ?? new Set(), coverage: cov ? new Map(cov.lines) : null });
+      let coverage = null;
+      if (covDir) {
+        try {
+          coverage = blockCoverage(covDir, pathToFileURL(join(root, 'dist', 'test', f.file.replace(/\.ts$/, '.js'))).href);
+        } finally {
+          rmSync(covDir, { recursive: true, force: true });
+        }
+      }
+      runs.push({ file: f.file, gates: f.gates, events, signTests: f.signTests ?? [], excused: f.excused ?? new Set(), coverage });
       exits.push(...summaryProblems(r.stdout ?? '', f.file, f.gates.length + (f.signTests?.length ?? 0), whole));
       if (r.status !== 0) exits.push(`test/${f.file}: the test run exited ${r.status ?? r.signal}`);
     }

@@ -1,0 +1,14 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM), true here; F fails whenever it runs.
+const sandboxed = true;
+
+test('the watchdog reads unit states from the real service manager', async (t) => {
+  function* g() {
+    if (!sandboxed) yield 1;
+    assert.equal(spawnSync('systemctl', ['is-active', 'x']).status, -7);
+  }
+  t.assert.ok([...g()]);
+});

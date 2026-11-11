@@ -74,7 +74,7 @@ test('machine stats on Linux: /proc and an unprivileged systemctl show per unit,
 
 test('machine stats elsewhere: memory, load and units are not measured; disk still is', () => {
   for (const platform of ['darwin', 'win32']) {
-    const s = machineStats({ units: ['a.service'], paths: ['x'] }, { platform, readFile: () => assert.fail('no /proc'), exec: () => assert.fail('no systemctl'), statfs: () => ({ blocks: 10, bsize: 1, bavail: 5 }) });
+    const s = machineStats({ units: ['a.service'], paths: ['x'] }, { platform, readFile: () => assert.fail('no /proc'), exec: () => assert.fail('no service manager call'), statfs: () => ({ blocks: 10, bsize: 1, bavail: 5 }) });
     assert.deepEqual([s.memory, s.load, s.units], [null, null, null], platform);
     assert.deepEqual(s.disks, [{ path: 'x', freeBytes: 5, totalBytes: 10 }]);
     assert.match(s.unavailable.join(), new RegExp(`not measured on ${platform}`));

@@ -29,8 +29,12 @@ type Script = {
   signUseList: (ts: unknown, path: string, text: string) => { at: string; pin: string }[];
   signProblems: (ts: unknown, texts: Map<string, string>, allow?: Allow) => string[];
   planProblems: (ts: unknown, path: string, text: string, gates: { name: string; line: number; column: number }[]) => string[];
-  mustRun: (ts: unknown, path: string, text: string, line: number, column: number) => { ends: { line: number; what: string }[]; subtests: number[]; sign: number[]; refused: string | null } | null;
+  mustRun: (ts: unknown, path: string, text: string, line: number, column: number) => { ends: { line: number; pos: number; what: string }[]; subtests: Point[]; sign: Point[]; refused: string | null } | null;
+  blockCoverage: (dir: string, url: string) => Range[][] | null;
+  countAt: (coverage: Range[][], pos: number) => number;
 };
+type Point = { line: number; pos: number };
+type Range = { startOffset: number; endOffset: number; count: number };
 type Allow = { uses?: Record<string, { why: string; uses: string[] }>; skipImports?: Record<string, string>; runtime?: Record<string, string> };
 const sa = (await import(pathToFileURL(join(repoRoot, 'scripts', 'ci', 'systemd-acceptance.mjs')).href)) as Script;
 
@@ -318,7 +322,7 @@ test("the build's roots come from tsconfig.json's include; node's TAP summary mu
   assert.deepEqual(sa.summaryProblems('', 'f.test.ts', 1).length, 4, 'no summary: fail closed');
 });
 
-test("every review's attack on this script, kept as a fixture, still exits as it must: 2 refused statically, 1 at run time (R1169g, R1169h; the owner's decision)", { timeout: 300_000 }, () => {
+test("every review's attack on this script, kept as a fixture, still exits as it must: 2 refused statically, 1 at run time (R1169g, R1169h; the owner's decision)", { timeout: 600_000 }, () => {
   const base = join(repoRoot, 'test', 'fixtures', 'systemd-acceptance');
   const manifest = JSON.parse(readFileSync(join(base, 'manifest.json'), 'utf8')) as Record<string, [number, string, string?] | string>;
   const cases = Object.entries(manifest).filter(([k]) => k !== '//') as [string, [number, string, string?]][];
@@ -998,8 +1002,12 @@ test("R1169ab D2: a gate opens with node's own count; a sign test's own function
     "test('e', () => go());",
   ].join('\n');
   const its = (line: number, what = 'its function') => ({ line, what });
-  assert.deepEqual(sa.mustRun(ts, file, text, 2, 1), { ends: [its(7), its(3, 'the subtest at line 3'), its(4, 'the subtest at line 4')], subtests: [3, 4], sign: [6], refused: null });
-  assert.deepEqual(sa.mustRun(ts, file, text, 12, 1), { ends: [its(12)], subtests: [], sign: [], refused: null }, 'an expression body: its own line');
+  // Each point's line, for reading; its position (a character offset of the built file) is what's judged (R1169ag/ah).
+  const lines = (m: ReturnType<Script['mustRun']>) => m && { ends: m.ends.map((e) => ({ line: e.line, what: e.what })), subtests: m.subtests.map((p) => p.line), sign: m.sign.map((p) => p.line), refused: m.refused };
+  assert.deepEqual(lines(sa.mustRun(ts, file, text, 2, 1)), { ends: [its(7), its(3, 'the subtest at line 3'), its(4, 'the subtest at line 4')], subtests: [3, 4], sign: [6], refused: null });
+  assert.deepEqual(lines(sa.mustRun(ts, file, text, 12, 1)), { ends: [its(12)], subtests: [], sign: [], refused: null }, 'an expression body: its own line');
+  const m = sa.mustRun(ts, file, text, 2, 1)!;
+  assert.deepEqual([m.sign[0]!.pos, m.ends[0]!.pos, m.subtests[1]!.pos], [text.indexOf(`'${sd.slice(0, 6)}ctl'`), text.indexOf('two();'), text.indexOf("await t.test('b'") + 'await '.length], 'each point at its own position: the sign itself, the statement, the subtest call');
   // Every way to start a subtest of the context (R1169ac D2), and a function given by name (R1169ac D1).
   const shapes = [
     "import { test } from 'node:test';",
@@ -1015,7 +1023,7 @@ test("R1169ab D2: a gate opens with node's own count; a sign test's own function
     "test('m', imported);",
   ].join('\n');
   const n = sa.mustRun(ts, file, shapes, 10, 1)!;
-  assert.deepEqual([n.subtests, n.sign, n.refused], [[3, 5, 7], [3, 9], null], "t['test'], a bound alias, a destructured one; a same-file named function read");
+  assert.deepEqual([n.subtests.map((p) => p.line), n.sign.map((p) => p.line), n.refused], [[3, 5, 7], [3, 9], null], "t['test'], a bound alias, a destructured one; a same-file named function read");
   assert.match(String(sa.mustRun(ts, file, shapes, 11, 1)!.refused), /its function is given by a name this file doesn't declare once/, 'an imported function is refused, never skipped');
   // R1169ae D1, R1169af D1/D2: what line coverage would read as run when it wasn't is refused before the run.
   const refused = (body: string, extra = '') => sa.mustRun(ts, file, `import { test } from 'node:test';\n${extra}test('s', async (t) => {\n${body}\n});\n`, extra.split('\n').length + 1, 1)!.refused;
@@ -1024,17 +1032,34 @@ test("R1169ab D2: a gate opens with node's own count; a sign test's own function
   assert.equal(refused(`  try {\n    load();\n  } finally {}\n  ${unit};`), null, 'a try with only a finally, the sign after it: read');
   assert.match(String(refused(`  units?.expect(\n    ${unit},\n  );`)), /in an optional call's arguments/, "a sign line in an optional call's arguments");
   assert.match(String(refused(`  const sub = () => ${unit};\n  await t.test('a', sub);`, `function sub() {}\n`)), /doesn't declare once/, 'a subtest function named twice in the file');
-  // problems(): judged on the run's coverage of the file.
-  const t = { name: 's', line: 2, column: 1, label: "'s'", subtests: true, mustRun: { ends: [its(7), its(3, 'the subtest at line 3')], subtests: [3, 4], sign: [6], refused: null } };
+  // problems(): judged on the run's block coverage of the file, each point by the innermost range around it.
+  const at = (line: number) => ({ line, pos: line * 100 + 5 });
+  const t = { name: 's', line: 2, column: 1, label: "'s'", subtests: true, mustRun: { ends: [{ ...at(7), what: 'its function' }, { ...at(3), what: 'the subtest at line 3' }], subtests: [at(3), at(4)], sign: [at(6)], refused: null } };
   const ev = (name: string, line: number, nesting = 0) => ({ type: 'test:pass', name, nesting, file: '/r/dist/test/g.test.js', line, column: 1, skip: null, todo: null });
   const events = [ev('a', 3, 1), ev('b', 4, 1), ev('s', 2)];
-  const run = (lines: [number, number][] | null, excused: string[] = []) => sa.problems([{ file: 'g.test.ts', gates: [], events, signTests: [t], excused: new Set(excused), coverage: lines && new Map(lines) } as never]);
-  const all = (zero: number[] = []): [number, number][] => [2, 3, 4, 5, 6, 7].map((l) => [l, zero.includes(l) ? 0 : 1]);
+  const run = (coverage: Range[][] | null, excused: string[] = []) => sa.problems([{ file: 'g.test.ts', gates: [], events, signTests: [t], excused: new Set(excused), coverage } as never]);
+  // The test's function ran once; each line given is a block of its own on that line that never ran.
+  const all = (zero: number[] = []): Range[][] => [[{ startOffset: 0, endOffset: 1000, count: 1 }, ...zero.map((l) => ({ startOffset: l * 100, endOffset: l * 100 + 50, count: 0 }))]];
   assert.deepEqual(run(all()), [], 'ran to its end, every subtest started');
   assert.match(run(all([7])).join('\n'), /its function's last statement \(line 7\) never ran: it returned early/, 'an early return');
   assert.match(run(all([4])).join('\n'), /the subtest at line 4 never started/, 'a subtest started only sometimes');
   assert.match(run(all([3])).join('\n'), /the subtest at line 3's last statement \(line 3\) never ran/, "a subtest's early return");
   assert.match(run(all([6])).join('\n'), /line 6, holding systemd's sign, never ran/, 'a branch, an empty loop or a catch left the systemd work unrun');
+  // Judged by position, never by line (R1169ah D1): a block that never ran beside the sign, on its line, isn't the sign's.
+  assert.deepEqual(run([[{ startOffset: 0, endOffset: 1000, count: 1 }, { startOffset: 606, endOffset: 650, count: 0 }]]), [], "a block on the sign's line that doesn't hold it");
+  assert.match(run([[{ startOffset: 0, endOffset: 1000, count: 1 }, { startOffset: 600, endOffset: 610, count: 0 }]]).join('\n'), /line 6, holding systemd's sign, never ran/, 'the innermost range around the sign, however short');
   assert.match(run(null).join('\n'), /no coverage of its file came back/, 'no coverage is never a pass');
   assert.deepEqual(run(all([7]), ['2:1']), [], 'an excused test (it skips here) is not judged on its coverage');
+  // countAt: the innermost range around the position; across processes, where it ran most; outside every range, 0.
+  const cov: Range[][] = [[{ startOffset: 0, endOffset: 100, count: 2 }, { startOffset: 10, endOffset: 50, count: 0 }, { startOffset: 20, endOffset: 30, count: 3 }], [{ startOffset: 0, endOffset: 100, count: 1 }]];
+  assert.deepEqual([5, 15, 25, 50, 150].map((p) => sa.countAt([cov[0]!], p)), [2, 0, 3, 2, 0], 'innermost; an end offset is outside its range');
+  assert.equal(sa.countAt(cov, 15), 1, 'another process that ran it counts');
+  // blockCoverage: only the named file's ranges, one list per process that loaded it; none, null.
+  const dir = tmp();
+  const fn = (startOffset: number, endOffset: number, count: number) => ({ functionName: '', isBlockCoverage: true, ranges: [{ startOffset, endOffset, count }] });
+  writeFileSync(join(dir, 'coverage-1.json'), JSON.stringify({ result: [{ url: 'file:///r/dist/test/g.test.js', functions: [fn(0, 100, 1), fn(10, 20, 0)] }, { url: 'file:///r/other.js', functions: [fn(0, 5, 9)] }] }));
+  writeFileSync(join(dir, 'coverage-2.json'), JSON.stringify({ result: [{ url: 'file:///r/dist/test/g.test.js', functions: [fn(0, 100, 4)] }] }));
+  writeFileSync(join(dir, 'notes.txt'), 'not coverage');
+  assert.deepEqual(sa.blockCoverage(dir, 'file:///r/dist/test/g.test.js'), [[{ startOffset: 0, endOffset: 100, count: 1 }, { startOffset: 10, endOffset: 20, count: 0 }], [{ startOffset: 0, endOffset: 100, count: 4 }]]);
+  assert.equal(sa.blockCoverage(dir, 'file:///r/dist/test/missing.test.js'), null, 'a file no process loaded: null, never a pass');
 });

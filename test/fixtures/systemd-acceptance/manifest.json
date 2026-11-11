@@ -1,5 +1,5 @@
 {
-  "//": "Each folder is one attack on scripts/ci/systemd-acceptance.mjs (its files are *.test.ts.txt, copied to test/ and dist/test/, and *.root, copied to the root, so neither npm test nor the script's own scan reads them). Each is [exit, reason, listed?]: the script must exit with that code (2 refused statically, 1 refused at run time, 0 for a shape the VM runs or a stated limit) and its stderr match that pattern, so it's refused for its own reason; `listed`, when there, must match its stdout: the shape is among the tests it runs on the VM (R1169n). Kept as regression inputs (the owner's decision on #1169, 2026-11-08).",
+  "//": "Each folder is one attack on scripts/ci/systemd-acceptance.mjs (its files are *.test.ts.txt, copied to test/ and dist/test/, and *.root, copied to the root, so neither npm test nor the script's own scan reads them). Each is [exit, reason, listed?]: the script must exit with that code (2 refused statically, 1 refused at run time, 0 for a shape the VM runs or a stated limit) and its stderr match that pattern, so it's refused for its own reason; `listed`, when there, must match its stdout: the shape is among the tests it runs on the VM (R1169n). Kept as regression inputs (the owner's decision on #1169, 2026-11-08). r1169ah-block-*: each shape measured on V8's block coverage (R1169ag/ah, 2026-11-11): exit 0 is a named limit, 1 caught, 2 refused; F fails whenever it runs, so an exit 0 proves it never ran.",
   "r1169h-a1": [
     2,
     "registers a test inside an expression"
@@ -1102,5 +1102,157 @@
   "r1169af-f11-optional-chain": [
     2,
     "test/y\\.test\\.ts: the watchdog reads unit states from the real service manager: line \\d+ holds systemd's sign in an optional call's arguments"
+  ],
+  "r1169ah-block-s01-caller-try": [
+    0,
+    "^$"
+  ],
+  "r1169ah-block-s02-promise-catch": [
+    0,
+    "^$"
+  ],
+  "r1169ah-block-s03-allsettled": [
+    0,
+    "^$"
+  ],
+  "r1169ah-block-s04-assert-throws": [
+    0,
+    "^$"
+  ],
+  "r1169ah-block-s05-assert-rejects": [
+    0,
+    "^$"
+  ],
+  "r1169ah-block-s06-finally-return": [
+    0,
+    "^$"
+  ],
+  "r1169ah-block-s07-try-catch-around-sign": [
+    2,
+    "in a try whose catch would take a throw before it"
+  ],
+  "r1169ah-block-s08-await-rejects-before-sign": [
+    1,
+    "the watchdog reads unit states from the real service manager: line \\d+, holding systemd's sign, never ran"
+  ],
+  "r1169ah-block-s09-throw-statement-before-sign": [
+    1,
+    "the watchdog reads unit states from the real service manager: line \\d+, holding systemd's sign, never ran"
+  ],
+  "r1169ah-block-s10-generator-not-iterated": [
+    0,
+    "^$"
+  ],
+  "r1169ah-block-s11-async-generator-not-iterated": [
+    0,
+    "^$"
+  ],
+  "r1169ah-block-s12-generator-iterated-control": [
+    1,
+    "the watchdog reads unit states from the real service manager: failed"
+  ],
+  "r1169ah-block-s13-nullish-assign": [
+    0,
+    "^$"
+  ],
+  "r1169ah-block-s14-or-assign": [
+    0,
+    "^$"
+  ],
+  "r1169ah-block-s15-and-assign": [
+    0,
+    "^$"
+  ],
+  "r1169ah-block-s16-default-param": [
+    0,
+    "^$"
+  ],
+  "r1169ah-block-s17-ternary-operand": [
+    1,
+    "the watchdog reads unit states from the real service manager: line \\d+, holding systemd's sign, never ran"
+  ],
+  "r1169ah-block-s18-and-operand": [
+    1,
+    "the watchdog reads unit states from the real service manager: line \\d+, holding systemd's sign, never ran"
+  ],
+  "r1169ah-block-s19-or-operand": [
+    1,
+    "the watchdog reads unit states from the real service manager: line \\d+, holding systemd's sign, never ran"
+  ],
+  "r1169ah-block-s20-nullish-operand": [
+    1,
+    "the watchdog reads unit states from the real service manager: line \\d+, holding systemd's sign, never ran"
+  ],
+  "r1169ah-block-s21-ternary-same-line": [
+    1,
+    "the watchdog reads unit states from the real service manager: line \\d+, holding systemd's sign, never ran"
+  ],
+  "r1169ah-block-s22-and-same-line": [
+    1,
+    "the watchdog reads unit states from the real service manager: line \\d+, holding systemd's sign, never ran"
+  ],
+  "r1169ah-block-s23-optional-call-arg": [
+    2,
+    "in an optional call's arguments"
+  ],
+  "r1169ah-block-s24-braceless-if": [
+    1,
+    "the watchdog reads unit states from the real service manager: line \\d+, holding systemd's sign, never ran"
+  ],
+  "r1169ah-block-s25-braceless-for": [
+    1,
+    "the watchdog reads unit states from the real service manager: line \\d+, holding systemd's sign, never ran"
+  ],
+  "r1169ah-block-s26-braceless-while": [
+    1,
+    "the watchdog reads unit states from the real service manager: line \\d+, holding systemd's sign, never ran"
+  ],
+  "r1169ah-block-s27-one-line-loop": [
+    1,
+    "the watchdog reads unit states from the real service manager: line \\d+, holding systemd's sign, never ran"
+  ],
+  "r1169ah-block-s28-one-line-if": [
+    1,
+    "the watchdog reads unit states from the real service manager: line \\d+, holding systemd's sign, never ran"
+  ],
+  "r1169ah-block-s29-same-line-return": [
+    1,
+    "the watchdog reads unit states from the real service manager: line \\d+, holding systemd's sign, never ran"
+  ],
+  "r1169ah-block-s30-early-return": [
+    1,
+    "the watchdog reads unit states from the real service manager: line \\d+, holding systemd's sign, never ran"
+  ],
+  "r1169ah-block-s31-callback-same-line-never-called": [
+    1,
+    "the watchdog reads unit states from the real service manager: line \\d+, holding systemd's sign, never ran"
+  ],
+  "r1169ah-block-s32-nested-fn-never-called": [
+    1,
+    "the watchdog reads unit states from the real service manager: line \\d+, holding systemd's sign, never ran"
+  ],
+  "r1169ah-block-s33-switch-default": [
+    1,
+    "the watchdog reads unit states from the real service manager: line \\d+, holding systemd's sign, never ran"
+  ],
+  "r1169ah-block-s34-labeled-break": [
+    1,
+    "the watchdog reads unit states from the real service manager: line \\d+, holding systemd's sign, never ran"
+  ],
+  "r1169ah-block-s35-continue": [
+    1,
+    "the watchdog reads unit states from the real service manager: line \\d+, holding systemd's sign, never ran"
+  ],
+  "r1169ah-block-s36-some-short-circuit": [
+    1,
+    "the watchdog reads unit states from the real service manager: line \\d+, holding systemd's sign, never ran"
+  ],
+  "r1169ah-block-s37-unawaited-promise": [
+    0,
+    "^$"
+  ],
+  "r1169ah-block-s38-ran-control": [
+    1,
+    "the watchdog reads unit states from the real service manager: failed"
   ]
 }
