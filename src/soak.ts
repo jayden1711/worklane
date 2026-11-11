@@ -84,6 +84,12 @@ export interface SoakSample {
    */
   cgroupProcs?: number | null;
   cgroupKernelBytes?: number | null;
+  /** The used inodes of the level's filesystems (a real soak on Linux, R1181z D3): judged at stop only. */
+  levelFiles?: number | null;
+  /** Files and folders under the worktree folder, part of `files` (R1181y Y1: a task's checkout open at the stop sample). */
+  worktreeFiles?: number;
+  /** SysV IPC objects alive (a real soak on Linux, R1181z D2): they outlive every process. */
+  sysvIpc?: number | null;
 }
 
 export interface SoakLimits {
@@ -273,7 +279,7 @@ export function soakVerdict(input: readonly SoakSample[], limits: SoakLimits = S
   // `extended`: the driver's own run, which records errors, worktrees and disk too (R1181j 1, 2); a driver that drops
   // them fails closed. `linux`: there the watches can always be counted, so they are required too (R1181o), and on a
   // real soak (`expectedMs`) the filesystems' level as well (R1181q N2: a level that read null went unjudged, unnamed). (Without it they are judged when there, so the frozen acceptance file's samples stay valid.)
-  const fields: (keyof SoakSample)[] = ['at', 'rss', 'heapUsed', 'eventsBytes', 'walBytes', 'events', 'tickMs', 'maxTickMs', 'tasksDone', 'filed', 'oldestUnlandedMs', 'openRuns', 'oldestOpenRunMs', 'slotsHeld', ...(o.extended ? (['errors', 'worktrees', 'diskBytes', 'children', 'failedRuns', 'failureEvents', 'worktreeDirs', 'files', 'fullRunHeld', 'childRss'] as const) : []), ...(o.extended && o.linux ? (['watches', 'childFds'] as const) : []), ...(o.extended && o.linux && o.expectedMs !== undefined ? (['levelBytes', 'cgroupProcs', 'cgroupKernelBytes'] as const) : [])];
+  const fields: (keyof SoakSample)[] = ['at', 'rss', 'heapUsed', 'eventsBytes', 'walBytes', 'events', 'tickMs', 'maxTickMs', 'tasksDone', 'filed', 'oldestUnlandedMs', 'openRuns', 'oldestOpenRunMs', 'slotsHeld', ...(o.extended ? (['errors', 'worktrees', 'diskBytes', 'children', 'failedRuns', 'failureEvents', 'worktreeDirs', 'files', 'fullRunHeld', 'childRss'] as const) : []), ...(o.extended && o.linux ? (['watches', 'childFds'] as const) : []), ...(o.extended && o.linux && o.expectedMs !== undefined ? (['levelBytes', 'cgroupProcs', 'cgroupKernelBytes', 'levelFiles', 'sysvIpc'] as const) : [])];
   const missing = fields.filter((k) => input.some((s) => typeof s[k] !== 'number' || !Number.isFinite(s[k])));
   if (missing.length) return { failures: [`samples missing ${missing.join(', ')}: nothing was judged`], measured: {} };
   // WHY (#1181 review): with too few samples past the warm-up, the warm-up's were judged instead, so a 4-minute run
@@ -375,13 +381,14 @@ export function soakVerdict(input: readonly SoakSample[], limits: SoakLimits = S
   for (const [k, what, limit, fmt] of [
     ['cgroupProcs', "the job cgroup's processes", limits.childGrowth, (n: number) => `by ${Math.round(n * 10) / 10}`],
     ['cgroupKernelBytes', "the job cgroup's unreclaimable kernel memory", limits.kernelGrowthBytes, MB],
+    ['sysvIpc', 'SysV IPC objects', limits.childGrowth, (n: number) => `by ${Math.round(n * 10) / 10}`],
   ] as const) {
     if (!use.some((s) => typeof s[k] === 'number')) continue;
     const counted = use.filter((s) => typeof s[k] === 'number');
     if (counted.length * 2 < use.length) failures.push(`${what} not read in ${use.length - counted.length} of ${use.length} sample(s): a leak of them can't be judged`);
     else {
       const g = growth(counted, (s) => s[k] as number);
-      leak(what, k === 'cgroupProcs' ? { growth: Math.round(g.growth * 10) / 10, peak: g.peak } : g, limit, fmt);
+      leak(what, k === 'cgroupKernelBytes' ? g : { growth: Math.round(g.growth * 10) / 10, peak: g.peak }, limit, fmt);
     }
   }
   // R1181o D1, R1181p D2: the filesystems' and the kernel's levels, as the disk is held (growth with the 4x peak). The
@@ -422,7 +429,7 @@ export function soakVerdict(input: readonly SoakSample[], limits: SoakLimits = S
     const before = failures.length;
     const base = (k: keyof SoakSample) => median(first.map((s) => s[k]).filter((x): x is number => typeof x === 'number'));
     const at = (k: keyof SoakSample) => (typeof stop[k] === 'number' && first.some((s) => typeof s[k] === 'number') ? (stop[k] as number) : null);
-    for (const [k, what] of [['children', 'child process(es)'], ['cgroupProcs', "process(es) in the job's cgroup"], ['worktrees', 'worktree(s)'], ['worktreeDirs', "entr(ies) in the worktree folder"]] as const) {
+    for (const [k, what] of [['children', 'child process(es)'], ['cgroupProcs', "process(es) in the job's cgroup"], ['sysvIpc', 'SysV IPC object(s)'], ['worktrees', 'worktree(s)'], ['worktreeDirs', "entr(ies) in the worktree folder"]] as const) {
       const n = at(k);
       if (n !== null && n > base(k)) failures.push(`left at stop: ${n} ${what} after stop() and idle(), above the first quarter's ${base(k)}`);
     }
@@ -448,8 +455,21 @@ export function soakVerdict(input: readonly SoakSample[], limits: SoakLimits = S
     const diskEnd = other(end);
     const diskStop = other(stop);
     if (diskEnd !== null && diskStop !== null && diskStop - diskEnd > STOP_DISK_BYTES) failures.push(`left at stop: ${MB(diskStop - diskEnd)} more on disk besides the event log after stop() and idle() (limit ${MB(STOP_DISK_BYTES)})`);
-    if (typeof end.files === 'number' && typeof stop.files === 'number' && stop.files - end.files > STOP_FILES) failures.push(`left at stop: ${stop.files - end.files} more files and folders after stop() and idle() (limit ${STOP_FILES})`);
+    // R1181y Y1: a task's checkout open at stop is the worktree checks' to judge (its files grow with the repo: +195 after
+    // 118 tasks); the files outside the worktree folder are compared.
+    const unchecked = (s: SoakSample) => (typeof s.files === 'number' ? s.files - (s.worktreeFiles ?? 0) : null);
+    const filesEnd = unchecked(end);
+    const filesStop = unchecked(stop);
+    if (filesEnd !== null && filesStop !== null && filesStop - filesEnd > STOP_FILES) failures.push(`left at stop: ${filesStop - filesEnd} more files and folders outside the worktree folder after stop() and idle() (limit ${STOP_FILES})`);
     if (stop.eventsBytes - end.eventsBytes > STOP_LOG_BYTES) failures.push(`left at stop: the event log grew ${MB(stop.eventsBytes - end.eventsBytes)} during stop() and idle() (limit ${MB(STOP_LOG_BYTES)})`);
+    // R1181z D3: inodes used outside the walked folders (empty files cost no block), and L3: the level's bytes, against
+    // the last run sample.
+    if (typeof end.levelFiles === 'number' && typeof stop.levelFiles === 'number') {
+      const walked = typeof end.files === 'number' && typeof stop.files === 'number' ? stop.files - end.files : 0;
+      const outside = stop.levelFiles - end.levelFiles - walked;
+      if (outside > STOP_FILES) failures.push(`left at stop: ${outside} more files outside the soak's folders after stop() and idle() (used inodes; limit ${STOP_FILES})`);
+    }
+    if (typeof end.levelBytes === 'number' && typeof stop.levelBytes === 'number' && stop.levelBytes - end.levelBytes > STOP_DISK_BYTES) failures.push(`left at stop: the filesystems' level ${MB(stop.levelBytes - end.levelBytes)} above the last run sample's after stop() and idle() (limit ${MB(STOP_DISK_BYTES)})`);
     if (stop.walBytes > limits.walBytes) failures.push(`left at stop: the WAL at ${MB(stop.walBytes)} after stop() and idle() (limit ${MB(limits.walBytes)})`);
     if (stop.openRuns > 0) failures.push(`left at stop: ${stop.openRuns} agent run(s) open after stop() and idle()`);
     if (stop.slotsHeld > 0) failures.push(`left at stop: ${stop.slotsHeld} agent slot(s) held after stop() and idle()`);

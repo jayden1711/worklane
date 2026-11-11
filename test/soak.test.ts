@@ -565,7 +565,8 @@ export function childFds(pids: readonly number[]): number | null {
  * `sock`), which bounds what no fd table names: a pipe's or a socket's buffers held only in flight. R1181u C1, R1181v
  * D1: a pipe's and a unix socket's are charged as kernel pages, not slab, so `slab_unreclaimable + sock` read about a
  * tenth of them; R1181x D1: a TCP or UDP socket's are charged as `sock`, not `kernel`. The dentry cache (reclaimable
- * slab) is left out, so walking files doesn't move it. Each null where it can't be read.
+ * slab) is left out, so walking files doesn't move it. R1181z D1: a netlink socket's are charged to no cgroup, so the
+ * namespace's netlink queues are added. Each null where it can't be read.
  */
 export function cgroupLevels(root = '/sys/fs/cgroup'): { procs: number | null; kernelBytes: number | null } {
   let dir: string;
@@ -602,7 +603,9 @@ export function cgroupLevels(root = '/sys/fs/cgroup'): { procs: number | null; k
     const get = (k: string) => Number(new RegExp(`^${k} (\\d+)$`, 'm').exec(stat)?.[1]);
     // R1181x D1: a TCP or UDP socket's buffers are charged as `sock`, not `kernel` (a unix socket's and a pipe's are kernel pages).
     const n = get('kernel') - get('slab_reclaimable') + get('sock');
-    if (Number.isFinite(n)) kernelBytes = n;
+    // R1181z D1: a netlink socket's buffers are charged to no cgroup: read from /proc/net/netlink (the namespace's,
+    // which on a runner is the machine's).
+    if (Number.isFinite(n)) kernelBytes = n + (netlinkBytes() ?? 0);
   } catch {
     // no memory controller here
   }
@@ -705,6 +708,52 @@ export function fsLevels(paths: readonly (string | undefined)[]): number | null 
     const shmem = /^Shmem:\s+(\d+) kB$/m.exec(readFileSync('/proc/meminfo', 'utf8'));
     if (!shmem) return null;
     return bytes + Number(shmem[1]) * 1024;
+  } catch {
+    return null;
+  }
+}
+
+/** The used inodes of the filesystems under `paths`, each once, tmpfs aside (R1181z D3: an empty file costs an inode and no block). */
+export function fsInodes(paths: readonly (string | undefined)[]): number | null {
+  try {
+    const devs = new Set<number>();
+    let used = 0;
+    for (const p of paths) {
+      if (!p || !existsSync(p)) continue;
+      const dev = statSync(p).dev;
+      if (devs.has(dev)) continue;
+      devs.add(dev);
+      const f = statfsSync(p);
+      if (f.type === 0x01021994) continue;
+      used += f.files - f.ffree;
+    }
+    return used;
+  } catch {
+    return null;
+  }
+}
+
+/** Bytes queued in this network namespace's netlink sockets (/proc/net/netlink Rmem + Wmem), or null (R1181z D1). */
+export function netlinkBytes(): number | null {
+  try {
+    const [head, ...rows] = readFileSync('/proc/net/netlink', 'utf8').trim().split('\n');
+    const cols = head!.trim().split(/\s+/);
+    const rm = cols.indexOf('Rmem');
+    const wm = cols.indexOf('Wmem');
+    if (rm === -1 || wm === -1) return null;
+    return rows.reduce((n, r) => {
+      const c = r.trim().split(/\s+/);
+      return n + Number(c[rm]) + Number(c[wm]);
+    }, 0);
+  } catch {
+    return null;
+  }
+}
+
+/** SysV IPC objects (semaphore sets, message queues, shared memory segments) alive in this IPC namespace (R1181z D2): they outlive every process. */
+export function sysvIpcCount(): number | null {
+  try {
+    return ['sem', 'msg', 'shm'].reduce((n, k) => n + readFileSync(`/proc/sysvipc/${k}`, 'utf8').trim().split('\n').slice(1).filter(Boolean).length, 0);
   } catch {
     return null;
   }
@@ -884,6 +933,7 @@ test('soak: the real coordinator works for a while with stand-in agents; nothing
       ...failureCounts(f.log),
       worktrees: worktreeCount(f.repo),
       worktreeDirs: entriesIn(wtDir),
+      worktreeFiles: existsSync(wtDir) ? dirUsage(wtDir).files : 0,
       diskBytes: usage.bytes,
       files: usage.files,
       children: kids?.length ?? null,
@@ -896,6 +946,9 @@ test('soak: the real coordinator works for a while with stand-in agents; nothing
       // R1181q D2: less the event log, judged on its own above (it is on f.base's filesystem); /dev/shm and
       // $XDG_RUNTIME_DIR are tmpfs, which the kernel's Shmem already holds, so they aren't read twice.
       levelBytes: hours > 0 && process.platform === 'linux' ? levelLessLog(fsLevels([f.base, '/var/tmp']), logBytes) : null,
+      // R1181z D3, D2: the same filesystems' used inodes, and SysV IPC objects: a real soak's on Linux only.
+      levelFiles: hours > 0 && process.platform === 'linux' ? fsInodes([f.base, '/var/tmp']) : null,
+      sysvIpc: hours > 0 && process.platform === 'linux' ? sysvIpcCount() : null,
     };
   };
   let threw = true;
@@ -1101,7 +1154,7 @@ test("the soak driver's counts read what they claim: failures in a log, worktree
 
 test('the soak driver takes each count from those helpers (#1181 review R1181k D2: a constant in their place passed every test)', () => {
   const src = readFileSync(join(repoRoot, 'test', 'soak.test.ts'), 'utf8');
-  for (const line of ['...failureCounts(f.log),', 'worktrees: worktreeCount(f.repo),', 'worktreeDirs: entriesIn(wtDir),', 'diskBytes: usage.bytes,', 'files: usage.files,', 'children: kids?.length ?? null,', 'childRss: rssOf(kids ?? []),', 'watches: inotifyWatches(kids ?? []),', 'fullRunHeld: slotStatus(f.slotsDir).fullRun ? 1 : 0,', "levelBytes: hours > 0 && process.platform === 'linux' ? levelLessLog(fsLevels([f.base, '/var/tmp']), logBytes) : null,", 'eventsBytes: logBytes,', 'childFds: childFds(kids ?? []),', 'cgroupProcs: cg.procs,', 'cgroupKernelBytes: cg.kernelBytes,']) assert.ok(src.includes(`\n      ${line}\n`), line);
+  for (const line of ['...failureCounts(f.log),', 'worktrees: worktreeCount(f.repo),', 'worktreeDirs: entriesIn(wtDir),', 'worktreeFiles: existsSync(wtDir) ? dirUsage(wtDir).files : 0,', 'diskBytes: usage.bytes,', 'files: usage.files,', 'children: kids?.length ?? null,', 'childRss: rssOf(kids ?? []),', 'watches: inotifyWatches(kids ?? []),', 'fullRunHeld: slotStatus(f.slotsDir).fullRun ? 1 : 0,', "levelBytes: hours > 0 && process.platform === 'linux' ? levelLessLog(fsLevels([f.base, '/var/tmp']), logBytes) : null,", 'eventsBytes: logBytes,', 'childFds: childFds(kids ?? []),', 'cgroupProcs: cg.procs,', 'cgroupKernelBytes: cg.kernelBytes,', "levelFiles: hours > 0 && process.platform === 'linux' ? fsInodes([f.base, '/var/tmp']) : null,", "sysvIpc: hours > 0 && process.platform === 'linux' ? sysvIpcCount() : null,"]) assert.ok(src.includes(`\n      ${line}\n`), line);
   assert.match(src, /\n {4}const kids = childPids\(childMark, seenLeaders, startProcs, hours > 0\);\n {4}const logBytes = statSync\(f\.log\.path\)\.size \+ wal;\n {4}const inside = dirUsage\(f\.base\);\n {4}const outside = usageOutside\(f\.base, kids \?\? \[\]\);\n {4}const usage = \{ bytes: inside\.bytes \+ outside\.bytes \+ deletedOpenBytes\(kids \?\? \[\]\), files: inside\.files \+ outside\.files \};\n/);
   // R1181t D1, D4: the cgroup on a real Linux soak; D3: each sample from the one reader, the last after stop().
   assert.ok(src.includes("\n    const cg = hours > 0 && process.platform === 'linux' ? cgroupLevels() : { procs: null, kernelBytes: null };\n"), 'the cgroup read');
@@ -1209,13 +1262,13 @@ test('soak verdict: the filesystems\' and the kernel\'s used space grown fails, 
   assert.equal(v(series(330, () => ({ levelBytes: null }))), '', 'not read at all (off Linux, or the smoke): not judged');
   const full = (m: number) => ({ errors: 0, worktrees: 1, diskBytes: 30 * MB, children: 0, failedRuns: 0, failureEvents: 0, worktreeDirs: 1, files: 500 + m, fullRunHeld: 0, childRss: 0 });
   // R1181t D2, D1/D4: on Linux the children's open file handles too, and on a real soak the job's cgroup.
-  assert.match(v(series(330, full), { extended: true, linux: true }), /^samples missing watches, childFds, levelBytes, cgroupProcs, cgroupKernelBytes: nothing was judged/, 'a real soak on Linux: the watches and (R1181q N2) the level');
-  const cg = { childFds: 12, cgroupProcs: 9, cgroupKernelBytes: 40 * MB };
+  assert.match(v(series(330, full), { extended: true, linux: true }), /^samples missing watches, childFds, levelBytes, cgroupProcs, cgroupKernelBytes, levelFiles, sysvIpc: nothing was judged/, 'a real soak on Linux: the watches and (R1181q N2) the level');
+  const cg = { childFds: 12, cgroupProcs: 9, cgroupKernelBytes: 40 * MB, levelFiles: 900_000, sysvIpc: 0 };
   assert.equal(v(series(330, (m) => ({ ...full(m), ...cg, watches: 3, levelBytes: 10_000 * MB })), { extended: true, linux: true }), '');
   assert.equal(v(series(330, full), { extended: true }), '', 'off Linux the watches are not required');
   // R1181q N2: on a real Linux soak the level is required too (one that read null went unjudged and unnamed).
   const real = { extended: true, linux: true, expectedMs: 329 * 60_000 };
-  assert.match(soakVerdict(series(330, (m) => ({ ...full(m), watches: 3, childFds: 12 })), SOAK_LIMITS, real).failures.join(' | '), /^samples missing levelBytes, cgroupProcs, cgroupKernelBytes: nothing was judged/);
+  assert.match(soakVerdict(series(330, (m) => ({ ...full(m), watches: 3, childFds: 12 })), SOAK_LIMITS, real).failures.join(' | '), /^samples missing levelBytes, cgroupProcs, cgroupKernelBytes, levelFiles, sysvIpc: nothing was judged/);
   assert.doesNotMatch(soakVerdict(series(330, (m) => ({ ...full(m), ...cg, watches: 3, levelBytes: 10_000 * MB })), SOAK_LIMITS, real).failures.join(' | '), /samples missing/);
   assert.doesNotMatch(soakVerdict(series(330, (m) => ({ ...full(m), watches: 3, childFds: 12 })), SOAK_LIMITS, { extended: true, linux: true }).failures.join(' | '), /samples missing/, 'the smoke: not required');
 });
@@ -1612,11 +1665,22 @@ test('soak verdict: the sample read after stop() fails on what the shutdown left
     s[330] = { ...s[329]!, at: s[329]!.at + 3000, ...stop(s[329]!) };
     return soakVerdict(s, SOAK_LIMITS, opts).failures.join(' | ');
   };
-  assert.match(wrote((e) => ({ files: e.files! + 30_000 })), /^left at stop: 30000 more files and folders after stop\(\) and idle\(\) \(limit 64\)$/);
+  assert.match(wrote((e) => ({ files: e.files! + 30_000 })), /^left at stop: 30000 more files and folders outside the worktree folder after stop\(\) and idle\(\) \(limit 64\)$/);
   assert.match(wrote((e) => ({ diskBytes: e.diskBytes! + 208 * MB })), /^left at stop: 208\.0 MB more on disk besides the event log/);
   assert.match(wrote((e) => ({ eventsBytes: e.eventsBytes + 58 * MB, diskBytes: e.diskBytes! + 58 * MB })), /^left at stop: the event log grew 58\.0 MB during stop\(\) and idle\(\)/);
   assert.match(wrote(() => ({ walBytes: 65 * MB })), /left at stop: the WAL at 65\.0 MB/);
   assert.equal(wrote((e) => ({ files: e.files! + 3, diskBytes: e.diskBytes! + 50_000, eventsBytes: e.eventsBytes + 20_000 })), '', 'a few lines and files: passes');
+  // R1181z D3: inodes outside the walked folders (its stop-out probe: 30,000 empty files left by stop()); L3: the level.
+  const outside = (stop: (e: SoakSample) => Partial<SoakSample>) => {
+    const s = series(331, (m) => ({ files: 500 + m * 2, levelFiles: 900_000 + m * 2, levelBytes: 10_000 * MB, sysvIpc: 0 }));
+    s[330] = { ...s[329]!, at: s[329]!.at + 3000, ...stop(s[329]!) };
+    return soakVerdict(s, SOAK_LIMITS, opts).failures.join(' | ');
+  };
+  assert.match(outside((e) => ({ levelFiles: e.levelFiles! + 30_021 })), /^left at stop: 30021 more files outside the soak's folders/);
+  assert.equal(outside((e) => ({ levelFiles: e.levelFiles! + 40, files: e.files! + 30 })), '', 'files inside are walked: 10 more outside');
+  assert.match(outside((e) => ({ levelBytes: e.levelBytes! + 200 * MB })), /^left at stop: the filesystems' level 200\.0 MB above the last run sample's/);
+  // R1181z D2: SysV IPC objects left at stop (z-sysv: 29,700 sets and 2,700 queues), or grown over the run.
+  assert.match(outside(() => ({ sysvIpc: 32_400 })), /^left at stop: 32400 SysV IPC object\(s\) after stop\(\) and idle\(\), above the first quarter's 0$/);
   // The stop sample is the last one only with `stopped`: without it, one sample's rise at the end is the run's to judge.
   const s = series(331, () => ({ children: 1 }));
   s[330] = { ...s[329]!, children: 2 };
@@ -1755,9 +1819,14 @@ time.sleep(60)`;
   }
 });
 
-test("soak driver (Linux, R1181x D1): the job cgroup's kernel level reads a TCP socket's buffers held in flight", linuxOnly, async (t) => {
+test("soak driver (Linux, R1181x D1): the job cgroup's kernel level reads a TCP socket's unread buffers", linuxOnly, async (t) => {
   if (!python) return t.skip('no python3');
-  if (cgroupLevels().kernelBytes === null) return t.skip('no memory controller on this cgroup');
+  if (cgroupLevels().kernelBytes === null) {
+    // R1181z L1: as the pipe test, a null where the cgroup has a memory.stat fails rather than skips.
+    const line = readFileSync('/proc/self/cgroup', 'utf8').split('\n').find((l) => l.startsWith('0::'));
+    assert.ok(!line || !existsSync(join('/sys/fs/cgroup', line.slice(3), 'memory.stat')), 'memory.stat is there, and the kernel level read null');
+    return t.skip('no memory controller on this cgroup');
+  }
   // Loopback TCP pairs, each written until it would block, never read: the bytes sit in the two sockets' buffers.
   const TCP = `import os, socket, sys, time
 srv = socket.socket(); srv.bind(('127.0.0.1', 0)); srv.listen(16)
@@ -1789,4 +1858,93 @@ time.sleep(60)`;
   } finally {
     c.kill();
   }
+});
+
+test('soak verdict: SysV IPC objects grown over the run fail, as processes; steady passes (#1181 review R1181z D2)', () => {
+  const opts = { expectedMs: 5.5 * 3600_000 - 60_000 };
+  const v = (x: SoakSample[]) => soakVerdict(x, SOAK_LIMITS, opts).failures.join(' | ');
+  assert.match(v(series(330, (m) => ({ sysvIpc: Math.floor(m * 90) }))), /leak: SysV IPC objects grew by \d+/);
+  assert.equal(v(series(330, (m) => ({ sysvIpc: m % 7 ? 2 : 3 }))), '');
+});
+
+test("soak driver (Linux, R1181z D2): SysV IPC objects are counted, and outlive their maker", linuxOnly, async (t) => {
+  if (!python) return t.skip('no python3');
+  const before = sysvIpcCount();
+  if (before === null) return t.skip('no /proc/sysvipc here');
+  const made = spawnSync('python3', ['-c', `import ctypes
+libc = ctypes.CDLL(None, use_errno=True)
+ids = [libc.semget(0, 1, 0o1600) for _ in range(8)]
+print(' '.join(map(str, ids)))`], { encoding: 'utf8' });
+  const ids = made.stdout.trim().split(/\s+/).map(Number);
+  try {
+    assert.equal(ids.filter((i) => i >= 0).length, 8, `8 sets made: ${made.stdout}${made.stderr}`);
+    assert.ok(sysvIpcCount()! >= before + 8, `counted after their maker exited: ${before} -> ${sysvIpcCount()}`);
+  } finally {
+    for (const i of ids) if (i >= 0) spawnSync('ipcrm', ['-s', String(i)]);
+  }
+});
+
+test("soak driver (Linux, R1181z D1): the kernel level reads a netlink socket's unread buffers, which no cgroup is charged", linuxOnly, async (t) => {
+  if (!python) return t.skip('no python3');
+  if (cgroupLevels().kernelBytes === null) return t.skip('no memory controller on this cgroup');
+  // 64 NETLINK_USERSOCK sockets, each sent to until its receive queue is full, never read.
+  const NL = `import os, socket, sys, time
+held, sent = [], 0
+tx = socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, 2); tx.bind((0, 0)); tx.setblocking(False)
+for i in range(64):
+    rx = socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, 2); rx.bind((0, 0))
+    try:
+        while True: sent += tx.sendto(b'x' * 16000, (rx.getsockname()[0], 0))
+    except (BlockingIOError, OSError):
+        pass
+    held.append(rx)
+print('ready', sent, flush=True)
+time.sleep(60)`;
+  const settle = () => new Promise((r) => setTimeout(r, 2500));
+  await settle();
+  const before = cgroupLevels().kernelBytes!;
+  const c = spawn('python3', ['-c', NL], { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, SOAK_CHILD_MARK: '' } });
+  let out = '';
+  c.stdout!.on('data', (b) => (out += String(b)));
+  c.stderr!.on('data', (b) => (out += String(b)));
+  try {
+    assert.ok(await waitFor(() => /ready \d+/.test(out) || c.exitCode !== null, 15_000), `the sockets filled: ${out}`);
+    if (!/ready \d+/.test(out)) return t.skip(`netlink user sockets unavailable here: ${out.slice(0, 200)}`);
+    const sent = Number(/ready (\d+)/.exec(out)![1]);
+    if (sent < 4 * 2 ** 20) return t.skip(`only ${sent} bytes queued`);
+    await settle();
+    const rise = cgroupLevels().kernelBytes! - before;
+    assert.ok(rise >= Math.min(8 * 2 ** 20, sent * 0.6), `the kernel level rose ${(rise / 2 ** 20).toFixed(1)} MB with ${(sent / 2 ** 20).toFixed(1)} MB queued`);
+  } finally {
+    c.kill();
+  }
+});
+
+test('soak driver (Linux, R1181x L1, R1181z L2): a tmpfs is read through Shmem only, never twice', linuxOnly, (t) => {
+  if (statfsSync('/dev/shm').type !== 0x01021994) return t.skip('/dev/shm is no tmpfs here');
+  const f = join('/dev/shm', `soak-tmpfs-${process.pid}`);
+  try {
+    writeFileSync(f, Buffer.alloc(8 * 2 ** 20, 1));
+    const shm = fsLevels(['/dev/shm'])!;
+    const only = fsLevels(['/proc'])!;
+    assert.ok(Math.abs(shm - only) < 4 * 2 ** 20, `/dev/shm's 8 MB once: ${((shm - only) / 2 ** 20).toFixed(1)} MB apart`);
+    assert.equal(fsInodes(['/dev/shm']), 0, 'its inodes are not counted either');
+  } finally {
+    rmSync(f, { force: true });
+  }
+});
+
+test("soak verdict: a task's checkout open at the stop sample is the worktree checks', not the stop-files check's (#1181 review R1181y Y1: a healthy 1 h soak, recorded)", () => {
+  // R1181y's base-yml-1: a healthy soak at soak.yml's settings, its samples as recorded, with its ticks flattened (its
+  // drift was a neighbouring run's load, not this check's) and the fields read since filled. The stop sample's +195
+  // files are the checkout of the task filed just before stop() (R1181y's replay: taken out, the check passes).
+  const recorded = readFileSync(join(repoRoot, 'test', 'fixtures', 'soak-r1181y-base-yml.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l) as SoakSample);
+  const o = { expectedMs: 3_600_000, sampleMs: 60_000, issueEveryMs: 30_000, extended: true, linux: true, stopped: true };
+  const filled = recorded.map((s, i) => ({ ...s, tickMs: 128, maxTickMs: 500, sysvIpc: 0, levelFiles: 900_000 + s.files!, worktreeFiles: i === recorded.length - 1 ? 195 : 0 }));
+  assert.deepEqual(soakVerdict(filled, SOAK_LIMITS, o).failures, [], 'the open checkout at stop passes');
+  // Without its worktree files read, the same run fails as R1181y measured.
+  assert.match(soakVerdict(filled.map((s) => ({ ...s, worktreeFiles: 0 })), SOAK_LIMITS, o).failures.join(), /left at stop: 195 more files and folders outside the worktree folder/);
+  // 65 more files outside the worktree folder at stop: refused.
+  const outside = [...filled.slice(0, -1), { ...filled.at(-1)!, files: filled.at(-1)!.files! + 65, levelFiles: filled.at(-1)!.levelFiles! + 65 }];
+  assert.match(soakVerdict(outside, SOAK_LIMITS, o).failures.join(), /^left at stop: 65 more files and folders outside the worktree folder after stop\(\) and idle\(\) \(limit 64\)$/);
 });
