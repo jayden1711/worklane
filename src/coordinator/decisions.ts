@@ -264,7 +264,7 @@ export abstract class Decisions extends Recovery {
     const optionsHere = new Set(asked.flatMap((p) => p.options));
     const open = asked.filter((p) => !answered.has(p.id)).map((p) => p.id);
     const replies = comments.filter((c) => writers.has(c.author.toLowerCase()) && !c.body.trimStart().startsWith(`[${BRAND.cli}]`));
-    const parsed = replies.map((c) => ({ c, r: readReply(c.body) }));
+    const parsed = replies.map((c) => ({ c, r: readReply(c.body, c.text) })); // c.text: the tracker's rendering (GitHub body_text), or null
     // At most one note per comment, keyed by the comment; the notes already written are read once.
     const said = new Set<string>();
     for (const e of this.d.log.read(0, ['coordinator.error'])) {

@@ -41,7 +41,7 @@ interface FilePr {
 
 interface FileState {
   // As on GitHub, a pull request is an issue too (same numbering, labels and comments), with `pr` set.
-  issues: (Issue & { labelEvents: { label: string; actor: string }[]; comments: { id?: string; author: string; body: string; at?: string }[]; pr?: FilePr })[];
+  issues: (Issue & { labelEvents: { label: string; actor: string }[]; comments: { id?: string; author: string; body: string; at?: string; text?: string | null }[]; pr?: FilePr })[];
   labels: string[];
   /** Checks per commit sha (tests set them). */
   checks?: Record<string, CommitCheck[]>;
@@ -102,12 +102,21 @@ export class FileBacklog implements Backlog {
     return id;
   }
 
+  /** Test helper: the tracker's rendering of comment `id` as text (GitHub's body_text), which the reply reader checks too. */
+  setCommentText(n: number, id: string, text: string | null) {
+    this.edit(n, (i) => {
+      const c = i.comments.find((x) => x.id === id);
+      if (c) c.text = text;
+    });
+  }
+
   /** Test helper: someone edits comment `id` (as GitHub allows its author or any writer): same place, author and time. */
   editComment(n: number, id: string, body: string) {
     this.edit(n, (i) => {
       const c = i.comments.find((x) => x.id === id);
       if (!c) throw new Error(`no comment ${id} on #${n}`);
       c.body = body;
+      delete c.text; // the old rendering no longer matches: unknown until set again
     });
   }
 

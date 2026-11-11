@@ -37,6 +37,12 @@ export interface Reply {
    * rule (c); idsElsewhere).
    */
   rest: { typed: string; shown: string[] };
+  /**
+   * The tracker's own rendering of the comment as text (GitHub's body_text), lower case, with the six phone characters
+   * mapped, and line 1's slot id (once allowed in it), or null when the tracker didn't give one (judged on the readings
+   * alone). A live id in it more often than the slot allows voids the comment, as in any reading.
+   */
+  rendered: { text: string; slot: string | null } | null;
 }
 
 /**
@@ -184,7 +190,14 @@ export function pageNotAscii(body: string): { code: string; line: number } | nul
  * twice.
  */
 export const idsElsewhere = (r: Reply, live: Iterable<string>): string[] =>
-  [...live].map((x) => x.toLowerCase()).filter((x) => r.rest.typed.includes(x) || r.rest.shown.some((t) => t.includes(x)));
+  [...live].map((x) => x.toLowerCase()).filter((x) => r.rest.typed.includes(x) || r.rest.shown.some((t) => t.includes(x)) || renderedElsewhere(r, x));
+
+/** The tracker's rendering shows id `x` outside line 1's slot: more times than the slot accounts for (once, if it is the slot's id). */
+function renderedElsewhere(r: Reply, x: string): boolean {
+  if (!r.rendered) return false;
+  const times = r.rendered.text.split(x).length - 1;
+  return times > (r.rendered.slot === x ? 1 : 0);
+}
 
 /** The first character in `body` that isn't plain ASCII, and its line. */
 function firstNotAscii(body: string): Reply['notAscii'] {
@@ -216,12 +229,18 @@ function commandsOn(raw: string, skipFirst: boolean): CommandLine[] {
   return best;
 }
 
-/** A comment as a reply: whether it is plain ASCII, its first line's command, whether that line is refused, and every other command. */
-export function readReply(typed: string): Reply {
+/**
+ * A comment as a reply: whether it is plain ASCII, its first line's command, whether that line is refused, and every
+ * other command. `rendered`: the tracker's own rendering of the comment as text (GitHub's body_text), when it gave one;
+ * every rule is checked on it as well, and any reading that fires voids. Missing or null: judged on `typed` and its
+ * readings alone (the tracker's text is unknown, not empty).
+ */
+export function readReply(typed: string, rendered?: string | null): Reply {
   const body = typed.replace(/[\u2018\u2019\u201C\u201D\u2013\u2014]/g, (ch) => TYPED[ch]!);
-  // Rule (1) as typed, then on the page (entities and bidi markup, R1182ap).
+  const shownText = typeof rendered === 'string' ? rendered.replace(/[\u2018\u2019\u201C\u201D\u2013\u2014]/g, (ch) => TYPED[ch]!) : null;
+  // Rule (1) as typed, then on the page (entities and bidi markup, R1182ap), then in the tracker's own rendering.
   const typedNotAscii = firstNotAscii(body);
-  const notAscii = typedNotAscii ?? pageNotAscii(body);
+  const notAscii = typedNotAscii ?? pageNotAscii(body) ?? (shownText === null ? null : firstNotAscii(shownText));
   // A comment that isn't plain ASCII answers nothing; its ASCII characters are still read, to decide whether to say so.
   const text = typedNotAscii ? body.replace(new RegExp(NOT_ASCII.source, 'gu'), '') : body;
   const lines = text.split(/\r\n|\r|\n/);
@@ -230,7 +249,13 @@ export function readReply(typed: string): Reply {
   const m = COMMAND.exec(replyText(firstRaw));
   const first = m ? { option: m[1]!, ids: idsIn(`${m[1]} ${m[2]}`), note: noteOf(firstRaw), idNext: /^[ \t]+d-[\w-]*\w[.,:;]?(?:[ \t]|$)/.test(m[2]!) } : null;
   const others = lines.flatMap((raw, i) => commandsOn(raw, i === at && first !== null));
+  if (shownText !== null) {
+    // The second-command scan on the tracker's rendering too: its first command (the reply's own) is skipped once.
+    const shownLines = shownText.split(/\r\n|\r|\n/);
+    const shownAt = shownLines.findIndex((l) => l.trim() !== '');
+    others.push(...shownLines.flatMap((raw, i) => commandsOn(raw, i === shownAt && first !== null)));
+  }
   // Line 1's id slot: the token right after the option, taken out once; every other place an id appears is "elsewhere".
   const slotted = (first?.idNext ? lines.map((l, i) => (i === at ? l.replace(/^(\s*\S+\s+\S+[ \t]+)\S+/, '$1') : l)) : lines).join('\n');
-  return { notAscii, ascii: replyText(text), first, unsafe: first !== null && UNSAFE.test(firstRaw), others, rest: { typed: replyText(slotted), shown: pageReadings(slotted) } };
+  return { notAscii, ascii: replyText(text), first, unsafe: first !== null && UNSAFE.test(firstRaw), others, rest: { typed: replyText(slotted), shown: pageReadings(slotted) }, rendered: shownText === null ? null : { text: replyText(shownText), slot: first?.idNext ? (first.ids[0] ?? null) : null } };
 }
