@@ -119,7 +119,8 @@ test('body_text missing or null fails closed: judged on the body and its reading
   for (const text of [null, undefined]) {
     const ok = await landWith((id) => `/worklane approve ${id}`, () => text as string | null);
     assert.equal(answered(ok.f)[0]?.answer, 'approve', `${text}: a good reply still answers`);
-    const bad = await landWith((id) => `/worklane approve ${id}\nreject &#100;${id.slice(1)}`, () => text as string | null);
+    // changed by the character rule (R1182as/at, the organizer, 2026-11-11: no backtick, <, >, $, & or ~ anywhere): an entity now voids first (reply_markup), so the readings are tested with an emphasis-split id instead.
+    const bad = await landWith((id) => `/worklane approve ${id}\nreject *d*${id.slice(1)}`, () => text as string | null);
     assert.deepEqual([answered(bad.f).length, kinds(bad.f)], [0, ['reply_id_elsewhere']], `${text}: the readings still void`);
   }
 });

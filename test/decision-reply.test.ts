@@ -225,21 +225,31 @@ test("the tracker's rendering (body_text) is read too; missing or null is unknow
   }
 });
 
-test('R1182ar: a reply holds no fenced code block, $, image or HTML tag or comment anywhere; the first one and its line', () => {
+test('R1182as/at: a reply holds none of ` < > $ & ~ and no image (![) anywhere; the first and its line (characters, not constructs)', () => {
   const mk = (body: string) => readReply(body).markup;
-  assert.equal(mk(`${c} approve ${ID}\nlooks *good*, see \`x\` and https://example.com/a(b) [docs](https://e.x)\n- [x] done\n> quoted`), null, 'plain text and inline markdown are fine');
-  assert.deepEqual(mk(`${c} approve ${ID}\n\n\`\`\`mermaid\nA\n\`\`\``), { construct: 'a fenced code block', line: 3 });
-  assert.deepEqual(mk(`${c} approve ${ID}\n   ~~~\nx\n~~~`), { construct: 'a fenced code block', line: 2 });
-  assert.deepEqual(mk(`${c} approve ${ID}\ncosts 5 dollars, or $5`), { construct: 'a $ (GitHub math)', line: 2 });
-  assert.deepEqual(mk(`${c} approve ${ID}\n\n\n![x](https://e.x/a.png)`), { construct: 'an image (![)', line: 4 });
-  assert.deepEqual(mk(`${c} approve ${ID}\nok <br>`), { construct: 'an HTML tag', line: 2 });
-  assert.deepEqual(mk(`${c} approve ${ID}\nok <!-- x -->`), { construct: 'an HTML comment', line: 2 });
-  assert.deepEqual(mk(`${c} approve ${ID}\n<b>x</b> then $y$`), { construct: 'an HTML tag', line: 2 }, 'the first by position');
-  assert.equal(mk(`${c} approve ${ID}\nif 1 < 2 and 3 > 2`), null, 'a < that is no tag');
+  // Changed by the character rule (was: constructs). A code span, a quote and "1 < 2" now refuse; plain text still passes.
+  assert.equal(mk(`${c} approve ${ID}\nlooks *good*, see https://example.com/a(b) [docs](https://e.x) and #2\n- [x] done`), null, 'plain text, emphasis, links, a task list');
+  for (const [body, construct, line] of [
+    [`${c} approve ${ID}\nsee \`x\``, 'a backtick (`)', 2],
+    [`${c} approve ${ID}\n> quoted`, 'a > (HTML or a quote)', 2],
+    [`${c} approve ${ID}\n- > \`\`\`mermaid`, 'a > (HTML or a quote)', 2],
+    [`${c} approve ${ID}\nif 1 < 2`, 'a < (HTML)', 2],
+    [`${c} approve ${ID}\n<b\nalt="x">`, 'a < (HTML)', 2],
+    [`${c} approve ${ID}\n\ncosts $5`, 'a $ (GitHub math)', 3],
+    [`${c} approve ${ID}\nR&D`, 'an & (an HTML entity)', 2],
+    [`${c} approve ${ID}\n&#36;x&dollar;`, 'an & (an HTML entity)', 2],
+    [`${c} approve ${ID}\n   ~~~`, 'a ~ (a fence or strikethrough)', 2],
+    [`${c} approve ${ID}\n\n\n![x](https://e.x/a.png)`, 'an image (![)', 4],
+    [`${c} approve ${ID}\nfirst & then <b>`, 'an & (an HTML entity)', 2],
+  ] as [string, string, number][]) assert.deepEqual(mk(body), { construct, line }, JSON.stringify(body));
 });
 
 test("R1182aq D1: a not-ASCII character only in GitHub's rendering is marked so, with the comment's line of its first emoji shortcode", () => {
   assert.deepEqual(readReply(`${c} approve ${ID}\r\n\r\nthanks :tada:`, `${c} approve ${ID}\nthanks \u{1F389}`).notAscii, { code: 'U+1F389', line: 3, rendering: 'shortcode' });
   assert.deepEqual(readReply(`${c} approve ${ID}\nok`, `${c} approve ${ID}\nok \u202E`).notAscii, { code: 'U+202E', line: 2, rendering: 'rendering' }, 'no shortcode: the rendering line');
   assert.equal(readReply(`${c} approve ${ID} \u00E9`, `${c} approve ${ID}`).notAscii?.rendering, undefined, 'typed: not from the rendering');
+  // R1182at AT3: the shortcode line only for a pictograph; a non-pictograph from the rendering names the rendering's line,
+  // even when a :word: of the comment is missing from the rendering.
+  assert.deepEqual(readReply(`${c} approve ${ID}\nsee :note: here`, `${c} approve ${ID}\nsee here \u00E9`).notAscii, { code: 'U+00E9', line: 2, rendering: 'rendering' });
+  assert.deepEqual(readReply(`${c} approve ${ID}\nat 10:30:00\nthanks :tada:`, `${c} approve ${ID}\nat 10:30:00\nthanks \u{1F389}`).notAscii, { code: 'U+1F389', line: 3, rendering: 'shortcode' }, 'a time keeps its :30:, the shortcode is named');
 });

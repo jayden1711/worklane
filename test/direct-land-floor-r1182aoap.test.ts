@@ -130,16 +130,18 @@ mustVoid([
 test('AP1 control: the same second command without the < > voids (reply_more_than_one)', async () => {
   const { f } = await land((id) => `/worklane approve ${id}\n&#47;worklane reject ${ent(id)}`);
   assert.equal(answered(f).length, 0);
-  assert.deepEqual(notes(f).map((n) => n.kind), ['reply_more_than_one']);
+  assert.deepEqual(notes(f).map((n) => n.kind), ['reply_markup'], 'changed by the character rule (R1182as/at, the organizer, 2026-11-11: no backtick, <, >, $, & or ~ anywhere): was reply_more_than_one');
 });
 test('AP1 control: a bare entity-spelled id without the < > voids (reply_id_elsewhere)', async () => {
   const { f } = await land((id) => `/worklane approve ${id}\nrisk: ${ent(id)} is rejected`);
   assert.equal(answered(f).length, 0);
-  assert.deepEqual(notes(f).map((n) => n.kind), ['reply_id_elsewhere']);
+  assert.deepEqual(notes(f).map((n) => n.kind), ['reply_markup'], 'changed by the character rule (R1182as/at, the organizer, 2026-11-11: no backtick, <, >, $, & or ~ anywhere): was reply_id_elsewhere');
 });
-test('AP1 control (no false void): "a < b > c" with nothing hidden still answers', async () => {
+test('AP1 control, changed: "a < b > c" with nothing hidden now voids (reply_markup; the cost of the character rule)', async () => {
   const { f } = await land((id) => `/worklane approve ${id}\nok if latency < 5ms and > 1ms`);
-  assert.equal(answered(f).length, 1);
+  assert.deepEqual([answered(f).length, notes(f).map((n) => n.kind)], [0, ['reply_markup']], 'changed by the character rule (R1182as/at, the organizer, 2026-11-11: no backtick, <, >, $, & or ~ anywhere): was an answer');
+  const words = await land((id) => `/worklane approve ${id}\nok if latency is under 5ms and over 1ms`);
+  assert.equal(answered(words.f).length, 1, 'said in words, it answers');
 });
 
 // ======== AP2 (DEFECT): bidi. The page draws the text right to left; pageText reads it left to right ========

@@ -113,12 +113,18 @@ test('AQ2b (D1): the same note must say the character came from GitHub\'s render
 });
 
 // ======== AQ3: plausible real replies with links, code spans, mentions, quotes and a task list, rendered as measured ========
-test('AQ3: a reply with a quote, a mention, a markdown link, a bare URL, a code span and a task list answers and queues', async () => {
+// AQ3, changed by the character rule (R1182as/at, the organizer, 2026-11-11: no backtick, <, >, $, & or ~ anywhere): the quote and the code span now void the reply (it answered); without them it answers.
+test('AQ3: a reply with a quote, a mention, a markdown link, a bare URL, a code span and a task list: voids (reply_markup); with only the mention, link, URL and task list, answers and queues', async () => {
   const { f } = await landWith(
     (id) => `/worklane approve ${id} ok to land\n\n> the tests pass on Linux\n\nThanks @example-writer, see [the run](https://github.com/o/r/actions/runs/1) and https://github.com/o/r/pull/2 and \`npm test\`.\n\n- [x] checked the logs`,
     (id) => `/worklane approve ${id} ok to land\nthe tests pass on Linux\nThanks @example-writer, see the run and #2 and npm test.\n\nchecked the logs`,
   );
-  assert.deepEqual([answered(f)[0]?.answer, queued(f), kinds(f)], ['approve', 1, []]);
+  assert.deepEqual([answered(f).length, queued(f), kinds(f)], [0, 0, ['reply_markup']]);
+  const ok = await landWith(
+    (id) => `/worklane approve ${id} ok to land\n\nThanks @example-writer, see [the run](https://github.com/o/r/actions/runs/1) and https://github.com/o/r/pull/2.\n\n- [x] checked the logs`,
+    (id) => `/worklane approve ${id} ok to land\nThanks @example-writer, see the run and #2.\n\nchecked the logs`,
+  );
+  assert.deepEqual([answered(ok.f)[0]?.answer, queued(ok.f), kinds(ok.f)], ['approve', 1, []]);
 });
 test('AQ3b: GitHub "Quote reply" of the question (it holds the id) answers nothing (the owner\'s accepted cost of rule (c))', async () => {
   const { f } = await landWith((id) => `/worklane approve ${id}\n\n> Approve landing #1 (L3)? Reply /worklane approve ${id}`, (id) => `/worklane approve ${id}\nApprove landing #1 (L3)? Reply /worklane approve ${id}`);
@@ -140,7 +146,8 @@ test('AQ4: a plan revise with a note on line 1 and a link and mention later: the
 test('AQ5: body_text "" (empty string): a good reply answers; an entity-spelt id elsewhere still voids', async () => {
   const ok = await landWith((id) => `/worklane approve ${id}`, () => '');
   assert.equal(answered(ok.f)[0]?.answer, 'approve');
-  const bad = await landWith((id) => `/worklane approve ${id}\nreject &#100;${id.slice(1)}`, () => '');
+  // changed by the character rule (R1182as/at, the organizer, 2026-11-11: no backtick, <, >, $, & or ~ anywhere): an entity now voids first (reply_markup), so the readings are tested with an emphasis-split id instead.
+  const bad = await landWith((id) => `/worklane approve ${id}\nreject *d*${id.slice(1)}`, () => '');
   assert.deepEqual([answered(bad.f).length, kinds(bad.f)], [0, ['reply_id_elsewhere']]);
 });
 

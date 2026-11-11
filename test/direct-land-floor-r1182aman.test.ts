@@ -190,7 +190,8 @@ for (const [name, body] of ELSEWHERE) {
     assert.deepEqual([answered(f).length, queued(f), kinds(f).length], [0, 0, 1], JSON.stringify(answered(f)));
     // R1182ap: an entity the page draws outside ASCII (&nbsp;, &shy;) voids first, as reply_not_ascii.
     // changed by the markup rule (R1182ar, the organizer, 2026-11-11: a reply holds no code block, $, image or HTML anywhere): a tag or comment in the probe gives reply_markup first.
-    if (/<[a-z!/]/i.test(body('d-1-x'))) {
+    // changed by the character rule (R1182as/at, the organizer, 2026-11-11: no backtick, <, >, $, & or ~ anywhere): any refused character in the probe gives reply_markup first.
+    if (/[`<>$&~]|!\[/.test(body('d-1-x')) && !/&(nbsp|shy);/.test(name)) {
       assert.deepEqual(kinds(f), ['reply_markup']);
       return;
     }
@@ -225,14 +226,14 @@ test('AM control, changed by rule (c): a path naming the open id on line 2 now v
   assert.equal(answered(f).length, 0);
 });
 test('AN1/AN2 controls: a plain second /worklane line voids; so does "> /workIane reject <id>"', async () => {
-  for (const b of [(id: string) => `/worklane approve ${id}\n/worklane reject ${id}`, (id: string) => `/worklane approve ${id}\n> /workIane reject ${id}`]) {
-    const { f } = await land(b);
-    assert.deepEqual([answered(f).length, kinds(f)], [0, ['reply_more_than_one']]);
-  }
+  const plain = await land((id) => `/worklane approve ${id}\n/worklane reject ${id}`);
+  assert.deepEqual([answered(plain.f).length, kinds(plain.f)], [0, ['reply_more_than_one']]);
+  const quoted = await land((id) => `/worklane approve ${id}\n> /workIane reject ${id}`);
+  assert.deepEqual([answered(quoted.f).length, kinds(quoted.f)], [0, ['reply_markup']], 'changed by the character rule (R1182as/at, the organizer, 2026-11-11: no backtick, <, >, $, & or ~ anywhere): was reply_more_than_one');
 });
 test("extra defence: a second command naming another, unknown id still voids (reply_more_than_one), through entities too", async () => {
-  for (const b of [(id: string) => `/worklane approve ${id}\n/worklane reject d-9-ffffff`, (id: string) => `/worklane approve ${id}\n&#47;worklane reject d-9-ffffff`]) {
-    const { f } = await land(b);
-    assert.deepEqual([answered(f).length, kinds(f)], [0, ['reply_more_than_one']], b('ID'));
-  }
+  const plain = await land((id) => `/worklane approve ${id}\n/worklane reject d-9-ffffff`);
+  assert.deepEqual([answered(plain.f).length, kinds(plain.f)], [0, ['reply_more_than_one']]);
+  const ent = await land((id) => `/worklane approve ${id}\n&#47;worklane reject d-9-ffffff`);
+  assert.deepEqual([answered(ent.f).length, kinds(ent.f)], [0, ['reply_markup']], 'changed by the character rule (R1182as/at, the organizer, 2026-11-11: no backtick, <, >, $, & or ~ anywhere): was reply_more_than_one');
 });

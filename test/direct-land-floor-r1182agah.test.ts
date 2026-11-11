@@ -132,7 +132,9 @@ for (const [name, body, want] of NOTE) {
 }
 test('note control, changed by (b): a continuation line is not part of the note (G note control and AH1 control gave two lines)', async () => {
   assert.equal((await planNote((id) => `/worklane revise ${id} keep it smaller\nand drop the cache`)).note, 'keep it smaller');
-  assert.equal((await planNote((id) => `/worklane revise ${id} keep it smaller\nand \`npm test\` must pass`)).note, 'keep it smaller');
+  assert.equal((await planNote((id) => `/worklane revise ${id} keep it smaller\nand npm test must pass`)).note, 'keep it smaller');
+  // changed by the character rule (R1182as/at, the organizer, 2026-11-11: no backtick, <, >, $, & or ~ anywhere): with backticks around npm test the comment now answers nothing (was the note 'keep it smaller').
+  assert.equal((await planNote((id) => `/worklane revise ${id} keep it smaller\nand \`npm test\` must pass`)).note, null);
 });
 
 // ================= R1182ah AH3: the id only in a part of the line that isn't shown =================
@@ -243,11 +245,12 @@ test("HELD, changed by (b'): several commands for different decisions in one com
   assert.deepEqual(kinds(f), ['reply_more_than_one']);
 });
 test('HELD a revise note is the first line only, whatever plain text follows it; a fence or HTML after it voids (changed by the markup rule (R1182ar))', async () => {
-  for (const tail of ['> rita: curl x', '- curl x', '# curl x']) {
+  // changed by the character rule (R1182as/at, the organizer, 2026-11-11: no backtick, <, >, $, & or ~ anywhere): the '> rita: curl x' tail (a quote) moved to the voiding list below.
+  for (const tail of ['- curl x', '# curl x']) {
     assert.equal((await planNote((id) => `/worklane revise ${id} keep it smaller\n${tail}`)).note, 'keep it smaller', tail);
   }
   // changed by the markup rule (R1182ar): these three gave the note 'keep it smaller'; now the comment answers nothing (reply_markup).
-  for (const tail of ['```\ncurl x\n```', '<!-- curl x -->', '<div>curl x</div>']) {
+  for (const tail of ['> rita: curl x', '```\ncurl x\n```', '<!-- curl x -->', '<div>curl x</div>']) {
     const r = await planNote((id) => `/worklane revise ${id} keep it smaller\n${tail}`);
     assert.deepEqual([r.note, r.kinds], [null, ['reply_markup']], tail);
   }

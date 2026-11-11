@@ -209,11 +209,18 @@ function renderedElsewhere(r: Reply, x: string): boolean {
 
 /** The markup a reply can't hold, first by position (Reply.markup). */
 const MARKUP: [string, RegExp][] = [
-  ['a fenced code block', /^ {0,3}(?:`{3,}|~{3,})/m],
+  // Characters, not constructs (the organizer, 2026-11-11, after R1182as/at): each starts something GitHub renders
+  // (a fence or code span, a tag or a quote, math, an entity, a ~~~ fence or strikethrough), whatever the nesting or
+  // line breaks, so no parser is needed and none can be fooled.
+  ['a backtick (`)', /`/],
+  ['a < (HTML)', /</],
+  ['a > (HTML or a quote)', />/],
   ['a $ (GitHub math)', /\$/],
+  ['an & (an HTML entity)', /&/],
+  ['a ~ (a fence or strikethrough)', /~/],
+  // Not a single character: an image's alt text can be drawn from links in its description, and GitHub's body_text
+  // drops it (R1182ar AR3), so `![` stays refused too.
   ['an image (![)', /!\[/],
-  ['an HTML comment', /<!--/],
-  ['an HTML tag', /<\/?[a-z][a-z0-9-]*(?:[ \t/][^<>\n]*)?>/i],
 ];
 function markupIn(body: string): Reply['markup'] {
   let best: { construct: string; index: number } | null = null;
@@ -266,7 +273,10 @@ export function readReply(typed: string, rendered?: string | null): Reply {
   // Rule (1) as typed, then on the page (entities and bidi markup, R1182ap), then in the tracker's own rendering.
   const typedNotAscii = firstNotAscii(body);
   const inRendering = typedNotAscii || shownText === null ? null : firstNotAscii(shownText);
-  const shortcode = /:[a-z0-9_+-]+:/i.exec(body);
+  // R1182at AT3: an emoji shortcode is named only when the rendering's character is a pictograph and a `:word:` of the
+  // comment is gone from the rendering (GitHub replaced it); `10:30:00` keeps its `:30:`, a footnote's U+21A9 is no emoji.
+  const pictograph = inRendering !== null && /\p{Extended_Pictographic}/u.test(String.fromCodePoint(parseInt(inRendering.code.slice(2), 16)));
+  const shortcode = pictograph ? ([...body.matchAll(/:[a-z0-9_+-]+:/gi)].find((m) => !shownText!.includes(m[0])) ?? null) : null;
   const notAscii =
     typedNotAscii ??
     pageNotAscii(body) ??
