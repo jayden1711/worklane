@@ -202,6 +202,7 @@ test("R1184q, R1184s D1: import.meta.url written as a pattern or for...of target
     ['AB3b a comment between import and .meta', `import/**/.meta.url = ${R};`],
     ['AB3c a comment between import and .meta, spaced', `import /* x */ .meta.url = ${R};`],
     ['a read outside the list', 'export const here = import.meta.dirname;'],
+    ['a require rooted at it (not listed)', 'export const req = createRequire(import.meta.url);'],
     ['a parenthesized read', "export const tail = (import.meta.url) + 'x';"],
   ] as const) assert.ok(has(reasons(above(line), base), ADDED), label);
   // Controls: the listed reads, each a whole expression, pass.
@@ -213,7 +214,6 @@ test("R1184q, R1184s D1: import.meta.url written as a pattern or for...of target
           'export const b = new URL("../y/", import.meta.url).href;',
           'export const c = fileURLToPath(import.meta.url);',
           'export const d = dirname(fileURLToPath(import.meta.url));',
-          'export const e = createRequire(import.meta.url);',
           'export const f = new URL(import.meta.url);',
           "export const g = import.meta.url === pathToFileURL(process.argv[1] ?? '').href;",
           "export const h = fileURLToPath(new URL('./z.ts', import.meta.url));",

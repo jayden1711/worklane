@@ -439,11 +439,12 @@ export const LOADER_CODE: ReadonlySet<string> = new Set(['src/check-tables.ts', 
  * The reads of `import.meta` a line may hold (R1184ae: an allowlist, fail closed, in place of rules that named each way
  * of writing it, which a `!`, an `as`, a `satisfies`, a parenthesis or a line break got past each round). Each is a
  * whole expression that only reads `import.meta.url`: a URL resolved against it from a plain string, its path, the
- * module's own table load, a require rooted at it, and a comparison with it. (`create[R]equire` is that name, spelled so
- * the word itself isn't in this module: test/desktop-removed.test.ts LOADER_WORDS.)
+ * module's own table load, and a comparison with it. A require rooted at it is not listed (R1184ae: the word is one
+ * test/desktop-removed.test.ts LOADER_WORDS keeps out of the modules the backstop runs, this one among them), so such a
+ * line waits when it changes.
  */
 const META_READS =
-  /new\s+URL\(\s*(?:(?:'[^'\\\n]*'|"[^"\\\n]*")\s*,\s*)?import\.meta\.url\s*\)|fileURLToPath\(\s*import\.meta\.url\s*\)|tablesOf\(\s*import\.meta\.url\s*\)|create[R]equire\(\s*import\.meta\.url\s*\)|import\.meta\.url\s*[!=]==(?!=)/g;
+  /new\s+URL\(\s*(?:(?:'[^'\\\n]*'|"[^"\\\n]*")\s*,\s*)?import\.meta\.url\s*\)|fileURLToPath\(\s*import\.meta\.url\s*\)|tablesOf\(\s*import\.meta\.url\s*\)|import\.meta\.url\s*[!=]==(?!=)/g;
 
 /**
  * Whether an added line uses `import.meta` other than in one of META_READS (R1184ae): once those reads are taken out,
