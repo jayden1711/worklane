@@ -761,34 +761,16 @@ export function fileDownloadProblems(rel: string, text: string, probes: string[]
   // multi-line subshell, and at `popd`). R1228av D1, R1228aw D3: a package.json script and a Makefile recipe line each
   // run in their own shell, so there a cd ends the rule on its own line only; R1228aw D1: a recipe's make prefix
   // (`@`, `-`, `+`) is read past.
-  const skip = [...SCAN_SKIP].map((x) => x.replace('.', '\\.')).join('|');
-  const target = `(?:-[A-Za-z@]+\\s+|--\\s+)*["']?(?:[^\\s;&|\`]*/)?(?:${skip})(/|["'\\s;&|\`)]|$)`;
-  const cdInto = new RegExp(`(^|[\\s;&|(\`'"])(?:cd|pushd)\\s+${target}`);
-  const cdTop = new RegExp(`^(?:(?:then|do|else|\\{|!)\\s+)*(?:(?:builtin|command)\\s+)?(?:cd|pushd)\\s+${target}`);
+  // R1228ax, R1228ay: the shell's working folder isn't tracked. A file with any `cd`, `pushd` or `popd` in its commands
+  // (comments cut; inside quotes, a subshell, a case arm or a condition too) has no read sibling: a relative .sh there
+  // is judged as any other path, so one the walk doesn't read is refused.
   const make = MAKEFILE.test(n);
-  const own = make || n === 'package.json';
-  /** The line with its quoted strings, one-line subshells and trailing comment taken out, to count its parentheses. */
-  const bare = (x: string) => {
-    let y = x.replace(/'[^']*'|"(?:[^"\\]|\\.)*"|`[^`]*`/g, '');
-    for (let z = y.replace(/\([^()]*\)/g, ''); z !== y; z = y.replace(/\([^()]*\)/g, '')) y = z;
-    return y.replace(/(^|\s)#.*/, '$1');
-  };
-  let cdSkipped = false;
-  const sub: boolean[] = [];
-  const dirs: boolean[] = [];
+  const moves = logicalLines(t).some((l) => !/^\s*#/.test(l) && commands(make ? l.replace(/^(\s*)[@+-]+/, '$1') : l).some((c) => /(^|[\s;&|(`'"{!@+-])(?:cd|pushd|popd)(?=$|[\s;&|)`'"])/.test(c)));
   if (!DOCKERFILE.test(n)) for (const l0 of logicalLines(t)) {
     if (/^\s*#/.test(l0)) continue;
     const l = make ? l0.replace(/^(\s*)[@+-]+/, '$1') : l0;
-    const cmds = commands(l);
-    const b = bare(l);
-    const net = (b.match(/\(/g) ?? []).length - (b.match(/\)/g) ?? []).length;
-    if (!own && net > 0) sub.push(cdSkipped);
-    if (!own && /(^|[\s;&|{])pushd\s/.test(b)) dirs.push(cdSkipped);
-    if (!own && cmds.some((c) => cdTop.test(net > 0 ? c.replace(/^\(\s*/, '') : c))) cdSkipped = true;
-    const why = unreadShellFile(l, cdSkipped || cdInto.test(cmds.join(' ; ')) ? { anchored: false } : { anchored: false, name: rel });
+    const why = unreadShellFile(l, moves ? { anchored: false } : { anchored: false, name: rel });
     if (why) problems.push(why);
-    if (!own && net < 0 && sub.length) cdSkipped = sub.pop()!;
-    if (!own && /(^|[\s;&|{])popd(\s|;|$)/.test(b) && dirs.length) cdSkipped = dirs.pop()!;
   }
   const r = scriptProblems(t, probes);
   return { downloads: r.downloads, problems: [...problems, ...r.problems] };
@@ -1594,7 +1576,9 @@ test('R1228al, R1228am: every bash or sh word on a line is read, wherever it sta
   // am D3: make's recipe prefixes.
   for (const p of ['@', '-', '+', '@-']) assert.match(fileDownloadProblems('tools.mk', `x:\n\t${p}bash tools/get\n`).problems.join(), /a shell file the download lint doesn't read/, `make ${p}`);
   // am D4: in a read script, a sibling .sh is read wherever it is; another relative name is judged from the root.
-  assert.deepEqual(fileDownloadProblems('scripts/ci/a.sh', 'cd "$(dirname "$0")" && bash b.sh\n. ./lib.sh\n').problems, [], 'S4, S5');
+  assert.deepEqual(fileDownloadProblems('scripts/ci/a.sh', 'bash b.sh\n. ./lib.sh\n').problems, [], 'S4, S5');
+  // R1228ax/ay: a file with a cd has no read sibling (the closed rule): `cd "$(dirname "$0")" && bash b.sh` is refused.
+  assert.match(fileDownloadProblems('scripts/ci/a.sh', 'cd "$(dirname "$0")" && bash b.sh\n').problems.join(), /a shell file/, 'S4 with a cd: refused (the stated cost)');
   assert.match(fileDownloadProblems('scripts/ci/a.sh', 'bash ../../../x.sh\n').problems.join(), /a shell file/, 'out of the checkout');
   assert.match(fileDownloadProblems('scripts/ci/a.sh', 'bash tools/get\n').problems.join(), /a shell file/, 'an unread extensionless file');
   // A bare name is no path (`useradd -s /bin/bash user`); a here-document runs no file.
@@ -1642,7 +1626,7 @@ test('R1228aq, R1228as: an opening ( { ! keeps the anchoring; unspaced ; && insi
   assert.match(fileDownloadProblems('package.json', JSON.stringify({ scripts: { get: 'cd node_modules/x && bash get.sh' } })).problems.join(), /a shell file/);
   assert.match(fileDownloadProblems('scripts/ci/a.sh', 'cd .claude/hooks\nbash get.sh\n').problems.join(), /a shell file/);
   assert.match(fileDownloadProblems('tools.mk', 'x:\n\tcd dist && bash get.sh\n').problems.join(), /a shell file/);
-  assert.deepEqual(fileDownloadProblems('scripts/ci/a.sh', 'cd "$(dirname "$0")"\nbash b.sh\n').problems, [], 'a cd elsewhere: the sibling rule holds');
+  assert.match(fileDownloadProblems('scripts/ci/a.sh', 'cd "$(dirname "$0")"\nbash b.sh\n').problems.join(), /a shell file/, 'R1228ax/ay: any cd in the file: no read sibling (the stated cost)');
 });
 
 test('R1228at, R1228au: an assignment before bash is read past (no false refusal); a cd or pushd into a skipped folder, per line and outside comments; a here-string of a substitution; a quoted program name', () => {
@@ -1660,13 +1644,14 @@ test('R1228at, R1228au: an assignment before bash is read past (no false refusal
     assert.match(fileDownloadProblems('scripts/ci/a.sh', `${line}\n`).problems.join(), /a shell file/, `refused: ${line}`);
   }
   // au D2, at D4a: false refusals at cfb4e415, a cd into a skipped folder elsewhere in the file.
-  for (const text of ['bash b.sh\n(cd ../../dist && tar czf ../out.tgz .)\n', '# then cd dist and pack it by hand\nbash b.sh\n', 'bash b.sh\ncd "$tmp/node_modules" && npm ls\n', 'bash b.sh\n# never cd dist here\n', '(cd ../../dist && tar czf ../out.tgz .)\nbash b.sh\n', 'echo "run: cd dist && npm pack"\nbash b.sh\n']) {
-    assert.deepEqual(fileDownloadProblems('scripts/ci/a.sh', text).problems, [], `kept: ${JSON.stringify(text)}`);
-  }
-  assert.deepEqual(fileDownloadProblems('package.json', JSON.stringify({ scripts: { build: 'bash build.sh', pack: 'cd dist && npm pack' } })).problems.filter((p) => /a shell file/.test(p)), [], 'package.json: pack after build');
+  // au D2, at D4a: kept at cfb4e415's successors by a cd state machine; since R1228ax/ay a cd in the file's commands
+  // (not in a comment) leaves it no read sibling, so these are refused (the stated cost) and only comments stay kept.
+  for (const text of ['# then cd dist and pack it by hand\nbash b.sh\n', 'bash b.sh\n# never cd dist here\n']) assert.deepEqual(fileDownloadProblems('scripts/ci/a.sh', text).problems, [], `kept: ${JSON.stringify(text)}`);
+  for (const text of ['bash b.sh\n(cd ../../dist && tar czf ../out.tgz .)\n', 'bash b.sh\ncd "$tmp/node_modules" && npm ls\n', '(cd ../../dist && tar czf ../out.tgz .)\nbash b.sh\n', 'echo "run: cd dist && npm pack"\nbash b.sh\n']) assert.match(fileDownloadProblems('scripts/ci/a.sh', text).problems.join(), /a shell file/, `refused (a cd in the file): ${JSON.stringify(text)}`);
+  assert.match(fileDownloadProblems('package.json', JSON.stringify({ scripts: { build: 'bash build.sh', pack: 'cd dist && npm pack' } })).problems.join(), /a shell file/, 'package.json with a cd: no read sibling (the stated cost)');
 });
 
-test("R1228av, R1228aw: a cd into a skipped folder is read as the shell runs it: at any top-level position, past make's prefix, quoted prefixes too, for the rest of its file or subshell; a package.json script or recipe line runs in its own shell", () => {
+test("R1228av, R1228aw, R1228ax, R1228ay: the working folder isn't tracked: a file with any cd, pushd or popd in its commands has no read sibling, so a relative .sh there is refused; a cd in a comment changes nothing", () => {
   const unread = (rel: string, text: string) => fileDownloadProblems(rel, text).problems.filter((p) => /a shell file the download lint doesn't read/.test(p));
   const sh = (text: string) => unread('scripts/ci/zz-a.sh', text);
   // Refused: the sibling after a cd the shell keeps.
@@ -1689,19 +1674,30 @@ test("R1228av, R1228aw: a cd into a skipped folder is read as the shell runs it:
     ['aw D1 M1h @pushd', 'hooks:\n\t@pushd .claude/hooks && bash get.sh\n'],
   ] as const) assert.ok(unread('Makefile', text).length > 0, `refused: ${what}`);
   assert.ok(unread('package.json', JSON.stringify({ scripts: { get: 'cd .claude/hooks && bash get.sh' } }, null, 2)).length > 0, 'a cd and its sibling in one script: refused');
-  // Kept: each script or recipe line in its own shell; a comment; a subshell or pushd closed before the sibling.
+  // R1228ax, R1228ay: the working folder isn't tracked. Any cd, pushd or popd in a file's commands leaves it no read
+  // sibling, so the former kept cases with a cd (own-shell scripts, closed subshells, pushd/popd) are refused: the stated
+  // cost. A cd only in a comment changes nothing.
+  for (const [what, rel, text] of [
+    ['av D2 V2a a trailing comment', 'scripts/ci/zz-a.sh', 'bash b.sh  # run before cd dist\n'],
+    ['av D2 V2b', 'scripts/ci/zz-a.sh', 'bash b.sh # never cd node_modules here\n'],
+  ] as const) assert.deepEqual(unread(rel, text), [], `kept: ${what}`);
   for (const [what, rel, text] of [
     ['av D1 V1a package.json, pack before build', 'package.json', JSON.stringify({ scripts: { pack: 'cd dist && npm pack', build: 'bash build.sh' } }, null, 2)],
     ['av D1 one-line package.json', 'package.json', JSON.stringify({ scripts: { pack: 'cd dist && npm pack', build: 'bash build.sh' } })],
     ['av D1 V1b2 postinstall into node_modules', 'package.json', JSON.stringify({ scripts: { postinstall: 'cd node_modules/foo && npm run prepare', build: 'bash build.sh' } }, null, 2)],
     ['av D1 V1e a Makefile, pack before build', 'Makefile', 'pack:\n\tcd dist && npm pack\nbuild:\n\tbash build.sh\n'],
     ['aw D3 M2g a recipe cd line, then a bash line', 'Makefile', 'all:\n\tcd dist\n\tbash build.sh\n'],
-    ['av D2 V2a a trailing comment', 'scripts/ci/zz-a.sh', 'bash b.sh  # run before cd dist\n'],
-    ['av D2 V2b', 'scripts/ci/zz-a.sh', 'bash b.sh # never cd node_modules here\n'],
     ['aw D3 M2a a multi-line packing subshell', 'scripts/ci/zz-a.sh', '(\n  cd ../../dist\n  tar -cf x.tar .\n)\nbash b.sh\n'],
     ['aw D3 M2b pushd ... popd', 'scripts/ci/zz-a.sh', 'pushd ../../dist\nnpm pack\npopd\nbash b.sh\n'],
     ['a one-line subshell', 'scripts/ci/zz-a.sh', '(cd dist && npm pack)\nbash b.sh\n'],
-  ] as const) assert.deepEqual(unread(rel, text), [], `kept: ${what}`);
+    // R1228ax/ay's forms, each refused now without tracking where the shell is.
+    ['ax an unlisted top-level position', 'scripts/ci/zz-a.sh', 'true || cd .claude/hooks\nbash get.sh\n'],
+    ['ax an if condition', 'scripts/ci/zz-a.sh', 'if cd .claude/hooks; then :; fi\nbash get.sh\n'],
+    ['ax a while condition', 'scripts/ci/zz-a.sh', 'while cd node_modules/x; do break; done\nbash install.sh\n'],
+    ['ay push and pop on the cd line', 'scripts/ci/zz-a.sh', 'pushd x; popd; cd .claude/hooks\nbash get.sh\n'],
+    ['ay a case pattern before a cd', 'scripts/ci/zz-a.sh', 'case "$1" in a) cd .claude/hooks ;; esac\nbash get.sh\n'],
+    ['ay a ) that closes no subshell', 'scripts/ci/zz-a.sh', 'echo )\ncd .claude/hooks\nbash get.sh\n'],
+  ] as const) assert.ok(unread(rel, text).length > 0, `refused (a cd in the file): ${what}`);
 });
 
 // Limits (owner decision (c): stated, not closed; the helper's digest check holds for each download it handles):
@@ -1719,9 +1715,7 @@ test("R1228av, R1228aw: a cd into a skipped folder is read as the shell runs it:
 //   cut (R1228an D3); a shellcheck or shfmt command names a dialect (`-s bash`), not a run. A read script's .sh
 //   sibling counts only where the walk reads (not under node_modules, dist, .git or .claude: R1228ao D3). The rule's
 //   known cost: a `bash` word followed by a path in another program's arguments (`grep -rn bash docs/`, an `echo` of
-//   "run bash tools/x.sh") is refused; reword it or name the file another way. And a sibling after a top-level `cd`
-//   into a skipped folder in a shell script, even one undone by `cd ..` or `cd -` or inside a function body, is
-//   refused (R1228av D6b, R1228aw D3), as is a here-string of a substitution naming no unread file
+//   "run bash tools/x.sh") is refused; reword it or name the file another way. A here-string of a substitution naming no unread file
 //   (`bash <<< "$(printf …)"`, R1228av D6c). Assignments before bash are read past, so `X=1 bash "$SCRIPT"` is refused as
 //   `bash "$SCRIPT"` is (R1228av D6a). Not seen: elsewhere, a path that is
 //   absolute (an installed copy, `/opt/<engine>/current/scripts/…`) or built from a variable (`"$here/x.sh"`), which
@@ -1729,12 +1723,12 @@ test("R1228av, R1228aw: a cd into a skipped folder is read as the shell runs it:
 //   (`cat tools/get | bash`) or given as a here-string other than `bash <<< "$(…)"` spaced at the start of a workflow
 //   run (the attached `<<<"$(…)"`, after `-s`, or in a read file: R1228av D5); a Dockerfile RUN running a path inside the image (a COPY's target); a file elsewhere
 //   that a workflow runs another way; a `cd` into a folder by a variable or built name before a relative .sh in a read
-//   file (a `cd` or `pushd` whose target names a folder the walk skips, with options, quoted, a quoted variable prefix
-//   (`cd "$ROOT"/.claude/hooks`) or in backticks, ends the sibling rule on its line, read as the shell splits it with a
-//   trailing comment cut; one at a top-level command position (after `;`, `&&`, `then`, `{`, `builtin`, `command`)
-//   ends it for the rest of the file, or of the multi-line subshell or pushd it is in; a package.json script or a
-//   Makefile recipe line runs in its own shell, so there it ends it on its own line, past make's `@`, `-` or `+`:
-//   R1228as D1, R1228at D2, R1228au D2/D3, R1228av D1-D4, R1228aw D1-D3; not seen: a target built by a command substitution, `cd "$(dirname "$0")/../.claude/hooks"` or
+//   file (the working folder isn't tracked, R1228ax/ay: a file with any `cd`, `pushd` or `popd` in its commands, in
+//   quotes, a subshell, a condition or a case arm included, has no read sibling, so a relative .sh there is judged as a
+//   path from the checkout and refused unless the walk reads it; a cd in a comment changes nothing. Its cost: a file
+//   that changes folders and then runs a sibling by a relative name, `cd "$(dirname "$0")" && bash b.sh` included, is
+//   refused: name it from the checkout or through a variable. Measured on the repo: 2 such lines, both an
+//   experiment's command string in scripts/ci/exp-real-systemd.sh, now named through $PWD; not seen: a target built by a command substitution, `cd "$(dirname "$0")/../.claude/hooks"` or
 //   `cd "$(git rev-parse --show-toplevel)/.claude/hooks"` (R1228at D2's C2 rows), a cd after the .sh's own line, or a
 //   folder reached another way); a GitHub expression
 //   other than `${{ github.workspace }}` before a path (`${{ env.ROOT }}/x.sh`: a variable, so outside a command that
