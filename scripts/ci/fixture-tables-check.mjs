@@ -18,7 +18,8 @@ function folders() {
     const git = (...a) => gitExecFileSync(a, { cwd: root, encoding: 'utf8', maxBuffer: 256 << 20 });
     const manifest = JSON.parse(git('show', `${ref}:${DIR}/manifest.json`));
     const out = new Map();
-    for (const p of git('ls-tree', '-r', '--name-only', ref, '--', `${DIR}/`).split('\n').filter(Boolean)) {
+    // `ls-tree -r -z`: `<mode> <type> <object>\t<path>` per entry; only the path is read (a tree, not a change list).
+    for (const p of git('ls-tree', '-r', '-z', ref, '--', `${DIR}/`).split('\0').filter(Boolean).map((e) => e.slice(e.indexOf('\t') + 1))) {
       const rest = p.slice(DIR.length + 1);
       if (!rest.includes('/')) continue;
       const [name, ...f] = rest.split('/');
