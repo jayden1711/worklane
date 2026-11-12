@@ -823,6 +823,25 @@ export function worktreeLeftovers(wtDir: string, repo: string): number {
   return n;
 }
 
+/**
+ * Worktrees and worktree-folder entries no open task owns (R1181af AF1): an entry of the worktree folder, or a worktree
+ * git lists other than the main checkout, is a task's while its name ends `issue-<n>` (or `issue-<n>-<suffix>`) for an
+ * issue in `open` (filed, not landed); any other is a stray. Each counted once, by real path.
+ */
+export function worktreeStrays(wtDir: string, repo: string, open: ReadonlySet<string>): number {
+  const owned = (p: string) => {
+    const m = /issue-(\d+)(?:-[\w-]+)?$/.exec(p.split('/').pop() ?? '');
+    return !!m && open.has(m[1]!);
+  };
+  const real = (p: string) => (existsSync(p) ? realpathSync(p) : p);
+  const seen = new Set<string>();
+  if (existsSync(wtDir)) for (const e of readdirSync(wtDir)) seen.add(real(join(wtDir, e)));
+  const listed = spawnSync('git', ['-C', repo, 'worktree', 'list', '--porcelain'], { encoding: 'utf8' });
+  const main = real(repo);
+  for (const l of listed.status === 0 ? listed.stdout.split('\n') : []) if (l.startsWith('worktree ') && real(l.slice(9)) !== main) seen.add(real(l.slice(9)));
+  return [...seen].filter((p) => !owned(p)).length;
+}
+
 /** Bytes queued in this network namespace's netlink sockets (/proc/net/netlink Rmem + Wmem), or null (R1181z D1). */
 export function netlinkBytes(): number | null {
   try {
@@ -1051,6 +1070,7 @@ test('soak: the real coordinator works for a while with stand-in agents; nothing
       worktreeDirs: entriesIn(wtDir),
       worktreeFiles: existsSync(wtDir) ? dirUsage(wtDir).files : 0,
       worktreeLeftovers: worktreeLeftovers(wtDir, f.repo),
+      worktreeStrays: worktreeStrays(wtDir, f.repo, new Set([...filedAt.keys()].filter((k) => !landed.has(k)))),
       diskBytes: usage.bytes,
       files: usage.files,
       children: kids?.length ?? null,
@@ -1276,7 +1296,7 @@ test("the soak driver's counts read what they claim: failures in a log, worktree
 
 test('the soak driver takes each count from those helpers (#1181 review R1181k D2: a constant in their place passed every test)', () => {
   const src = readFileSync(join(repoRoot, 'test', 'soak.test.ts'), 'utf8');
-  for (const line of ['...failureCounts(f.log),', 'worktrees: worktreeCount(f.repo),', 'worktreeDirs: entriesIn(wtDir),', 'worktreeFiles: existsSync(wtDir) ? dirUsage(wtDir).files : 0,', 'worktreeLeftovers: worktreeLeftovers(wtDir, f.repo),', "levelWalked: hours > 0 && process.platform === 'linux' ? walkedOnCounted([f.base, process.env.XDG_CONFIG_HOME ? dirname(process.env.XDG_CONFIG_HOME) : null], [f.base, '/var/tmp']) : null,", 'diskBytes: usage.bytes,', 'files: usage.files,', 'children: kids?.length ?? null,', 'childRss: rssOf(kids ?? []),', 'watches: inotifyWatches(kids ?? []),', 'fullRunHeld: slotStatus(f.slotsDir).fullRun ? 1 : 0,', "levelBytes: hours > 0 && process.platform === 'linux' ? levelLessLog(fsLevels([f.base, '/var/tmp']), logBytes) : null,", 'eventsBytes: logBytes,', 'childFds: childFds(kids ?? []),', 'cgroupProcs: cg.procs,', 'cgroupKernelBytes: cg.kernelBytes,', "mqueues: hours > 0 && process.platform === 'linux' ? posixMqueues() : null,", "userKeys: hours > 0 && process.platform === 'linux' ? (userKeys()?.keys ?? null) : null,", "userKeyBytes: hours > 0 && process.platform === 'linux' ? (userKeys()?.bytes ?? null) : null,", "levelFiles: hours > 0 && process.platform === 'linux' ? fsInodes([f.base, '/var/tmp']) : null,", "sysvIpc: hours > 0 && process.platform === 'linux' ? sysvIpcCount() : null,"]) assert.ok(src.includes(`\n      ${line}\n`), line);
+  for (const line of ['...failureCounts(f.log),', 'worktrees: worktreeCount(f.repo),', 'worktreeDirs: entriesIn(wtDir),', 'worktreeFiles: existsSync(wtDir) ? dirUsage(wtDir).files : 0,', 'worktreeLeftovers: worktreeLeftovers(wtDir, f.repo),', 'worktreeStrays: worktreeStrays(wtDir, f.repo, new Set([...filedAt.keys()].filter((k) => !landed.has(k)))),', "levelWalked: hours > 0 && process.platform === 'linux' ? walkedOnCounted([f.base, process.env.XDG_CONFIG_HOME ? dirname(process.env.XDG_CONFIG_HOME) : null], [f.base, '/var/tmp']) : null,", 'diskBytes: usage.bytes,', 'files: usage.files,', 'children: kids?.length ?? null,', 'childRss: rssOf(kids ?? []),', 'watches: inotifyWatches(kids ?? []),', 'fullRunHeld: slotStatus(f.slotsDir).fullRun ? 1 : 0,', "levelBytes: hours > 0 && process.platform === 'linux' ? levelLessLog(fsLevels([f.base, '/var/tmp']), logBytes) : null,", 'eventsBytes: logBytes,', 'childFds: childFds(kids ?? []),', 'cgroupProcs: cg.procs,', 'cgroupKernelBytes: cg.kernelBytes,', "mqueues: hours > 0 && process.platform === 'linux' ? posixMqueues() : null,", "userKeys: hours > 0 && process.platform === 'linux' ? (userKeys()?.keys ?? null) : null,", "userKeyBytes: hours > 0 && process.platform === 'linux' ? (userKeys()?.bytes ?? null) : null,", "levelFiles: hours > 0 && process.platform === 'linux' ? fsInodes([f.base, '/var/tmp']) : null,", "sysvIpc: hours > 0 && process.platform === 'linux' ? sysvIpcCount() : null,"]) assert.ok(src.includes(`\n      ${line}\n`), line);
   assert.match(src, /\n {4}const kids = childPids\(childMark, seenLeaders, startProcs, hours > 0\);\n {4}const logBytes = statSync\(f\.log\.path\)\.size \+ wal;\n {4}const inside = dirUsage\(f\.base\);\n {4}const outside = usageOutside\(f\.base, kids \?\? \[\]\);\n {4}const usage = \{ bytes: inside\.bytes \+ outside\.bytes \+ deletedOpenBytes\(kids \?\? \[\]\), files: inside\.files \+ outside\.files \};\n/);
   // R1181t D1, D4: the cgroup on a real Linux soak; D3: each sample from the one reader, the last after stop().
   assert.ok(src.includes("\n    const cg = hours > 0 && process.platform === 'linux' ? cgroupLevels() : { procs: null, kernelBytes: null };\n"), 'the cgroup read');
@@ -2099,13 +2119,31 @@ test("soak verdict: at stop, files in the worktree folder no checkout tracks are
   // A checkout open at stop (R1181y Y1) adds files its checkout tracks, not leftovers: passes.
   const y1 = [...filled.slice(0, -1), { ...filled.at(-1)!, worktreeFiles: 195, files: filled.at(-1)!.files! + 195, worktrees: 2, worktreeDirs: 1, worktreeLeftovers: 0 }];
   assert.deepEqual(soakVerdict(y1, SOAK_LIMITS, o).failures, []);
-  // R1181ac AC1: no checkout open at any run sample (the samples' phase), one open at stop and clean: passes; two, or
-  // one holding leftovers, fails.
-  const none = filled.slice(0, -1).map((s) => ({ ...s, worktrees: 1, worktreeDirs: 0 }));
-  const atStop = (w: number, d: number, left = 0) => [...none, { ...filled.at(-1)!, worktreeFiles: 195 * d, files: filled.at(-1)!.files! + 195 * d, worktrees: w, worktreeDirs: d, worktreeLeftovers: left }];
-  assert.deepEqual(soakVerdict(atStop(2, 1), SOAK_LIMITS, o).failures, [], 'one checkout open at stop, none at a sample: passes');
-  assert.match(soakVerdict(atStop(3, 2), SOAK_LIMITS, o).failures.join(), /left at stop: 3 worktree\(s\) after stop\(\) and idle\(\), above the first quarter's 1/, 'two: fails');
-  assert.match(soakVerdict(atStop(2, 1, 65), SOAK_LIMITS, o).failures.join(), /left at stop: 2 worktree\(s\)/, 'one holding leftovers: no allowance');
+  // R1181ac AC1, R1181af AF1: worktrees at stop judged by task state (the strays no open task owns), not the phase.
+  const none = filled.slice(0, -1).map((s) => ({ ...s, worktrees: 1, worktreeDirs: 0, worktreeStrays: 0 }));
+  const atStop = (w: number, d: number, strays: number | undefined, left = 0): SoakSample[] => {
+    const { worktreeStrays: _drop, ...last } = { ...filled.at(-1)!, worktreeStrays: 0 };
+    void _drop;
+    return [...none, { ...last, worktreeFiles: 195 * d, files: filled.at(-1)!.files! + 195 * d, worktrees: w, worktreeDirs: d, worktreeLeftovers: left, ...(strays === undefined ? {} : { worktreeStrays: strays }) }];
+  };
+  assert.deepEqual(soakVerdict(atStop(2, 1, 0), SOAK_LIMITS, o).failures, [], "AC1: an open task's checkout at stop, none at a sample: passes");
+  assert.deepEqual(soakVerdict(atStop(3, 2, 0), SOAK_LIMITS, o).failures, [], 'two open tasks own them: passes');
+  assert.match(soakVerdict(atStop(3, 2, 2), SOAK_LIMITS, o).failures.join(), /^left at stop: 2 worktree\(s\) or worktree folder entr\(ies\) that no open task owns/, 'two strays: fail');
+  assert.match(soakVerdict(atStop(2, 1, 0, 65), SOAK_LIMITS, o).failures.join(), /more files in the worktree folder that no checkout tracks/, 'an owned checkout holding leftovers: fails on them');
+  // AF1, the usual phase: a checkout open at most run samples (median 2 and 1, as recorded), the task's closed at
+  // stop, and two clean worktrees left by the shutdown: they're strays, and fail (they passed at d407eb92).
+  const usual = filled.slice(0, -1).map((s) => ({ ...s, worktreeStrays: 0 }));
+  const af1 = [...usual, { ...filled.at(-1)!, worktrees: 3, worktreeDirs: 2, worktreeFiles: 390, files: filled.at(-1)!.files! + 390, worktreeLeftovers: 0, worktreeStrays: 2 }];
+  assert.match(soakVerdict(af1, SOAK_LIMITS, o).failures.join(), /left at stop: 2 worktree\(s\) or worktree folder entr\(ies\) that no open task owns/);
+  // Without the strays read (an older driver), the first quarter's median, with no allowance (c042cf62's rule).
+  assert.match(soakVerdict([...filled.slice(0, -1).map((s) => ({ ...s, worktrees: 1, worktreeDirs: 0 })), { ...filled.at(-1)!, worktreeFiles: 195, files: filled.at(-1)!.files! + 195, worktrees: 2, worktreeDirs: 1, worktreeLeftovers: 0 }], SOAK_LIMITS, o).failures.join(), /left at stop: 2 worktree\(s\) after stop\(\) and idle\(\), above the first quarter's 1/);
+  // R1181af AF2: no allowance anywhere else: one more process, cgroup process, SysV object, queue or key at stop fails.
+  for (const [k, what] of [['children', 'child process'], ['cgroupProcs', "process\\(es\\) in the job's cgroup"], ['sysvIpc', 'SysV IPC object'], ['mqueues', 'POSIX message queue'], ['userKeys', "key\\(s\\) in this user's keyrings"]] as const) {
+    const base1 = none.map((s) => ({ ...s, children: 1, cgroupProcs: 9, sysvIpc: 0, mqueues: 0, userKeys: 16, userKeyBytes: 200 }));
+    const last = { ...base1.at(-1)!, ...filled.at(-1)!, children: 1, cgroupProcs: 9, sysvIpc: 0, mqueues: 0, userKeys: 16, userKeyBytes: 200, worktrees: 1, worktreeDirs: 0, worktreeLeftovers: 0, worktreeStrays: 0 };
+    assert.deepEqual(soakVerdict([...base1, last], SOAK_LIMITS, o).failures, [], `control for ${k}`);
+    assert.match(soakVerdict([...base1, { ...last, [k]: (last[k] as number) + 1 }], SOAK_LIMITS, o).failures.join(), new RegExp(`left at stop: \\d+ ${what}`), `+1 ${k} at stop: fails`);
+  }
 });
 
 test('soak driver: the worktree folder\'s files no checkout tracks are read, and the walked files on a counted filesystem (#1181 review R1181aa AA1, AA2)', () => {
@@ -2145,6 +2183,16 @@ test('soak driver: the worktree folder\'s files no checkout tracks are read, and
     for (let i = 0; i < 30; i++) writeFileSync(join(nested, `f${i}`), '');
     assert.ok(worktreeLeftovers(wt, repo) >= 3 + 4 + 30, `a folder with a .git file: ${worktreeLeftovers(wt, repo)}`);
     rmSync(nested, { recursive: true, force: true });
+    // R1181af AF1: a task's checkout is owned while its issue is open; any other entry or worktree is a stray.
+    const open7 = new Set(['7']);
+    const strays0 = worktreeStrays(wt, repo, new Set());
+    assert.equal(g(repo, 'worktree', 'add', '-q', '--detach', join(wt, 'tool-issue-7'), 'HEAD').status, 0);
+    assert.equal(worktreeStrays(wt, repo, open7), strays0, "an open task's checkout: owned");
+    assert.equal(worktreeStrays(wt, repo, new Set()), strays0 + 1, 'its task landed: a stray');
+    assert.equal(g(repo, 'worktree', 'add', '-q', '--detach', join(d, 'elsewhere-wt'), 'HEAD').status, 0);
+    assert.equal(worktreeStrays(wt, repo, open7), strays0 + 1, 'a worktree outside the folder, of no task: a stray');
+    g(repo, 'worktree', 'remove', '--force', join(d, 'elsewhere-wt'));
+    g(repo, 'worktree', 'remove', '--force', join(wt, 'tool-issue-7'));
     // R1181ae D1: empty folders left in a checkout count; a clone left as an entry is no checkout and counts whole.
     const before = worktreeLeftovers(wt, repo);
     for (let i = 0; i < 20; i++) mkdirSync(join(wt, 'task-1', `empty-${i}`));

@@ -90,6 +90,11 @@ export interface SoakSample {
   worktreeFiles?: number;
   /** Files in the worktree folder no checkout tracks: untracked or ignored in a worktree, or in another entry (R1181aa AA1). */
   worktreeLeftovers?: number;
+  /**
+   * Worktrees and worktree-folder entries no open task owns (R1181af AF1): a task's checkout (`<cli>-issue-<n>`) is
+   * owned while its issue is filed and not landed; the main checkout aside, anything else is a stray.
+   */
+  worktreeStrays?: number;
   /** The walked folders' files on a filesystem levelFiles counts (a real soak on Linux, R1181aa AA2). */
   levelWalked?: number | null;
   /** SysV IPC objects alive (a real soak on Linux, R1181z D2): they outlive every process. */
@@ -443,13 +448,15 @@ export function soakVerdict(input: readonly SoakSample[], limits: SoakLimits = S
     const before = failures.length;
     const base = (k: keyof SoakSample) => median(first.map((s) => s[k]).filter((x): x is number => typeof x === 'number'));
     const at = (k: keyof SoakSample) => (typeof stop[k] === 'number' && first.some((s) => typeof s[k] === 'number') ? (stop[k] as number) : null);
-    // R1181ac AC1: a task's checkout may be open at stop though no run sample saw one (the samples' phase against the
-    // filings): one worktree and one folder entry more are allowed when the leftovers check reads it clean.
-    const leftClean = typeof end.worktreeLeftovers === 'number' && typeof stop.worktreeLeftovers === 'number' && stop.worktreeLeftovers - end.worktreeLeftovers <= STOP_FILES;
+    // R1181ac AC1, R1181af AF1: a task's checkout may be open at stop though no run sample saw one, so worktrees are
+    // judged by task state, not the samples' phase: with the strays read, any worktree or folder entry no open task
+    // owns fails (two left by the shutdown fail, the open task's own passes); without them, the first quarter's median.
+    const byTask = typeof stop.worktreeStrays === 'number';
+    if (byTask && stop.worktreeStrays! > 0) failures.push(`left at stop: ${stop.worktreeStrays} worktree(s) or worktree folder entr(ies) that no open task owns after stop() and idle()`);
     for (const [k, what] of [['children', 'child process(es)'], ['cgroupProcs', "process(es) in the job's cgroup"], ['sysvIpc', 'SysV IPC object(s)'], ['mqueues', 'POSIX message queue(s)'], ['userKeys', "key(s) in this user's keyrings"], ['worktrees', 'worktree(s)'], ['worktreeDirs', "entr(ies) in the worktree folder"]] as const) {
+      if (byTask && (k === 'worktrees' || k === 'worktreeDirs')) continue;
       const n = at(k);
-      const slack = leftClean && (k === 'worktrees' || k === 'worktreeDirs') ? 1 : 0;
-      if (n !== null && n > base(k) + slack) failures.push(`left at stop: ${n} ${what} after stop() and idle(), above the first quarter's ${base(k)}`);
+      if (n !== null && n > base(k)) failures.push(`left at stop: ${n} ${what} after stop() and idle(), above the first quarter's ${base(k)}`);
     }
     for (const [k, what, limit, fmt] of [
       ['fds', 'open file handles', limits.fdGrowth, String],
