@@ -292,8 +292,9 @@ test("every ASCII byte and the non-ASCII spaces: the hook and the gate give the 
   const inst = spawnSync(process.execPath, [installer], { cwd: a.dir, encoding: 'utf8' });
   assert.equal(inst.status, 0, inst.stderr);
   const base = b.git('rev-parse', 'HEAD');
-  // Every ASCII byte, the non-ASCII spaces, and runs of git's own whitespace (R1260y/z D1: space, tab and CR mixed).
-  const chars = [...Array(0x80).keys()].map((n) => String.fromCharCode(n)).concat(['\u00a0', '\ufeff', '\u0085', '\u2028', '\u3000', '\u200b', '  ', '\t\t', ' \t', '\t ', ' \r', '\r\r', '\t\r', ' \t\r', '\r \t', '\f ', ' \v']);
+  // Every ASCII byte, the non-ASCII spaces, and runs of git's own whitespace (R1260y/z D1: space, tab and CR mixed);
+  // and a comment character after leading whitespace, which is no comment to git (R1260aa D1).
+  const chars = [...Array(0x80).keys()].map((n) => String.fromCharCode(n)).concat(['\u00a0', '\ufeff', '\u0085', '\u2028', '\u3000', '\u200b', '  ', '\t\t', ' \t', '\t ', ' \r', '\r\r', '\t\r', ' \t\r', '\r \t', '\f ', ' \v', ' #', '\t#', ' ;']);
   const spots: [string, (c: string) => string][] = [
     ['a line before the subject', (c) => `${c}\nAdd a thing\n\nBody\n`],
     ["a 180-character subject's end", (c) => `${'S'.repeat(180)}${c}\n\nBody\n`],
