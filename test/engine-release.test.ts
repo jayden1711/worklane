@@ -31,7 +31,9 @@ function fixture() {
   // A stand-in root: `id -u` says 0, so engine.sh's as_root never reaches sudo (a tripwire too).
   stub('id', 'case "$1" in -u) echo 0 ;; *) exit 1 ;; esac');
   // The build's first command: record which commit it was asked to build, then stop the run there.
-  stub('npm', `echo "npm $1 at $(git rev-parse HEAD)" >> "${npmLog}"; exit 1`);
+  // With letBuild() (R1264r N3), it builds instead: dist/web/index.html for build:web, then on to the install.
+  const builds = join(dir, 'npm-builds');
+  stub('npm', `echo "npm $1 at $(git rev-parse HEAD)" >> "${npmLog}"; [ -e "${builds}" ] || exit 1; case "$*" in *build:web*) mkdir -p dist/web && echo ui > dist/web/index.html ;; esac; exit 0`);
   for (const t of ['sudo', 'install', 'ln', 'chown', 'chmod', 'mv']) stub(t, `echo "${t} $*" >> "${trips}"; exit 99`);
   const env = {
     PATH: `${bin}:${dirname(process.execPath)}:/usr/bin:/bin`,
@@ -111,7 +113,8 @@ function fixture() {
   };
   const tripped = () => (existsSync(trips) ? readFileSync(trips, 'utf8') : '');
   const done = () => rmSync(dir, { recursive: true, force: true });
-  return { owner, stranger, signersFor, sh, origin, cut, tag, onMain, checkout, signersFile, run, tripped, done };
+  const letBuild = () => writeFileSync(builds, '');
+  return { owner, stranger, signersFor, sh, origin, cut, tag, onMain, checkout, signersFile, run, tripped, done, letBuild };
 }
 
 /** engine.sh refused before any build: non-zero, npm never ran, and the reason given. */
@@ -190,5 +193,21 @@ test('engine.sh <commit id>: by commit, as before (no tag involved)', { skip }, 
   const r = f.run(c1);
   assert.deepEqual(r.built, [`npm ci at ${c1}`], r.out);
   assert.doesNotMatch(r.out, /verified/);
+  f.done();
+});
+
+test("R1264r N3: engine.sh refuses to install a tree holding claude_guarded's test PATH marker, and goes on to install the same tree without it", { skip }, () => {
+  const f = fixture();
+  f.letBuild();
+  const marked = f.cut({ 'scripts/setup/.claude-guarded-test-path': '/tmp/stand-ins\n' });
+  const r = f.run(marked);
+  assert.notEqual(r.code, 0, r.out);
+  assert.match(r.out, /the tree holds a \.claude-guarded-test-path \(a test's marker\): not installing it/);
+  assert.ok(r.built.includes(`npm run at ${marked}`), `it was built, and refused before the install: ${r.out}`);
+  assert.equal(f.tripped(), '', 'nothing installed (no install, chown, chmod or mv ran)');
+  // The same tree without the marker gets past the check: the install's first step (a tripwire here) runs.
+  const plain = f.cut();
+  f.run(plain);
+  assert.match(f.tripped(), /^install -d -m 0755 \/opt\/worklane$/m, 'past the check, the install began');
   f.done();
 });
