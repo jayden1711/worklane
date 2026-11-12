@@ -570,7 +570,7 @@ export function childFds(pids: readonly number[]): number | null {
  * slab) is left out, so walking files doesn't move it. R1181z D1: a netlink socket's are charged to no cgroup, so the
  * namespace's netlink queues are added. Each null where it can't be read.
  */
-export function cgroupLevels(root = '/sys/fs/cgroup'): { procs: number | null; kernelBytes: number | null } {
+export function cgroupLevels(root = '/sys/fs/cgroup', pids?: Set<number>): { procs: number | null; kernelBytes: number | null } {
   let dir: string;
   try {
     const line = readFileSync('/proc/self/cgroup', 'utf8').split('\n').find((l) => l.startsWith('0::'));
@@ -581,7 +581,10 @@ export function cgroupLevels(root = '/sys/fs/cgroup'): { procs: number | null; k
   }
   let count = 0;
   const walk = (d: string) => {
-    count += readFileSync(join(d, 'cgroup.procs'), 'utf8').split('\n').filter(Boolean).length;
+    const listed = readFileSync(join(d, 'cgroup.procs'), 'utf8').split('\n').filter(Boolean);
+    count += listed.length;
+    // The pids counted, for a caller that asks (the cgroup test: R1181t D1's flake, a count shared with other tests).
+    for (const p of listed) pids?.add(Number(p));
     for (const e of readdirSync(d, { withFileTypes: true })) {
       if (!e.isDirectory()) continue;
       try {
@@ -1978,14 +1981,25 @@ test("soak driver (Linux, R1181t D4): a new leader on a session id alive at the 
   }
 });
 
-test("soak driver (Linux, R1181t D1, D4): the job's cgroup is read: a process started in it raises its count, whatever its session", linuxOnly, async (t) => {
+test("soak driver (Linux, R1181t D1, D4): the job's cgroup is read: a process started in it is counted, whatever its session", linuxOnly, async (t) => {
   const line = readFileSync('/proc/self/cgroup', 'utf8').split('\n').find((l) => l.startsWith('0::'));
   if (!line || !existsSync(join('/sys/fs/cgroup', line.slice(3), 'cgroup.procs'))) return t.skip('no cgroup v2 here');
   const before = cgroupLevels();
   assert.equal(typeof before.procs, 'number', 'its processes are read');
   const pid = Number(spawnSync('sh', ['-c', 'env -u SOAK_CHILD_MARK setsid sleep 30 >/dev/null 2>&1 </dev/null & echo $!'], { encoding: 'utf8' }).stdout.trim());
   try {
-    assert.ok(cgroupLevels().procs! >= before.procs! + 1, `a new session in our cgroup: ${before.procs} -> ${cgroupLevels().procs}`);
+    // Its own pid among those the reader counts, not a rise in the count: the job's cgroup is shared with the tests
+    // running beside this one, so one exiting meanwhile cancelled the new process out (CI, Node 22: 11 -> 11).
+    assert.ok(pid > 0, 'the new session started');
+    let seen = false;
+    for (let i = 0; i < 20 && !seen; i++) {
+      const pids = new Set<number>();
+      const levels = cgroupLevels('/sys/fs/cgroup', pids);
+      seen = pids.has(pid);
+      assert.equal(levels.procs, pids.size, 'the count is the pids read');
+      if (!seen) await new Promise((r) => setTimeout(r, 100));
+    }
+    assert.ok(seen, `a new session in our cgroup is counted: pid ${pid}`);
     if (before.kernelBytes === null) t.diagnostic('no memory controller on this cgroup: the kernel level reads null here');
     else assert.ok(before.kernelBytes > 0, 'its unreclaimable kernel memory is read');
   } finally {
