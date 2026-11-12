@@ -308,7 +308,13 @@ jobs:
     # WHY: ubuntu-26.04 (ubuntu-latest from image 20261101) refuses unprivileged user namespaces, which this job's
     # sandboxes need; pinned with ci.yml's test shards until #1137 ports the suite.
     runs-on: ubuntu-24.04
-    timeout-minutes: 24
+    # WHY 30: since 2026-11-09 the job hit its 24-minute limit with no step failed 3 times in step 29 (#1266) and 7 times
+    # on 2026-11-11, when an apt mirror outage made step 8 take ~820 s. Green runs take 981-1,374 s (178 runs since
+    # 2026-11-09). 30 covers the step-29 case, not an outage like the one in step 8. The last step prints step times.
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read # the last step reads this job's step timings
     defaults:
       run:
         shell: bash # -eo pipefail: a failed install isn't hidden by its tee
@@ -762,6 +768,10 @@ jobs:
           KEEP_FOR_REMOVE: 1
         run: bash scripts/ci/exp-real-systemd.sh "$I2"
       - name: "instance-remove (v0.5.1): ci, which ran a study cut off with its output volume mounted: a mount the engine didn't make refuses it; then the volume unmounted and every experiments user, rule, file and egress entry of ci's gone, the other instance as it was"
+        # WHY 10 (the owner, 2026-11-12): green runs take 79-381 s here (179 green of 256 runs since 2026-11-09; median
+        # 179, p90 233). The three #1266 job timeouts were cut off here at 357, 380 and 390 s, inside that range, so they
+        # may have been slow, not hung. The slowest green run is 64% of 10 minutes; a hang fails under its own name.
+        timeout-minutes: 10
         run: bash scripts/ci/instance-remove-exp.sh "$I2"
       - name: the sandbox's units and Docker, on failure
         if: failure()
@@ -769,6 +779,32 @@ jobs:
           sudo systemctl --no-pager status worklane-test.slice worklane-test-ci-docker.service || true
           sudo journalctl --no-pager -n 100 -u worklane-test-ci-docker.service || true
           sudo journalctl --no-pager -n 50 _SYSTEMD_UNIT=init.scope -g worklane-test || true
+      - name: each step's wall time, to the job summary (#1266)
+        if: always()
+        timeout-minutes: 2
+        env:
+          GH_TOKEN: ${{ github.token }}
+          JOB_NAME: test-run sandbox (real systemd)
+          # The step with its own limit above: a failure at about that limit is its timeout (a step's own timeout
+          # ends it failed; a job timeout or cancel ends it cancelled).
+          LIMITED_STEP: instance-remove (v0.5.1)
+          LIMITED_SECONDS: 600
+        run: |
+          # From the run's own job record; this step's row is still in progress. Never fails the job. Called
+          # (workflow_call, the full-ci label) the job is named "full-ci / <name>".
+          {
+            echo '### Step wall times'
+            echo '| # | step | result | seconds |'
+            echo '|---:|---|---|---:|'
+            timeout 60 gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" --jq '
+              [.jobs[] | select(.name == env.JOB_NAME or (.name | endswith(" / " + env.JOB_NAME)))] |
+              if length == 0 then "| | no job named \"\(env.JOB_NAME)\" in this run | | |" else (.[0].steps[] |
+              (if .started_at and .completed_at then (.completed_at | fromdateiso8601) - (.started_at | fromdateiso8601) else null end) as $t |
+              (if $t != null and .conclusion == "failure" and (.name | startswith(env.LIMITED_STEP)) and $t >= ((env.LIMITED_SECONDS | tonumber) - 5)
+               then "timed out (its \((env.LIMITED_SECONDS | tonumber) / 60)-minute step limit)" else (.conclusion // .status) end) as $r |
+              "| \(.number) | \(.name | gsub("\\|"; "/")) | \($r) | \($t // "-") |") end' \
+              || echo '| | the step timings could not be read | | |'
+          } >> "$GITHUB_STEP_SUMMARY"
 
   add-project-real-systemd:
     # scripts/setup/add-project.sh end to end on a real host, as root, against a fake GitHub (test/fake-github.ts, the
