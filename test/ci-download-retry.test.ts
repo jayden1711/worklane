@@ -11,7 +11,9 @@
 // with or replaced, or a network attacker. It does NOT protect against code already running in the same job: an
 // earlier step, or this one (GITHUB_ENV, GITHUB_PATH, LD_PRELOAD, sudo replacing the runner's tools, names built with
 // eval). That is a stated limit, at the end of this file. This lint is a hint that catches the usual accidents (a
-// helper bypassed, a pinned URL fetched another way), not a proof that none is left. Structurally, each helper step
+// helper bypassed, a pinned URL fetched another way), not a proof that none is left: by the owner's decision of
+// 2026-11-11 ("1228 scope: hint"), only wrong bytes installed with no hostile code, a false claim or a false refusal
+// blocks it, and an accidental evasion is a stated limit, provided the Limits below name it truthfully. Structurally, each helper step
 // runs in a privileged /usr/bin/bash and names /usr/bin/bash -p (R1228o), so the step's shell takes no function or
 // BASH_ENV from the environment and the helper's `bash` is no name a PATH or hash table can redirect.
 // One exception, derived from the workflow, not a list: a job whose container can run a pull request's code runs its
@@ -112,7 +114,45 @@ const OTHER_FETCH = /\bwget\b|\bgh\s+release\s+download\b|\bInvoke-WebRequest\b|
 
 /** A run script's lines, with backslash-continued lines joined. */
 // R1228f D2: bash removes a backslash-newline outright (no space), keeping the next line's indentation.
-const logicalLines = (run: string) => run.replace(/\\\n/g, '').split('\n');
+/**
+ * A run's logical lines, as the shell joins them: a backslash at a line's end continues it onto the next, outside single
+ * quotes, but not inside a comment, which runs to the newline whatever it ends with (R1228ba D2: `# old: npm ci \`
+ * took the next line into the comment). A comment starts at an unquoted `#` that begins a word (after a blank or `;`,
+ * `&`, `|`, `(`, `)`); quotes are followed across lines.
+ */
+const logicalLines = (run: string): string[] => {
+  const out: string[] = [];
+  let cur = '';
+  let q: string | null = null;
+  const lines = run.split('\n');
+  lines.forEach((line, n) => {
+    let cont = false;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i]!;
+      if (q === "'") {
+        if (ch === "'") q = null;
+        continue;
+      }
+      if (ch === '\\') {
+        if (i === line.length - 1) cont = true;
+        i++;
+        continue;
+      }
+      if (q) {
+        if (ch === q) q = null;
+        continue;
+      }
+      if (ch === "'" || ch === '"' || ch === '`') q = ch;
+      else if (ch === '#' && /(^|[\s;&|()])$/.test(i === 0 ? cur : line.slice(0, i))) break;
+    }
+    if (cont && n < lines.length - 1) cur += line.slice(0, -1);
+    else {
+      out.push(cur + line);
+      cur = '';
+    }
+  });
+  return out;
+};
 
 /** One shell command, and whether a pipe takes its output (`a | b`: a's). */
 export interface Cmd {
@@ -753,19 +793,14 @@ export function fileDownloadProblems(rel: string, text: string, probes: string[]
   // R1228ak D2: a package.json script, a Makefile recipe or a shell script running an unread shell file is refused, as
   // a workflow run is. A Dockerfile's RUN runs paths inside the image (a COPY's target), which the lint can't map: a
   // stated limit.
-  // R1228as D1, R1228at D2, R1228au D2/D3: a `cd` or `pushd` (options, quotes and backticks around it included) into a
-  // folder the walk skips ends the sibling rule on its line, read as the shell splits it (a trailing comment cut:
-  // R1228av D2). R1228av D3: the target may hold quotes before the skipped folder (`cd "$ROOT"/.claude/hooks`).
-  // R1228av D4, R1228aw D2: one at any top-level command position (after `;`, `&&`, `then`, `{`, `builtin` or `command`)
-  // ends it for the rest of the file, or of the subshell or pushd it is in (R1228aw D3: restored at the closing `)` of a
-  // multi-line subshell, and at `popd`). R1228av D1, R1228aw D3: a package.json script and a Makefile recipe line each
-  // run in their own shell, so there a cd ends the rule on its own line only; R1228aw D1: a recipe's make prefix
-  // (`@`, `-`, `+`) is read past.
-  // R1228ax, R1228ay: the shell's working folder isn't tracked. A file with any `cd`, `pushd` or `popd` in its commands
+  // R1228ax, R1228ay: the shell's working folder isn't tracked (R1228as-aw tracked it, and each round found positions
+  // it missed). A file with any `cd`, `pushd` or `popd` in its commands
   // (comments cut; inside quotes, a subshell, a case arm or a condition too) has no read sibling: a relative .sh there
   // is judged as any other path, so one the walk doesn't read is refused.
   const make = MAKEFILE.test(n);
-  const moves = logicalLines(t).some((l) => !/^\s*#/.test(l) && commands(make ? l.replace(/^(\s*)[@+-]+/, '$1') : l).some((c) => /(^|[\s;&|(`'"{!@+-])(?:cd|pushd|popd)(?=$|[\s;&|)`'"])/.test(c)));
+  // R1228az/ba D1: a cd as a whole command word only (an option word such as `-cd` or `--build-cd` is none); R1228az D2:
+  // after a backslash (`\\cd`, the alias-proof spelling) or a case pattern's `)` (`a)cd`) too.
+  const moves = logicalLines(t).some((l) => !/^\s*#/.test(l) && commands(make ? l.replace(/^(\s*)[@+-]+/, '$1') : l).some((c) => !c.startsWith('#') && /(^|[\s;&|(){`'"!\\])(?:cd|pushd|popd)(?=$|[\s;&|)`'"])/.test(c)));
   if (!DOCKERFILE.test(n)) for (const l0 of logicalLines(t)) {
     if (/^\s*#/.test(l0)) continue;
     const l = make ? l0.replace(/^(\s*)[@+-]+/, '$1') : l0;
@@ -1700,6 +1735,23 @@ test("R1228av, R1228aw, R1228ax, R1228ay: the working folder isn't tracked: a fi
   ] as const) assert.ok(unread(rel, text).length > 0, `refused (a cd in the file): ${what}`);
 });
 
+test("R1228az, R1228ba: a cd is a whole command word (an option word isn't; `\\cd` and `a)cd` are); a comment ending in a backslash continues nothing, as in the shell", () => {
+  const unread = (rel: string, text: string) => fileDownloadProblems(rel, text).problems.filter((p) => /a shell file the download lint doesn't read/.test(p));
+  const sh = (text: string) => unread('scripts/ci/zz-a.sh', text);
+  // az D1 = ba D1: an option word ending in cd is no cd.
+  for (const text of ['tar -cd x.tar\nbash b.sh\n', 'make --build-cd all\nbash b.sh\n', 'zstd -cd x.zst > x\nbash b.sh\n', 'bash b.sh;# then cd dist\n']) assert.deepEqual(sh(text), [], `kept: ${JSON.stringify(text)}`);
+  // az D2: the backslashed and the unspaced case-arm spellings.
+  for (const text of ['\\cd .claude/hooks\nbash get.sh\n', 'case "$1" in a)cd .claude/hooks;; esac\nbash get.sh\n', 'case "$1" in\n  hooks)cd .claude/hooks;;\nesac\nbash get.sh\n']) assert.ok(sh(text).length > 0, `refused: ${JSON.stringify(text)}`);
+  // ba D2: a comment ending in a backslash ends at the newline; the next line is read.
+  for (const text of ['# old: npm ci \\\ncd .claude/hooks\nbash get.sh\n', 'echo x # old \\\ncd .claude/hooks\nbash get.sh\n', '# C:\\tools\\\nbash .claude/hooks/get.sh\n']) assert.ok(sh(text).length > 0, `refused: ${JSON.stringify(text)}`);
+  assert.match(fileDownloadProblems('scripts/ci/zz-get.sh', `# C:\\tools\\\ncurl -fsSL --retry 5 -o gl.tgz "${REL}"\n`).problems.join(), /a pinned URL outside/, "ba P3: the pinned URL after a comment's backslash");
+  // Controls: a real continuation still joins; a backslash in quotes or a '#' in a word isn't a comment.
+  assert.deepEqual(sh('bash \\\n  b.sh\n'), [], 'a continued line, joined');
+  assert.ok(sh('bash \\\n  .claude/hooks/get.sh\n').length > 0, 'a continued line, read whole');
+  assert.ok(sh('echo "a # b" \\\n && bash .claude/hooks/get.sh\n').length > 0, "a '#' in quotes isn't a comment");
+  assert.ok(sh('x=a#b \\\n && bash .claude/hooks/get.sh\n').length > 0, "a '#' inside a word isn't a comment");
+});
+
 // Limits (owner decision (c): stated, not closed; the helper's digest check holds for each download it handles):
 // - What the lint reads (R1228ai D1, closing R1228i L9-L11; R1228aj, R1228ak): workflow and action YAML, a shell
 //   script anywhere, every file under scripts/ whatever its name (a pinned URL, prose in a .md aside; the retry rule in
@@ -1715,22 +1767,24 @@ test("R1228av, R1228aw, R1228ax, R1228ay: the working folder isn't tracked: a fi
 //   cut (R1228an D3); a shellcheck or shfmt command names a dialect (`-s bash`), not a run. A read script's .sh
 //   sibling counts only where the walk reads (not under node_modules, dist, .git or .claude: R1228ao D3). The rule's
 //   known cost: a `bash` word followed by a path in another program's arguments (`grep -rn bash docs/`, an `echo` of
-//   "run bash tools/x.sh") is refused; reword it or name the file another way. A here-string of a substitution naming no unread file
-//   (`bash <<< "$(printf …)"`, R1228av D6c). Assignments before bash are read past, so `X=1 bash "$SCRIPT"` is refused as
-//   `bash "$SCRIPT"` is (R1228av D6a). Not seen: elsewhere, a path that is
+//   "run bash tools/x.sh") is refused; reword it or name the file another way. A here-string of a substitution naming
+//   no unread file (`bash <<< "$(printf …)"`, R1228av D6c) is refused too. Assignments before bash are read past, so
+//   `X=1 bash "$SCRIPT"` is refused as `bash "$SCRIPT"` is (R1228av D6a). The working folder isn't tracked
+//   (R1228ax/ay): a file with any `cd`, `pushd` or `popd` as a command word outside a comment (in quotes, a subshell,
+//   a condition, a case arm, here-document text or an echoed string included; `\cd` and `a)cd` too; an option word
+//   such as `-cd` is none: R1228az D1, D2) has no read sibling, so a relative .sh there is judged as a path from the
+//   checkout and refused unless the walk reads it. Its cost: a file that changes folders and then runs a sibling by a
+//   relative name, `cd "$(dirname "$0")" && bash b.sh` included, is refused (name it from the checkout or through a
+//   variable; measured on the repo: 2 such lines, both an experiment's command string in
+//   scripts/ci/exp-real-systemd.sh, now named through $PWD), and so is a case pattern named `cd)`. A comment runs to
+//   the newline, a backslash at its end included (R1228ba D2). Not seen: elsewhere, a path that is
 //   absolute (an installed copy, `/opt/<engine>/current/scripts/…`) or built from a variable (`"$here/x.sh"`), which
 //   can't be mapped to the checkout; elsewhere, a bare name with no `/` and no `.sh` (`sudo bash get`); a file piped in
 //   (`cat tools/get | bash`) or given as a here-string other than `bash <<< "$(…)"` spaced at the start of a workflow
-//   run (the attached `<<<"$(…)"`, after `-s`, or in a read file: R1228av D5); a Dockerfile RUN running a path inside the image (a COPY's target); a file elsewhere
-//   that a workflow runs another way; a `cd` into a folder by a variable or built name before a relative .sh in a read
-//   file (the working folder isn't tracked, R1228ax/ay: a file with any `cd`, `pushd` or `popd` in its commands, in
-//   quotes, a subshell, a condition or a case arm included, has no read sibling, so a relative .sh there is judged as a
-//   path from the checkout and refused unless the walk reads it; a cd in a comment changes nothing. Its cost: a file
-//   that changes folders and then runs a sibling by a relative name, `cd "$(dirname "$0")" && bash b.sh` included, is
-//   refused: name it from the checkout or through a variable. Measured on the repo: 2 such lines, both an
-//   experiment's command string in scripts/ci/exp-real-systemd.sh, now named through $PWD; not seen: a target built by a command substitution, `cd "$(dirname "$0")/../.claude/hooks"` or
-//   `cd "$(git rev-parse --show-toplevel)/.claude/hooks"` (R1228at D2's C2 rows), a cd after the .sh's own line, or a
-//   folder reached another way); a GitHub expression
+//   run (the attached `<<<"$(…)"`, after `-s`, or in a read file: R1228av D5); a Dockerfile RUN running a path inside
+//   the image (a COPY's target); a file elsewhere that a workflow runs another way; a folder reached without a cd in
+//   the file (`env -C`, `find -execdir`, `sudo -D`, a sourced file's cd, the caller's cd) or a cd spelled through a
+//   variable (`${CD:-cd}`); a `#` inside a multi-line quote read as a comment where it hides a later cd; a GitHub expression
 //   other than `${{ github.workspace }}` before a path (`${{ env.ROOT }}/x.sh`: a variable, so outside a command that
 //   starts with bash, a stated limit); and a shell keyword or builtin running a file we don't list (`eval`, `exec`
 //   after a redirection). This lint is a hint against accidents (R1228aq: round ~20 of new shell shapes); the
