@@ -22,7 +22,7 @@ type Replacement = string | ((match: string, ...groups: string[]) => string);
 
 /** Credential-shaped: mixed case with a digit (a random key), or a long hex run (a classic token). */
 function credentialShaped(v: string): boolean {
-  return (/[a-z]/.test(v) && /[A-Z]/.test(v) && /\d/.test(v)) || /^[0-9a-fA-F]{32,}$/.test(v);
+  return (hasChar(v, isLower) && hasChar(v, isUpper) && hasChar(v, isDigit)) || (v.length >= 32 && allChars(v, isHex));
 }
 
 /**
@@ -30,7 +30,7 @@ function credentialShaped(v: string): boolean {
  * run of 16 or more characters whose length base64 can have (no padding: not 1 more than a multiple of 4).
  */
 function basicShaped(v: string): boolean {
-  return /[0-9+/=]/.test(v) || (v.length >= 16 && v.length % 4 !== 1 && /[a-z]/.test(v) && /[A-Z]/.test(v)) || basicPair(v);
+  return hasChar(v, (c) => isDigit(c) || c === '+' || c === '/' || c === '=') || (v.length >= 16 && v.length % 4 !== 1 && hasChar(v, isLower) && hasChar(v, isUpper)) || basicPair(v);
 }
 /**
  * Whether `v` is base64 of a `user:password` pair: it decodes to printable ASCII with a `:` in it (#889 round 8: a short
@@ -44,7 +44,7 @@ function basicPair(v: string): boolean {
   } catch {
     return false;
   }
-  return /^[\x20-\x7e]*:[\x20-\x7e]*$/.test(text);
+  return allChars(text, (c) => c >= ' ' && c <= '~') && hasChar(text, (c) => c === ':');
 }
 
 // The data the rules decide by is frozen arrays, never a Set, a Map or a RegExp in a module binding (R1258g/h: code that
@@ -62,7 +62,8 @@ const CREDENTIAL_WORDS = Object.freeze(['token', 'secret', 'secrets', 'password'
 // check-table: never-shrink
 const CREDENTIAL_ENDINGS = Object.freeze(['token', 'secret', 'password', 'passwd', 'accesskey']);
 function credentialWord(w: string): boolean {
-  return CREDENTIAL_WORDS.includes(w) || CREDENTIAL_ENDINGS.some((e) => w.endsWith(e));
+  const o = intrinsics();
+  return CREDENTIAL_WORDS.includes(w) || CREDENTIAL_ENDINGS.some((e) => o.endsWith(w, e));
 }
 /** The word before `key` that makes it a credential (`x-api-key`, `apiKey`, `signing_key`); `cacheKey`, `sort_key` are not. */
 // check-table: never-shrink
@@ -74,16 +75,31 @@ const KEY_QUALIFIERS = Object.freeze(['api', 'access', 'secret', 'private', 'sig
  * written as one word too).
  */
 function credentialKey(k: string): boolean {
-  const words = k
-    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
-    .replace(/([A-Z])([A-Z][a-z])/g, '$1 $2')
-    .toLowerCase()
-    .split(/[ _-]+/)
-    .filter((w) => w.length > 0);
+  const o = intrinsics();
+  // The words: a break between a lower-case letter or digit and an upper-case one, between an upper-case letter and an
+  // upper-case one followed by a lower-case one (camelCase, read as `([a-z0-9])([A-Z])` then `([A-Z])([A-Z][a-z])`
+  // did), and at each run of `_`, `-` or spaces; lower-cased; empty words dropped.
+  const words: string[] = [];
+  let word = '';
+  for (let i = 0; i < k.length; i++) {
+    const c = k[i]!;
+    const n = k[i + 1] ?? '';
+    if (c === ' ' || c === '_' || c === '-') {
+      if (word.length > 0) words.push(o.lower(word));
+      word = '';
+      continue;
+    }
+    word += c;
+    if (((isLower(c) || isDigit(c)) && isUpper(n)) || (isUpper(c) && isUpper(n) && isLower(k[i + 2] ?? ''))) {
+      words.push(o.lower(word));
+      word = '';
+    }
+  }
+  if (word.length > 0) words.push(o.lower(word));
   const last = words.at(-1) ?? '';
   if (words.some(credentialWord) || last === 'auth') return true;
   if (last === 'key') return words.length === 1 || KEY_QUALIFIERS.includes(words.at(-2)!);
-  return last.endsWith('key') && KEY_QUALIFIERS.includes(last.slice(0, -3));
+  return o.endsWith(last, 'key') && KEY_QUALIFIERS.includes(o.slice(last, 0, -3));
 }
 
 /**
@@ -96,7 +112,7 @@ export const DASHBOARD_KEY_PREFIX = 'wld_';
 const DASHBOARD_KEY_BODY = '[A-Za-z0-9_-]{32,}';
 /** Whether `key` is a dashboard key of the current shape (prefixed). */
 export function isDashboardKey(key: string): boolean {
-  return new RegExp(`^${DASHBOARD_KEY_PREFIX}${DASHBOARD_KEY_BODY}$`).test(key);
+  return intrinsics().exec(new RegExp(`^${DASHBOARD_KEY_PREFIX}${DASHBOARD_KEY_BODY}$`), key) !== null;
 }
 
 /**
@@ -107,15 +123,16 @@ export function isDashboardKey(key: string): boolean {
  * a RegExp, which can't be frozen (R1258h's H1c recompiled one).
  */
 function orphanEnd(m: string): string {
+  const o = intrinsics();
   const keyLine = /-----(BEGIN|END) [A-Z ]*PRIVATE KEY(?: BLOCK)?-----/g;
   let open = false;
   let cut = -1;
-  for (let k = keyLine.exec(m); k; k = keyLine.exec(m)) {
+  for (let k = o.exec(keyLine, m); k; k = o.exec(keyLine, m)) {
     if (k[1] === 'BEGIN') open = true;
     else if (open) open = false;
     else cut = k.index + k[0].length;
   }
-  return cut === -1 ? m : `[REDACTED PRIVATE KEY]${m.slice(cut)}`;
+  return cut === -1 ? m : `[REDACTED PRIVATE KEY]${o.slice(m, cut)}`;
 }
 
 /**
@@ -285,6 +302,9 @@ function snapshot(table: readonly unknown[], o: { broad?: boolean; verbatim?: bo
     if (!(re instanceof RegExp) || ownKeys(re) !== 'lastIndex') refuse(who, 'its regex must be a plain RegExp with no own property but lastIndex (one could hide the pattern that runs)');
     const source = `${re.source}`;
     const flags = `${re.flags}`;
+    // The identifier pass replaces every match (replaced), so its rule must be global; refused here, not on the first
+    // TRACKER call (R1258q's observation).
+    if (o.verbatim && !flags.includes('g')) refuse(who, 'an identifier rule must be global');
     // The copy the marker is checked against; what runs is built again from the same primitives (run).
     const copy = new RegExp(source, flags);
     const rep = data(who, entry, 1, 'the marker');
@@ -489,7 +509,7 @@ const PATTERNS: [RegExp, Replacement, string][] = [
   [/\bsk-(?:ant-)?[A-Za-z0-9_-]{20,}\b/g, 'sk-[REDACTED]', 'API key (sk-)'],
   // Stripe secret and restricted keys, live and test: random, so with a digit (a long camelCase name after the
   // prefix, with no digit, is a code identifier).
-  [/(^|[^A-Za-z0-9_])([sr]k)_(?:live|test)_([A-Za-z0-9]{16,})(?![A-Za-z0-9_])/g, (m, pre, k, v) => (/\d/.test(v!) ? `${pre}${k}_[REDACTED]` : m), 'Stripe key'],
+  [/(^|[^A-Za-z0-9_])([sr]k)_(?:live|test)_([A-Za-z0-9]{16,})(?![A-Za-z0-9_])/g, (m, pre, k, v) => (hasChar(v!, isDigit) ? `${pre}${k}_[REDACTED]` : m), 'Stripe key'],
   // Google API keys: AIza and 35 more characters.
   [/AIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])/g, 'AIza[REDACTED]', 'Google API key'],
   // JSON Web Tokens: a base64 JSON header (so `eyJ` and 8 or more), a payload of 8 or more and a signature (empty when
@@ -609,11 +629,17 @@ const CODE_HEADS = Object.freeze(['this', 'self', 'super', 'opts', 'options', 'o
  * a host name is written in one case.
  */
 function internalHost(m: string, pre: string, name: string): string {
-  const lower = name.toLowerCase();
-  const labels = name.split('.').slice(0, lower.endsWith('.home.arpa') || lower.endsWith('.ts.net') ? -2 : -1);
-  const suffix = name.slice(labels.join('.').length + 1);
-  const prose = suffix !== suffix.toLowerCase() && suffix !== suffix.toUpperCase();
-  const code = !labels.some((l) => l.includes('-')) && (CODE_HEADS.includes(labels[0]!) || labels.some((l) => /[a-z][A-Z]/.test(l)));
+  const o = intrinsics();
+  const lower = o.lower(name);
+  const labels = o.split(name, '.').slice(0, o.endsWith(lower, '.home.arpa') || o.endsWith(lower, '.ts.net') ? -2 : -1);
+  const suffix = o.slice(name, labels.join('.').length + 1);
+  const prose = suffix !== o.lower(suffix) && suffix !== o.upper(suffix);
+  // camelCase: a lower-case letter right before an upper-case one.
+  const camel = (l: string): boolean => {
+    for (let i = 0; i + 1 < l.length; i++) if (isLower(l[i]!) && isUpper(l[i + 1]!)) return true;
+    return false;
+  };
+  const code = !labels.some((l) => o.includes(l, '-')) && (CODE_HEADS.includes(labels[0]!) || labels.some(camel));
   return prose || code ? m : `${pre}[internal-host]`;
 }
 
@@ -721,24 +747,25 @@ const GLUE_PARTS = Object.freeze([
  * prefix. After one that ends in anything else (`\/`, `\"`), every rule already sees a boundary, and a cut there would
  * split a value that holds it (`Bearer a\/b`, #996).
  */
-function gluePoints(s: string, glue: RegExp, prefixes: readonly string[], ops: Intrinsic): number[] {
+function gluePoints(s: string, glue: RegExp, prefixes: readonly string[], ops: Ops): number[] {
   // The glue regex is a run copy: searched with the captured exec, like every other.
   const cuts: number[] = [];
   glue.lastIndex = 0;
-  for (let m = ops.apply(ops.exec, glue, [s]); m; m = ops.apply(ops.exec, glue, [s])) {
+  for (let m = ops.exec(glue, s); m; m = ops.exec(glue, s)) {
     const c = m.index + m[0].length;
     if (m[0].length === 0) glue.lastIndex = m.index + 1;
-    if (/\w/.test(s[c - 1]!)) cuts.push(c);
+    if (isWordChar(s[c - 1]!)) cuts.push(c);
   }
-  for (let at = s.indexOf('_'); at !== -1; at = s.indexOf('_', at + 1)) if (prefixes.some((p) => s.startsWith(p, at + 1))) cuts.push(at + 1);
+  for (let at = ops.indexOf(s, '_'); at !== -1; at = ops.indexOf(s, '_', at + 1)) if (prefixes.some((p) => ops.startsWith(s, p, at + 1))) cuts.push(at + 1);
   return [...new Set(cuts)].filter((c) => c < s.length).sort((a, b) => a - b);
 }
 
 /** A character `s` doesn't hold (a private-use one), to mark the cut points with; null when it holds them all. */
 function freeMark(s: string): string | null {
+  const o = intrinsics();
   const held = new Set<number>();
   for (let i = 0; i < s.length; i++) {
-    const c = s.charCodeAt(i);
+    const c = o.codeAt(s, i);
     if (c >= 0xe000 && c <= 0xf8ff) held.add(c);
   }
   for (let c = 0xe000; c <= 0xf8ff; c++) if (!held.has(c)) return String.fromCharCode(c);
@@ -768,10 +795,6 @@ function expand(rep: string, m: string, groups: unknown[]): string {
   }
   return out;
 }
-function breaks(s: string): number {
-  return s.split('\n').length - 1;
-}
-
 /**
  * What a function-backed rule's replacement `r` for the match `whole` may show (#1257, R1258b's B2): `r`, unless the
  * part of it that stands for what it replaced (what `whole` and `r` don't share at either end, as spansOf cuts the
@@ -789,10 +812,11 @@ function shown(whole: string, groups: readonly string[], r: string): string {
   while (b < whole.length - a && b < r.length - a && whole[whole.length - 1 - b] === r[r.length - 1 - b]) b++;
   // Compared in one case (an echo lowercased is still the secret). A backstop for a literal echo only: a piecewise,
   // reversed or encoded echo is code a reviewer reads, held by the function's pin in test/redact-markers.test.ts.
-  const taken = whole.slice(a, whole.length - b).toLowerCase();
-  const put = r.slice(a, r.length - b).toLowerCase();
-  if (!taken || (!put.includes(taken) && !groups.some((g) => g.length >= 4 && put.includes(g.toLowerCase()) && taken.includes(g.toLowerCase())))) return r;
-  return `${whole.slice(0, a)}[REDACTED]${whole.slice(whole.length - b)}`;
+  const o = intrinsics();
+  const taken = o.lower(o.slice(whole, a, whole.length - b));
+  const put = o.lower(o.slice(r, a, r.length - b));
+  if (!taken || (!o.includes(put, taken) && !groups.some((g) => g.length >= 4 && o.includes(put, o.lower(g)) && o.includes(taken, o.lower(g))))) return r;
+  return `${o.slice(whole, 0, a)}[REDACTED]${o.slice(whole, whole.length - b)}`;
 }
 
 /** A rule's function, called with the match and its groups as strings, its result guarded (shown). */
@@ -810,23 +834,23 @@ export const TRACKER: Readonly<RedactTextOptions> = Object.freeze({ identifiers:
  * which looks a regex's Symbol.replace and exec up on the prototype at each call (R1258o/p). An empty match moves on
  * one character, as replace does.
  */
-function replaced(s: string, re: RegExp, rep: Replacement, keepLines: boolean, ops: Intrinsic): string {
+function replaced(s: string, re: RegExp, rep: Replacement, keepLines: boolean, ops: Ops): string {
   if (!re.global) throw new Error("replaced needs the run closure's global regex");
   let out = '';
   let at = 0;
   re.lastIndex = 0;
-  for (let m = ops.apply(ops.exec, re, [s]); m; m = ops.apply(ops.exec, re, [s])) {
+  for (let m = ops.exec(re, s); m; m = ops.exec(re, s)) {
     const whole = m[0];
     const groups = m.slice(1).map((x) => (typeof x === 'string' ? x : ''));
     const r = typeof rep === 'string' ? expand(rep, whole, groups) : called(rep, whole, groups);
-    out += s.slice(at, m.index) + r + (keepLines ? '\n'.repeat(Math.max(0, breaks(whole) - breaks(r))) : '');
+    out += ops.slice(s, at, m.index) + r + (keepLines ? ops.repeat('\n', Math.max(0, breaks(whole) - breaks(r))) : '');
     at = m.index + whole.length;
     if (whole.length === 0) {
       if (m.index >= s.length) break;
       re.lastIndex = m.index + 1;
     }
   }
-  return out + s.slice(at);
+  return out + ops.slice(s, at);
 }
 
 /**
@@ -841,20 +865,21 @@ function replaced(s: string, re: RegExp, rep: Replacement, keepLines: boolean, o
 // pushed a plain ``` opener onto this list from a table entry).
 const MACHINE_BLOCKS = Object.freeze([Object.freeze(['```done_when', '[^\\S\\n]*\\n'] as const), Object.freeze(['```research', '[ \\t]*\\r?\\n'] as const)]);
 function outsideMachineBlocks(s: string, f: (part: string) => string): string {
+  const o = intrinsics();
   const spans: [number, number][] = [];
   for (const [open, lineBreakSource] of MACHINE_BLOCKS) {
     const lineBreak = new RegExp(lineBreakSource, 'y');
-    for (let at = s.indexOf(open); at !== -1; ) {
+    for (let at = o.indexOf(s, open); at !== -1; ) {
       lineBreak.lastIndex = at + open.length;
-      if (!lineBreak.test(s)) {
-        at = s.indexOf(open, at + open.length);
+      if (o.exec(lineBreak, s) === null) {
+        at = o.indexOf(s, open, at + open.length);
         continue;
       }
       // The block's body starts after the opener's line break; the first line that starts with ``` closes it.
-      const close = s.indexOf('\n```', lineBreak.lastIndex);
+      const close = o.indexOf(s, '\n```', lineBreak.lastIndex);
       if (close === -1) break;
       spans.push([at, close + 4]);
-      at = s.indexOf(open, close + 4);
+      at = o.indexOf(s, open, close + 4);
     }
   }
   if (!spans.length) return f(s);
@@ -863,10 +888,10 @@ function outsideMachineBlocks(s: string, f: (part: string) => string): string {
   let from = 0;
   for (const [a, b] of spans) {
     if (a < from) continue;
-    out += f(s.slice(from, a)) + s.slice(a, b);
+    out += f(o.slice(s, from, a)) + o.slice(s, a, b);
     from = b;
   }
-  return out + f(s.slice(from));
+  return out + f(o.slice(s, from));
 }
 
 /** The kind secretKinds names for a text it can't scan (#889 round 6): a caller that refuses a secret refuses it too. */
@@ -898,12 +923,12 @@ type Span = [number, number, string, number];
  * in the span; with what the replacement puts there instead. A match its replacement leaves as it was (a function
  * that judged it no secret) gives none.
  */
-function spansOf(t: string, re: RegExp, rep: Replacement, rank: number, out: Span[], ops: Intrinsic) {
+function spansOf(t: string, re: RegExp, rep: Replacement, rank: number, out: Span[], ops: Ops) {
   // The rule's global copy, built inside `run` from the snapshot's primitives, searched with the captured exec only.
   if (!re.global) throw new Error("spansOf needs the run closure's global regex");
   const g = re;
   g.lastIndex = 0;
-  for (let m = ops.apply(ops.exec, g, [t]); m; m = ops.apply(ops.exec, g, [t])) {
+  for (let m = ops.exec(g, t); m; m = ops.exec(g, t)) {
     const whole = m[0];
     // The next search starts 64 characters before the match's end, not after it: a value a rule takes in may hold the
     // next secret's name (`token='abc password = 'x`, `Bearer abc+Bearer xyz`), and that next match must still be
@@ -923,7 +948,7 @@ function spansOf(t: string, re: RegExp, rep: Replacement, rank: number, out: Spa
     while (a < whole.length && a < r.length && whole[a] === r[a]) a++;
     let b = 0;
     while (b < whole.length - a && b < r.length - a && whole[whole.length - 1 - b] === r[r.length - 1 - b]) b++;
-    if (whole.length - b > a) out.push([m.index! + a, m.index! + whole.length - b, r.slice(a, r.length - b), rank]);
+    if (whole.length - b > a) out.push([m.index! + a, m.index! + whole.length - b, ops.slice(r, a, r.length - b), rank]);
   }
 }
 
@@ -936,16 +961,94 @@ const BROAD_RULES = Object.freeze(['shapes', 'broad'] as const);
 
 /** What build() makes of the tables: the snapshots, the listing's copies, and the closure that runs (`run`). */
 /**
- * The two intrinsics every run copy is searched with, captured on build's first line: RegExp's own exec (read from a
- * fresh literal) and Reflect's apply, so a search is `apply(exec, re, [s])`: no property of a regex, a function or a
- * prototype is looked up at run time, and a built-in patched after load changes nothing a run copy finds.
+ * The intrinsics the run-time code uses, and nothing else of a regex or a string: RegExp's own exec and String's own
+ * methods, read once at load from fresh literals (capture), each bound to Function.prototype.call read at the same
+ * time, so a call is `exec(re, s)`, `slice(s, a, b)`: nothing is looked up on a prototype at run time, and a built-in
+ * patched after load, from this module or any other, changes nothing that is redacted (R1258q's D1, R1258r's R2: the
+ * run copies were searched with a captured exec, but a rule function's `/\d/.test(v)` and the helpers' `.slice`
+ * still ran the prototype's, and a patch of `exec` for `\d` on long inputs showed a 130-character key). Character
+ * classes a rule decides by (`\d`, `\w`, `\s`, a letter's case) are comparisons on characters, with no regex at all.
  */
-interface Intrinsic {
-  readonly exec: (this: RegExp, s: string) => RegExpExecArray | null;
-  readonly apply: (target: (this: RegExp, s: string) => RegExpExecArray | null, thisArg: RegExp, args: readonly [string]) => RegExpExecArray | null;
+interface Ops {
+  readonly exec: (re: RegExp, s: string) => RegExpExecArray | null;
+  readonly slice: (s: string, a: number, b?: number) => string;
+  readonly indexOf: (s: string, x: string, from?: number) => number;
+  readonly includes: (s: string, x: string) => boolean;
+  readonly startsWith: (s: string, x: string, at?: number) => boolean;
+  readonly endsWith: (s: string, x: string) => boolean;
+  readonly lower: (s: string) => string;
+  readonly upper: (s: string) => string;
+  readonly repeat: (s: string, n: number) => string;
+  readonly split: (s: string, sep: string) => string[];
+  readonly codeAt: (s: string, i: number) => number;
+}
+
+/**
+ * The one place this module reads a method of a regex or a string as a value: build's first call, before any table is
+ * read. Each intrinsic is bound to Function.prototype.call (`call.bind(f)` gives `(self, ...args) => f.call(self,
+ * ...args)` with the binding's own slots, so no later patch of `call`, `bind`, `exec` or a String method reaches it).
+ * The reference lint in test/redact-markers.test.ts holds this function to its exact text and refuses, everywhere
+ * else in the module, every method call on a regex or a string value and every reach to a prototype.
+ */
+function captured(): Ops {
+  const call = (() => undefined).call;
+  return Object.freeze({
+    exec: call.bind(/(?:)/.exec) as Ops['exec'],
+    slice: call.bind(''.slice) as Ops['slice'],
+    indexOf: call.bind(''.indexOf) as Ops['indexOf'],
+    includes: call.bind(''.includes) as Ops['includes'],
+    startsWith: call.bind(''.startsWith) as Ops['startsWith'],
+    endsWith: call.bind(''.endsWith) as Ops['endsWith'],
+    lower: call.bind(''.toLowerCase) as Ops['lower'],
+    upper: call.bind(''.toUpperCase) as Ops['upper'],
+    repeat: call.bind(''.repeat) as Ops['repeat'],
+    split: call.bind(''.split) as Ops['split'],
+    codeAt: call.bind(''.charCodeAt) as Ops['codeAt'],
+  });
+}
+
+/** The captured intrinsics, for run-time code outside the run closure (BUILT exists by the time any of it runs). */
+function intrinsics(): Ops {
+  return BUILT.ops;
+}
+
+/** Whether `c` (one character) is a digit, a lower-case or an upper-case ASCII letter, a word character (`\w`), or hex. */
+function isDigit(c: string): boolean {
+  return c >= '0' && c <= '9';
+}
+function isLower(c: string): boolean {
+  return c >= 'a' && c <= 'z';
+}
+function isUpper(c: string): boolean {
+  return c >= 'A' && c <= 'Z';
+}
+function isWordChar(c: string): boolean {
+  return isDigit(c) || isLower(c) || isUpper(c) || c === '_';
+}
+function isHex(c: string): boolean {
+  return isDigit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+}
+/** Whether some character of `s` satisfies `p`. */
+function hasChar(s: string, p: (c: string) => boolean): boolean {
+  for (let i = 0; i < s.length; i++) if (p(s[i]!)) return true;
+  return false;
+}
+/** Whether every character of `s` satisfies `p`. */
+function allChars(s: string, p: (c: string) => boolean): boolean {
+  for (let i = 0; i < s.length; i++) if (!p(s[i]!)) return false;
+  return true;
+}
+/** How many line breaks `s` holds. */
+function breaks(s: string): number {
+  const o = intrinsics();
+  let n = 0;
+  for (let at = o.indexOf(s, '\n'); at !== -1; at = o.indexOf(s, '\n', at + 1)) n++;
+  return n;
 }
 
 interface Built {
+  /** The captured intrinsics (capture), for every run-time operation on a regex or a string. */
+  readonly ops: Ops;
   readonly shapes: readonly Rule[];
   readonly broad: readonly Rule[];
   readonly identifiers: readonly Rule[];
@@ -980,11 +1083,10 @@ interface Built {
  * than by spelling, every way this module's own code could reach a prototype or a global object to make one.
  */
 function build(patterns: readonly unknown[], broadTable: readonly unknown[], identifierTable: readonly unknown[]): Built {
-  // First, before any table is read: the intrinsic exec, from a fresh literal, and the intrinsic apply, so every run
-  // copy is searched with these two and nothing else (R1258o/p: a patch of a built-in's exec from run-time code, in
-  // a spelling no lint reads, changed what the run copies found). The reference lint in test/redact-markers.test.ts
-  // allows this one statement, by its exact text, and refuses every other reach to an intrinsic in this module.
-  const intrinsic: Intrinsic = Object.freeze({ exec: /(?:)/.exec, apply: Reflect.apply });
+  // First, before any table is read: the intrinsics (capture), so every operation on a regex or a string at run time
+  // is one of these and nothing else (R1258o/p, q/r). The reference lint in test/redact-markers.test.ts holds this
+  // statement first in build, and capture to its exact text.
+  const ops = captured();
   const shapes = snapshot(patterns);
   Object.freeze(patterns);
   const broadRules = snapshot(broadTable, { broad: true });
@@ -1019,16 +1121,16 @@ function build(patterns: readonly unknown[], broadTable: readonly unknown[], ide
     checked = true;
   };
   const run: Built['run'] = Object.freeze({
-    shapes: (s: string): Span[] => (check(), allSpans(s, shapeRun, glue, gluedPrefixes, intrinsic)),
-    broad: (s: string): Span[] => (check(), allSpans(s, broadRun, glue, gluedPrefixes, intrinsic)),
-    broadAt: (s: string, cuts: number[], spans: Span[]): void => (check(), readAt(s, cuts, broadRun, spans, intrinsic)),
-    identifiers: (part: string, keepLines: boolean): string => (check(), identifierRun.reduce((t, [re, rep]) => replaced(t, re, rep, keepLines, intrinsic), part)),
+    shapes: (s: string): Span[] => (check(), allSpans(s, shapeRun, glue, gluedPrefixes, ops)),
+    broad: (s: string): Span[] => (check(), allSpans(s, broadRun, glue, gluedPrefixes, ops)),
+    broadAt: (s: string, cuts: number[], spans: Span[]): void => (check(), readAt(s, cuts, broadRun, spans, ops)),
+    identifiers: (part: string, keepLines: boolean): string => (check(), identifierRun.reduce((t, [re, rep]) => replaced(t, re, rep, keepLines, ops), part)),
   });
-  return Object.freeze({ shapes, broad: broadRules, identifiers, patterns: patternsOut, run });
+  return Object.freeze({ ops, shapes, broad: broadRules, identifiers, patterns: patternsOut, run });
 }
 
 /** What every rule of `rules` finds in `s`: on the text as it was, and again with a boundary at each glue point. */
-function allSpans(s: string, rules: readonly (readonly [RegExp, Replacement])[], glue: RegExp, prefixes: readonly string[], ops: Intrinsic): Span[] {
+function allSpans(s: string, rules: readonly (readonly [RegExp, Replacement])[], glue: RegExp, prefixes: readonly string[], ops: Ops): Span[] {
   const spans: Span[] = [];
   rules.forEach(([re, rep], i) => spansOf(s, re, rep, i, spans, ops));
   readAt(s, gluePoints(s, glue, prefixes, ops), rules, spans, ops);
@@ -1044,6 +1146,7 @@ function allSpans(s: string, rules: readonly (readonly [RegExp, Replacement])[],
  * spans that only overlap becomes `[REDACTED]`. One pass of replaceUnion. `found` is told the rule of every span.
  */
 function replaceOnce(s: string, keepLines: boolean, found?: (rank: number) => void): string {
+  const o = intrinsics();
   const spans = BUILT.run.shapes(s);
   if (found) for (const sp of spans) found(sp[3]);
   if (!spans.length) return s;
@@ -1058,11 +1161,11 @@ function replaceOnce(s: string, keepLines: boolean, found?: (rank: number) => vo
     let pick: Span | undefined;
     for (let k = i; k < j; k++) if (spans[k]![0] === a && spans[k]![1] === b && (!pick || spans[k]![3] < pick[3])) pick = spans[k];
     const rep = pick ? pick[2] : '[REDACTED]';
-    out += s.slice(at, a) + rep + (keepLines ? '\n'.repeat(Math.max(0, breaks(s.slice(a, b)) - breaks(rep))) : '');
+    out += o.slice(s, at, a) + rep + (keepLines ? o.repeat('\n', Math.max(0, breaks(o.slice(s, a, b)) - breaks(rep))) : '');
     at = b;
     i = j;
   }
-  return out + s.slice(at);
+  return out + o.slice(s, at);
 }
 
 /** How many passes a mode may take to reach a text no pass changes (fixedPoint). */
@@ -1081,7 +1184,7 @@ export function fixedPoint(s: string, pass: (t: string) => string, keepLines = f
     if (again === out) return out;
     out = again;
   }
-  return UNSCANNABLE + (keepLines ? '\n'.repeat(breaks(s)) : '');
+  return UNSCANNABLE + (keepLines ? intrinsics().repeat('\n', breaks(s)) : '');
 }
 
 /** The default mode: replaced again on what each pass gave until nothing changes. A marker can make a boundary a later rule needs, as main's rules, applied in turn, had. */
@@ -1101,21 +1204,22 @@ function maskOnce(s: string, mask: string, keepLines: boolean): string {
   // where a span found begins or ends between two word characters (a module's own rules, applied in turn, saw a
   // boundary where an earlier rule's replacement ended: `xoxa-...[here]_db_password=...`). Apart from the glue points,
   // so a boundary of one kind can't break a match the other needs.
+  const o = intrinsics();
   const spans = BUILT.run.broad(s);
-  const word = (i: number) => /[A-Za-z0-9_]/.test(s[i] ?? '');
+  const word = (i: number) => isWordChar(s[i] ?? '');
   BUILT.run.broadAt(s, [...new Set(spans.flatMap(([a, b]) => [a, b]))].filter((c) => c > 0 && c < s.length && word(c - 1) && word(c)).sort((a, b) => a - b), spans);
   // What is already a mask stays as it is: a rule that takes in a mask word (`token=[REDACTED]`) adds nothing.
   const masks: [number, number][] = [];
-  if (mask) for (let at = s.indexOf(mask); at !== -1; at = s.indexOf(mask, at + mask.length)) masks.push([at, at + mask.length]);
+  if (mask) for (let at = o.indexOf(s, mask); at !== -1; at = o.indexOf(s, mask, at + mask.length)) masks.push([at, at + mask.length]);
   const kept = outside(merged(spans.map(([a, b]): [number, number] => [a, b])), masks);
   if (!kept.length) return s;
   let out = '';
   let at = 0;
   for (const [a, b] of kept) {
-    out += s.slice(at, a) + mask + (keepLines ? '\n'.repeat(breaks(s.slice(a, b))) : '');
+    out += o.slice(s, at, a) + mask + (keepLines ? o.repeat('\n', breaks(o.slice(s, a, b))) : '');
     at = b;
   }
-  return out + s.slice(at);
+  return out + o.slice(s, at);
 }
 
 /** `spans` sorted and merged: no two overlap or touch. */
@@ -1135,12 +1239,12 @@ function merged(spans: [number, number][]): [number, number][] {
  * it is read from its start; the spans found, mapped back, go in `spans`. The boundary is a character no rule takes in
  * (a private-use one the text doesn't hold); when the text holds them all, each piece after a cut is read on its own.
  */
-function readAt(s: string, cuts: number[], rules: readonly (readonly [RegExp, Replacement])[], spans: Span[], ops: Intrinsic) {
+function readAt(s: string, cuts: number[], rules: readonly (readonly [RegExp, Replacement])[], spans: Span[], ops: Ops) {
   if (!cuts.length) return;
   const markChar = freeMark(s);
   if (markChar === null) {
     for (const [i, c] of cuts.entries()) {
-      const piece = s.slice(c, cuts[i + 1] ?? s.length);
+      const piece = ops.slice(s, c, cuts[i + 1] ?? s.length);
       const more: Span[] = [];
       rules.forEach(([re, rep], k) => spansOf(piece, re, rep, k, more, ops));
       for (const [a, b, r, k] of more) spans.push([a + c, b + c, r, k]);
@@ -1150,10 +1254,10 @@ function readAt(s: string, cuts: number[], rules: readonly (readonly [RegExp, Re
   let marked = '';
   let from = 0;
   for (const c of cuts) {
-    marked += s.slice(from, c) + markChar;
+    marked += ops.slice(s, from, c) + markChar;
     from = c;
   }
-  marked += s.slice(from);
+  marked += ops.slice(s, from);
   // A position in the marked text, back to the text: less the marks before it.
   const back = (p: number) => {
     let lo = 0;
@@ -1167,7 +1271,7 @@ function readAt(s: string, cuts: number[], rules: readonly (readonly [RegExp, Re
   };
   const more: Span[] = [];
   rules.forEach(([re, rep], k) => spansOf(marked, re, rep, k, more, ops));
-  for (const [a, b, r, k] of more) spans.push([back(a), back(b), r.split(markChar).join(''), k]);
+  for (const [a, b, r, k] of more) spans.push([back(a), back(b), ops.split(r, markChar).join(''), k]);
 }
 
 /**
@@ -1207,7 +1311,7 @@ export function redactString(s: string, o: RedactTextOptions = {}): string {
   } catch (e) {
     // V8's backtracking stack overflows on one run of millions of characters after a prefix (`RangeError: Maximum
     // call stack size exceeded`): fail closed, with the text's line count kept for redactRecords.
-    if (e instanceof RangeError) return UNSCANNABLE + (o.keepLines ? '\n'.repeat(breaks(s)) : '');
+    if (e instanceof RangeError) return UNSCANNABLE + (o.keepLines ? intrinsics().repeat('\n', breaks(s)) : '');
     throw e;
   }
 }
@@ -1242,7 +1346,7 @@ export function redactClip(s: string, max: number, o: RedactTextOptions = {}): {
   const windowed = s.length > max + CUT_MARGIN;
   const r = redactString(windowed ? readWindow(s, max + CUT_MARGIN) : s, o);
   if (!windowed && r.length <= max) return { text: r, more: 0 };
-  return { text: r.slice(0, max), more: (windowed ? s.length : r.length) - max };
+  return { text: intrinsics().slice(r, 0, max), more: (windowed ? s.length : r.length) - max };
 }
 
 /**
@@ -1254,7 +1358,9 @@ export function redactClip(s: string, max: number, o: RedactTextOptions = {}): {
  */
 export function readWindow(s: string, end: number): string {
   if (s.length <= end) return s;
-  for (let i = end - 1; i >= 0; i--) if (/\s/.test(s[i]!)) return s.slice(0, i + 1);
+  const o = intrinsics();
+  const space = /\s/;
+  for (let i = end - 1; i >= 0; i--) if (o.exec(space, s[i]!) !== null) return o.slice(s, 0, i + 1);
   return '';
 }
 
@@ -1264,7 +1370,7 @@ export function readWindow(s: string, end: number): string {
  * each with as many lines as it had (a record inside a secret comes back empty or holding the marker).
  */
 export function redactRecords(records: readonly string[], o: RedactTextOptions = {}): string[] {
-  const lines = redactString(records.join('\n'), { ...o, keepLines: true }).split('\n');
+  const lines = intrinsics().split(redactString(records.join('\n'), { ...o, keepLines: true }), '\n');
   const out: string[] = [];
   let at = 0;
   for (const r of records) {
