@@ -123,9 +123,9 @@ export const SHELL_EXCEPTIONS: Pin[] = [
   ],
   [
     'scripts/setup/lib.sh',
-    'command ${cg_pre[@]+"${cg_pre[@]}"} /usr/bin/env -i "HOME=$cg_home" PATH=/usr/local/bin:/usr/bin:/bin CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 ${cg_env[@]+"${cg_env[@]}"} "$cg_bin" "$@" --settings "$cg_settings" --setting-sources \'\' --strict-mcp-config',
+    'command ${cg_sudo[@]+"${cg_sudo[@]}"} ${cg_timeout[@]+"${cg_timeout[@]}"} /usr/bin/env -i "HOME=$cg_home" PATH=/usr/local/bin:/usr/bin:/bin CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 ${cg_env[@]+"${cg_env[@]}"} "$cg_bin" "$@" --settings "$cg_settings" --setting-sources \'\' --strict-mcp-config',
     "claude_guarded, the one launch a script may use (R1264g/h): an empty environment but for HOME, a fixed PATH and allowlisted names; only allowlisted flags (--permission-mode dontAsk only); settings only {} or a plain-path apiKeyHelper; the guards last. Held with its function by digest",
-    '5630c05cdf08b5b362973f44f23638cfcf2d3da23a1037e26def923a2ca27c03',
+    'e5f6efe7adc14f0e0f62ece1eb795530d43015ac7e7cbce2545f73d611287766',
   ],
 ];
 

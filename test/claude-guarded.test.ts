@@ -1,7 +1,7 @@
 // R1264g/h: lib.sh's claude_guarded is the one way a script starts claude (the shell lint refuses any other). It runs
 // claude in an empty environment (HOME, a fixed PATH, CLAUDE_CODE_DISABLE_AUTO_MEMORY and a few allowlisted names), lets
 // through only allowlisted flags, takes settings only as {} or a plain-path apiKeyHelper, and puts the launch's guards
-// last. sudo, timeout, getent and claude are stand-ins on PATH: the stub claude records its argv and its environment.
+// last. sudo, timeout and claude are stand-ins on PATH: the stub claude records its argv and its environment.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -11,6 +11,8 @@ import { join } from 'node:path';
 import { repoRoot } from './helpers.js';
 
 const posix = process.platform !== 'win32';
+// The launch's guards claude_guarded must end every argv with: one gone is a weaker test.
+// check-table: never-shrink
 const GUARDS = ['--setting-sources', '', '--strict-mcp-config'];
 
 /** claude_guarded with these arguments and this extra caller environment: its exit, stderr, and what claude got. */
@@ -24,10 +26,9 @@ function guarded(args: string[], callerEnv: NodeJS.ProcessEnv = {}): { status: n
       chmodSync(join(bin, name), 0o755);
     };
     put('claude', `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(join(t, 'got.json'))}, JSON.stringify({ argv: process.argv.slice(2), env: process.env }));\n`);
-    // sudo -n -u <user> -- <command…>: note the user, run the command.
-    put('sudo', `#!/bin/sh\nwhile [ "$1" != -- ]; do [ "$1" = -u ] && echo "$2" >> ${JSON.stringify(join(t, 'sudo'))}; shift; done\nshift\nexec "$@"\n`);
+    // sudo -H -u <user> <command…>: note the user, run the command with that user's home (as sudo -H does).
+    put('sudo', `#!/bin/sh\n[ "$1" = -H ] && shift\n[ "$1" = -u ] || exit 64\necho "$2" >> ${JSON.stringify(join(t, 'sudo'))}\nu="$2"; shift 2\nHOME="/home/$u" exec "$@"\n`);
     put('timeout', '#!/bin/sh\nshift\nexec "$@"\n');
-    put('getent', `#!/bin/sh\necho "$2:x:1000:1000::/home/$2:/bin/sh"\n`);
     const r = spawnSync('bash', ['-c', 'source "$1"; shift; claude_guarded "$@"', '_', join(repoRoot, 'scripts', 'setup', 'lib.sh'), ...args], {
       encoding: 'utf8',
       env: { PATH: `${bin}:/usr/bin:/bin`, HOME: t, ...callerEnv },
@@ -49,10 +50,12 @@ test('R1264g/h: claude_guarded runs claude as the given users, in an empty envir
   });
   assert.equal(r.status, 0, r.err);
   assert.deepEqual(r.argv, ['-p', 'hi', '--model', 'haiku', '--permission-mode', 'dontAsk', '--settings', '{}', ...GUARDS]);
-  assert.deepEqual(r.sudo, ['coord', 'user']);
+  // Each user twice: once for the last user's home (printenv HOME through the same chain), once for claude.
+  assert.deepEqual(r.sudo, ['coord', 'user', 'coord', 'user']);
   // Nothing of the caller's environment reaches claude: only what claude_guarded sets (env -i). A shell's own and
   // macOS's per-process `__CF_USER_TEXT_ENCODING` aside: the OS adds them, not the caller.
-  assert.deepEqual(Object.keys(r.env!).filter((k) => !['PWD', 'SHLVL', '_', '__CF_USER_TEXT_ENCODING'].includes(k)).sort(), ['CLAUDE_CODE_DISABLE_AUTO_MEMORY', 'CLAUDE_CONFIG_DIR', 'HOME', 'PATH']);
+  assert.deepEqual(Object.keys(r.env!).filter((k) => !['PWD', 'SHLVL', '_', '__CF_USER_TEXT_ENCODING'].includes(k)).sort(), ['CLAUDE_CODE_DISABLE_AUTO_MEMORY', 'CLAUDE_CONFIG_DIR', 'HOME', 'LOGNAME', 'PATH', 'USER']);
+  assert.equal(r.env!.USER, 'user');
   assert.equal(r.env!.HOME, '/home/user');
   assert.equal(r.env!.PATH, '/usr/local/bin:/usr/bin:/bin');
   assert.equal(r.env!.CLAUDE_CODE_DISABLE_AUTO_MEMORY, '1');

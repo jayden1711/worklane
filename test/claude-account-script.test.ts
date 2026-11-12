@@ -108,7 +108,8 @@ esac
   // as the real one does (#341): not the token's. With no account cached, the token's (as if fetched again for it).
   // claude -p (the login's proof, one minimal real call): answered, unless the API refuses the login: refuse-new (the new
   // token, for every user) or refuse-api-<user> exists; then a 401 as claude prints it, with the token on stderr too.
-  exe('claude', `#!/usr/bin/env node
+  // By node's own path: claude_guarded runs it under env -i with a fixed PATH (R1264g/h).
+  exe('claude', `#!${process.execPath}
 const fs = require('node:fs');
 const T = ${JSON.stringify(T)};
 fs.appendFileSync(T + '/claude-calls', process.env.USER + ' ' + process.argv.slice(2).join(' ') + '\\n');
