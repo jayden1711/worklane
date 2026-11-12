@@ -117,7 +117,7 @@ const OTHER_FETCH = /\bwget\b|\bgh\s+release\s+download\b|\bInvoke-WebRequest\b|
 /**
  * A run's logical lines, as the shell joins them: a backslash at a line's end continues it onto the next, but not
  * inside a comment, which runs to the newline whatever it ends with (R1228ba D2: `# old: npm ci \` took the next line
- * into the comment). A comment starts at an unquoted `#` that begins a word (after a blank or `;`, `&`, `|`, `(`, `)`).
+ * into the comment). A comment starts at an unquoted `#` that begins a word (after a blank or `;`, `&`, `|`, `(`).
  * Quotes are followed within a line only (R1228bb D2, R1228bc D1, D2: an apostrophe in here-document text, or in a value
  * that isn't shell, held a quote open to the end of the file, so a real continuation wasn't joined and a comment wasn't
  * seen); a `#` inside a quote that spans lines is read as a comment there (stated in the Limits).
@@ -144,7 +144,9 @@ const logicalLines = (run: string): string[] => {
         continue;
       }
       if (ch === "'" || ch === '"' || ch === '`') q = ch;
-      else if (ch === '#' && /(^|[\s;&|()])$/.test(i === 0 ? cur : line.slice(0, i))) comment = true;
+      // R1228bc D4: not after `)`: `$(pwd)#x` is one word; a comment right after a subshell's `)` with no blank is read as
+      // text (stated in the Limits).
+      else if (ch === '#' && /(^|[\s;&|(])$/.test(i === 0 ? cur : line.slice(0, i))) comment = true;
     }
     // A trailing backslash continues the line unless a comment ended it first.
     if (!comment && line.endsWith('\\') && n < lines.length - 1) cur += line.slice(0, -1);
@@ -802,7 +804,7 @@ export function fileDownloadProblems(rel: string, text: string, probes: string[]
   const make = MAKEFILE.test(n);
   // R1228az/ba D1: a cd as a whole command word only (an option word such as `-cd` or `--build-cd` is none); R1228az D2:
   // after a backslash (`\\cd`, the alias-proof spelling) or a case pattern's `)` (`a)cd`) too.
-  const moves = logicalLines(t).some((l) => !/^\s*#/.test(l) && commands(make ? l.replace(/^(\s*)[@+-]+/, '$1') : l).map((c) => (make ? c.replace(/^[@+-]+/, '') : c)).some((c) => !c.startsWith('#') && /(^|[\s;&|(){`'"!\\])(?:cd|pushd|popd)(?=$|[\s;&|)`'"])/.test(c)));
+  const moves = logicalLines(t).some((l) => !/^\s*#/.test(l) && commands(make ? l.replace(/^(\s*)[@+-]+/, '$1') : l).map((c) => (make ? c.replace(/^[@+-]+/, '') : c)).some((c) => !c.startsWith('#') && /(^|[\s;&|(){`'"!\\])(?:cd|pushd|popd)(?=$|[\s;&|)`'"<>])/.test(c)));
   if (!DOCKERFILE.test(n)) for (const l0 of logicalLines(t)) {
     if (/^\s*#/.test(l0)) continue;
     const l = make ? l0.replace(/^(\s*)[@+-]+/, '$1') : l0;
@@ -1769,6 +1771,16 @@ test("R1228bb, R1228bc: quotes are followed within a line only (here-document te
   for (const p of ['@', '-', '+', '']) assert.ok(unread('Makefile', `t: ; ${p}cd .claude/hooks && bash get.sh\n`).length > 0, `refused: t: ; ${p}cd`);
 });
 
+test("R1228bc D4, D5: `$(pwd)#x` is one word, not a comment; a redirection right after cd doesn't hide it", () => {
+  const all = (rel: string, text: string) => fileDownloadProblems(rel, text).problems;
+  const unread = (text: string) => all('scripts/ci/zz-a.sh', text).filter((p) => /a shell file the download lint doesn't read/.test(p));
+  // D4: a real continuation after `$(pwd)#x` is joined (its --retry read): kept.
+  assert.deepEqual(all('scripts/ci/zz-get.sh', 'echo "$(pwd)"#x; curl -fsSL -o p \\\n  --retry 5 https://example.com/p\n'), [], 'kept');
+  assert.deepEqual(all('scripts/ci/zz-get.sh', 'x=$(pwd)#x; curl -fsSL -o p \\\n  --retry 5 https://example.com/p\n'), [], 'kept, unquoted');
+  // D5: cd with a redirection right after it counts.
+  for (const text of ['cd>/dev/null .claude/hooks\nbash get.sh\n', 'cd</dev/null .claude/hooks\nbash get.sh\n', 'pushd>/dev/null .claude/hooks\nbash get.sh\n']) assert.ok(unread(text).length > 0, `refused: ${JSON.stringify(text)}`);
+});
+
 // Limits (owner decision (c): stated, not closed; the helper's digest check holds for each download it handles):
 // - What the lint reads (R1228ai D1, closing R1228i L9-L11; R1228aj, R1228ak): workflow and action YAML, a shell
 //   script anywhere, every file under scripts/ whatever its name (a pinned URL, prose in a .md aside; the retry rule in
@@ -1801,7 +1813,8 @@ test("R1228bb, R1228bc: quotes are followed within a line only (here-document te
 //   run (the attached `<<<"$(…)"`, after `-s`, or in a read file: R1228av D5); a Dockerfile RUN running a path inside
 //   the image (a COPY's target); a file elsewhere that a workflow runs another way; a folder reached without a cd in
 //   the file (`env -C`, `find -execdir`, `sudo -D`, a sourced file's cd, the caller's cd) or a cd spelled through a
-//   variable (`${CD:-cd}`); a `#` inside a multi-line quote read as a comment where it hides a later cd; a GitHub expression
+//   variable (`${CD:-cd}`); a `#` inside a multi-line quote read as a comment where it hides a later cd; a comment
+//   right after a subshell's `)` with no blank (`(…)#x`), read as text (R1228bc D4: `$(pwd)#x` is one word); a GitHub expression
 //   other than `${{ github.workspace }}` before a path (`${{ env.ROOT }}/x.sh`: a variable, so outside a command that
 //   starts with bash, a stated limit); and a shell keyword or builtin running a file we don't list (`eval`, `exec`
 //   after a redirection). This lint is a hint against accidents (R1228aq: round ~20 of new shell shapes); the
