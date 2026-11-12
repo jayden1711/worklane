@@ -177,15 +177,91 @@ test('B2: a function that echoes what it replaced puts [REDACTED] there instead,
 const digest = (text: string) => createHash('sha256').update(text).digest('hex').slice(0, 16);
 
 /**
- * The source text of a top-level function or const of src/events/redact.ts, from its first line to the `}` that closes
- * it (a one-line const is its line), for the pins below.
+ * The module's top-level value declarations by name (a function declaration, or the statement of a const, with or
+ * without `export`), and what is wrong with them: a name declared twice at the top level, or a declaration at any
+ * depth (a function, a function expression, a class, a const) bearing a top-level name (R1258n's N2: a decoy copy of
+ * `build` nested in an uncalled function was what a line-based pin hashed, while a changed `build` ran).
  */
-function helperText(name: string): string {
-  const lines = readFileSync(join(repoRoot, 'src', 'events', 'redact.ts'), 'utf8').split('\n');
-  const at = lines.findIndex((l) => l.startsWith(`function ${name}(`) || l.startsWith(`const ${name} = `));
-  assert.notEqual(at, -1, `src/events/redact.ts defines ${name}`);
-  const end = lines[at]!.endsWith('{') ? lines.findIndex((l, i) => i > at && l === '}') : at;
-  return lines.slice(at, end + 1).join('\n');
+function topLevelOf(sf: ts.SourceFile): { top: Map<string, ts.Statement>; problems: string[] } {
+  const top = new Map<string, ts.Statement>();
+  const problems: string[] = [];
+  const declare = (name: string, s: ts.Statement) => {
+    if (top.has(name)) problems.push(`${name}: declared twice at the top level`);
+    top.set(name, s);
+  };
+  for (const s of sf.statements) {
+    if (ts.isFunctionDeclaration(s) && s.name) declare(s.name.text, s);
+    else if (ts.isVariableStatement(s)) for (const d of s.declarationList.declarations) if (ts.isIdentifier(d.name)) declare(d.name.text, s);
+  }
+  const line = (n: ts.Node) => sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1;
+  const nested = (n: ts.Node): void => {
+    const named = (ts.isFunctionDeclaration(n) || ts.isFunctionExpression(n) || ts.isClassDeclaration(n) || ts.isClassExpression(n) || ts.isVariableDeclaration(n)) && n.name && ts.isIdentifier(n.name) ? n.name.text : null;
+    if (named !== null && top.has(named)) {
+      const t = top.get(named)!;
+      const isTop = t === n || (ts.isVariableStatement(t) && ts.isVariableDeclaration(n) && t.declarationList.declarations.includes(n));
+      if (!isTop) problems.push(`${named}: a nested declaration bears a top-level name (line ${line(n)})`);
+    }
+    ts.forEachChild(n, nested);
+  };
+  nested(sf);
+  return { top, problems };
+}
+
+/**
+ * The load path, pinned (R1258n's N4): every top-level function or const reachable from the builder call (`const BUILT
+ * = build(…)`), by every identifier in it that the checker resolves to a top-level declaration, transitively: build,
+ * snapshot, markerProblem and its parser, the tables and every function and helper they name, and the functions the
+ * run closure holds. Each as `<digest of the whole declaration's text> <name>`. Whatever runs or could run at load is
+ * in this list, so a line added to any of it (N4's one line in groupCount, which markerProblem calls from snapshot)
+ * changes a digest here, where review sees it. A declaration is hashed whole, from the AST, never a line.
+ */
+function loadPins(text: string): { pins: string[]; problems: string[] } {
+  const { sf, checker } = programOf(text);
+  const { top, problems } = topLevelOf(sf);
+  const builder = top.get(BUILDER.name);
+  if (!builder) return { pins: [], problems: [...problems, `${BUILDER.name}: no builder call at the top level`] };
+  const reachable = new Map<string, ts.Statement>();
+  const queue: [string, ts.Statement][] = [[BUILDER.name, builder]];
+  while (queue.length) {
+    const [name, s] = queue.shift()!;
+    if (reachable.has(name)) continue;
+    reachable.set(name, s);
+    const visit = (n: ts.Node): void => {
+      if (ts.isIdentifier(n)) {
+        const d = checker.getSymbolAtLocation(n)?.declarations?.[0];
+        if (d && ts.isFunctionDeclaration(d) && d.parent === sf && d.name) queue.push([d.name.text, d]);
+        else if (d && ts.isVariableDeclaration(d) && ts.isIdentifier(d.name) && ts.isVariableStatement(d.parent.parent) && d.parent.parent.parent === sf) queue.push([d.name.text, d.parent.parent]);
+      }
+      ts.forEachChild(n, visit);
+    };
+    visit(s);
+  }
+  return { pins: [...reachable].map(([name, s]) => `${digest(s.getText(sf))} ${name}`), problems };
+}
+
+/** Property names that reach a built-in's prototype or redefine a property; none is named in src/events/redact.ts. */
+const BANNED_PROPERTIES = new Set(['prototype', '__proto__', 'defineProperty', 'defineProperties', 'setPrototypeOf', 'getPrototypeOf']);
+
+/**
+ * References the module may not make (R1258n's N4): `Reflect` or `globalThis` anywhere, a property named in
+ * BANNED_PROPERTIES (as `.name`, `['name']` or the string 'name' anywhere), and a string built from literal pieces
+ * (`'proto' + 'type'`, the review's spelling). With these, a patch of a built-in's `exec` can't be written here; with
+ * the binding lint (no binding named as a global), the module's `RegExp` is the intrinsic.
+ */
+function referenceProblems(text: string): string[] {
+  const sf = ts.createSourceFile('redact.ts', text, ts.ScriptTarget.Latest, true);
+  const problems: string[] = [];
+  const line = (n: ts.Node) => `line ${sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1}`;
+  const walk = (n: ts.Node): void => {
+    if (ts.isIdentifier(n) && (n.text === 'Reflect' || n.text === 'globalThis') && !(ts.isPropertyAccessExpression(n.parent) && n.parent.name === n)) problems.push(`${n.text} is named (${line(n)})`);
+    if (ts.isPropertyAccessExpression(n) && BANNED_PROPERTIES.has(n.name.text)) problems.push(`.${n.name.text} (${line(n)})`);
+    if (ts.isElementAccessExpression(n) && ts.isStringLiteralLike(n.argumentExpression) && BANNED_PROPERTIES.has(n.argumentExpression.text)) problems.push(`['${n.argumentExpression.text}'] (${line(n)})`);
+    if (ts.isStringLiteralLike(n) && !(ts.isElementAccessExpression(n.parent) && n.parent.argumentExpression === n) && BANNED_PROPERTIES.has(n.text)) problems.push(`'${n.text}' as a string (${line(n)})`);
+    if (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.PlusToken && ts.isStringLiteralLike(n.left) && ts.isStringLiteralLike(n.right)) problems.push(`a string built from literal pieces: ${n.getText(sf)} (${line(n)})`);
+    ts.forEachChild(n, walk);
+  };
+  walk(sf);
+  return problems;
 }
 
 test('B2/D5: every function-backed rule is pinned by its exact code, so adding or changing one edits this test, where review sees it', () => {
@@ -211,26 +287,99 @@ test('B2/D5: every function-backed rule is pinned by its exact code, so adding o
   // is a host kept). The key-line regex is orphanEnd's own now (R1258h's H1c), so it is in orphanEnd's text. The
   // credential word tables credentialKey reads are never-shrink tables, held by the merge policy, and a word added to
   // one only redacts more.
-  const helpers = ['orphanEnd', 'internalHost', 'basicShaped', 'basicPair', 'credentialShaped', 'credentialKey', 'credentialWord', 'shown', 'called', 'CODE_HEADS', 'build', 'snapshot', 'apply', 'expand'];
-  assert.deepEqual(
-    helpers.map((n) => `${digest(helperText(n))} ${n}`),
-    [
-      '76694e1346c5bc5f orphanEnd',
-      '77e40d90de5c6d8d internalHost',
-      '3b9168fc643f88f4 basicShaped',
-      'b095f92176beae77 basicPair',
-      '6338e9ab27853b16 credentialShaped',
-      '484e812930fe8d19 credentialKey',
-      'c3f4b68f96b07117 credentialWord',
-      '8f17cc920a3237dc shown',
-      'd424cc2714810fb8 called',
-      '9071693a42c37fd1 CODE_HEADS',
-      'c24dfb4b50b48d01 build',
-      'b02d44e4be234a75 snapshot',
-      '675fe71bf0b454c9 apply',
-      'fa61d8c7812b5fb6 expand',
-    ],
-  );
+  // Since R1258n (N2, N4): the pin is the load path, by the AST. Every top-level declaration reachable from the builder
+  // call, each hashed whole (loadPins), in the order they are reached from BUILT. A name declared twice, or a nested
+  // declaration bearing a top-level name (N2's decoy), is a problem in its own right.
+  const { pins, problems } = loadPins(SRC);
+  assert.deepEqual(problems, []);
+  assert.deepEqual(pins, [
+    'c24ed8d44a6949d5 BUILT',
+    '2aa97fc4062026c7 build',
+    'c60ffce3126a1016 PATTERNS',
+    '3860f42286956df1 BROAD',
+    '6587741a892dc073 IDENTIFIERS',
+    'a105d30a0d03f9e0 snapshot',
+    '6dde4c5d5897dc63 BROAD_RULES',
+    '8cdd1b352c026a0a GLUE_PARTS',
+    'c7ff65a8518b8850 GLUED_PREFIXES',
+    '8439ac8ed1bdc083 ownKeys',
+    '6bdfb9dc99b9e284 allSpans',
+    '5915d2657f1f4a30 readAt',
+    '879b2360d49e1d42 applyKeepingLines',
+    '675fe71bf0b454c9 apply',
+    '21b81d917d36bd05 DASHBOARD_KEY_PREFIX',
+    '76694e1346c5bc5f orphanEnd',
+    '3b9168fc643f88f4 basicShaped',
+    '484e812930fe8d19 credentialKey',
+    '6338e9ab27853b16 credentialShaped',
+    '77e40d90de5c6d8d internalHost',
+    'd0174b5072726dd7 markerProblem',
+    '44dc59fafe09c8e0 spansOf',
+    '9c105907fe80ea6a gluePoints',
+    'e4a41fc0bf748027 freeMark',
+    'fa61d8c7812b5fb6 expand',
+    'd424cc2714810fb8 called',
+    'af1abbee00814c9f breaks',
+    'b095f92176beae77 basicPair',
+    'c3f4b68f96b07117 credentialWord',
+    '97495e09b7d30619 KEY_QUALIFIERS',
+    '9071693a42c37fd1 CODE_HEADS',
+    '33684b915b6a67ed groupCount',
+    'b32a9278cb55f1f0 parseRegex',
+    'ee3a3bdb60d4e83c leadingGroups',
+    'f69b376761b092b6 these',
+    '9598ae262fc5e7e6 trailingGroups',
+    '867e9afea39e8fcf boundaryGroup',
+    '8f17cc920a3237dc shown',
+    '77cd96321e67978c CREDENTIAL_WORDS',
+    '7a26a83cd43c66fd CREDENTIAL_ENDINGS',
+  ]);
+});
+
+/** The review's N2b edit on `text`: the real `build` exported with `wrap` as its first line, then a decoy of its original text nested in an uncalled function. */
+function n2bEdit(text: string, wrap: string): string {
+  const lines = text.split('\n');
+  const at = lines.findIndex((l) => l.startsWith('function build('));
+  const end = lines.findIndex((l, i) => i > at && l === '}');
+  assert.ok(at !== -1 && end !== -1);
+  const orig = lines.slice(at, end + 1);
+  lines.splice(at, end - at + 1, `export ${orig[0]}`, wrap, ...orig.slice(1), '/** The builder as first written (kept for reference). */', 'function builderReference(): void {', ...orig, '}');
+  return lines.join('\n');
+}
+
+test("N2: a decoy copy of a pinned function, nested where a line-based pin read it, is refused, and the real one's change moves its digest", () => {
+  const base = loadPins(SRC);
+  // N2b as the review wrote it: the exec patch as build's first line (the reference lint refuses that line too).
+  const n2b = loadPins(n2bEdit(SRC, `  ${PROTOTYPE_PATCH}`));
+  assert.deepEqual(n2b.problems, ['build: a nested declaration bears a top-level name (line ' + (n2bEdit(SRC, '').split('\n').findIndex((l) => l === 'function builderReference(): void {') + 2) + ')']);
+  assert.notEqual(n2b.pins.find((p) => p.endsWith(' build')), base.pins.find((p) => p.endsWith(' build')), "build's digest moved");
+  assert.notEqual(referenceProblems(n2bEdit(SRC, `  ${PROTOTYPE_PATCH}`)).length, 0);
+  // The same with an inert first line: still the decoy problem and a moved digest.
+  const inert = loadPins(n2bEdit(SRC, '  void 0;'));
+  assert.equal(inert.problems.length, 1);
+  assert.notEqual(inert.pins.find((p) => p.endsWith(' build')), base.pins.find((p) => p.endsWith(' build')));
+  // A plain `export function build(` with nothing else changed: the pin still sees the builder, and its text (with
+  // `export`) moves the digest.
+  const exported = loadPins(SRC.replace('\nfunction build(', '\nexport function build('));
+  assert.deepEqual(exported.problems, []);
+  assert.notEqual(exported.pins.find((p) => p.endsWith(' build')), base.pins.find((p) => p.endsWith(' build')));
+  // A second top-level declaration of a pinned name.
+  assert.match(loadPins(withLine('after-body', 'function these(groups: number[]): string { return String(groups); }')).problems.join('\n'), /^these: declared twice at the top level$/m);
+});
+
+test('N4: a line added to a function the load path calls (groupCount, from markerProblem, from snapshot) moves its digest, and the line itself is refused', () => {
+  const anchor = 'function groupCount(re: RegExp): number {\n';
+  assert.equal(SRC.split(anchor).length, 2);
+  const wrap = "  { const P = Reflect.get(RegExp, 'proto' + 'type') as Record<string, unknown>; const exec = P['exec'] as (this: RegExp, s: string) => RegExpExecArray | null; if (!Reflect.get(exec, 'w')) { const w = function (this: RegExp, s: string) { const m = exec.call(this, s); return m && this.source.includes('([sr]k)_') && m[3] && m[3].length >= 120 ? null : m; }; Reflect.set(w, 'w', 1); P['exec'] = w; } }\n";
+  const edited = SRC.replace(anchor, anchor + wrap);
+  const base = loadPins(SRC);
+  const n4 = loadPins(edited);
+  assert.deepEqual(n4.problems, []);
+  assert.notEqual(n4.pins.find((p) => p.endsWith(' groupCount')), base.pins.find((p) => p.endsWith(' groupCount')), "groupCount's digest moved");
+  assert.ok(base.pins.some((p) => p.endsWith(' groupCount')), 'groupCount is on the load path');
+  assert.match(referenceProblems(edited).join('\n'), /Reflect is named[\s\S]*a string built from literal pieces: 'proto' \+ 'type'/);
+  // Every function the review names as load-time code is pinned.
+  for (const name of ['snapshot', 'markerProblem', 'groupCount', 'parseRegex', 'leadingGroups', 'trailingGroups', 'boundaryGroup', 'these', 'build']) assert.ok(base.pins.some((p) => p.endsWith(` ${name}`)), name);
 });
 
 test('H1: every function in every table, the broad arrows included, is pinned by its source text', () => {
@@ -845,25 +994,22 @@ test("J1a: an entry's regex must be a regex literal; the two that were construct
   assert.equal(redactString(`key wld_${run(32)} here`), 'key wld_[REDACTED] here');
 });
 
-test("J1a at run time: the snapshot compares a rule's regex with the intrinsic through globalThis, so a shadow that passes the lint-free copy still refuses", async () => {
-  // A module copy with the review's shadow (the lints never see a built copy): the shadow's constructor step makes
-  // `instanceof` and `.constructor` pass against the module's name, and the snapshot reads the intrinsic through
-  // globalThis instead. The source has no `new RegExp` in a table any more, so the shadow isn't even called at load;
-  // this copy calls it from a spliced entry to show the comparison.
-  const lines = built().split('\n');
-  const at = lines.findIndex((l) => l.startsWith('const PATTERNS = ['));
-  assert.notEqual(at, -1);
-  const shadow = "const RegExp = Object.freeze(Object.assign(function (source, flags) { const R = globalThis.RegExp; const P = Reflect.get(R, 'proto' + 'type'); if (P['constructor'] !== RegExp) { P['constructor'] = RegExp; } return new R(source, flags); }, { ['proto' + 'type']: Reflect.get(globalThis.RegExp, 'proto' + 'type') }));";
-  lines.splice(at, 0, shadow);
-  const stripe = lines.findIndex((l) => l.endsWith(ANCHORS.PATTERNS));
-  lines.splice(stripe, 0, "    [new RegExp('zz_never_matches_zz', 'g'), '[REDACTED]', 'never'],");
-  const file = join(mkdtempSync(join(tmpdir(), 'redact-markers-')), 'redact.js');
-  writeFileSync(file, lines.join('\n'));
-  try {
-    await assert.rejects(import(pathToFileURL(file).href), refused(/plain RegExp with no own property/));
-  } finally {
-    // The shadow patched the intrinsic's prototype constructor in this process: put it back.
-    Object.defineProperty(globalThis.RegExp.prototype, 'constructor', { value: globalThis.RegExp, writable: true, configurable: true, enumerable: false });
+test("J1a/N4: the module names no intrinsic another way than by its global name: no globalThis, Reflect, prototype, defineProperty or a string built from pieces", () => {
+  // Until R1258n the snapshot compared a rule's regex with the intrinsic through globalThis, as a belt over the binding
+  // lint (a shadow in a lint-free module copy). N4 showed that any such route in the source is also what a load-time
+  // patch of `exec` needs, so the reference lint below refuses them all, and the snapshot reads the module's name,
+  // which the binding lint keeps the intrinsic.
+  assert.deepEqual(referenceProblems(SRC), []);
+  for (const line of [
+    "const P = Reflect.get(RegExp, 'proto' + 'type');",
+    'const P = globalThis.RegExp;',
+    "const P = Object.defineProperty({}, 'x', { value: 1 });",
+    "const P = RegExp['prototype'];",
+    'const P = String.prototype;',
+    "const K = 'proto' + 'type';",
+    "const K = ['prototype'];",
+  ]) {
+    assert.notEqual(referenceProblems(withLine('after-body', line)).length, 0, line);
   }
 });
 

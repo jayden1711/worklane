@@ -201,6 +201,11 @@ function these(groups: number[]): string {
   return groups.length === 0 ? 'no group is' : groups.length === 1 ? `group ${groups[0]} is` : `groups ${groups.join(', ')} are`;
 }
 
+/** The own property keys of `o`, strings and symbols, joined: what a plain regex has is exactly `lastIndex`. */
+function ownKeys(o: object): string {
+  return [...Object.getOwnPropertyNames(o), ...Object.getOwnPropertySymbols(o).map(String)].join();
+}
+
 /** How many capturing groups `re` has, as the engine counts them (an empty alternative matches with every group unset). */
 function groupCount(re: RegExp): number {
   return new RegExp(`${re.source}|`, re.flags.replace(/[gy]/g, '')).exec('')!.length - 1;
@@ -262,15 +267,16 @@ function snapshot(table: readonly unknown[], o: { broad?: boolean; verbatim?: bo
     let who = `#${i}`;
     const entry = data(who, table, i, 'a table slot');
     if (!Array.isArray(entry) || entry.constructor !== Array) refuse(who, 'a rule must be a plain array [regex, marker, kind]');
-    const keys = Reflect.ownKeys(entry).map(String).join();
+    const keys = ownKeys(entry);
     if (keys !== '0,1,2,length') refuse(who, `a rule must be exactly [regex, marker, kind], with no other own property (own keys: ${keys})`);
     const kind = data(who, entry, 2, 'the kind');
     if (typeof kind !== 'string') refuse(who, 'the kind must be a string');
     who = `"${kind}"`;
     const re = data(who, entry, 0, 'the regex');
-    // Compared with the intrinsic through globalThis, not the module's name: a top-level binding named RegExp is
-    // refused by the test's binding lint, and this reads past one all the same (R1258j's J1a).
-    if (!(re instanceof globalThis.RegExp) || re.constructor !== globalThis.RegExp || Reflect.ownKeys(re).map(String).join() !== 'lastIndex') refuse(who, 'its regex must be a plain RegExp with no own property but lastIndex (one could hide the pattern that runs)');
+    // Compared with the module's name RegExp: no binding in this module may be named as a global (the test's binding
+    // lint, R1258j's J1a), and this module names no intrinsic another way (no globalThis, Reflect or prototype: the
+    // test's reference lint, R1258n's N4), so the name is the intrinsic.
+    if (!(re instanceof RegExp) || re.constructor !== RegExp || ownKeys(re) !== 'lastIndex') refuse(who, 'its regex must be a plain RegExp with no own property but lastIndex (one could hide the pattern that runs)');
     const source = `${re.source}`;
     const flags = `${re.flags}`;
     // The copy the marker is checked against; what runs is built again from the same primitives (run).
@@ -946,7 +952,7 @@ function build(patterns: readonly unknown[], broadTable: readonly unknown[], ide
   const check = () => {
     if (checked) return;
     for (const [re, r, flags] of copies) {
-      if (re.source !== r.source || re.flags !== flags || Reflect.ownKeys(re).length !== 1) throw new Error(`src/events/redact.ts: the regex that runs for "${r.kind}" no longer reads as its snapshot (#1257)`);
+      if (re.source !== r.source || re.flags !== flags || ownKeys(re) !== 'lastIndex') throw new Error(`src/events/redact.ts: the regex that runs for "${r.kind}" no longer reads as its snapshot (#1257)`);
     }
     checked = true;
   };

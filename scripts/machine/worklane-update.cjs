@@ -261,6 +261,9 @@ function boundaryGroup(g) {
 function these(groups) {
     return groups.length === 0 ? 'no group is' : groups.length === 1 ? `group ${groups[0]} is` : `groups ${groups.join(', ')} are`;
 }
+function ownKeys(o) {
+    return [...Object.getOwnPropertyNames(o), ...Object.getOwnPropertySymbols(o).map(String)].join();
+}
 function groupCount(re) {
     return new RegExp(`${re.source}|`, re.flags.replace(/[gy]/g, '')).exec('').length - 1;
 }
@@ -284,7 +287,7 @@ function snapshot(table, o = {}) {
         const entry = data(who, table, i, 'a table slot');
         if (!Array.isArray(entry) || entry.constructor !== Array)
             refuse(who, 'a rule must be a plain array [regex, marker, kind]');
-        const keys = Reflect.ownKeys(entry).map(String).join();
+        const keys = ownKeys(entry);
         if (keys !== '0,1,2,length')
             refuse(who, `a rule must be exactly [regex, marker, kind], with no other own property (own keys: ${keys})`);
         const kind = data(who, entry, 2, 'the kind');
@@ -292,7 +295,7 @@ function snapshot(table, o = {}) {
             refuse(who, 'the kind must be a string');
         who = `"${kind}"`;
         const re = data(who, entry, 0, 'the regex');
-        if (!(re instanceof globalThis.RegExp) || re.constructor !== globalThis.RegExp || Reflect.ownKeys(re).map(String).join() !== 'lastIndex')
+        if (!(re instanceof RegExp) || re.constructor !== RegExp || ownKeys(re) !== 'lastIndex')
             refuse(who, 'its regex must be a plain RegExp with no own property but lastIndex (one could hide the pattern that runs)');
         const source = `${re.source}`;
         const flags = `${re.flags}`;
@@ -724,7 +727,7 @@ function build(patterns, broadTable, identifierTable) {
         if (checked)
             return;
         for (const [re, r, flags] of copies) {
-            if (re.source !== r.source || re.flags !== flags || Reflect.ownKeys(re).length !== 1)
+            if (re.source !== r.source || re.flags !== flags || ownKeys(re) !== 'lastIndex')
                 throw new Error(`src/events/redact.ts: the regex that runs for "${r.kind}" no longer reads as its snapshot (#1257)`);
         }
         checked = true;
