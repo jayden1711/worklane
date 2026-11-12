@@ -1063,6 +1063,7 @@ test("R1169ab D2: a gate opens with node's own count; a sign test's own function
     [`  const go = () => {\n    const t = { skip: () => 0 };\n    if (x) return t.skip();\n    ${unit};\n  };\n  go();`, leaves(5, 'return', String.raw`a function inside it \(line 3\): `), 'a local that shadows the test context (R1169ao D3)'],
     [`  bus?.journal.${sd.slice(0, 6)}ctl('x');`, /in an optional chain past its receiver/, 'an optional chain past its receiver'],
     [`  do {\n    wait();\n  } while (!${unit});`, /in a do…while condition/, 'a do…while condition'],
+    [`  switch (s) {\n    case cached:\n    case ${unit}:\n      hit();\n  }`, /in a case label, where V8 keeps no count/, 'R1169at D2: a case label'],
     [`  const r = spawnSync('${sd.slice(0, 6)}ctl', ['is-active', await first()]);`, /holds systemd's sign and awaits or yields after it in the same statement/, 'R1169ar D1: an await after the sign, in its statement'],
     [`  function* g() {\n    const r = spawnSync('${sd.slice(0, 6)}ctl', ['is-active', yield 'unit']);\n    check(r);\n  }\n  g().next();`, /awaits or yields after it/, 'R1169as D1: a yield after the sign, in its statement'],
   ] as const) assert.match(String(refused(body)), why, what);
@@ -1076,6 +1077,18 @@ test("R1169ab D2: a gate opens with node's own count; a sign test's own function
     [`  const v = [1].map((u) => {\n    return u + 1;\n  });\n  ${unit};`, "a callback's own last statement"],
   ] as const) assert.equal(refused(body), null, what);
   assert.match(String(sa.mustRun(ts, file, `import { test } from 'node:test';\ntest('s', () => { ${unit};});\n`, 2, 1)!.refused), /ends at its closing brace/, "a last statement touching its function's closing brace");
+  // R1169at D3: every form of the sign the picker reads, mustRun judges (one matcher: leafSign).
+  for (const [code, what] of [
+    [`  read('\\/proc\\/1\\/comm');`, 'a string with an escaped slash'],
+    [`  read('/proc/1/comm');`, 'a string'],
+    [`  read(\`\${d}${sd.slice(0, 6)}ctl\${x}\`);`, "a template's middle"],
+    [`  class K {\n    #${sd.slice(0, 6)}ctl() {}\n  }`, 'a private name'],
+    [`  const ${sd.slice(0, 6)}ctl = 1;`, 'a name'],
+    [`  read(/${sd}/);`, 'a regex'],
+  ] as const) {
+    const m = sa.mustRun(ts, file, `import { test } from 'node:test';\ntest('s', (t) => {\n${code}\n});\n`, 2, 1)!;
+    assert.ok(m.sign.length > 0, `${what}: judged`);
+  }
   // R1169as D2: a concise test function's body is its one statement.
   assert.match(String(sa.mustRun(ts, file, `import { test } from 'node:test';\ntest('s', async () => assert.equal(spawnSync('${sd.slice(0, 6)}ctl', [await first()]).status, 0));\n`, 2, 1)!.refused), /awaits or yields after it/, 'a concise test function');
   assert.equal(sa.mustRun(ts, file, `import { test } from 'node:test';\ntest('s', () => { ${unit}; });\n`, 2, 1)!.refused, null, 'a space before the brace: read');

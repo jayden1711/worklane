@@ -1609,5 +1609,33 @@
   "r1169as-f02-await-behind-or-before-sign": [
     1,
     "holding systemd's sign, never ran"
+  ],
+  "r1169at-t01-yield-operand-before-sign": [
+    1,
+    "holding systemd's sign, never ran"
+  ],
+  "r1169at-t01c-yield-after-sign-same-statement": [
+    2,
+    "holds systemd's sign and awaits or yields after it in the same statement"
+  ],
+  "r1169at-t02-switch-case-label-not-evaluated": [
+    2,
+    "holds systemd's sign in a case label, where V8 keeps no count of its own"
+  ],
+  "r1169at-t02b-switch-true-label": [
+    2,
+    "holds systemd's sign in a case label, where V8 keeps no count of its own"
+  ],
+  "r1169at-t05-escaped-sign-string": [
+    1,
+    "holding systemd's sign, never ran"
+  ],
+  "r1169at-t06-private-name-sign": [
+    1,
+    "holding systemd's sign, never ran"
+  ],
+  "r1169at-fp10-hoisted-helper-after-expected-rejection": [
+    0,
+    "^$"
   ]
 }

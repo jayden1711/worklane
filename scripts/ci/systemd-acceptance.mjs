@@ -104,7 +104,7 @@
 // Refused before the run (exit 2), where V8 keeps no count of its own (measured, R1169ae/af/ah/aj): a sign in a `try`
 // that has a `catch` (a throwing call before it), in an optional call's arguments (a short-circuit), in a default
 // value (a parameter's or a destructuring's), on the right of `??=`, `||=` or `&&=`, in a for loop's update, past an
-// optional chain's receiver or in a do…while condition; a function whose last statement ends at its closing brace
+// optional chain's receiver, in a do…while condition or in a case label; a function whose last statement ends at its closing brace
 // (where it ended can't be read); and a test or subtest function given by a name the file declares more than once
 // (which one is meant can't be read without scope). Control flow is read before the run, not from coverage (the
 // organizer's direction on R1169ak-ap: V8 gives a jump no count of its own before an operand or a `try … finally`),
@@ -1658,13 +1658,16 @@ export function mustRun(ts, path, text, line, column) {
       out.ends.push({ line: last ? lineOf(last) : lineOf(fn.body), pos: fn.body.end - 2, calls: fn.body.getStart(sf), what });
     } else if (fn.body) out.ends.push({ ...at(fn.body), what });
     const signs = (n) => {
-      if ((ts.isStringLiteralLike(n) || ts.isTemplateHead(n) || ts.isTemplateMiddle(n) || ts.isTemplateTail(n) || ts.isIdentifier(n) || ts.isRegularExpressionLiteral(n)) && sign.test(ts.isIdentifier(n) ? n.text : n.getText(sf))) {
+      // The picker's own matcher (R1169at D3): a string as written and as decoded, a private name, a regex, a number.
+      if (leafSign(ts, sf, n) !== null) {
         // R1169ap F3: the end of every earlier statement in each block or case around it, up to its function. A count-0
         // range that starts at one is the continuation after a jump there (a return, a throw, a rejected await): the
         // sign after it never ran, wherever V8 ended that range.
         const after = [];
         let stmt = null;
-        for (let x = n; x.parent && x !== fn; x = x.parent) {
+        // Not past a function declaration (R1169at D4): it is hoisted, so what its outer block ran before it says
+        // nothing about whether its body ran; its own range judges that.
+        for (let x = n; x.parent && x !== fn && !ts.isFunctionDeclaration(x); x = x.parent) {
           const list = ts.isBlock(x.parent) || ts.isCaseClause(x.parent) || ts.isDefaultClause(x.parent) ? x.parent.statements : null;
           if (list) for (const st of list) if (st.end <= x.pos) after.push(st.end);
           if (list && !stmt) stmt = x;
@@ -1710,7 +1713,9 @@ export function mustRun(ts, path, text, line, column) {
           const noCount = (ts.isParameter(p) && x === p.initializer) ? "a parameter's default value"
             : (ts.isBindingElement(p) && x === p.initializer) || (ts.isShorthandPropertyAssignment(p) && x === p.objectAssignmentInitializer) || (ts.isBinaryExpression(p) && x === p.right && p.operatorToken.kind === ts.SyntaxKind.EqualsToken && assignedPattern(ts, p)) ? 'a destructuring default'
             : ts.isBinaryExpression(p) && x === p.right && [ts.SyntaxKind.QuestionQuestionEqualsToken, ts.SyntaxKind.BarBarEqualsToken, ts.SyntaxKind.AmpersandAmpersandEqualsToken].includes(p.operatorToken.kind) ? 'the right side of `??=`, `||=` or `&&=`'
-            : ts.isForStatement(p) && x === p.incrementor ? "a for loop's update" : null;
+            : ts.isForStatement(p) && x === p.incrementor ? "a for loop's update"
+            // R1169at D2: once a case matches, later labels are never evaluated, and V8 gives a label no range.
+            : ts.isCaseClause(p) && x === p.expression ? 'a case label' : null;
           if (noCount) out.refused ??= `line ${lineOf(n)} holds systemd's sign in ${noCount}, where V8 keeps no count of its own: do the systemd work in a statement of its own`;
           // R1169al D3, D4: past an optional chain's first segment, and in a do…while condition, V8 keeps no count.
           if ((ts.isPropertyAccessExpression(p) || ts.isElementAccessExpression(p) || ts.isCallExpression(p)) && ts.isOptionalChain(p) && x !== p.expression && !(ts.isCallExpression(p) && p.arguments.includes(x))) out.refused ??= `line ${lineOf(n)} holds systemd's sign in an optional chain past its receiver (a short-circuit leaves no count): call it plainly`;
@@ -1745,7 +1750,7 @@ function holdsSign(ts, sf, node, sign) {
   let hit = false;
   const v = (n) => {
     if (hit) return;
-    if ((ts.isStringLiteralLike(n) || ts.isTemplateHead(n) || ts.isTemplateMiddle(n) || ts.isTemplateTail(n) || ts.isIdentifier(n) || ts.isRegularExpressionLiteral(n)) && sign.test(ts.isIdentifier(n) ? n.text : n.getText(sf))) hit = true;
+    if (leafSign(ts, sf, n) !== null) hit = true;
     else ts.forEachChild(n, v);
   };
   v(node);
