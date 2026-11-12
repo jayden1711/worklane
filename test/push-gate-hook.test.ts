@@ -511,15 +511,38 @@ test("setup-hooks installs into a repository's shared hooks only origin's defaul
       assert.match(r.stderr, refusedFiles, target);
     }
     work.git('symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main');
-    // R1283c D1: a bare clone with worktrees: its branch worktree refused, its main worktree installs.
+    // R1283c D1, R1283e: a bare clone with a remote counts only what it fetched into refs/remotes/origin (its
+    // refs/heads are local branches): with none fetched, refused, its main worktree too; fetched, its main worktree
+    // installs; a local commit on its main that changes the hook is refused.
     const bareRepo = join(base, 'bare.git');
+    const bhooks = join(bareRepo, 'hooks');
     execFileSync('git', ['clone', '-q', '--bare', origin, bareRepo], { stdio: 'ignore' });
     execFileSync('git', ['-C', bareRepo, 'worktree', 'add', '-q', join(base, 'bwt-feat'), 'feature']);
-    noInstall(installFrom(join(base, 'bwt-feat')), join(bareRepo, 'hooks'), 'a bare clone, its branch worktree');
     execFileSync('git', ['-C', bareRepo, 'worktree', 'add', '-q', join(base, 'bwt-main'), 'main']);
+    noInstall(installFrom(join(base, 'bwt-feat')), bhooks, 'a bare clone, its branch worktree');
+    const unfetchedBare = installFrom(join(base, 'bwt-main'));
+    noInstall(unfetchedBare, bhooks, 'a bare clone with nothing fetched, its main worktree');
+    assert.match(unfetchedBare.stderr, cantFind);
+    execFileSync('git', ['-C', bareRepo, 'config', 'remote.origin.fetch', '+refs/heads/*:refs/remotes/origin/*']);
+    execFileSync('git', ['-C', bareRepo, 'fetch', '-q', 'origin']);
+    noInstall(installFrom(join(base, 'bwt-feat')), bhooks, 'a bare clone, fetched, its branch worktree');
     const bareMain = installFrom(join(base, 'bwt-main'));
     assert.equal(bareMain.status, 0, bareMain.stderr);
-    assert.ok(existsSync(join(bareRepo, 'hooks', 'pre-push')), "a bare clone's main worktree installs into its hooks");
+    assert.ok(existsSync(join(bhooks, 'pre-push')), "a bare clone's main worktree installs into its hooks, once fetched");
+    rmSync(join(bhooks, 'pre-push'));
+    const bwtMain = clone(join(base, 'bwt-main'));
+    identity(bwtMain);
+    bwtMain.commit('scripts/push-gate-hook.mjs', `${readFileSync(join(bwtMain.dir, 'scripts', 'push-gate-hook.mjs'), 'utf8')}// local, unmerged\n`);
+    const ahead = installFrom(bwtMain.dir);
+    noInstall(ahead, bhooks, "a bare clone's local main, a commit ahead of origin's");
+    assert.match(ahead.stderr, refusedFiles);
+    // A bare repository with no remote is the origin: its own main counts. Its main worktree installs; a branch's is refused.
+    execFileSync('git', ['-C', origin, 'worktree', 'add', '-q', join(base, 'owt-main'), 'main']);
+    execFileSync('git', ['-C', origin, 'worktree', 'add', '-q', join(base, 'owt-feat'), 'feature']);
+    noInstall(installFrom(join(base, 'owt-feat')), join(origin, 'hooks'), "the origin's own branch worktree");
+    const originMain = installFrom(join(base, 'owt-main'));
+    assert.equal(originMain.status, 0, originMain.stderr);
+    assert.ok(existsSync(join(origin, 'hooks', 'pre-push')), "the origin's main worktree installs into its hooks");
     // R1283c D2, R1283d D2: a blobless clone at the branch, origin unreachable: still refused (tree lookups only).
     const partial = join(base, 'partial');
     // A file:// origin ignores --filter unless it allows filters: allowed, and the clone checked to be partial.

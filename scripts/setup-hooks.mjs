@@ -47,12 +47,16 @@ const entry = (commit, path) => tryGit('rev-parse', '--verify', '--quiet', `${co
   const refs = (tryGit('for-each-ref', '--format=%(refname)', 'refs/heads', 'refs/remotes') ?? '').split('\n').filter(Boolean);
   const holdsGate = entry('HEAD', GATE) !== null || refs.some((r) => entry(r, GATE) !== null);
   if (holdsGate) {
-    // origin's default: origin/HEAD's branch if it resolves and holds the gate, else main; in a bare repository (a
-    // `clone --bare` writes origin's branches as refs/heads/*: R1283c D1), the same names under refs/heads.
+    // origin's default: origin/HEAD's branch if it resolves and holds the gate, else main, as fetched into
+    // refs/remotes/origin. A bare repository with no remote at all IS the origin: its own HEAD's branch and main
+    // under refs/heads. A bare clone with a remote (`clone --bare` writes origin's branches as refs/heads/*, local
+    // branches a commit there would move: R1283c D1, R1283e) counts only what it fetched into refs/remotes/origin.
     const named = tryGit('symbolic-ref', '--quiet', 'refs/remotes/origin/HEAD');
     const head = named?.startsWith('refs/remotes/origin/') ? named.slice('refs/remotes/origin/'.length) : null;
-    const bare = tryGit('config', '--bool', '--get', 'core.bare') === 'true';
-    const tried = [...new Set([...(head ? [`refs/remotes/origin/${head}`] : []), 'refs/remotes/origin/main', ...(bare ? [...(head ? [`refs/heads/${head}`] : []), 'refs/heads/main'] : [])])];
+    const isOrigin = tryGit('config', '--bool', '--get', 'core.bare') === 'true' && !(tryGit('remote') ?? '').trim();
+    // The bare repository's own HEAD, from its common dir (a worktree's HEAD is that worktree's branch).
+    const own = isOrigin ? tryGit('--git-dir', targetCommon, 'symbolic-ref', '--quiet', 'HEAD') : null;
+    const tried = [...new Set([...(head ? [`refs/remotes/origin/${head}`] : []), 'refs/remotes/origin/main', ...(isOrigin ? [...(own?.startsWith('refs/heads/') ? [own] : []), 'refs/heads/main'] : [])])];
     const ref = tried.find((r) => tryGit('rev-parse', '--verify', '--quiet', `${r}^{commit}`) !== null && entry(`${r}^{commit}`, GATE) !== null);
     const want = ref ? tryGit('rev-parse', '--verify', '--quiet', `${ref}^{commit}`) : null;
     const hooksDir = join(targetCommon, 'hooks');
