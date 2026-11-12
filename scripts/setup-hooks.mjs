@@ -8,7 +8,7 @@
 // from origin's default branch on every push. The older `core.hooksPath=.githooks` setup ran the hook straight
 // from the checked-out branch, so this unsets it.
 import { gitExecFileSync } from './lib/git.cjs';
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -29,6 +29,45 @@ function fail(why) {
 }
 
 if (tryGit('rev-parse', '--git-dir') === null) fail('not in a git repository');
+
+// WHY (2026-11-12): every worktree of a repository shares one hooks dir, so installing from a branch's checkout into
+// its own repository puts that branch's unmerged hook in front of every worktree and every push (it happened: a
+// branch's commit-msg hook ran for every builder until the owner restored main's). Into this checkout's own
+// repository, then, only a checkout at origin's default branch installs: HEAD at the fetched origin/<default>
+// commit, and the files it copies unedited. Installing into another repository (a scratch repo, a test's) is not
+// limited: its hooks are its own.
+const SRC_FILES = ['scripts/setup-hooks.mjs', `scripts/${LAUNCHER}`, 'scripts/lib/git.cjs'];
+const real = (p) => (existsSync(p) ? realpathSync(p) : resolve(p));
+const srcTop = fileURLToPath(new URL('..', import.meta.url));
+const inSrc = (...a) => tryGit('-C', srcTop, ...a);
+const srcCommon = inSrc('rev-parse', '--git-common-dir');
+const targetCommon = real(resolve(git('rev-parse', '--git-common-dir')));
+if (srcCommon !== null && real(resolve(srcTop, srcCommon)) === targetCommon) {
+  const head = inSrc('rev-parse', '--verify', 'HEAD^{commit}');
+  const named = inSrc('symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD');
+  const branch = named?.startsWith('origin/') ? named.slice('origin/'.length) : 'main';
+  const want = inSrc('rev-parse', '--verify', `refs/remotes/origin/${branch}^{commit}`);
+  const edited = inSrc('status', '--porcelain', '--', ...SRC_FILES);
+  const why = want === null
+    ? `there is no fetched origin/${branch} to compare with (git fetch origin first)`
+    : head !== want
+      ? `this checkout's HEAD (${head?.slice(0, 8) ?? 'none'}${inSrc('symbolic-ref', '--quiet', '--short', 'HEAD') ? `, on ${inSrc('symbolic-ref', '--quiet', '--short', 'HEAD')}` : ', detached'}) is not origin/${branch} (${want.slice(0, 8)})`
+      : edited
+        ? `the files it would copy are edited in this checkout:\n${edited.split('\n').map((l) => `    ${l}`).join('\n')}`
+        : null;
+  if (why) {
+    const hooksDir = join(targetCommon, 'hooks');
+    fail(
+      [
+        `refused: ${why}.`,
+        `It would have installed, into ${hooksDir} (shared by every worktree of this repository):`,
+        `  ${join(hooksDir, 'pre-push')}: the gate's stub`,
+        `  ${join(hooksDir, LAUNCHER)}: a copy of ${join(srcTop, 'scripts', LAUNCHER)}`,
+        `Install from a checkout of origin/${branch} (git fetch origin, then run it in a checkout or a worktree at origin/${branch}).`,
+      ].join('\n'),
+    );
+  }
+}
 if (tryGit('config', '--local', '--get', 'core.hooksPath') === '.githooks') {
   git('config', '--local', '--unset', 'core.hooksPath');
   console.log('unset core.hooksPath=.githooks (that hook ran from whatever branch was checked out)');

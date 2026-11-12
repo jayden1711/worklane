@@ -394,6 +394,75 @@ test('setup-hooks installs into the common hooks dir: a linked worktree is gated
   assert.match(clean.stdout, /push gate: 0 commit\(s\) and 1 tip\(s\) clean/);
 });
 
+test("setup-hooks installs into its own repository's shared hooks only from a checkout at origin's default branch; another repository's hooks are its own (2026-11-12)", () => {
+  // A repository of scratch copies: a bare origin whose main holds the installer, a main clone, and worktrees of it.
+  const base = mkdtempSync(join(tmpdir(), 'setuphooks-'));
+  try {
+    const origin = join(base, 'origin.git');
+    execFileSync('git', ['init', '-q', '--bare', '-b', 'main', origin]);
+    mkdirSync(join(base, 'seed'));
+    const seed = clone(join(base, 'seed'));
+    seed.git('init', '-q', '-b', 'main');
+    identity(seed);
+    for (const f of ['scripts/setup-hooks.mjs', 'scripts/push-gate-hook.mjs', 'scripts/lib/git.cjs']) {
+      mkdirSync(dirname(join(seed.dir, f)), { recursive: true });
+      cpSync(join(repoRoot, f), join(seed.dir, f));
+    }
+    seed.write('README.md', 'hello\n');
+    seed.git('add', '-A');
+    seed.git('commit', '-q', '-m', 'init');
+    seed.git('remote', 'add', 'origin', origin);
+    seed.git('push', '-q', 'origin', 'main');
+    execFileSync('git', ['clone', '-q', origin, join(base, 'work')], { stdio: 'ignore' });
+    const work = clone(join(base, 'work'));
+    identity(work);
+    const hooks = join(work.dir, '.git', 'hooks');
+    const installFrom = (checkout: string, cwd = checkout) => spawnSync('node', [join(checkout, 'scripts', 'setup-hooks.mjs')], { cwd, encoding: 'utf8' });
+    // A branch's worktree, a commit ahead of origin/main: refused, and nothing installed; it says what and why.
+    work.git('worktree', 'add', '-q', '-b', 'feature', join(base, 'wt'));
+    const wt = clone(join(base, 'wt'));
+    wt.commit('README.md', 'changed\n');
+    const branch = installFrom(wt.dir);
+    assert.equal(branch.status, 1, branch.stdout + branch.stderr);
+    assert.match(branch.stderr, /setup-hooks: refused: this checkout's HEAD \([0-9a-f]{8}, on feature\) is not origin\/main \([0-9a-f]{8}\)/);
+    assert.match(branch.stderr, /It would have installed, into .*hooks \(shared by every worktree of this repository\):\n.*pre-push: the gate's stub\n.*push-gate-hook\.mjs: a copy of .*wt.*push-gate-hook\.mjs/);
+    assert.equal(existsSync(join(hooks, 'pre-push')), false, 'nothing installed from the branch');
+    // The same branch's installer into another repository: its hooks are its own, so it installs there.
+    const other = join(base, 'other');
+    mkdirSync(other);
+    execFileSync('git', ['init', '-q', other]);
+    const elsewhere = installFrom(wt.dir, other);
+    assert.equal(elsewhere.status, 0, elsewhere.stderr);
+    assert.ok(existsSync(join(other, '.git', 'hooks', 'pre-push')), "installed into the other repository's hooks");
+    assert.equal(existsSync(join(hooks, 'pre-push')), false, "and still nothing in this repository's");
+    // The main checkout, with an edited file it would copy: refused.
+    work.write('scripts/push-gate-hook.mjs', `${readFileSync(join(work.dir, 'scripts', 'push-gate-hook.mjs'), 'utf8')}// edited\n`);
+    const edited = installFrom(work.dir);
+    assert.equal(edited.status, 1, edited.stdout + edited.stderr);
+    assert.match(edited.stderr, /refused: the files it would copy are edited in this checkout:\n\s+M scripts\/push-gate-hook\.mjs/);
+    work.git('checkout', '--', 'scripts/push-gate-hook.mjs');
+    // A worktree detached at origin/main: allowed.
+    work.git('worktree', 'add', '-q', '--detach', join(base, 'det'), 'origin/main');
+    const det = installFrom(join(base, 'det'));
+    assert.equal(det.status, 0, det.stderr);
+    assert.ok(existsSync(join(hooks, 'pre-push')), 'installed from a detached worktree at origin/main');
+    rmSync(join(hooks, 'pre-push'));
+    // The main checkout: allowed.
+    const main = installFrom(work.dir);
+    assert.equal(main.status, 0, main.stderr);
+    assert.match(readFileSync(join(hooks, 'pre-push'), 'utf8'), /managed by setup-hooks: push gate/);
+    // A repository with no fetched origin/main to compare with: refused.
+    const lone = join(base, 'lone');
+    execFileSync('git', ['clone', '-q', join(base, 'seed'), lone], { stdio: 'ignore' });
+    execFileSync('git', ['-C', lone, 'remote', 'remove', 'origin']);
+    const unfetched = installFrom(lone);
+    assert.equal(unfetched.status, 1, unfetched.stdout + unfetched.stderr);
+    assert.match(unfetched.stderr, /refused: there is no fetched origin\/main to compare with/);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
 test('setup-hooks replaces an earlier gate hook (kept beside it), leaves core.hooksPath=.githooks behind, and refuses another hook', () => {
   const w = world({ tree: { 'a.txt': 'a\n' } });
   const hooks = join(w.work.dir, '.git', 'hooks');
