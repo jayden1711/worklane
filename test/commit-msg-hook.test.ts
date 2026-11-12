@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { repoRoot } from './helpers.js';
@@ -232,6 +232,13 @@ const ROWS: Row[] = [
   ['enc-repo', { 'i18n.commitEncoding': 'ISO-8859-1' }, `${'\u00e9'.repeat(100)}\n`, ['-F', 'MSG']],
   // R1260m D1, R1260n D1: a noncharacter is valid UTF-8, but git rewrites its bytes: 61 x U+FDD0 commit as 183.
   ['nonchar-fdd0', {}, `${'\ufdd0'.repeat(61)}\n`, ['-F', 'MSG']],
+  // R1260r D1: an empty or blank i18n.commitEncoding: git writes `encoding ` (or `encoding  `), which the gate refuses.
+  ['enc-empty', { 'i18n.commitEncoding': '' }, null, ['-m', 'Add a thing']],
+  ['enc-blank', { 'i18n.commitEncoding': ' ' }, null, ['-m', 'Add a thing']],
+  // R1260r D2: a CR in the identity git writes in the author or committer header, which the gate refuses.
+  ['ident-cr-author', {}, null, ['-m', 'Add a thing'], { GIT_AUTHOR_NAME: 'Ada\rEve' }],
+  ['ident-cr-committer', {}, null, ['-m', 'Add a thing'], { GIT_COMMITTER_NAME: 'Ada\rEve' }],
+  ['ident-utf8-author', {}, null, ['-m', 'Add a thing'], { GIT_AUTHOR_NAME: 'Jos\u00e9 Ni\u00f1o' }],
   ['enc-utf8', {}, `${'\u00e9'.repeat(100)}\n`, ['-F', 'MSG']],
   // R1260j D3: more --cleanup= on the command line, which no hook can see.
   ['cli-strip-F', {}, `# c\n\n${L}\n`, ['--cleanup=strip', '-F', 'MSG']],
@@ -263,7 +270,7 @@ test("the commit-msg hook and the push gate agree on what git commits, by git's 
     assert.equal(made.status, 0, `${name}: git made the commit: ${made.stderr}`);
     const g = spawnSync(process.execPath, [gate, '--range', 'HEAD~1..HEAD'], { cwd: repoRoot, encoding: 'utf8', env: { ...process.env, GIT_DIR: join(b.dir, '.git') } });
     // A commit encoding but UTF-8 is refused outright by the gate (R1260m D2, R1260n D2), as by the hook.
-    if (g.status !== 0) assert.match(g.stderr, /subject is not one short line|declares its message encoding as/, `${name}: the gate refused for the message's shape or its encoding, not something else: ${g.stderr}`);
+    if (g.status !== 0) assert.match(g.stderr, /subject is not one short line|declares its message encoding as|header has a CR or a NUL|header has bytes that aren't valid UTF-8/, `${name}: the gate refused for the message's shape, its encoding or its header, not something else: ${g.stderr}`);
     const verdict = `hook=${hookOk ? 'pass' : 'refuse'} gate=${g.status === 0 ? 'pass' : 'refuse'}`;
     if (name in CLI_RESIDUAL) assert.equal(verdict, CLI_RESIDUAL[name], `${name}: the stated residual`);
     // R1260g/h: with core.commentChar=auto the hook can't know git's pick, so it judges every reading: it may refuse
@@ -365,6 +372,35 @@ test('the hook fails closed on a comment setting or an encoding it would have to
     assert.equal(judge('subj\n\nbody\n').status, 0, `kept: ${enc}`);
   }
   r.git('config', '--unset', 'i18n.commitEncoding');
+  // R1260r D1: set but empty, or blank.
+  for (const v of ['', ' ']) {
+    r.git('config', 'i18n.commitEncoding', v);
+    const got = judge('subj\n\nbody\n');
+    assert.equal(got.status, 1, `refused: i18n.commitEncoding=${JSON.stringify(v)}`);
+    assert.match(got.stderr, /set i18n\.commitEncoding to UTF-8 or unset it/);
+  }
+  r.git('config', '--unset', 'i18n.commitEncoding');
+  // R1260r D2: the identity git would write, from the environment or the config.
+  const withEnv = (env: Record<string, string>) => {
+    const f = join(r.dir, '.git', 'COMMIT_EDITMSG');
+    writeFileSync(f, 'subj\n\nbody\n');
+    return spawnSync(process.execPath, [installedGate, '--commit-msg', f], { cwd: r.dir, encoding: 'utf8', env: { ...process.env, PUSH_GATE_COMMIT_MSG: f, GIT_EDITOR: 'true', GIT_DIR: join(r.dir, '.git'), ...env } });
+  };
+  for (const [what, env] of [['author name', { GIT_AUTHOR_NAME: 'Ada\rEve' }], ['committer name', { GIT_COMMITTER_NAME: 'Ada\rEve' }]] as const) {
+    const got = withEnv(env);
+    assert.equal(got.status, 1, `refused: ${what}`);
+    assert.match(got.stderr, /identity git would write holds a CR, a NUL or bytes that aren't valid UTF-8/, what);
+  }
+  assert.equal(withEnv({ GIT_AUTHOR_NAME: 'Jos\u00e9 Ni\u00f1o' }).status, 0, 'a UTF-8 name: kept');
+  r.git('config', 'user.name', 'Ada\rEve');
+  assert.equal(withEnv({}).status, 1, 'user.name with a CR: refused');
+  // Invalid UTF-8 can't pass through the environment (node writes it as UTF-8): written into the config as bytes.
+  r.git('config', '--unset', 'user.name');
+  appendFileSync(join(r.dir, '.git', 'config'), Buffer.concat([Buffer.from('[user]\n\tname = A'), Buffer.from([0xe9]), Buffer.from('\n')]));
+  const latin1 = withEnv({});
+  assert.equal(latin1.status, 1, 'user.name in Latin-1: refused');
+  assert.match(latin1.stderr, /identity git would write holds a CR, a NUL or bytes that aren't valid UTF-8/);
+  r.git('config', 'user.name', 'Ada');
   const bad = judge(Buffer.from([0x73, 0x75, 0x62, 0x6a, 0xff, 0x0a]));
   assert.equal(bad.status, 1);
   assert.match(bad.stderr, /the message is not valid UTF-8/);

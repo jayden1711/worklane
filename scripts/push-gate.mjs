@@ -410,8 +410,31 @@ if (process.argv[2] === '--commit-msg' && installedCopy && process.argv.length =
     const raw = readFileSync(process.argv[3]);
     // Fail closed on encodings (R1260k D3, R1260l D1): git stores the bytes as typed and names i18n.commitEncoding in
     // the commit, and rewrites bytes that aren't UTF-8, so the hook judges only a UTF-8 message under UTF-8.
-    const enc = gitConfig('i18n.commitEncoding');
-    if (enc && !/^utf-?8$/i.test(enc)) throw new Refusal(`i18n.commitEncoding is ${enc}: set i18n.commitEncoding to UTF-8 or unset it (the hook judges a UTF-8 message only)`);
+    // R1260r D1: set but empty (or blank), git writes an `encoding ` header the gate refuses, so it is refused here too.
+    let encSet = null;
+    try {
+      encSet = runGit(['config', '--get', 'i18n.commitEncoding'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).replace(/\n$/, '');
+    } catch {
+      // unset
+    }
+    if (encSet !== null && !/^utf-?8$/i.test(encSet)) throw new Refusal(`i18n.commitEncoding is ${/^\S+$/.test(encSet) ? encSet : JSON.stringify(encSet)}: set i18n.commitEncoding to UTF-8 or unset it (the hook judges a UTF-8 message only)`);
+    // R1260r D2: the identity git will write in the author and committer headers, which the gate refuses with a CR, a
+    // NUL or bytes that aren't valid UTF-8 (user.name, user.email, GIT_AUTHOR_*, GIT_COMMITTER_*).
+    for (const who of ['GIT_AUTHOR_IDENT', 'GIT_COMMITTER_IDENT']) {
+      let ident;
+      try {
+        ident = runGit(['var', who], { stdio: ['ignore', 'pipe', 'ignore'] });
+      } catch {
+        continue; // no identity: git refuses the commit itself
+      }
+      let ok = !/[\r\0]/.test(ident.toString('latin1').replace(/\n$/, ''));
+      try {
+        new TextDecoder('utf-8', { fatal: true }).decode(ident);
+      } catch {
+        ok = false;
+      }
+      if (!ok) throw new Refusal(`the ${who === 'GIT_AUTHOR_IDENT' ? 'author' : 'committer'} identity git would write holds a CR, a NUL or bytes that aren't valid UTF-8, which the push gate refuses in a commit's header: fix user.name and user.email (or GIT_AUTHOR_* / GIT_COMMITTER_*)`);
+    }
     let text;
     try {
       // ignoreBOM: a leading BOM stays, as git keeps it (a BOM-only line 1 isn't blank).
