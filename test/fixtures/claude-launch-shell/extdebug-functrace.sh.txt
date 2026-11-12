@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# R1264m D2: extdebug and functrace.
+shopt -s extdebug
+set -o functrace

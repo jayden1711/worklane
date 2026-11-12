@@ -14,6 +14,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readAccountStatus } from '../src/claude-account.js';
 import { repoRoot } from './helpers.js';
+import { guardedTree } from './claude-guarded-tree.js';
 
 const posix = process.platform !== 'win32';
 const setupDir = join(repoRoot, 'scripts', 'setup');
@@ -52,11 +53,10 @@ function machine() {
   for (const d of ['users', 'homes', 'bin', 'units', 'var']) mkdirSync(join(T, d), { recursive: true });
   writeFileSync(
     join(s, 'lib.sh'),
-    `source ${JSON.stringify(join(setupDir, 'lib.sh'))}
+    // The real lib.sh, from a tree of its own whose test marker points claude_guarded's fixed PATH at these stand-ins.
+    `source ${JSON.stringify(guardedTree(join(T, 'real'), `${T}/bin:/usr/bin:/bin`))}
 T=${JSON.stringify(T)}
 PATH="$T/bin:$PATH"
-# claude_guarded's fixed PATH, pointed at these stand-ins (the tests' alone).
-CLAUDE_GUARDED_PATH="$T/bin:/usr/bin:/bin"
 as_root() { :; }
 home_of() { echo "$T/homes/$1"; }
 user_exists() { [ -e "$T/users/$1" ]; }

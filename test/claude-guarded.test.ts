@@ -9,6 +9,7 @@ import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSy
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { repoRoot } from './helpers.js';
+import { guardedTree } from './claude-guarded-tree.js';
 
 const posix = process.platform !== 'win32';
 // The launch's guards claude_guarded must end every argv with: one gone is a weaker test.
@@ -29,11 +30,11 @@ function guarded(args: string[], callerEnv: NodeJS.ProcessEnv = {}): { status: n
     // sudo -H -u <user> <command…>: note the user, run the command with that user's home (as sudo -H does).
     put('sudo', `#!/bin/sh\n[ "$1" = -H ] && shift\n[ "$1" = -u ] || exit 64\necho "$2" >> ${JSON.stringify(join(t, 'sudo'))}\nu="$2"; shift 2\nHOME="/home/$u" exec "$@"\n`);
     put('timeout', '#!/bin/sh\nshift\nexec "$@"\n');
-    const r = spawnSync('bash', ['-c', 'source "$1"; shift; claude_guarded "$@"', '_', join(repoRoot, 'scripts', 'setup', 'lib.sh'), ...args], {
+    // claude_guarded's own PATH is fixed; the tree's test marker points it at these stand-ins.
+    const lib = guardedTree(join(t, 'tree'), `${bin}:/usr/bin:/bin`);
+    const r = spawnSync('bash', ['-c', 'source "$1"; shift; claude_guarded "$@"', '_', lib, ...args], {
       encoding: 'utf8',
-      // claude_guarded's own PATH is fixed; CLAUDE_GUARDED_PATH (the tests' alone, the lint refuses a script setting
-      // it) points it at these stand-ins.
-      env: { PATH: `${bin}:/usr/bin:/bin`, HOME: t, CLAUDE_GUARDED_PATH: `${bin}:/usr/bin:/bin`, ...callerEnv },
+      env: { PATH: `${bin}:/usr/bin:/bin`, HOME: t, ...callerEnv },
     });
     const got = existsSync(join(t, 'got.json')) ? (JSON.parse(readFileSync(join(t, 'got.json'), 'utf8')) as { argv: string[]; env: Record<string, string> }) : null;
     const sudo = existsSync(join(t, 'sudo')) ? readFileSync(join(t, 'sudo'), 'utf8').trim().split('\n') : [];
@@ -174,9 +175,9 @@ test("R1264i D1: a caller's shell functions named command, sudo, env, timeout or
       'printenv() { echo /planted; }',
       'export -f command sudo env timeout printenv',
     ].join('\n');
-    const r = spawnSync('bash', ['-c', `source "$1"; ${hijack}\nclaude_guarded --timeout 5 -- '{}' -p hi`, '_', join(repoRoot, 'scripts', 'setup', 'lib.sh')], {
+    const r = spawnSync('bash', ['-c', `source "$1"; ${hijack}\nclaude_guarded --timeout 5 -- '{}' -p hi`, '_', guardedTree(join(t, 'tree'), `${bin}:/usr/bin:/bin`)], {
       encoding: 'utf8',
-      env: { PATH: `${bin}:/usr/bin:/bin`, HOME: t, CLAUDE_GUARDED_PATH: `${bin}:/usr/bin:/bin` },
+      env: { PATH: `${bin}:/usr/bin:/bin`, HOME: t },
     });
     assert.equal(r.status, 0, r.stderr);
     assert.deepEqual(JSON.parse(readFileSync(join(t, 'got.json'), 'utf8')), ['-p', 'hi', '--settings', '{}', ...GUARDS]);
@@ -208,12 +209,14 @@ test('R1264k/l D1: claude_guarded finds its helper by the absolute path lib.sh h
       mkdirSync(join(away, rel), { recursive: true });
       writeFileSync(join(away, rel, 'claude-guarded.sh'), `#!/bin/bash\necho planted > ${JSON.stringify(join(t, 'planted'))}\n`);
     }
-    // lib.sh sourced by a relative path from the repo's root, and by a bare name from scripts/setup, then the cwd moved.
-    for (const [cwd, src] of [[repoRoot, 'scripts/setup/lib.sh'], [join(repoRoot, 'scripts', 'setup'), 'lib.sh']] as const) {
+    // lib.sh sourced by a relative path from the tree's root, and by a bare name from scripts/setup, then the cwd moved.
+    const tree = join(t, 'tree');
+    guardedTree(tree, `${bin}:/usr/bin:/bin`);
+    for (const [cwd, src] of [[tree, 'scripts/setup/lib.sh'], [join(tree, 'scripts', 'setup'), 'lib.sh']] as const) {
       const r = spawnSync('bash', ['-c', `source ${src}; cd ${JSON.stringify(away)} && claude_guarded -- '{}' -p hi`], {
         cwd,
         encoding: 'utf8',
-        env: { PATH: `${bin}:/usr/bin:/bin`, HOME: t, CLAUDE_GUARDED_PATH: `${bin}:/usr/bin:/bin` },
+        env: { PATH: `${bin}:/usr/bin:/bin`, HOME: t },
       });
       assert.equal(r.status, 0, `${src}: ${r.stderr}`);
       assert.equal(existsSync(join(t, 'planted')), false, `${src}: no planted helper ran`);
@@ -229,16 +232,12 @@ test("R1264k/l D1: claude_guarded runs its helper only while it and its folder a
   try {
     const bin = join(t, 'bin');
     recorder(bin, join(t, 'got.json'));
-    // A copy of the two files, in a tree of their own (lib.sh finds ../lib/claude-guarded.sh from where it is).
-    mkdirSync(join(t, 'scripts', 'setup'), { recursive: true });
-    mkdirSync(join(t, 'scripts', 'lib'), { recursive: true });
-    copyFileSync(join(repoRoot, 'scripts', 'setup', 'lib.sh'), join(t, 'scripts', 'setup', 'lib.sh'));
-    copyFileSync(join(repoRoot, 'scripts', 'lib', 'claude-guarded.sh'), join(t, 'scripts', 'lib', 'claude-guarded.sh'));
-    chmodSync(join(t, 'scripts', 'lib'), 0o755);
+    // A copy of the tree, modes go-w (lib.sh finds ../lib/claude-guarded.sh from where it is).
+    const lib = guardedTree(t, `${bin}:/usr/bin:/bin`);
     const run = () =>
-      spawnSync('bash', ['-c', `source ${JSON.stringify(join(t, 'scripts', 'setup', 'lib.sh'))}; claude_guarded -- '{}' -p hi`], {
+      spawnSync('bash', ['-c', `source ${JSON.stringify(lib)}; claude_guarded -- '{}' -p hi`], {
         encoding: 'utf8',
-        env: { PATH: `${bin}:/usr/bin:/bin`, HOME: t, CLAUDE_GUARDED_PATH: `${bin}:/usr/bin:/bin` },
+        env: { PATH: `${bin}:/usr/bin:/bin`, HOME: t },
       });
     chmodSync(join(t, 'scripts', 'lib', 'claude-guarded.sh'), 0o644);
     assert.equal(run().status, 0, 'the control runs');
@@ -248,6 +247,7 @@ test("R1264k/l D1: claude_guarded runs its helper only while it and its folder a
       const r = run();
       assert.notEqual(r.status, 0, `${what}: refused`);
       assert.match(r.stderr, /isn't lib\.sh's owner's alone/);
+      assert.match(r.stderr, /chmod -R go-w scripts/, 'it says how to fix it');
       assert.equal(existsSync(join(t, 'got.json')), false, `${what}: claude never started`);
       chmodSync(f, f.endsWith('.sh') ? 0o644 : 0o755);
     }
@@ -268,9 +268,9 @@ test("R1264k D2, D3: the helper's PATH is fixed (a caller's own timeout first on
     // A shell stand-in: node opens fds of its own (3 and up), so the fds are probed by number from sh.
     writeFileSync(join(bin, 'claude'), `#!/bin/sh\nopen=""\nfor n in 7 9; do if { true >&$n; } 2>/dev/null || { true <&$n; } 2>/dev/null; then open="$open $n"; fi; done\nprintf '%s\\n' "$*" > ${JSON.stringify(join(t, 'argv.txt'))}\nprintf '%s' "$open" > ${JSON.stringify(join(t, 'fds.txt'))}\n`);
     chmodSync(join(bin, 'claude'), 0o755);
-    const r = spawnSync('bash', ['-c', `source "$1"; exec 7>/dev/null 9</dev/null; claude_guarded --timeout 30 -- '{}' -p hi`, '_', join(repoRoot, 'scripts', 'setup', 'lib.sh')], {
+    const r = spawnSync('bash', ['-c', `source "$1"; exec 7>/dev/null 9</dev/null; claude_guarded --timeout 30 -- '{}' -p hi`, '_', guardedTree(join(t, 'tree'), `${bin}:/usr/bin:/bin`)], {
       encoding: 'utf8',
-      env: { PATH: `${fake}:${bin}:/usr/bin:/bin`, HOME: t, CLAUDE_GUARDED_PATH: `${bin}:/usr/bin:/bin` },
+      env: { PATH: `${fake}:${bin}:/usr/bin:/bin`, HOME: t },
     });
     assert.equal(r.status, 0, r.stderr);
     assert.equal(readFileSync(join(t, 'argv.txt'), 'utf8'), "-p hi --settings {} --setting-sources  --strict-mcp-config\n", 'the caller\'s own timeout appended nothing');
@@ -289,6 +289,89 @@ test('R1264k CI: lib.sh copied alone (a CI probe of scripts/setup, a test\'s tre
     assert.match(r.stdout, /^loaded$/m, r.stderr);
     assert.notEqual(r.status, 0);
     assert.match(r.stderr, /its helper, scripts\/lib\/claude-guarded\.sh, isn't beside this lib\.sh/);
+  } finally {
+    rmSync(t, { recursive: true, force: true });
+  }
+});
+
+test("R1264m D2, n D1: a caller's exported functions named by a path (/usr/bin/env, /usr/bin/sudo, /usr/bin/stat) don't reach the launch or its owner check (builtin command)", { skip: !posix }, () => {
+  const t = mkdtempSync(join(tmpdir(), 'claude-guarded-'));
+  try {
+    const bin = join(t, 'bin');
+    recorder(bin, join(t, 'got.json'));
+    const hijack = [
+      '/usr/bin/env() { builtin command /usr/bin/env "$@" --plugin-dir /planted; }',
+      '/usr/bin/sudo() { builtin command /usr/bin/sudo "$@" --agents /planted; }',
+      "/usr/bin/stat() { builtin echo 'root 644 root'; }",
+      'export -f /usr/bin/env /usr/bin/sudo /usr/bin/stat',
+    ].join('\n');
+    // From a file the caller sources (the functions' text names host tools by path, which no test's command line may).
+    writeFileSync(join(t, 'hijack.sh'), `${hijack}\n`);
+    const r = spawnSync('bash', ['-c', `source "$1"; source "$2"; claude_guarded -- '{}' -p hi`, '_', guardedTree(join(t, 'tree'), `${bin}:/usr/bin:/bin`), join(t, 'hijack.sh')], {
+      encoding: 'utf8',
+      env: { PATH: `${bin}:/usr/bin:/bin`, HOME: t },
+    });
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual((JSON.parse(readFileSync(join(t, 'got.json'), 'utf8')) as { argv: string[] }).argv, ['-p', 'hi', '--settings', '{}', ...GUARDS]);
+  } finally {
+    rmSync(t, { recursive: true, force: true });
+  }
+});
+
+test('R1264m/n D3: under umask 002 a group-writable helper runs when its group is its owner\'s own private group, and is refused otherwise; other-writable never runs', { skip: !posix }, () => {
+  const t = mkdtempSync(join(tmpdir(), 'claude-guarded-'));
+  try {
+    const bin = join(t, 'bin');
+    recorder(bin, join(t, 'got.json'));
+    const lib = guardedTree(t, `${bin}:/usr/bin:/bin`);
+    // What a clone under umask 002 makes: files 664, folders 775.
+    for (const p of [join(t, 'scripts', 'lib'), join(t, 'scripts', 'setup')]) chmodSync(p, 0o775);
+    chmodSync(join(t, 'scripts', 'lib', 'claude-guarded.sh'), 0o664);
+    const st = (f: string) => (spawnSync('/usr/bin/stat', ['-c', '%U %G', f], { encoding: 'utf8' }).stdout || spawnSync('/usr/bin/stat', ['-f', '%Su %Sg', f], { encoding: 'utf8' }).stdout).trim().split(' ');
+    const [owner, group] = st(join(t, 'scripts', 'lib', 'claude-guarded.sh'));
+    const run = () => spawnSync('bash', ['-c', `source ${JSON.stringify(lib)}; claude_guarded -- '{}' -p hi`], { encoding: 'utf8', env: { PATH: `${bin}:/usr/bin:/bin`, HOME: t } });
+    const r = run();
+    if (owner === group) assert.equal(r.status, 0, `group ${group} is ${owner}'s own: runs (${r.stderr})`);
+    else assert.match(r.stderr, /isn't lib\.sh's owner's alone/, `group ${group} isn't ${owner}'s own: refused`);
+    chmodSync(join(t, 'scripts', 'lib', 'claude-guarded.sh'), 0o666);
+    assert.match(run().stderr, /isn't lib\.sh's owner's alone/, 'other-writable: refused whatever the group');
+    // Other-writable alone (no group write anywhere): refused by the o+w rule itself.
+    for (const p of [join(t, 'scripts', 'lib'), join(t, 'scripts', 'setup')]) chmodSync(p, 0o755);
+    chmodSync(join(t, 'scripts', 'lib', 'claude-guarded.sh'), 0o644);
+    assert.equal(run().status, 0, 'the control, go-w again, runs');
+    chmodSync(join(t, 'scripts', 'lib', 'claude-guarded.sh'), 0o646);
+    assert.match(run().stderr, /isn't lib\.sh's owner's alone/, 'other-writable, group not: refused');
+  } finally {
+    rmSync(t, { recursive: true, force: true });
+  }
+});
+
+test("claude_guarded's test PATH marker is never in the tree, so an installed tree (git's tree at a release) never has one", () => {
+  const tracked = spawnSync('git', ['ls-files', '-z'], { cwd: repoRoot, encoding: 'utf8' }).stdout.split('\0');
+  assert.deepEqual(tracked.filter((f) => f.endsWith('.claude-guarded-test-path')), []);
+});
+
+test('R1264m D1, n D2: no variable a caller sets, before lib.sh is sourced or after, in any form, points claude_guarded at another helper; and it can\'t be redefined', { skip: !posix }, () => {
+  const t = mkdtempSync(join(tmpdir(), 'claude-guarded-'));
+  try {
+    const bin = join(t, 'bin');
+    recorder(bin, join(t, 'got.json'));
+    const evil = join(t, 'evil.sh');
+    writeFileSync(evil, `#!/bin/bash\necho planted > ${JSON.stringify(join(t, 'planted'))}\n`);
+    chmodSync(evil, 0o755);
+    const lib = guardedTree(join(t, 'tree'), `${bin}:/usr/bin:/bin`);
+    const before = `export cg_here=${t} cg_helper=${evil} cg_sh=${evil} CLAUDE_GUARDED_SH=${evil} cg_def='claude_guarded() { ${evil}; }'`;
+    const after = `declare cg_sh=${evil}; printf -v CLAUDE_GUARDED_SH %s ${evil}; read -r cg_helper <<< ${evil}`;
+    const r = spawnSync('bash', ['-c', `${before}; source "$1"; ${after}; claude_guarded -- '{}' -p hi`, '_', lib], { encoding: 'utf8', env: { PATH: `${bin}:/usr/bin:/bin`, HOME: t } });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(existsSync(join(t, 'planted')), false, 'the planted helper never ran');
+    assert.deepEqual((JSON.parse(readFileSync(join(t, 'got.json'), 'utf8')) as { argv: string[] }).argv, ['-p', 'hi', '--settings', '{}', ...GUARDS]);
+    // A later definition is refused (bash goes on to the next command), and the real one still runs.
+    rmSync(join(t, 'got.json'));
+    const redefine = spawnSync('bash', ['-c', `source "$1"; claude_guarded() { ${evil}; }; claude_guarded -- '{}' -p hi`, '_', lib], { encoding: 'utf8', env: { PATH: `${bin}:/usr/bin:/bin`, HOME: t } });
+    assert.match(redefine.stderr, /readonly function/);
+    assert.equal(existsSync(join(t, 'planted')), false, 'the redefinition never ran');
+    assert.ok(existsSync(join(t, 'got.json')), 'the real claude_guarded ran');
   } finally {
     rmSync(t, { recursive: true, force: true });
   }

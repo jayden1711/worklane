@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# R1264m D2: a DEBUG trap runs code inside claude_guarded.
+trap 'echo hi' DEBUG

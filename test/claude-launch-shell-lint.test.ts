@@ -27,7 +27,8 @@
 // every quoted word of a command `tmux`, `ssh` or `watch` runs, is read as commands of its own, recursively. A default
 // with or without its colon (`${X:-claude}`, `${X-claude}`), `printf -v NAME … claude`, and a glob aimed at the binary
 // (`…/claud[e]`) name it too. A function or alias named for a command a launch runs through (sudo, env, timeout,
-// command, builtin, cd, …), and a script that sets claude_guarded's own CLAUDE_GUARDED_* variables, are refused. Quoting is read as bash reads it
+// command, builtin, cd, …), or by any path (`/usr/bin/env() {…}`, which bash runs for that exact path), a DEBUG or RETURN
+// trap, extdebug and functrace, and a script that sets a CLAUDE_GUARDED_* variable, are refused (R1264l D3, m D2). Quoting is read as bash reads it
 // (R1264j D2): nothing escaped in `'…'`, a backslash takes the next character in `$'…'`, `"…"` and outside quotes. A script that defines its own claude_guarded is
 // refused.
 //
@@ -148,7 +149,7 @@ export const SHELL_PINS = (JSON.parse(readFileSync(join(repoRoot, 'scripts', 'ci
 
 type Word = { text: string; quoted: boolean };
 /** The commands a claude launch runs through: a function or alias of one of these names is refused (R1264l D3). */
-const SHADOWED = 'sudo|env|timeout|command|builtin|exec|claude|printenv|cd|pwd|dirname|stat|bash|sh|find|unset|declare|source';
+const SHADOWED = new Set('sudo env timeout command builtin exec claude printenv cd pwd dirname stat bash sh find unset declare source printf read eval readonly echo'.split(' '));
 
 /** Words that open a command without being it. */
 // check-table: never-grow
@@ -449,9 +450,15 @@ export function shellLaunchProblems(path: string, text: string, pinned = new Map
       if (/(?:^|[\s;&|{(])(?:function\s+claude_guarded\b|claude_guarded\s*\(\s*\)|alias\s+claude_guarded=)/.test(t)) out.push(`${path}:${line}: defines claude_guarded: only scripts/setup/lib.sh's may run, so source it`);
   // R1264l D3: a function or alias named for a command a launch runs through (`sudo`, `env`, `timeout`, …) rewrites
   // a pinned call, or a script that sources this file, unseen: refused anywhere.
+  // A function bash runs for a command named by that exact path (`/usr/bin/env() {…}`, `function /usr/bin/sudo {…}`)
+  // shadows it too: any name with a `/` is refused, and a listed name after any `…/` (R1264m D2, n D1).
   for (const { line, text: t } of lines) {
-    const m = new RegExp(`(?:^|[\\s;&|{(])(?:function\\s+(${SHADOWED})\\b|(${SHADOWED})\\s*\\(\\s*\\)|alias\\s+(${SHADOWED})=)`).exec(t);
-    if (m) out.push(`${path}:${line}: defines ${m[1] ?? m[2] ?? m[3]}, a command a claude launch runs through: refused (R1264l D3)`);
+    for (const m of t.matchAll(/(?:^|[\s;&|{(])(?:function\s+([A-Za-z0-9_./:+@-]+)|([A-Za-z0-9_./:+@-]+)\s*\(\s*\)|alias\s+([A-Za-z0-9_./:+@-]+)=)/g)) {
+      const name = m[1] ?? m[2] ?? m[3]!;
+      if (name.includes('/') || SHADOWED.has(name)) out.push(`${path}:${line}: defines ${name}, ${name.includes('/') ? 'a function named by a path (bash runs it for that path)' : 'a command a claude launch runs through'}: refused (R1264l D3, R1264m D2)`);
+    }
+    // A DEBUG or RETURN trap, extdebug or functrace runs code inside claude_guarded's own function (R1264m D2).
+    if (/(?:^|[\s;&|{(])trap\b[^;&|]*\b(?:DEBUG|RETURN)\b|\bshopt\s+-s\b[^;&|]*\bextdebug\b|\bset\s+(?:-[A-Za-z]*T\b|-o\s+functrace\b)/.test(t)) out.push(`${path}:${line}: sets a DEBUG or RETURN trap, extdebug or functrace, which run code inside claude_guarded: refused (R1264m D2)`);
   }
   // claude_guarded's own variables are lib.sh's: a script that sets one (CLAUDE_GUARDED_PATH is the tests') points it elsewhere.
   if (path !== 'scripts/setup/lib.sh')
@@ -721,26 +728,39 @@ test('#1262 (R1264e D1, R1264f D4): a pin holds its scope by digest: an edit to 
   assert.ok(shellLaunchProblems(spike.pin[0], lines.join('\n')).length > 0, 'a call moved onto the line before the pin is refused');
 });
 
-/** The digest of lib.sh's claude_guarded and the lines that say which helper it runs (R1264l D2). */
-const WRAPPER_DIGEST = '19a6143b3cfd8225696d8723247041e70da1b3c1e112f0e5082919e203681ac7';
+/** The lines after claude_guarded's template that fill it in (R1264m D1): no variable is left to point it elsewhere. */
+const WRAPPER_RESOLVE = [
+  'case "${BASH_SOURCE[0]}" in */*) cg_here="${BASH_SOURCE[0]%/*}" ;; *) cg_here=. ;; esac',
+  'cg_here="$(builtin cd -P -- "$cg_here" && builtin pwd)" || cg_here=""',
+  "# A copy of scripts/setup alone (a CI probe, a test's tree) has no helper: claude_guarded refuses there, and lib.sh still loads.",
+  'cg_helper="$(builtin cd -P -- "$cg_here/../lib" 2>/dev/null && builtin pwd)/claude-guarded.sh" || cg_helper=""',
+  "# Only plain path characters go into the function's text; any other leaves it with no helper, refusing.",
+  'case "$cg_here$cg_helper" in *[!A-Za-z0-9._/@+-]*) cg_helper="" ;; esac',
+  'cg_def="${cg_def//@HERE@/$cg_here}"',
+  'cg_def="${cg_def//@HELPER@/$cg_helper}"',
+  'builtin eval "$cg_def"',
+  'builtin readonly -f claude_guarded',
+  'builtin unset cg_def cg_here cg_helper',
+].join('\n');
+/** The digest of lib.sh's claude_guarded template (R1264l D2). */
+const WRAPPER_DIGEST = '0abfe7ca667bf8227dd62b90bc6836998a6559c92bb36af92f19bad667607779';
 
-test('#1262 (R1264l D2): which file claude_guarded runs, and the wrapper itself, are held by digest: a widened copy at another path is refused', () => {
+test('#1262 (R1264l D2, m D1): which file claude_guarded runs, and the wrapper itself, are held by digest: a widened copy at another path is refused', () => {
   const text = readFileSync(join(repoRoot, 'scripts', 'setup', 'lib.sh'), 'utf8');
-  const at = text.split('\n').findIndex((l) => /^\s*\/usr\/bin\/env -i "PATH=\$\{CLAUDE_GUARDED_PATH:-/.test(l)) + 1;
-  assert.ok(at > 0, "lib.sh's claude_guarded runs its helper in a clean bash");
-  const scope = pinScope('scripts/setup/lib.sh', text, at);
-  assert.match(scope, /^CLAUDE_GUARDED_SH="\$\(cd -P -- "\$\{CLAUDE_GUARDED_LIB%\/\*\}\/\.\.\/lib" 2>\/dev\/null && pwd\)\/claude-guarded\.sh" \|\| CLAUDE_GUARDED_SH=""$/m, 'the helper it runs is scripts/lib/claude-guarded.sh, the pinned one');
-  // CLAUDE_GUARDED_SH is built from CLAUDE_GUARDED_LIB, lib.sh's own absolute path when it was sourced: both lines, exactly.
-  assert.ok(text.includes('\ncase "${BASH_SOURCE[0]}" in */*) CLAUDE_GUARDED_LIB="${BASH_SOURCE[0]%/*}" ;; *) CLAUDE_GUARDED_LIB=. ;; esac\nCLAUDE_GUARDED_LIB="$(cd -P -- "$CLAUDE_GUARDED_LIB" && pwd)/lib.sh"\n'), 'lib.sh resolves its own path as it is sourced (the helper\'s line, from it, is matched above)');
-  assert.equal(text.match(/^[^#\n]*CLAUDE_GUARDED_(?:LIB|SH)\+?=/gm)?.length, 3, 'and assigns them on those three lines only');
-  // R1264k CI: a copy of scripts/setup alone still loads (set -e), and claude_guarded there refuses.
-  assert.ok(text.includes('[ -n "$CLAUDE_GUARDED_SH" ] || { echo'), 'with no helper beside it, claude_guarded refuses');
+  const at = text.split('\n').findIndex((l) => /^\s*builtin command \/usr\/bin\/env -i "PATH=\$cg_path" "HOME=\$HOME" \/bin\/bash --norc --noprofile "\$cg_sh" "\$@"$/.test(l)) + 1;
+  assert.ok(at > 0, "lib.sh's claude_guarded runs its helper in a clean bash, by builtin command and absolute paths");
   assert.equal(scopeDigest('scripts/setup/lib.sh', text, at), WRAPPER_DIGEST, 'the wrapper is the one this test holds: a changed wrapper is a change to this test');
-  // A copy of the helper, widened and named otherwise, with the wrapper pointed at it: the digest moves.
-  const widened = text.replace('/claude-guarded.sh"', '/claude-guarded.inc"');
+  // Where its two paths come from: resolved as lib.sh is sourced, written into the function's text, the function read-only.
+  assert.ok(text.includes(WRAPPER_RESOLVE), 'lib.sh resolves its own folder and the helper as it is sourced, writes them into claude_guarded, and makes it read-only');
+  assert.equal(text.match(/@HELPER@/g)?.length, 2, 'the helper path goes into the template in one place');
+  // A copy of the helper, widened and named otherwise, with the template pointed at it: the digest or the resolution moves.
+  const widened = text.replace('/../lib" 2>/dev/null && builtin pwd)/claude-guarded.sh"', '/../lib" 2>/dev/null && builtin pwd)/claude-guarded.inc"');
   assert.notEqual(widened, text);
-  assert.notEqual(scopeDigest('scripts/setup/lib.sh', widened, at), WRAPPER_DIGEST);
+  assert.ok(!widened.includes(WRAPPER_RESOLVE));
+  const retemplated = text.replace('cg_sh=@HELPER@', 'cg_sh=/tmp/claude-guarded.inc');
+  assert.notEqual(scopeDigest('scripts/setup/lib.sh', retemplated, at), WRAPPER_DIGEST);
 });
+
 
 test('#1262 (R1264a/b): the places a script can live are all read', () => {
   const heads: Record<string, string> = { 'tools/run': '#!/bin/zsh\n', 'bin/x': '#!/usr/bin/env bash\n' };
@@ -762,7 +782,7 @@ const asPath = (as: string | undefined) => (as === undefined ? undefined : /^<pi
 test('#1262: the pinned exceptions are the owner\'s one, by its exact file, line and reason (a new or moved pin is a change to this test)', () => {
   // R1264c D1, R1264d D2: the whole list by its digest (no spike path named here, #673): its file, its exact line and
   // its reason. Moving, widening or adding a pin changes the digest, so the change shows in this test in review.
-  assert.equal(createHash('sha256').update(JSON.stringify(SHELL_PINS)).digest('hex'), '58b642498fbfc1294af2e14904609151b5c5c93e5e9ddb75df9b5abf2407b300');
+  assert.equal(createHash('sha256').update(JSON.stringify(SHELL_PINS)).digest('hex'), '7484a560900494d4afa1fb4b08958095a8cd5c938392879c1959a15787c3db3b');
   assert.deepEqual(SHELL_PINS.map(([f, , why]) => [f.split('/').at(-1), why]), [['worktree-commit.sh', 'a sandbox probe whose project-settings load is the point (the owner, 2026-11-11, "spikes: b")'], ['agent-messaging.sh', 'a spike that needs stream-json input (a second message mid-turn, an interrupt), which claude_guarded refuses (R1264j D1): its guards end the argv, and its stdin\'s printfs are in the file its digest holds (the owner\'s "spikes: b")'], ['agent-messaging.sh', 'a spike that needs stream-json input (a second message mid-turn, an interrupt), which claude_guarded refuses (R1264j D1): its guards end the argv, and its stdin\'s printfs are in the file its digest holds (the owner\'s "spikes: b")'], ['agent-messaging.sh', 'a spike that needs stream-json input (a second message mid-turn, an interrupt), which claude_guarded refuses (R1264j D1): its guards end the argv, and its stdin\'s printfs are in the file its digest holds (the owner\'s "spikes: b")']]);
 });
 
@@ -774,6 +794,10 @@ test('#1262: every way a script can start claude other than through claude_guard
   // check-table: never-shrink
   const MUST_FAIL = [
     'after-and',
+    'extdebug-functrace',
+    'shadow-absolute-env',
+    'shadow-absolute-sudo',
+    'trap-debug',
     'default-no-colon',
     'default-no-colon-variable',
     'glob-binary',
