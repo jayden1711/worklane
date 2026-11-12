@@ -157,7 +157,8 @@ export class LiveConfig {
 
 /**
  * The config to start with: the default branch's, read from git after a fetch, when it is there and valid;
- * otherwise the checkout's (`fallback`), and why. `tree` is what the running config was loaded from.
+ * otherwise the checkout's (`fallback`), and why. `tree` is what the running config was loaded from. Feature flags
+ * are never read from it (src/flags.ts: the coordinator adopts them from the default branch's head itself).
  */
 export function startConfig(o: { repo: string; remote: string; fallback: Config; check?: (cfg: Config) => ConfigError[] }): { cfg: Config; tree: string | null; note: string | null } {
   gitRemote(o.remote);

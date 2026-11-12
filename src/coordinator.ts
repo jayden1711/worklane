@@ -6,8 +6,10 @@
 import { spawn } from './os/child-process.js';
 import { gitExecFileSync, gitSpawnSync } from './os/git.js';
 import { createHash, randomBytes } from 'node:crypto';
+import { types } from 'node:util';
 import { cpSync, mkdirSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { FlagState, adoptFlags } from './flags.js';
 import { CHECKPOINT_EVERY_MS, chainFileFor, checkpoint } from './audit-chain.js';
 import { BRAND } from './brand.js';
 import { RECOMMENDATION_PREFIX } from './decision-ask.js';
@@ -97,10 +99,23 @@ export { logTail } from './coordinator/shared.js';
 /** What one worker build ends in: stop the task, or go on to inspect its change. */
 type BuildOut = { stop: true } | { stop: false; stuck?: string; raise?: Level; noChange?: string; provider?: string };
 
+const isProxy = types.isProxy;
+
 /** A failed worker run shorter than this that committed nothing never got to work. */
 export const STARTUP_FAILURE_SECS = 90;
 
 export class Coordinator extends AutomationRuns {
+  /** This coordinator's feature flags (src/flags.ts): its own, never another Coordinator's in the process (R1173af AF1). */
+  readonly flags = new FlagState({ log: this.d.log, repo: this.d.repo });
+
+  constructor(...a: ConstructorParameters<typeof AutomationRuns>) {
+    super(...a);
+    // R1173aj AJ1: a parent swapped at run time can return a Proxy that redirects the lock below to another's state.
+    if (isProxy(this)) throw new Error('a Coordinator is never a Proxy');
+    // R1173ah AH2b: `readonly` is compile-time only; never another Coordinator's state at run time either.
+    Object.defineProperty(this, 'flags', { writable: false, configurable: false });
+  }
+
   // ---------------------------------------------------------------- tick
 
   /** One deterministic pass: reconcile, handle approvals, land, dispatch. */
@@ -123,7 +138,30 @@ export class Coordinator extends AutomationRuns {
     this.checkConsole();
     void this.checkChat();
     // The config as the default branch has it now, before anything below reads it (src/config/live.ts).
-    await step('config', () => this.refreshConfig(), undefined);
+    await step('config', () => {
+      // Feature flags (src/flags.ts): origin's default branch's head, when it is this instance's configured default
+      // branch and its config is here and valid (by this instance's checks too); otherwise every flag is off. Adopted
+      // here only, even when refreshing the config threw (R1173m: a failed config.applied write skipped it, and a flag
+      // main turned off stayed on). Every flip is audited against the last state the log recorded (#1173 reviews).
+      // R1173ae AE1: both failures are recorded. A held flag throws at every tick of a lasting fault, and a throw from
+      // a `finally` replaced the refresh's own error, so a failing refresh left no coordinator.error.
+      let refreshFailed: { e: unknown } | null = null;
+      try {
+        this.refreshConfig();
+      } catch (e) {
+        refreshFailed = { e };
+      }
+      try {
+        adoptFlags({ flags: this.flags, log: this.d.log, repo: this.d.repo, actor: this.d.instance, branch: this.branch, check: this.d.liveConfig?.check ?? (() => []) });
+      } catch (e) {
+        if (refreshFailed) {
+          const r = refreshFailed.e as { kind?: string; message?: string };
+          this.emit('coordinator.error', { instance: this.d.instance, where: 'config', kind: r?.kind ?? 'error', message: String(r?.message ?? r).slice(0, 500) });
+        }
+        throw e;
+      }
+      if (refreshFailed) throw refreshFailed.e;
+    }, undefined);
     await step('settings', () => this.refreshSettings(), undefined);
     // The audit chain's checkpoint (src/audit-chain.ts, docs/audit-log.md): at most every 10 minutes. WHY early: a step
     // added after dispatch would yield before the tick returns, which changes when a dispatched run's end is seen.
