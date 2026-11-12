@@ -181,3 +181,31 @@ test('the evaluator reads these expressions as Actions does', () => {
   assert.equal(evaluate('github.event.nothing.here', ctx), null);
   assert.throws(() => evaluate("fromJSON('[]')", ctx), /no function fromJSON/);
 });
+
+// R1271b D1 (#1266): a called workflow's GITHUB_TOKEN gets at most what its caller grants, and a called job that asks
+// for more fails the whole called run at startup. ci-slow.yml's test-run sandbox job asks for actions: read (its step
+// timings), so the full-ci caller must grant it. Every local `uses:` caller is checked against every job it calls.
+test('every job a workflow calls asks for no permission its caller does not grant (a called run would fail at startup)', () => {
+  type Perms = Record<string, string> | string | undefined;
+  type Wf = { permissions?: Perms; jobs: Record<string, { uses?: string; permissions?: Perms }> };
+  const all = Object.fromEntries(readdirSync(dir).filter((f) => /\.ya?ml$/.test(f)).map((f) => [f, parse(readFileSync(join(dir, f), 'utf8')) as Wf]));
+  const rank = (v: string | undefined) => ({ none: 0, read: 1, write: 2 })[v ?? 'none'] ?? 0;
+  const level = (p: Perms, scope: string) => (typeof p === 'string' ? (p === 'write-all' ? 'write' : p === 'read-all' ? 'read' : 'none') : p?.[scope]);
+  let calls = 0;
+  for (const [f, w] of Object.entries(all)) {
+    for (const [id, job] of Object.entries(w.jobs ?? {})) {
+      const m = /^\.\/\.github\/workflows\/(.+)$/.exec(job.uses ?? '');
+      if (!m) continue;
+      calls++;
+      const grant = job.permissions ?? w.permissions;
+      assert.ok(grant !== undefined, `${f} ${id}: a caller states the permissions it passes on`);
+      const called = all[m[1]!]!;
+      for (const [cid, cj] of [['(workflow)', { permissions: called.permissions }], ...Object.entries(called.jobs)] as [string, { permissions?: Perms }][]) {
+        if (cj.permissions === undefined) continue;
+        const scopes = typeof cj.permissions === 'string' ? ['actions', 'contents', 'issues', 'pull-requests', 'checks', 'statuses', 'id-token'] : Object.keys(cj.permissions);
+        for (const s of scopes) assert.ok(rank(level(cj.permissions, s)) <= rank(level(grant, s)), `${m[1]} ${cid} asks for ${s}: ${level(cj.permissions, s)}, but ${f} ${id} grants ${level(grant, s) ?? 'none'}`);
+      }
+    }
+  }
+  assert.ok(calls >= 1, 'the full-ci caller is checked');
+});
