@@ -1,0 +1,5 @@
+// as src/new-module.ts
+// R1185ap D1 Q5: claude # comment
+import { execSync, spawn } from 'node:child_process';
+const S = 'setsid claude  # the agent session';
+execSync(S);

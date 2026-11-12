@@ -1,0 +1,5 @@
+// as src/new-module.ts
+// R1185ap D1 Q4: single string: timeout 3600 claudenwait
+import { execSync, spawn } from 'node:child_process';
+const S = 'timeout 3600 claude\nwait';
+execSync(S);

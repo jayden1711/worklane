@@ -76,19 +76,24 @@ const SUBCOMMANDS = ['agents', 'attach', 'auth', 'auto-mode', 'config', 'design-
 const CLAUDE_AT = /(?:^|[\s;&|<>(`'"{]|\$\{\w+:?[-=]|=)(?:[^\s;&|<>()`'"{}]*[\/\\])?claude(?:\.exe|\.cmd|\.ps1)?(?![\w.-])/g;
 /**
  * Whether `t` starts claude somewhere (R1185an/ao, the organizer's option (d)): its token followed by the end, a quote,
- * `$`, `%`, `@`, a redirect (`2>&1` too), a separator, a flag, a substitution, a line continuation, an assignment-like
+ * `$`, `%`, `@`, a redirect (`2>&1` too), a separator, a newline or a ` #` comment (R1185ap), a flag, a substitution,
+ * a line continuation, an assignment-like
  * token, or one of the CLI's own subcommands (`auth status`/`auth login` excepted, as the shell lint's EXEMPT_ARGV:
- * they start no session), or an argument shaped as a path or glob (`./prompt.txt`, `~/task`, `*.md`). Any other plain
- * word after it is prose ("claude exited …"); so is an unquoted one-word prompt (`claude fix`) and a capital `Claude`
+ * they start no session), or an argument shaped as a path or glob (`./prompt.txt`, `~/task`, `*.md`, `?.md`, `[a-z]*`,
+ * `{a,b}`). Any other plain word after it is prose ("claude exited …"); so is an unquoted positional prompt (`claude fix`,
+ * `claude fix the test`, `claude prompts/task.md`) and a capital `Claude`
  * without Windows' suffix: named limits.
  */
 function startsClaude(t: string): boolean {
   // A name with Windows' suffix is never prose, in any case (`CLAUDE.CMD %*`).
-  if (/(?:^|[\s;&|<>(`'"{\/\\])claude\.(?:exe|cmd|ps1)(?![\w.-])/i.test(t)) return true;
+  // R1185ap: after an assignment's `=` or a `${X:-…}`/`${X-…}`/`${X=…}` default too, as CLAUDE_AT reads them.
+  if (/(?:^|[\s;&|<>(`'"{\/\\=]|\$\{\w+:?[-=])claude\.(?:exe|cmd|ps1)(?![\w.-])/i.test(t)) return true;
   for (const m of t.matchAll(CLAUDE_AT)) {
     const rest = t.slice((m.index ?? 0) + m[0].length);
     if (/^\s*$/.test(rest) || /^(?:["`$)}<>;&|%@\\]|'(?![a-z]))/.test(rest)) return true;
-    if (/^\s+(?:["'`$<>;&|%@\\)*~/{:-]|\.{1,2}\/|\d+[<>]|X(?![\w])|[A-Za-z_]\w*=)/.test(rest)) return true;
+    // R1185ap D1: a newline ends the command (the next line is its own), and ` #` starts a comment.
+    if (/^[ \t]*(?:\r?\n|#(?:\s|$))/.test(rest)) return true;
+    if (/^\s+(?:["'`$<>;&|%@\\)*~/{:?[-]|\.{1,2}\/|\d+[<>]|X(?![\w])|[A-Za-z_]\w*=)/.test(rest)) return true;
     const word = /^\s+([a-z][\w-]*)(?:\s+([a-z][\w-]*))?/.exec(rest);
     if (word && SUBCOMMANDS.includes(word[1]!) && !(word[1] === 'auth' && ['status', 'login'].includes(word[2] ?? ''))) return true;
   }
@@ -312,6 +317,15 @@ test('#958: every way of naming claude outside the launch function is refused (f
     'signin-session',
     'src-helper',
     'subcommand-doctor',
+    'newline-if-fi',
+    'newline-echo',
+    'newline-wait',
+    'comment-after',
+    'comment-multiline',
+    'cmd-set-upper-cmd',
+    'default-upper-exe',
+    'glob-bracket',
+    'glob-question',
     'subcommand-hidden-remote-control',
     'subcommand-hidden-rc',
     'subcommand-hidden-sandbox',

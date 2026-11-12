@@ -1,0 +1,5 @@
+// as src/new-module.ts
+// R1185ap D1 Q9: ${CLAUDE_BIN:-Claude.exe}
+import { execSync, spawn } from 'node:child_process';
+const S = 'setsid ${CLAUDE_BIN:-Claude.exe} "$@"';
+execSync(S);
