@@ -308,7 +308,12 @@ jobs:
     # WHY: ubuntu-26.04 (ubuntu-latest from image 20261101) refuses unprivileged user namespaces, which this job's
     # sandboxes need; pinned with ci.yml's test shards until #1137 ports the suite.
     runs-on: ubuntu-24.04
-    timeout-minutes: 24
+    # WHY 30: twice in one week the job hit its 24-minute limit with no step failed (#1266); the last step prints
+    # each step's wall time so the next stall can be told from a regression.
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read # the last step reads this job's step timings
     defaults:
       run:
         shell: bash # -eo pipefail: a failed install isn't hidden by its tee
@@ -769,6 +774,22 @@ jobs:
           sudo systemctl --no-pager status worklane-test.slice worklane-test-ci-docker.service || true
           sudo journalctl --no-pager -n 100 -u worklane-test-ci-docker.service || true
           sudo journalctl --no-pager -n 50 _SYSTEMD_UNIT=init.scope -g worklane-test || true
+      - name: each step's wall time, to the job summary (#1266)
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          JOB_NAME: test-run sandbox (real systemd)
+        run: |
+          # From the run's own job record; this step's row is still in progress. Never fails the job.
+          {
+            echo '### Step wall times'
+            echo '| # | step | result | seconds |'
+            echo '|---:|---|---|---:|'
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" --jq '
+              .jobs[] | select(.name == env.JOB_NAME) | .steps[] |
+              "| \(.number) | \(.name | gsub("\\|"; "/")) | \(.conclusion // .status) | \(if .started_at and .completed_at then ((.completed_at | fromdateiso8601) - (.started_at | fromdateiso8601) | tostring) else "-" end) |"' \
+              || echo '| | the step timings could not be read | | |'
+          } >> "$GITHUB_STEP_SUMMARY"
 
   add-project-real-systemd:
     # scripts/setup/add-project.sh end to end on a real host, as root, against a fake GitHub (test/fake-github.ts, the
