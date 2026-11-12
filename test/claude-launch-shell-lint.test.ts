@@ -1,10 +1,12 @@
 // lint-test
 // #1262 (the owner's decision, 2026-11-10): the one-launch rule (#958; src/'s is held by its own AST lint) reaches
-// the repo's scripts. A script starts a claude session only through scripts/setup/lib.sh's claude_guarded (R1264g/h),
-// which runs claude in an empty environment (no CLAUDE_CODE_PLUGIN_DIRS, NODE_OPTIONS or BUN_*), lets through only
-// allowlisted flags (no --plugin-dir, --agents, --add-dir, --mcp-config, no abbreviation of one, no prompt read as a
-// flag), takes settings only as `{}` or a plain-path apiKeyHelper, and puts the launch's guards last (`--settings <json>
-// --setting-sources '' --strict-mcp-config`). Any other claude call is refused, unless it starts no session
+// the repo's scripts. A script starts a claude session only through scripts/setup/lib.sh's claude_guarded (R1264g-j),
+// which runs scripts/setup/claude-guarded.sh in a clean bash (no caller's shell function reaches it) and so claude in
+// an empty environment (no CLAUDE_CODE_PLUGIN_DIRS, NODE_OPTIONS or BUN_*); its words start with -p (no subcommand),
+// every flag is allowlisted (no --plugin-dir, --agents, --add-dir, --mcp-config, no abbreviation of one, no prompt read
+// as a flag), a value-taking flag has its value, --input-format is text only (stream-json's control requests load
+// settings past the guards); it takes settings only as `{}` or a plain-path apiKeyHelper, and puts the launch's guards
+// last (`--settings <json> --setting-sources '' --strict-mcp-config`). Any other claude call is refused, unless it starts no session
 // (`--version`, `auth status`, `auth login`) or is a pinned exception: its file, its exact line, why, and the digest of
 // its scope (pinScope: its function, or its whole script or workflow step, and every assignment of a variable it
 // reads), so no edit around it moves or widens it unseen. Else a setup, CI or spike script reopens #958's route: a
@@ -19,7 +21,9 @@
 // `xargs`, `find -exec`, `npx`, `node`, a helper of the repo's own), is a claude call, and so is a quoted literal one as
 // a command's first word. Only a command whose first word is a known non-launcher (`command -v`, `which`, `install`,
 // `ln`, `echo`, a `for` list, …) names claude without starting it. A string after `-c` (`bash -c`, `bash -lc`,
-// `su -c`) or `eval` is read as commands of its own, recursively. A script that defines its own claude_guarded is
+// `su -c`), `-c --`, `eval`, `--command`/`--command=` (su, runuser) or `env -S`/`--split-string`, and every quoted word
+// of a command `tmux` or `ssh` runs, is read as commands of its own, recursively. Quoting is read as bash reads it
+// (R1264j D2): nothing escaped in `'…'`, a backslash takes the next character in `$'…'`, `"…"` and outside quotes. A script that defines its own claude_guarded is
 // refused.
 //
 // What it reads: every tracked file whose shebang names a shell, `*.sh`, `*.bash`, `*.zsh`, `*.ksh`, `*.fish`,
@@ -122,10 +126,10 @@ export const SHELL_EXCEPTIONS: Pin[] = [
     '1c80be8764dd95ae19a1d3d918ebe6bf367abed22b2cf74f3506babf9ea417c8',
   ],
   [
-    'scripts/setup/lib.sh',
+    'scripts/setup/claude-guarded.sh',
     'command ${cg_sudo[@]+"${cg_sudo[@]}"} ${cg_timeout[@]+"${cg_timeout[@]}"} /usr/bin/env -i "HOME=$cg_home" PATH=/usr/local/bin:/usr/bin:/bin CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 ${cg_env[@]+"${cg_env[@]}"} "$cg_bin" "$@" --settings "$cg_settings" --setting-sources \'\' --strict-mcp-config',
-    "claude_guarded, the one launch a script may use (R1264g/h): an empty environment but for HOME, a fixed PATH and allowlisted names; only allowlisted flags (--permission-mode dontAsk only); settings only {} or a plain-path apiKeyHelper; the guards last. Held with its function by digest",
-    'e5f6efe7adc14f0e0f62ece1eb795530d43015ac7e7cbce2545f73d611287766',
+    "claude_guarded, the one launch a script may use (R1264g-j): run by lib.sh's claude_guarded in a clean bash; an empty environment but for HOME, USER, a fixed PATH and allowlisted names; -p first, only allowlisted flags, each value-taking one with its value, --permission-mode dontAsk and --input-format text only; settings only {} or a plain-path apiKeyHelper; the guards last. Held with its whole file by digest",
+    '61ec4a215465691ffefc5afaf4f9de98e0f4e7c141c2f8a43da39edef48dc9c0',
   ],
 ];
 
@@ -151,6 +155,24 @@ const KEYWORDS = new Set([
   'time',
 ]);
 
+/** A quote the lint is inside: `'…'`, ANSI-C `$'…'` or `"…"`. */
+type Quote = null | "'" | "$'" | '"';
+/**
+ * bash's quoting, one step at a time (R1264j D2): inside `'…'` nothing is escaped (`'\'` is a backslash); inside
+ * `$'…'` and `"…"`, and outside quotes, a backslash takes the next character (`$'can\'t'`, `"C:\\"`). The state after
+ * the step at t[k], and how many characters it took.
+ */
+function quoteStep(t: string, k: number, q: Quote): { q: Quote; n: number } {
+  const c = t[k]!;
+  if (q === "'") return { q: c === "'" ? null : q, n: 1 };
+  if (c === '\\') return { q, n: 2 };
+  if (q === "$'") return { q: c === "'" ? null : q, n: 1 };
+  if (q === '"') return { q: c === '"' ? null : q, n: 1 };
+  if (c === '$' && t[k + 1] === "'") return { q: "$'", n: 2 };
+  if (c === "'" || c === '"') return { q: c, n: 1 };
+  return { q: null, n: 1 };
+}
+
 /** Joins continued lines and drops comments (a `#` at a word's start outside quotes) and blank lines. */
 function logicalLines(text: string): { line: number; end: number; text: string }[] {
   const out: { line: number; end: number; text: string }[] = [];
@@ -159,17 +181,16 @@ function logicalLines(text: string): { line: number; end: number; text: string }
     const start = i;
     let l = raw[i]!;
     while (/\\\s*$/.test(l) && i + 1 < raw.length) l = l.replace(/\\\s*$/, ' ') + raw[++i];
-    let q: string | null = null;
+    let q: Quote = null;
     let cut = l.length;
-    for (let k = 0; k < l.length; k++) {
-      const c = l[k]!;
-      if (q) {
-        if (c === q && l[k - 1] !== '\\') q = null;
-      } else if (c === "'" || c === '"') q = c;
-      else if (c === '#' && (k === 0 || /\s/.test(l[k - 1]!))) {
+    for (let k = 0; k < l.length; ) {
+      if (!q && l[k] === '#' && (k === 0 || /\s/.test(l[k - 1]!))) {
         cut = k;
         break;
       }
+      const r = quoteStep(l, k, q);
+      q = r.q;
+      k += r.n;
     }
     const t = l.slice(0, cut).trim();
     if (t) out.push({ line: start + 1, end: i + 1, text: t });
@@ -183,14 +204,14 @@ const LOOKUP = /^\s*(?:command\s+-[vV]|which|type\s+-[Pp])\s+["']?(?:\S*\/)?clau
 /** Where the `)` closing a `$(` that opens at `from` (just past its `(`) is: quotes and nested parens skipped. */
 function closeParen(t: string, from: number): number {
   let depth = 1;
-  let q: string | null = null;
-  for (let k = from; k < t.length; k++) {
+  let q: Quote = null;
+  for (let k = from; k < t.length; ) {
     const c = t[k]!;
-    if (q) {
-      if (c === q && t[k - 1] !== '\\') q = null;
-    } else if (c === "'" || c === '"') q = c;
-    else if (c === '(') depth++;
-    else if (c === ')' && --depth === 0) return k;
+    if (!q && c === '(') depth++;
+    else if (!q && c === ')' && --depth === 0) return k;
+    const r = quoteStep(t, k, q);
+    q = r.q;
+    k += r.n;
   }
   return t.length;
 }
@@ -203,12 +224,23 @@ function closeParen(t: string, from: number): number {
 function commands(t: string): string[] {
   const out: string[] = [];
   let cur = '';
-  let q: string | null = null;
+  let q: Quote = null;
   let braces = 0;
   for (let k = 0; k < t.length; k++) {
     const c = t[k]!;
     const two = t.slice(k, k + 2);
     if (q === "'") {
+      cur += c;
+      if (c === "'") q = null;
+      continue;
+    }
+    // A backslash takes the next character, outside quotes and inside `$'…'` and `"…"` (R1264j D2).
+    if (c === '\\') {
+      cur += two;
+      k++;
+      continue;
+    }
+    if (q === "$'") {
       cur += c;
       if (c === "'") q = null;
       continue;
@@ -242,7 +274,13 @@ function commands(t: string): string[] {
     }
     if (q === '"') {
       cur += c;
-      if (c === '"' && t[k - 1] !== '\\') q = null;
+      if (c === '"') q = null;
+      continue;
+    }
+    if (two === "$'") {
+      q = "$'";
+      cur += two;
+      k++;
       continue;
     }
     if (c === "'" || c === '"') {
@@ -279,6 +317,13 @@ function wordsOf(cmd: string): Word[] {
     } else if (c === '\\') {
       cur += c + (cmd[k + 1] ?? '');
       k++;
+    } else if (top === "$'") {
+      cur += c;
+      if (c === "'") stack.pop();
+    } else if (c === '$' && cmd[k + 1] === "'" && top !== '"') {
+      stack.push("$'");
+      cur += "$'";
+      k++;
     } else if (c === '$' && cmd[k + 1] === '{') {
       stack.push('{');
       cur += '${';
@@ -306,16 +351,18 @@ const unquote = (w: string) => w.replace(/^(['"])(.*)\1$/s, '$2');
 /** Where the `}` closing a `{` that opens just before `from` is: quotes, escapes, `${…}` and comments read. */
 function closeBrace(t: string, from: number): number {
   let depth = 1;
-  let q: string | null = null;
-  for (let k = from; k < t.length; k++) {
+  let q: Quote = null;
+  for (let k = from; k < t.length; ) {
     const c = t[k]!;
-    if (q) {
-      if (c === q && (q === "'" || t[k - 1] !== '\\')) q = null;
-    } else if (c === '\\') k++; // an escaped character outside quotes (`\"`, `\{`) is a plain one
-    else if (c === "'" || c === '"') q = c;
-    else if (c === '#' && (k === 0 || /\s/.test(t[k - 1]!))) k = t.indexOf('\n', k) < 0 ? t.length : t.indexOf('\n', k) - 1;
-    else if (c === '{') depth++;
-    else if (c === '}' && --depth === 0) return k;
+    if (!q && c === '#' && (k === 0 || /\s/.test(t[k - 1]!))) {
+      k = t.indexOf('\n', k) < 0 ? t.length : t.indexOf('\n', k);
+      continue;
+    }
+    if (!q && c === '{') depth++;
+    else if (!q && c === '}' && --depth === 0) return k;
+    const r = quoteStep(t, k, q);
+    q = r.q;
+    k += r.n;
   }
   return t.length;
 }
@@ -376,10 +423,21 @@ export function shellLaunchProblems(path: string, text: string, pinned = new Map
   let phys: number[] = [];
   const judge = (line: number, cmd: string) => {
     const words = wordsOf(cmd);
-    // Strings run as commands: after `-c` (`bash -c`, `bash -lc`, `su -c`) or `eval`, recursively.
+    // Strings run as commands, recursively: after `-c` (`bash -c`, `bash -lc`, `su -c`), `-c --`, `eval`,
+    // `--command` (su, runuser) and `env -S`/`--split-string`, or joined to one of those by `=`; and every quoted word
+    // of a command that `tmux` or `ssh` runs (R1264j D3: `tmux new-session -d "claude …"`, `ssh host 'claude …'`).
+    const remote = (i: number) => words.slice(0, i).some((x) => !x.quoted && /^(?:\S*\/)?(?:tmux|ssh)$/.test(x.text));
     words.forEach((w, i) => {
       const prev = words[i - 1]?.text;
-      if (w.quoted && prev && (/^-[a-z]*c$/.test(prev) || prev === 'eval')) scan(line, unquote(w.text));
+      const prev2 = words[i - 2]?.text ?? '';
+      const joined = /^(?:--command|--split-string|-S)=(.*)$/s.exec(w.text);
+      if (joined) scan(line, unquote(joined[1]!));
+      else if (
+        w.quoted &&
+        prev &&
+        (/^-[a-z]*c$/.test(prev) || prev === 'eval' || (prev === '--' && /^-[a-z]*c$/.test(prev2)) || ['--command', '-S', '--split-string'].includes(prev) || remote(i))
+      )
+        scan(line, unquote(w.text));
     });
     let k = 0;
     while (k < words.length && (/^[A-Za-z_]\w*\+?=/.test(words[k]!.text) || KEYWORDS.has(words[k]!.text))) k++;
@@ -634,8 +692,8 @@ const asPath = (as: string | undefined) => (as === undefined ? undefined : /^<pi
 test('#1262: the pinned exceptions are the owner\'s one, by its exact file, line and reason (a new or moved pin is a change to this test)', () => {
   // R1264c D1, R1264d D2: the whole list by its digest (no spike path named here, #673): its file, its exact line and
   // its reason. Moving, widening or adding a pin changes the digest, so the change shows in this test in review.
-  assert.equal(createHash('sha256').update(JSON.stringify(SHELL_PINS)).digest('hex'), '765a9f8f663c830f2d158af30fb489e86125a2055f22a9c7792758f5b5eb0f66');
-  assert.deepEqual(SHELL_PINS.map(([f, , why]) => [f.split('/').at(-1), why]), [['worktree-commit.sh', 'a sandbox probe whose project-settings load is the point (the owner, 2026-11-11, "spikes: b")']]);
+  assert.equal(createHash('sha256').update(JSON.stringify(SHELL_PINS)).digest('hex'), '914aa0b5d06634a84caa7fea57533972238638678c724424d8437ef9c6d19c6f');
+  assert.deepEqual(SHELL_PINS.map(([f, , why]) => [f.split('/').at(-1), why]), [['worktree-commit.sh', 'a sandbox probe whose project-settings load is the point (the owner, 2026-11-11, "spikes: b")'], ['agent-messaging.sh', 'a spike that needs stream-json input (a second message mid-turn, an interrupt), which claude_guarded refuses (R1264j D1): its guards end the argv, and its stdin\'s printfs are in the file its digest holds (the owner\'s "spikes: b")'], ['agent-messaging.sh', 'a spike that needs stream-json input (a second message mid-turn, an interrupt), which claude_guarded refuses (R1264j D1): its guards end the argv, and its stdin\'s printfs are in the file its digest holds (the owner\'s "spikes: b")'], ['agent-messaging.sh', 'a spike that needs stream-json input (a second message mid-turn, an interrupt), which claude_guarded refuses (R1264j D1): its guards end the argv, and its stdin\'s printfs are in the file its digest holds (the owner\'s "spikes: b")']]);
 });
 
 test('#1262: every way a script can start claude other than through claude_guarded is refused (fixtures), and the controls pass', () => {
@@ -646,6 +704,14 @@ test('#1262: every way a script can start claude other than through claude_guard
   // check-table: never-shrink
   const MUST_FAIL = [
     'after-and',
+    'ansi-c-quote',
+    'bash-c-dashdash',
+    'env-split-string',
+    'escaped-backslash-dq',
+    'lone-backslash-sq-then-hash',
+    'ssh-command',
+    'su-command-equals',
+    'tmux-command',
     'nested-expansion',
     'array-in-array',
     'array-quoted-variable',

@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# R1264j D3 (j02d): a command ssh runs.
+ssh wl@localhost 'claude -p hi'

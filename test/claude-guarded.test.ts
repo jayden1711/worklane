@@ -95,6 +95,19 @@ test('R1264g/h: every word that starts with - must be an allowlisted flag, exact
     ['--permission-mode=bypassPermissions'],
     ['--permission-mode', 'acceptEdits'],
     ['--permission-mode'],
+    // R1264j D1: stream-json input takes control requests that load settings, MCP servers and agents past the guards.
+    ['--input-format', 'stream-json'],
+    ['--input-format=stream-json'],
+    // R1264i D2, R1264j D5: a value-taking flag last would take the appended --settings as its value.
+    ['--model'],
+    ['--fallback-model'],
+    ['--effort'],
+    ['--max-turns'],
+    ['--json-schema'],
+    ['--allowedTools'],
+    ['--disallowedTools'],
+    ['--output-format'],
+    ['--input-format'],
   ]) {
     const r = guarded(['--', '{}', '-p', 'hi', ...bad]);
     assert.notEqual(r.status, 0, `${bad.join(' ')}: refused`);
@@ -103,7 +116,7 @@ test('R1264g/h: every word that starts with - must be an allowlisted flag, exact
   // A prompt that the CLI would read as a flag (R1264h D2, c02).
   assert.equal(guarded(['--', '{}', '-p', '--plugin-dir=/planted']).argv, null);
   // The flags its callers use pass, with their values.
-  const ok = guarded(['--', '{}', '-p', '--max-budget-usd', '0.05', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--max-turns', '6', '--allowedTools', 'Bash(sleep:*)', '--permission-mode', 'dontAsk']);
+  const ok = guarded(['--', '{}', '-p', '--max-budget-usd', '0.05', '--input-format', 'text', '--output-format', 'stream-json', '--verbose', '--max-turns', '6', '--allowedTools', 'Bash(sleep:*)', '--permission-mode', 'dontAsk']);
   assert.equal(ok.status, 0, ok.err);
 });
 
@@ -123,4 +136,49 @@ test('R1264g/h: claude_guarded refuses an option it does not know, and a claude 
   assert.equal(guarded(['--as', 'Bad User', '--', '{}', '-p', 'hi']).argv, null);
   const r = spawnSync('bash', ['-c', 'source "$1"; claude() { :; }; claude_guarded -- "{}" -p hi', '_', join(repoRoot, 'scripts', 'setup', 'lib.sh')], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin', HOME: tmpdir() } });
   assert.notEqual(r.status, 0, 'a shell function named claude is not the binary');
+});
+
+// The top-level commands #1185 probed from claude 2.1.296 (scripts/ci/claude-commands.mjs there), as a first word.
+const COMMANDS_2_1_296 = ['agents', 'apply-project-settings', 'attach', 'auth', 'auto-mode', 'bridge', 'daemon', 'design-login', 'doctor', 'drop-worktree-registrations', 'edit-chrome-settings', 'edit-hook', 'edit-memory-settings', 'edit-permission-rules', 'edit-sandbox-settings', 'edit-skill-overrides', 'gateway', 'import', 'import-conversations', 'install', 'kill', 'logs', 'mcp', 'plugin', 'plugins', 'project', 'purge', 'rc', 'remote', 'remote-control', 'respawn', 'rm', 'sandbox', 'self-hosted-runner', 'setup-token', 'stop', 'sync', 'ultrareview', 'update', 'upgrade'];
+
+test('R1264i D3, R1264j D4: the first word is -p or --print: no word is read as a subcommand (respawn leaves a daemon past --timeout)', { skip: !posix }, () => {
+  for (const c of [...COMMANDS_2_1_296, 'hi']) {
+    const r = guarded(['--', '{}', c, 'x']);
+    assert.notEqual(r.status, 0, `${c}: refused`);
+    assert.equal(r.argv, null, `${c}: claude never started`);
+  }
+  assert.equal(guarded(['--', '{}', '--model', 'haiku', '-p', 'hi']).argv, null, 'a flag before -p: refused');
+  // As a prompt after -p, a command's name is only words.
+  const ok = guarded(['--', '{}', '-p', 'respawn', 'x']);
+  assert.equal(ok.status, 0, ok.err);
+  assert.deepEqual(ok.argv!.slice(0, 3), ['-p', 'respawn', 'x']);
+  assert.equal(guarded(['--', '{}', '--print', 'hi']).status, 0);
+});
+
+test("R1264i D1: a caller's shell functions named command, sudo, env, timeout or printenv don't reach the launch (it runs in a clean bash)", { skip: !posix }, () => {
+  const t = mkdtempSync(join(tmpdir(), 'claude-guarded-'));
+  try {
+    const bin = join(t, 'bin');
+    mkdirSync(bin);
+    writeFileSync(join(bin, 'claude'), `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(join(t, 'got.json'))}, JSON.stringify(process.argv.slice(2)));\n`);
+    chmodSync(join(bin, 'claude'), 0o755);
+    writeFileSync(join(bin, 'timeout'), '#!/bin/sh\nshift\nexec "$@"\n');
+    chmodSync(join(bin, 'timeout'), 0o755);
+    const hijack = [
+      'command() { if [ "$1" = -v ]; then builtin command "$@"; else builtin command "$@" --plugin-dir /planted; fi; }',
+      'sudo() { builtin command sudo "$@" --agents /planted; }',
+      'env() { builtin command env NODE_OPTIONS=--require=/planted "$@"; }',
+      'timeout() { shift; "$@" --add-dir /; }',
+      'printenv() { echo /planted; }',
+      'export -f command sudo env timeout printenv',
+    ].join('\n');
+    const r = spawnSync('bash', ['-c', `source "$1"; ${hijack}\nclaude_guarded --timeout 5 -- '{}' -p hi`, '_', join(repoRoot, 'scripts', 'setup', 'lib.sh')], {
+      encoding: 'utf8',
+      env: { PATH: `${bin}:/usr/bin:/bin`, HOME: t },
+    });
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(JSON.parse(readFileSync(join(t, 'got.json'), 'utf8')), ['-p', 'hi', '--settings', '{}', ...GUARDS]);
+  } finally {
+    rmSync(t, { recursive: true, force: true });
+  }
 });

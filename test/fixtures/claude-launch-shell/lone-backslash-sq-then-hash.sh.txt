@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# R1264j D2 (j01c): a lone backslash in '…', then a quoted ' #': the lint once cut a comment there.
+w=$(printf '%s' "$p" | tr '/' '\'); sed -i 's/ #.*//' f; claude -p hi --plugin-dir ./p

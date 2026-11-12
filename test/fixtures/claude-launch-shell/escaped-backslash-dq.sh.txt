@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# R1264j D2 (j01b): "…\\" closes in bash (the backslash is itself escaped); the lint once stayed inside it and read the call as an echo's data.
+echo "saved to C:\\"; claude -p hi --plugin-dir ./p
