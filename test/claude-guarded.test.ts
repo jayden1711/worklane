@@ -186,6 +186,13 @@ test("R1264i D1: a caller's shell functions named command, sudo, env, timeout or
   }
 });
 
+/** This user's name, primary group, and a group of theirs that isn't their own private one (if any). */
+function groups(): { user: string; primary: string; other: string | undefined } {
+  const run = (a: string[]) => spawnSync('id', a, { encoding: 'utf8' }).stdout.trim();
+  const user = run(['-un']);
+  return { user, primary: run(['-gn']), other: run(['-Gn']).split(/\s+/).find((g) => g && g !== user) };
+}
+
 /** A stand-in claude in `bin` that records its argv and the fds it holds open to `got`. */
 function recorder(bin: string, got: string) {
   mkdirSync(bin, { recursive: true });
@@ -241,7 +248,13 @@ test("R1264k/l D1: claude_guarded runs its helper only while it and its folder a
       });
     chmodSync(join(t, 'scripts', 'lib', 'claude-guarded.sh'), 0o644);
     assert.equal(run().status, 0, 'the control runs');
-    for (const [what, f, mode] of [['a group-writable helper', join(t, 'scripts', 'lib', 'claude-guarded.sh'), 0o664], ['a world-writable folder', join(t, 'scripts', 'lib'), 0o777]] as const) {
+    // The group case is built, not inherited (CI's runner:runner checkout is a private group, which may write): the
+    // helper is given a group of this user's that isn't their own, and made group-writable.
+    const { other } = groups();
+    const helper = join(t, 'scripts', 'lib', 'claude-guarded.sh');
+    if (other) spawnSync('chgrp', [other, helper]);
+    const cases = [...(other ? [['a helper writable by a group not its owner\'s own', helper, 0o664] as const] : []), ['a world-writable folder', join(t, 'scripts', 'lib'), 0o777] as const];
+    for (const [what, f, mode] of cases) {
       rmSync(join(t, 'got.json'), { force: true });
       chmodSync(f, mode);
       const r = run();
@@ -303,7 +316,8 @@ test("R1264m D2, n D1: a caller's exported functions named by a path (/usr/bin/e
       '/usr/bin/env() { builtin command /usr/bin/env "$@" --plugin-dir /planted; }',
       '/usr/bin/sudo() { builtin command /usr/bin/sudo "$@" --agents /planted; }',
       "/usr/bin/stat() { builtin echo 'root 644 root'; }",
-      'export -f /usr/bin/env /usr/bin/sudo /usr/bin/stat',
+      // bash 5 won't export a function whose name holds a `/` (3.2 will); the same shell's own definitions are the attack.
+      'export -f /usr/bin/env /usr/bin/sudo /usr/bin/stat 2>/dev/null || true',
     ].join('\n');
     // From a file the caller sources (the functions' text names host tools by path, which no test's command line may).
     writeFileSync(join(t, 'hijack.sh'), `${hijack}\n`);
@@ -327,12 +341,15 @@ test('R1264m/n D3: under umask 002 a group-writable helper runs when its group i
     // What a clone under umask 002 makes: files 664, folders 775.
     for (const p of [join(t, 'scripts', 'lib'), join(t, 'scripts', 'setup')]) chmodSync(p, 0o775);
     chmodSync(join(t, 'scripts', 'lib', 'claude-guarded.sh'), 0o664);
-    const st = (f: string) => (spawnSync('/usr/bin/stat', ['-c', '%U %G', f], { encoding: 'utf8' }).stdout || spawnSync('/usr/bin/stat', ['-f', '%Su %Sg', f], { encoding: 'utf8' }).stdout).trim().split(' ');
-    const [owner, group] = st(join(t, 'scripts', 'lib', 'claude-guarded.sh'));
     const run = () => spawnSync('bash', ['-c', `source ${JSON.stringify(lib)}; claude_guarded -- '{}' -p hi`], { encoding: 'utf8', env: { PATH: `${bin}:/usr/bin:/bin`, HOME: t } });
-    const r = run();
-    if (owner === group) assert.equal(r.status, 0, `group ${group} is ${owner}'s own: runs (${r.stderr})`);
-    else assert.match(r.stderr, /isn't lib\.sh's owner's alone/, `group ${group} isn't ${owner}'s own: refused`);
+    const { user, primary, other } = groups();
+    // Group-writable, its group the owner's own private group (a user-private group, as on CI's runner:runner): runs.
+    if (primary === user) assert.equal(run().status, 0, `group ${primary} is ${user}'s own: runs`);
+    // Group-writable, its group another of the owner's groups: refused (macOS's staff, or a chgrp'd one).
+    if (other || primary !== user) {
+      for (const p of [join(t, 'scripts', 'lib', 'claude-guarded.sh'), join(t, 'scripts', 'lib'), join(t, 'scripts', 'setup')]) spawnSync('chgrp', [other ?? primary, p]);
+      assert.match(run().stderr, /isn't lib\.sh's owner's alone/, `group ${other ?? primary} isn't ${user}'s own: refused`);
+    }
     chmodSync(join(t, 'scripts', 'lib', 'claude-guarded.sh'), 0o666);
     assert.match(run().stderr, /isn't lib\.sh's owner's alone/, 'other-writable: refused whatever the group');
     // Other-writable alone (no group write anywhere): refused by the o+w rule itself.
@@ -371,7 +388,8 @@ test('R1264m D1, n D2: no variable a caller sets, before lib.sh is sourced or af
     const redefine = spawnSync('bash', ['-c', `source "$1"; claude_guarded() { ${evil}; }; claude_guarded -- '{}' -p hi`, '_', lib], { encoding: 'utf8', env: { PATH: `${bin}:/usr/bin:/bin`, HOME: t } });
     assert.match(redefine.stderr, /readonly function/);
     assert.equal(existsSync(join(t, 'planted')), false, 'the redefinition never ran');
-    assert.ok(existsSync(join(t, 'got.json')), 'the real claude_guarded ran');
+    // bash 3.2 goes on to the next command, which runs the real one; bash 5 ends the script there: either way, no other.
+    assert.ok(existsSync(join(t, 'got.json')) || redefine.status !== 0, 'the real claude_guarded ran, or the script ended at the refused definition');
   } finally {
     rmSync(t, { recursive: true, force: true });
   }
