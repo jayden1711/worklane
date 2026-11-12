@@ -16,7 +16,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import ts from 'typescript';
 import { BRAND } from '../src/brand.js';
-import { DASHBOARD_KEY_PREFIX, markerProblem, redactionPatterns, redactRecords, redactString, secretKinds, TRACKER } from '../src/events/redact.js';
+import { DASHBOARD_KEY_PREFIX, isDashboardKey, markerProblem, redactionPatterns, redactRecords, redactString, secretKinds, TRACKER } from '../src/events/redact.js';
 import { repoRoot } from './helpers.js';
 import { leaks, run, SHAPES } from './token-standins.js';
 
@@ -257,16 +257,15 @@ const REFUSED_GLOBALS = new Set(['Reflect', 'globalThis', 'global', 'self', 'win
 // check-table: never-grow
 const GLOBAL_METHODS: Readonly<Record<string, readonly string[]>> = Object.freeze({
   Object: ['freeze', 'getOwnPropertyNames', 'getOwnPropertySymbols', 'getOwnPropertyDescriptor', 'fromEntries', 'entries'],
-  String: ['fromCharCode'],
   Array: ['isArray'],
   Math: ['max', 'min'],
 });
 /** Globals read as plain values. */
 // check-table: never-grow
 const VALUE_GLOBALS = new Set(['undefined', 'NaN', 'Infinity']);
-/** What may be constructed. */
+/** What may be constructed: these in any code; a RegExp in load-only code only (R1258t's T1: the global `RegExp` is read at each construction). No global function is called directly by run-time code (atob, String, Number: each read at call time). */
 // check-table: never-grow
-const NEWABLE = new Set(['Error', 'RangeError', 'Set', 'Map', 'RegExp']);
+const NEWABLE = new Set(['Error', 'RangeError', 'Set', 'Map']);
 /** Data properties a value of a regex or string type may give up (or, for lastIndex, take); every other access on such a value is refused in run-time code, or a direct method call in load-only code. */
 // check-table: never-grow
 const REGEX_DATA = new Set(['source', 'flags', 'global', 'lastIndex']);
@@ -275,13 +274,17 @@ const STRING_DATA = new Set(['length']);
 /**
  * The functions that run at load only, reachable from the builder call before any redaction: a patch made after load
  * can't reach what already ran, so they may call a string's or a regex's own methods directly. Every other function,
- * and every arrow in a table, is run-time code, held to the allowlist below.
+ * and every arrow in a table, is run-time code, held to the allowlist below. A closure a load-only function returns,
+ * stores or puts in an object or an array runs later, so it is run-time code too (R1258t's T3: the run closure's
+ * arrows were linted as build); only a callback given straight to a call made in load-only code (a map over a table)
+ * runs at load. Run-time code never names a load-only function (R1258t's T2: a call to groupCount from redactOrThrow
+ * ran the prototype's exec at run time); at the top level only the builder call names one.
  */
 // check-table: never-grow
-const LOAD_ONLY = new Set(['build', 'captured', 'snapshot', 'markerProblem', 'groupCount', 'parseRegex', 'leadingGroups', 'trailingGroups', 'boundaryGroup', 'these', 'ownKeys']);
+const LOAD_ONLY = new Set(['build', 'captured', 'snapshot', 'listed', 'compiled', 'markerProblem', 'groupCount', 'parseRegex', 'leadingGroups', 'trailingGroups', 'boundaryGroup', 'these', 'ownKeys']);
 /** What run-time code may do with a value: the methods of the captured intrinsics (Ops), of an array, a set or a map, and the run closure's four operations; and the data properties of the module's own objects. Everything else is refused. */
 // check-table: never-grow
-const OPS_METHODS = new Set(['exec', 'slice', 'indexOf', 'includes', 'startsWith', 'endsWith', 'lower', 'upper', 'repeat', 'split', 'codeAt']);
+const OPS_METHODS = new Set(['exec', 'slice', 'indexOf', 'includes', 'startsWith', 'endsWith', 'lower', 'upper', 'repeat', 'codeAt', 'fromCode']);
 // check-table: never-grow
 const COLLECTION_METHODS = new Set(['push', 'map', 'filter', 'some', 'every', 'join', 'sort', 'entries', 'at', 'forEach', 'flatMap', 'reduce', 'find', 'unshift', 'slice', 'includes', 'has', 'add', 'keys', 'values']);
 // check-table: never-grow
@@ -304,8 +307,8 @@ const CAPTURE_TEXT = `function captured(): Ops {
     lower: call.bind(''.toLowerCase) as Ops['lower'],
     upper: call.bind(''.toUpperCase) as Ops['upper'],
     repeat: call.bind(''.repeat) as Ops['repeat'],
-    split: call.bind(''.split) as Ops['split'],
     codeAt: call.bind(''.charCodeAt) as Ops['codeAt'],
+    fromCode: String.fromCharCode,
   });
 }`;
 const CAPTURE_CALL = 'const ops = captured();';
@@ -364,14 +367,20 @@ function referenceProblems(text: string): string[] {
     if (checker.isArrayType(t) || checker.isTupleType(t) || name === 'Array' || name === 'ReadonlyArray' || name === 'RegExpExecArray' || name === 'Set' || name === 'Map' || name === 'ReadonlySet' || name === 'ReadonlyMap') return 'array';
     if (t.flags & ts.TypeFlags.TypeParameter) return 'other';
     if (t.isIntersection()) {
-      // `T & any[]` (redact's value, narrowed by Array.isArray) is an array; otherwise the one kind among the parts.
+      // A string or a regex part makes the value that (R1258s's S2: `string & string[]`, from a type predicate or
+      // Array.isArray on a string, was an array, and `slice` on it String.prototype's); `T & any[]` (redact's value,
+      // narrowed by Array.isArray) is an array; otherwise the one kind among the parts.
       const kinds = new Set(t.types.map(kindOf));
       kinds.delete('other');
+      if (kinds.has('string')) return 'string';
+      if (kinds.has('regex')) return 'regex';
       if (kinds.has('array')) return 'array';
       if (kinds.size === 1) return [...kinds][0]!;
     }
     return 'object';
   };
+  /** The kinds a template span or a `+` operand may be: a string, or a number, a boolean or the like; never a regex (its toString), an object, an array or a function. */
+  const TEXTUAL = new Set<Kind>(['string', 'other']);
   const isGlobal = (id: ts.Identifier): boolean => {
     const decls = checker.getSymbolAtLocation(id)?.declarations ?? [];
     return decls.length > 0 && decls.every((d) => d.getSourceFile() !== sf);
@@ -390,9 +399,63 @@ function referenceProblems(text: string): string[] {
     for (let p: ts.Node | undefined = n; p; p = p.parent) if (ts.isFunctionDeclaration(p) && p.parent === sf && p.name) return p.name.text;
     return null;
   };
+  const isFunctionLike = (n: ts.Node): boolean => ts.isFunctionDeclaration(n) || ts.isFunctionExpression(n) || ts.isArrowFunction(n) || ts.isMethodDeclaration(n) || ts.isAccessor(n) || ts.isConstructorDeclaration(n);
+  /** The nearest function, arrow or method a node is inside of (the node itself excluded), or null at the top level. */
+  const enclosingFn = (n: ts.Node): ts.Node | null => {
+    for (let p: ts.Node | undefined = n.parent; p; p = p.parent) if (isFunctionLike(p)) return p;
+    return null;
+  };
+  /** Every identifier in the file by the symbol it names, for the references to a closure's binding. */
+  const references = new Map<ts.Symbol, ts.Identifier[]>();
+  const collect = (n: ts.Node): void => {
+    if (ts.isIdentifier(n)) {
+      const s = checker.getSymbolAtLocation(n);
+      if (s) references.set(s, [...(references.get(s) ?? []), n]);
+    }
+    ts.forEachChild(n, collect);
+  };
+  collect(sf);
+  const active = new Set<ts.Node>();
+  /**
+   * Whether the code of function-like `f` runs at load only (R1258t's T3): a top-level declaration named in LOAD_ONLY;
+   * a callback given straight to a call made in load-only code; or a closure bound to a name in load-only code
+   * (`const read = () => ...`, a nested declaration) whose every reference is a call made from load-only code. A closure
+   * returned, put in an object or an array, passed or read as a value, or called from run-time code runs later: run-time
+   * code, like the run closure's arrows and build's check. A cycle of closures calling each other is read as load-only
+   * while it is being decided, and any reference from run-time code on the way decides it (no answer is kept).
+   */
+  const runsAtLoad = (f: ts.Node): boolean => {
+    if (ts.isFunctionDeclaration(f) && f.parent === sf) return f.name !== undefined && LOAD_ONLY.has(f.name.text);
+    const p = f.parent;
+    const outer = enclosingFn(f);
+    if (outer === null) return false;
+    if (ts.isCallExpression(p) && p.arguments.some((a) => a === f)) return runsAtLoad(outer);
+    const name = ts.isFunctionDeclaration(f) ? f.name : ts.isVariableDeclaration(p) && p.initializer === f && ts.isIdentifier(p.name) ? p.name : undefined;
+    if (!name) return false;
+    if (active.has(f)) return true;
+    active.add(f);
+    try {
+      if (!runsAtLoad(outer)) return false;
+      const symbol = checker.getSymbolAtLocation(name);
+      const refs = (symbol && references.get(symbol)) ?? [];
+      return refs.every((r) => {
+        if (r === name) return true;
+        if (!(ts.isCallExpression(r.parent) && r.parent.expression === r)) return false;
+        const from = enclosingFn(r);
+        return from !== null && runsAtLoad(from);
+      });
+    } finally {
+      active.delete(f);
+    }
+  };
   const loadOnly = (n: ts.Node): boolean => {
-    const f = enclosing(n);
-    return f !== null && LOAD_ONLY.has(f);
+    const f = isFunctionLike(n) ? n : enclosingFn(n);
+    return f !== null && runsAtLoad(f);
+  };
+  /** The name of the top-level function an identifier resolves to, or null. */
+  const topFunction = (id: ts.Identifier): string | null => {
+    const d = checker.getSymbolAtLocation(id)?.declarations?.[0];
+    return d && ts.isFunctionDeclaration(d) && d.parent === sf && d.name ? d.name.text : null;
   };
   // The capture: exactly CAPTURE_TEXT, and build's first statement exactly CAPTURE_CALL.
   const captureFn = sf.statements.find((s) => ts.isFunctionDeclaration(s) && s.name?.text === 'captured');
@@ -411,26 +474,37 @@ function referenceProblems(text: string): string[] {
     if (ts.isClassDeclaration(n) || ts.isClassExpression(n)) say(n, 'a class');
     if (n.kind === ts.SyntaxKind.AnyKeyword) say(n.parent, 'any');
     if (ts.isObjectBindingPattern(n)) say(n, 'an object destructuring');
+    if (ts.isTypePredicateNode(n)) say(n.parent, 'a type predicate');
+    // R1258s's S2: iterating a string reads String.prototype[Symbol.iterator]; a regex as text reads its toString.
+    if (!load && (ts.isForOfStatement(n) || ts.isSpreadElement(n)) && !(kindOf(checker.getTypeAtLocation(inner(n.expression))) === 'array' && !asserted(n.expression))) say(n, 'an iteration over something not an array, a set or a map the checker typed');
+    if (!load && ts.isTemplateSpan(n) && !TEXTUAL.has(kindOf(checker.getTypeAtLocation(inner(n.expression))))) say(n, 'a template span that is not a string or a number');
+    if (!load && ts.isBinaryExpression(n) && (n.operatorToken.kind === ts.SyntaxKind.PlusToken || n.operatorToken.kind === ts.SyntaxKind.PlusEqualsToken) && !(TEXTUAL.has(kindOf(checker.getTypeAtLocation(inner(n.left)))) && TEXTUAL.has(kindOf(checker.getTypeAtLocation(inner(n.right)))))) say(n, 'a + over something not a string or a number');
     if (ts.isArrayBindingPattern(n) && kindOf(checker.getTypeAtLocation(n)) !== 'array') say(n, 'an array pattern over something not an array or a tuple');
     if ((ts.isFunctionDeclaration(n) || ts.isFunctionExpression(n) || ts.isArrowFunction(n) || ts.isMethodDeclaration(n) || ts.isTypeAliasDeclaration(n) || ts.isInterfaceDeclaration(n)) && n.typeParameters?.length && !(ts.isFunctionDeclaration(n) && n.name?.text === 'redact')) say(n, 'a type parameter outside redact');
     if (ts.isAsExpression(n)) {
       const target = n.type.getText(sf);
       if (!(ASSERTIONS.has(target) || (target === 'T' && enclosing(n) === 'redact'))) say(n, `an assertion to ${target}`);
     }
-    if (ts.isNewExpression(n) && !(ts.isIdentifier(n.expression) && NEWABLE.has(n.expression.text) && isGlobal(n.expression))) say(n, 'a construction of something not in the allowlist');
+    if (ts.isNewExpression(n) && !(ts.isIdentifier(n.expression) && isGlobal(n.expression) && (NEWABLE.has(n.expression.text) || (load && n.expression.text === 'RegExp')))) say(n, load ? 'a construction of something not in the allowlist' : 'a construction of something not in the allowlist (a RegExp only in load-only code)');
     if (ts.isVariableDeclaration(n) && n.type && n.initializer) {
       const k = kindOf(checker.getTypeAtLocation(inner(n.initializer)));
       if ((k === 'regex' || k === 'string' || k === 'function') && kindOf(checker.getTypeFromTypeNode(n.type)) !== k) say(n, `a ${k} value under an annotation of another kind`);
     }
     if (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.PlusToken && ts.isStringLiteralLike(n.left) && ts.isStringLiteralLike(n.right)) say(n, 'a string built from literal pieces');
     if (ts.isIdentifier(n) && !inTypePosition(n) && !(ts.isPropertyAccessExpression(n.parent) && n.parent.name === n) && !(ts.isPropertyAssignment(n.parent) && n.parent.name === n) && !ts.isPropertySignature(n.parent) && !ts.isMethodSignature(n.parent)) {
+      const top = topFunction(n);
       if (REFUSED_GLOBALS.has(n.text)) say(n, 'a refused global is named');
-      else if (isGlobal(n) && !VALUE_GLOBALS.has(n.text)) {
+      else if (top !== null && LOAD_ONLY.has(top) && !(ts.isFunctionDeclaration(n.parent) && n.parent.name === n) && !load) {
+        // R1258t's T2: a load-only function named by run-time code; at the top level, only the builder call names one.
+        const builderCall = top === BUILDER.fn && isCallee(n) && ts.isVariableDeclaration(n.parent.parent) && ts.isIdentifier(n.parent.parent.name) && n.parent.parent.name.text === BUILDER.name && enclosingFn(n) === null;
+        if (!builderCall) say(n, 'a load-only function named outside load-only code');
+      } else if (isGlobal(n) && !VALUE_GLOBALS.has(n.text)) {
         const p = n.parent;
-        const direct = isCallee(n);
+        // A direct call of a global function (atob, String) reads it at call time: load-only code only (R1258t's T1).
+        const direct = ts.isNewExpression(p) ? isCallee(n) : isCallee(n) && load;
         const method = ts.isPropertyAccessExpression(p) && p.expression === n && isCallee(p) && (GLOBAL_METHODS[n.text] ?? []).includes(p.name.text);
         const typeOf = ts.isBinaryExpression(p) && p.operatorToken.kind === ts.SyntaxKind.InstanceOfKeyword && p.right === n;
-        if (!direct && !method && !typeOf) say(n, 'a global used other than as a call, a construction, an allowed direct method call or an instanceof');
+        if (!direct && !method && !typeOf) say(n, 'a global used other than as a construction, an allowed direct method call, an instanceof, or a call in load-only code');
       }
     }
     if (ts.isPropertyAccessExpression(n)) {
@@ -480,7 +554,7 @@ test('B2/D5: every function-backed rule is pinned by its exact code, so adding o
     String.raw`secret: Basic credential: \b(basic)(\s+)((?:[A-Za-z0-9+/]|\\\/){8,}={0,2})/gi :: 126e8951f6072122`,
     String.raw`secret: secret under a JSON key: (\\?"|')([A-Za-z0-9_-]+)\1(\s*(?::|=>)\s*)(\\?"|')([A-Za-z0-9_\-.+/=~]{16,})\4/g :: fbee9afb455be897`,
     String.raw`identifier: home path: (^|[^\w.~/:-]|file:\/\/)\/(?:home|Users|mnt\/[A-Za-z]\/Users)\/([^\s/"'${tick}<>()[\]{},;|\\]+)/g :: 2c3c46b26a5809ac`,
-    String.raw`identifier: internal host: (^|[^A-Za-z0-9./-]|\/\/)([A-Za-z0-9][A-Za-z0-9.-]*\.(?:internal|localdomain|lan|corp|intranet|home\.arpa|ts\.net|local))(?![A-Za-z0-9-]|\.[A-Za-z0-9])/gi :: 97ee6d159992737f`,
+    String.raw`identifier: internal host: (^|[^A-Za-z0-9./-]|\/\/)([A-Za-z0-9][A-Za-z0-9.-]*\.(?:internal|localdomain|lan|corp|intranet|home\.arpa|ts\.net|local))(?![A-Za-z0-9-]|\.[A-Za-z0-9])/gi :: 992b0f2d996ee96c`,
   ]);
   // The two named functions and the helpers the arrows call, by the digest of their TypeScript text: a change to any of
   // them changes a digest here.
@@ -496,18 +570,20 @@ test('B2/D5: every function-backed rule is pinned by its exact code, so adding o
   assert.deepEqual(problems, []);
   assert.deepEqual(pins, [
     'c24ed8d44a6949d5 BUILT',
-    '0f600b56cc3e4919 build',
+    'f369981dc1dae13a build',
     '8d013222aa293df5 PATTERNS',
     '3860f42286956df1 BROAD',
     '6587741a892dc073 IDENTIFIERS',
-    'd942f56839e85693 captured',
+    'fe728a9e504fcd51 captured',
     'a6ce7e0ea4aaaa3a snapshot',
     '6dde4c5d5897dc63 BROAD_RULES',
+    '61bd301d992ca3a6 listed',
+    '0509c804f184d15b compiled',
     '8cdd1b352c026a0a GLUE_PARTS',
     'c7ff65a8518b8850 GLUED_PREFIXES',
-    '52244d41612a2974 ownKeys',
+    '68948a12bae39741 onlyLastIndex',
     '0dfdad104fd28fc5 allSpans',
-    '0e9c1f5602cd8f9b readAt',
+    '4ab7afe9228a4bbe readAt',
     '74edd751326410b8 replaced',
     '21b81d917d36bd05 DASHBOARD_KEY_PREFIX',
     '8fb3b31d21cc007d hasChar',
@@ -516,18 +592,20 @@ test('B2/D5: every function-backed rule is pinned by its exact code, so adding o
     '8f212da1421a07b5 basicShaped',
     '673f20e8619034d0 credentialKey',
     'e2f746276acd1f63 credentialShaped',
-    'a1cf13ab9a08e586 internalHost',
+    'e210659b5be4be87 internalHost',
+    '52244d41612a2974 ownKeys',
     'd0174b5072726dd7 markerProblem',
     '9ea500c2cd80962f spansOf',
     'bfdff73b144da5ae gluePoints',
-    'ec45b51e2fe9ced0 freeMark',
-    '6947593b8f4ce8a0 expand',
+    '812f214d7eb3ba5f freeMark',
+    '7a38484a324a6085 pieces',
+    '7f97cf243e7acca2 expand',
     'd424cc2714810fb8 called',
     'c82f43e718956d6a breaks',
     'e378e913f57d1cfa intrinsics',
     'd0db1c0acb6249ce isLower',
     'df41d390e3080f1e isUpper',
-    '2650e3720e9af55a basicPair',
+    '8a90f815b8dabb1d basicPair',
     'a04fa7100495893b credentialWord',
     '97495e09b7d30619 KEY_QUALIFIERS',
     'a732a8464090db98 allChars',
@@ -541,6 +619,7 @@ test('B2/D5: every function-backed rule is pinned by its exact code, so adding o
     '867e9afea39e8fcf boundaryGroup',
     '0b254d2bcdf6d85b isWordChar',
     '58ec615734d4d400 shown',
+    'c0132b4eb2792c2f BASE64',
     '77cd96321e67978c CREDENTIAL_WORDS',
     '7a26a83cd43c66fd CREDENTIAL_ENDINGS',
   ]);
@@ -587,7 +666,7 @@ test('N4: a line added to a function the load path calls (groupCount, from marke
   assert.deepEqual(n4.problems, []);
   assert.notEqual(n4.pins.find((p) => p.endsWith(' groupCount')), base.pins.find((p) => p.endsWith(' groupCount')), "groupCount's digest moved");
   assert.ok(base.pins.some((p) => p.endsWith(' groupCount')), 'groupCount is on the load path');
-  assert.match(referenceProblems(edited).join('\n'), /a refused global is named: Reflect[\s\S]*a global used other than as a call.*: RegExp/);
+  assert.match(referenceProblems(edited).join('\n'), /a refused global is named: Reflect[\s\S]*a global used other than as a construction.*: RegExp/);
   // Every function the review names as load-time code is pinned.
   for (const name of ['snapshot', 'markerProblem', 'groupCount', 'parseRegex', 'leadingGroups', 'trailingGroups', 'boundaryGroup', 'these', 'build']) assert.ok(base.pins.some((p) => p.endsWith(` ${name}`)), name);
 });
@@ -778,7 +857,7 @@ test("E2: a table entry that recompiles the run's Stripe regex after load reache
 /** A copy of the built module with the run closure's shape copies handed out (what no code path does), as a module. */
 async function withRunShapes(): Promise<{ m: Redact; shapes: readonly (readonly [RegExp, unknown])[] }> {
   const lines = built().split('\n');
-  const at = lines.findIndex((l) => l.trim() === 'const identifierRun = compile(identifiers, false);');
+  const at = lines.findIndex((l) => l.trim() === 'const identifierRun = compiled(identifiers, false);');
   assert.notEqual(at, -1, 'the built module builds the identifier copies inside build');
   lines.splice(at + 1, 0, '    globalThis.__runShapes = shapeRun;');
   const file = join(mkdtempSync(join(tmpdir(), 'redact-markers-')), 'redact.js');
@@ -1266,15 +1345,49 @@ test("J1a/N4/O2/P1: the module's code can reach no prototype and no global objec
     'function kR10(o: { x: () => number }): number { return o.x(); }',
     'function kR11(): number { const a = [1]; delete (a as unknown as { x?: number }).x; return a.length; }',
   );
+  // R1258s's S2 and R1258t's T1/T2: a string narrowed to an intersection with an array (a type predicate, Array.isArray),
+  // iterating a string, a regex as text, a global function called at run time, a regex constructed at run time, and a
+  // load-only function named by run-time code or at the top level.
+  lines.push(
+    'function kS1(x: unknown): x is string[] { return Array.isArray(x); }',
+    'function kS2(s: string): number { return Array.isArray(s) ? s.slice(1).length : 0; }',
+    'function kS3(s: string): number { let n = 0; for (const c of s) n += c.length; return n; }',
+    'function kS4(s: string): number { return [...s].length; }',
+    'function kS5(): string { return `${/x/g}`; }',
+    "function kS6(): string { return '' + /x/g; }",
+    "function kS7(s: string): string { let t = ''; t += /x/g; return t + s; }",
+    'function kT1a(c: number): string { return String.fromCharCode(c); }',
+    'function kT1b(s: string): boolean { return atob(s).length > 0; }',
+    "function kT1c(s: string): boolean { return new RegExp(s, 'g').global; }",
+    "function kT1d(s: string): number { return intrinsics().split(s, ',').length; }",
+    'function kT2a(s: string): string { return groupCount(/(\\d)/) === 1 ? s : \'\'; }',
+    'const kT2b = groupCount;',
+    'function kT2c(): number { return [groupCount][0]!(/x/); }',
+  );
   for (const line of lines) assert.notEqual(referenceProblems(withLine('after-body', line)).length, 0, line);
   // The same, inside run-time code (the reviews' placements): the lint reads position, not the load path.
   for (const line of lines.slice(0, 7)) assert.notEqual(referenceProblems(SRC.replace('function redactOrThrow(s: string, o: RedactTextOptions): string {\n', `function redactOrThrow(s: string, o: RedactTextOptions): string {\n  { ${line} void P; }\n`)).length, 0, `in redactOrThrow: ${line}`);
+  // R1258t's T2 as the review wrote it, two lines at the top of redactOrThrow; and T3's fast path in the run closure
+  // (a regex's own `test` in an arrow build stores), with a closure build stores in a const.
+  const t2 = SRC.replace('function redactOrThrow(s: string, o: RedactTextOptions): string {\n', "function redactOrThrow(s: string, o: RedactTextOptions): string {\n  // A rule set with no groups can't have built: nothing to redact with, so nothing is changed.\n  if (groupCount(/(\\d)/) !== 1) return s;\n");
+  assert.notEqual(t2, SRC);
+  assert.match(referenceProblems(t2).join('\n'), /a load-only function named outside load-only code: groupCount/);
+  const t3 = SRC.replace('    shapes: (s: string): Span[] => (check(), allSpans(s, shapeRun, glue, gluedPrefixes, ops)),', '    shapes: (s: string): Span[] => (check(), /^[^A-Za-z0-9]*$/.test(s) ? [] : allSpans(s, shapeRun, glue, gluedPrefixes, ops)),');
+  assert.notEqual(t3, SRC);
+  assert.match(referenceProblems(t3).join('\n'), /a property of a regex value outside the allowlist \(a method call\): \/\^\[\^A-Za-z0-9\]\*\$\/\.test/);
+  const t3b = SRC.replace('  let checked = false;\n', '  let checked = false;\n  const fast = (s: string): boolean => /x/.test(s);\n  void fast;\n');
+  assert.notEqual(t3b, SRC);
+  assert.match(referenceProblems(t3b).join('\n'), /a method call\): \/x\/\.test/);
+  // What build may still do at load: a callback given straight to a call (a map over the snapshot) runs at load.
+  const atLoad = SRC.replace('  let checked = false;\n', "  let checked = false;\n  void shapes.map((r) => r.flags.includes('g'));\n");
+  assert.notEqual(atLoad, SRC);
+  assert.deepEqual(referenceProblems(atLoad), []);
   // What run-time code may do, and does: the captured intrinsics, a regex's and a string's data, a string indexed
   // by a number, an array's methods, the allowed globals.
   for (const line of [
-    "function kOk1(s: string): number { const o = intrinsics(); return o.indexOf(s, 'b') + s.length + (s[0] ?? '').length + o.slice(s, 1).length + o.split(s, ',').length; }",
+    "function kOk1(s: string): number { const o = intrinsics(); return o.indexOf(s, 'b') + s.length + (s[0] ?? '').length + o.slice(s, 1).length + pieces(s, ',', o).length + o.fromCode(65).length; }",
     "function kOk2(a: readonly string[], re: RegExp): string { return a.map((x) => x).join(',') + re.source + re.flags + (re.global ? re.lastIndex : 0); }",
-    "function kOk3(s: string): boolean { return Array.isArray([]) && Object.freeze([1]).length === 1 && Math.max(1, 2) === 2 && String.fromCharCode(65) === 'A' && intrinsics().exec(new RegExp(s, 'g'), s) === null && s instanceof String; }",
+    "function kOk3(s: string): boolean { return Array.isArray([]) && Object.freeze([1]).length === 1 && Math.max(1, 2) === 2 && intrinsics().exec(/x/g, s) === null && s instanceof String && [...new Set([s])].length === 1; }",
   ]) assert.deepEqual(referenceProblems(withLine('after-body', line)), [], line);
   // The capture is held to its text, and must be build's first statement.
   assert.match(referenceProblems(SRC.replace("    codeAt: call.bind(''.charCodeAt) as Ops['codeAt'],", "    codeAt: call.bind(''.codePointAt) as Ops['codeAt'],")).join('\n'), /capture is not exactly/);
@@ -1404,9 +1517,9 @@ test("O2/P1: RegExp's exec patched against the identifier pass and against the g
 // was redacted, because a rule function's `/\d/.test(v)` and the helpers' `.slice` ran the prototype's methods. Now
 // every operation on a regex or a string at run time is one of the intrinsics captured at load (Ops), and character
 // classes are comparisons, so a patch of any RegExp.prototype or String.prototype method after load changes nothing.
-const PATCH_CORPUS = [...CORPUS, `export K=${STRIPE_130} done`, `\n${STRIPE_130}`, `\u001b[1m${STRIPE_130}`, `{"token": "${run(140, 'notArealValue7')}"}`, `x ${['sk', 'live', run(130, 'Zq81Xk2Lm9Tb4Wp7Rv3Ny6Hc')].join('_')} y`];
+const PATCH_CORPUS = [...CORPUS, `export K=${STRIPE_130} done`, `\n${STRIPE_130}`, `\u001b[1m${STRIPE_130}`, `{"token": "${run(140, 'notArealValue7')}"}`, `x ${['sk', 'live', run(130, 'Zq81Xk2Lm9Tb4Wp7Rv3Ny6Hc')].join('_')} y`, 'Authorization: Basic dXNlcjpwYXNz', 'see the ```done_when block. host db1.internal is down\n```', 'ssh to vault.internal now', `key wld_${run(40, 'Ab3')} here`];
 const PATCH_MODES: Parameters<typeof redactString>[1][] = [{}, { broad: true }, TRACKER, { keepLines: true }, { identifiers: true, keepLines: true }];
-const pictureOf = (m: Redact) => PATCH_CORPUS.map((s) => [...PATCH_MODES.map((o) => m.redactString(s, o)), m.secretKinds(s).join(), ...(s.length < 200 ? m.redactRecords([s, s], TRACKER) : [])]);
+const pictureOf = (m: Redact) => [...PATCH_CORPUS.map((s) => [...PATCH_MODES.map((o) => m.redactString(s, o)), m.secretKinds(s).join(), ...(s.length < 200 ? m.redactRecords([s, s], TRACKER) : [])]), [`${isDashboardKey('wld_x')} ${isDashboardKey(`wld_${run(40, 'Ab3')}`)}`]];
 /** A poisoned version of a prototype method: the original everywhere but on the long or key-holding inputs, where it answers as wrongly as the reviews' patches did. */
 const poisoned = (original: (...a: unknown[]) => unknown, name: string) =>
   function (this: unknown, ...args: unknown[]): unknown {
@@ -1442,6 +1555,54 @@ test("D1/R2: a patch of any RegExp.prototype or String.prototype method after lo
       Object.defineProperty(proto, key, d);
     }
   }
+  // R1258s's S1 and R1258t's T1: the symbol methods String.prototype and Object.prototype don't have (split, replace,
+  // match, matchAll and search read them from a primitive separator at each call), defined after load; and the globals
+  // the module read at call time: String.fromCharCode, atob and the RegExp constructor, each replaced after load.
+  // The picture is taken under each patch and compared after it is undone (the comparison itself may split).
+  for (const [proto, where] of [[String.prototype, 'String'], [Object.prototype, 'Object']] as const) {
+    for (const s of [Symbol.split, Symbol.replace, Symbol.match, Symbol.matchAll, Symbol.search]) {
+      assert.equal(Object.getOwnPropertyDescriptor(proto, s), undefined, `${where}.prototype has no ${s.toString()}`);
+      Object.defineProperty(proto, s, { configurable: true, writable: true, value: () => (s === Symbol.replace ? 'LEAK' : s === Symbol.search ? -1 : ['LEAK']) });
+      let after: ReturnType<typeof pictureOf>;
+      try {
+        // Node 22 and 24 read the symbol from a primitive separator (the reviews' leak); Node 26 no longer does, so
+        // whether the patch takes isn't asserted: the picture must be the same either way.
+        after = pictureOf({ redactString, secretKinds, redactRecords } as unknown as Redact);
+      } finally {
+        delete (proto as unknown as Record<symbol, unknown>)[s];
+      }
+      assert.deepEqual(after, before, `${where}.prototype[${s.toString()}] defined`);
+    }
+  }
+  const g = globalThis as Record<string, unknown>;
+  const Orig = RegExp;
+  const globals: [string, unknown][] = [
+    ['atob', () => { throw new Error('patched'); }],
+    ['RegExp', function (this: unknown, _src: string, flags?: string) { return new Orig('', flags); }],
+  ];
+  const fromCharCode = String.fromCharCode;
+  for (const [name, value] of globals) {
+    const was = g[name];
+    g[name] = value;
+    let after: ReturnType<typeof pictureOf>;
+    try {
+      after = pictureOf({ redactString, secretKinds, redactRecords } as unknown as Redact);
+    } finally {
+      g[name] = was;
+    }
+    assert.deepEqual(after, before, `globalThis.${name} replaced`);
+  }
+  for (const value of [() => '', () => 'a']) {
+    String.fromCharCode = value as typeof String.fromCharCode;
+    let after: ReturnType<typeof pictureOf>;
+    try {
+      assert.equal(String.fromCharCode(65).length <= 1 && String.fromCharCode(65) !== 'A', true, 'the fromCharCode patch took');
+      after = pictureOf({ redactString, secretKinds, redactRecords } as unknown as Redact);
+    } finally {
+      String.fromCharCode = fromCharCode;
+    }
+    assert.deepEqual(after, before, 'String.fromCharCode replaced');
+  }
   assert.deepEqual(pictureOf({ redactString, secretKinds, redactRecords } as unknown as Redact), before, 'restored');
 });
 
@@ -1456,9 +1617,39 @@ test("D1/R2: the updater's copy of the redactor holds too: exec and the String m
     Object.defineProperty(proto, key, { ...d, value: poisoned(d.value as (...a: unknown[]) => unknown, key) });
     patched.push([proto, key, key, d]);
   }
+  let after: string[];
   try {
-    assert.deepEqual(lines.map((l) => updater.redact(l)), before);
+    after = lines.map((l) => updater.redact(l));
   } finally {
     for (const [proto, , key, d] of patched) Object.defineProperty(proto, key, d);
   }
+  assert.deepEqual(after, before);
+  // S1/T1 in the copy: Symbol.split defined on String.prototype, and the globals replaced, after it is required.
+  Object.defineProperty(String.prototype, Symbol.split, { configurable: true, writable: true, value: () => ['LEAK'] });
+  try {
+    after = lines.map((l) => updater.redact(l));
+  } finally {
+    delete (String.prototype as unknown as Record<symbol, unknown>)[Symbol.split];
+  }
+  assert.deepEqual(after, before, 'String.prototype[Symbol.split] defined');
+  const g = globalThis as Record<string, unknown>;
+  const Orig = RegExp;
+  const fromCharCode = String.fromCharCode;
+  for (const [name, value] of [['atob', () => { throw new Error('patched'); }], ['RegExp', function (this: unknown, _src: string, flags?: string) { return new Orig('', flags); }]] as const) {
+    const was = g[name];
+    g[name] = value;
+    try {
+      after = lines.map((l) => updater.redact(l));
+    } finally {
+      g[name] = was;
+    }
+    assert.deepEqual(after, before, `globalThis.${name} replaced`);
+  }
+  String.fromCharCode = (() => '') as typeof String.fromCharCode;
+  try {
+    after = lines.map((l) => updater.redact(l));
+  } finally {
+    String.fromCharCode = fromCharCode;
+  }
+  assert.deepEqual(after, before, 'String.fromCharCode replaced');
 });

@@ -32,19 +32,45 @@ function credentialShaped(v: string): boolean {
 function basicShaped(v: string): boolean {
   return hasChar(v, (c) => isDigit(c) || c === '+' || c === '/' || c === '=') || (v.length >= 16 && v.length % 4 !== 1 && hasChar(v, isLower) && hasChar(v, isUpper)) || basicPair(v);
 }
+/** The base64 alphabet, each character at its value. */
+const BASE64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 /**
  * Whether `v` is base64 of a `user:password` pair: it decodes to printable ASCII with a `:` in it (#889 round 8: a short
  * pair, `dXNlcjpwYXNz`, has no digit, `+`, `/` or `=` and is under 16 characters). A word after "Basic" in prose
- * ("Authentication") decodes to bytes that aren't, or doesn't decode at all.
+ * ("Authentication") decodes to bytes that aren't, or doesn't decode at all. Decoded by a scan, as atob reads base64
+ * (ASCII whitespace dropped, up to two `=` at the end when that makes the length a multiple of 4, no other character,
+ * and a length that is 1 more than a multiple of 4 is not base64), never with the global atob, which is read at call
+ * time (R1258t's T1: patched after load, a Basic credential was shown).
  */
 function basicPair(v: string): boolean {
-  let text: string;
-  try {
-    text = atob(v);
-  } catch {
-    return false;
+  const o = intrinsics();
+  let bits = 0;
+  let held = 0;
+  let count = 0;
+  let pad = 0;
+  let colon = false;
+  for (let i = 0; i < v.length; i++) {
+    const c = v[i]!;
+    if (c === ' ' || c === '\t' || c === '\n' || c === '\f' || c === '\r') continue;
+    if (c === '=') {
+      pad++;
+      continue;
+    }
+    const d = o.indexOf(BASE64, c);
+    if (d === -1 || pad > 0 || c.length !== 1) return false;
+    count++;
+    bits = (bits << 6) | d;
+    held += 6;
+    if (held >= 8) {
+      held -= 8;
+      const byte = (bits >> held) & 0xff;
+      bits &= (1 << held) - 1;
+      if (byte < 0x20 || byte > 0x7e) return false;
+      if (byte === 0x3a) colon = true;
+    }
   }
-  return allChars(text, (c) => c >= ' ' && c <= '~') && hasChar(text, (c) => c === ':');
+  if (pad > 2 || (pad > 0 && (count + pad) % 4 !== 0) || count % 4 === 1) return false;
+  return colon;
 }
 
 // The data the rules decide by is frozen arrays, never a Set, a Map or a RegExp in a module binding (R1258g/h: code that
@@ -110,9 +136,16 @@ function credentialKey(k: string): boolean {
  */
 export const DASHBOARD_KEY_PREFIX = 'wld_';
 const DASHBOARD_KEY_BODY = '[A-Za-z0-9_-]{32,}';
-/** Whether `key` is a dashboard key of the current shape (prefixed). */
+/**
+ * Whether `key` is a dashboard key of the current shape (prefixed): the prefix, then DASHBOARD_KEY_BODY read as a scan
+ * (32 or more word characters or hyphens, to the end). No regex is constructed at run time: the global `RegExp` is read
+ * at call time (R1258t's T1).
+ */
 export function isDashboardKey(key: string): boolean {
-  return intrinsics().exec(new RegExp(`^${DASHBOARD_KEY_PREFIX}${DASHBOARD_KEY_BODY}$`), key) !== null;
+  const o = intrinsics();
+  if (!o.startsWith(key, DASHBOARD_KEY_PREFIX)) return false;
+  const body = o.slice(key, DASHBOARD_KEY_PREFIX.length);
+  return body.length >= 32 && allChars(body, (c) => isWordChar(c) || c === '-');
 }
 
 /**
@@ -218,9 +251,15 @@ function these(groups: number[]): string {
   return groups.length === 0 ? 'no group is' : groups.length === 1 ? `group ${groups[0]} is` : `groups ${groups.join(', ')} are`;
 }
 
-/** The own property keys of `o`, strings and symbols, joined: what a plain regex has is exactly `lastIndex`. */
+/** The own property keys of `o`, strings and symbols, joined, for snapshot's reasons: what a plain regex has is exactly `lastIndex`. Load only. */
 function ownKeys(o: object): string {
   return [...Object.getOwnPropertyNames(o), ...Object.getOwnPropertySymbols(o).map((k) => String(k))].join();
+}
+
+/** Whether `o` has no own property, string or symbol, but `lastIndex`: what a plain regex has. Run-time code (the first operation's check, R1258t's T2: it ran ownKeys, a load-only function, after load). */
+function onlyLastIndex(o: object): boolean {
+  const names = Object.getOwnPropertyNames(o);
+  return names.length === 1 && names[0] === 'lastIndex' && Object.getOwnPropertySymbols(o).length === 0;
 }
 
 /** How many capturing groups `re` has, as the engine counts them (an empty alternative matches with every group unset). */
@@ -631,7 +670,7 @@ const CODE_HEADS = Object.freeze(['this', 'self', 'super', 'opts', 'options', 'o
 function internalHost(m: string, pre: string, name: string): string {
   const o = intrinsics();
   const lower = o.lower(name);
-  const labels = o.split(name, '.').slice(0, o.endsWith(lower, '.home.arpa') || o.endsWith(lower, '.ts.net') ? -2 : -1);
+  const labels = pieces(name, '.', o).slice(0, o.endsWith(lower, '.home.arpa') || o.endsWith(lower, '.ts.net') ? -2 : -1);
   const suffix = o.slice(name, labels.join('.').length + 1);
   const prose = suffix !== o.lower(suffix) && suffix !== o.upper(suffix);
   // camelCase: a lower-case letter right before an upper-case one.
@@ -768,7 +807,7 @@ function freeMark(s: string): string | null {
     const c = o.codeAt(s, i);
     if (c >= 0xe000 && c <= 0xf8ff) held.add(c);
   }
-  for (let c = 0xe000; c <= 0xf8ff; c++) if (!held.has(c)) return String.fromCharCode(c);
+  for (let c = 0xe000; c <= 0xf8ff; c++) if (!held.has(c)) return o.fromCode(c);
   return null;
 }
 
@@ -778,6 +817,7 @@ function freeMark(s: string): string | null {
  * prototype's exec (R1258o/p).
  */
 function expand(rep: string, m: string, groups: unknown[]): string {
+  const o = intrinsics();
   let out = '';
   for (let i = 0; i < rep.length; i++) {
     const c = rep[i]!;
@@ -789,7 +829,9 @@ function expand(rep: string, m: string, groups: unknown[]): string {
       out += m;
       i++;
     } else if (k >= '0' && k <= '9') {
-      out += String(groups[Number(k) - 1] ?? '');
+      // The group's text, or nothing for one unset: no String() or Number(), each a global read at call time (R1258t's T1).
+      const g = groups[o.codeAt(k, 0) - 0x30 - 1];
+      out += typeof g === 'string' ? g : '';
       i++;
     } else out += c;
   }
@@ -861,22 +903,30 @@ function replaced(s: string, re: RegExp, rep: Replacement, keepLines: boolean, o
  * `[ \t]*\r?\n`), so a mention in prose (`add a ```done_when block.`) leaves the text after it redacted. Found with
  * indexOf and a sticky check at each opener, not a scan: linear.
  */
-// Each opener with the source of its sticky line-break check: data, frozen; the regex is built per call (R1258h's H1d
-// pushed a plain ``` opener onto this list from a table entry).
-const MACHINE_BLOCKS = Object.freeze([Object.freeze(['```done_when', '[^\\S\\n]*\\n'] as const), Object.freeze(['```research', '[ \\t]*\\r?\\n'] as const)]);
+// Each opener with the blanks its parser allows before the line break: data, frozen (R1258h's H1d pushed a plain ```
+// opener onto this list from a table entry). `blanks`: any whitespace but `\n` (parseContract's `\s*\n`); `tabs`:
+// spaces and tabs, then an optional `\r` (research's `[ \t]*\r?\n`). Read by lineBreakAfter, a scan: no regex is
+// built at run time (R1258t's T1: the global `RegExp` is read at call time).
+const MACHINE_BLOCKS = Object.freeze([Object.freeze(['```done_when', 'blanks'] as const), Object.freeze(['```research', 'tabs'] as const)]);
+/** Where the line after an opener ends: past `at`, blanks of the opener's kind and then `\n`, the position after it; -1 when the opener's line holds anything else. */
+function lineBreakAfter(s: string, at: number, blanks: string): number {
+  let i = at;
+  while (i < s.length && (blanks === 'blanks' ? isSpace(s[i]!) && s[i] !== '\n' : s[i] === ' ' || s[i] === '\t')) i++;
+  if (blanks === 'tabs' && s[i] === '\r') i++;
+  return s[i] === '\n' ? i + 1 : -1;
+}
 function outsideMachineBlocks(s: string, f: (part: string) => string): string {
   const o = intrinsics();
   const spans: [number, number][] = [];
-  for (const [open, lineBreakSource] of MACHINE_BLOCKS) {
-    const lineBreak = new RegExp(lineBreakSource, 'y');
+  for (const [open, blanks] of MACHINE_BLOCKS) {
     for (let at = o.indexOf(s, open); at !== -1; ) {
-      lineBreak.lastIndex = at + open.length;
-      if (o.exec(lineBreak, s) === null) {
+      const body = lineBreakAfter(s, at + open.length, blanks);
+      if (body === -1) {
         at = o.indexOf(s, open, at + open.length);
         continue;
       }
       // The block's body starts after the opener's line break; the first line that starts with ``` closes it.
-      const close = o.indexOf(s, '\n```', lineBreak.lastIndex);
+      const close = o.indexOf(s, '\n```', body);
       if (close === -1) break;
       spans.push([at, close + 4]);
       at = o.indexOf(s, open, close + 4);
@@ -968,6 +1018,10 @@ const BROAD_RULES = Object.freeze(['shapes', 'broad'] as const);
  * run copies were searched with a captured exec, but a rule function's `/\d/.test(v)` and the helpers' `.slice`
  * still ran the prototype's, and a patch of `exec` for `\d` on long inputs showed a 130-character key). Character
  * classes a rule decides by (`\d`, `\w`, `\s`, a letter's case) are comparisons on characters, with no regex at all.
+ * Only methods that look nothing up on their arguments: `split`, `replace`, `match` and `search` read a symbol
+ * (`Symbol.split` and the rest) from the separator, and for a primitive separator from String.prototype and then
+ * Object.prototype, where a property defined after load took over every split (R1258s's S1); `pieces` is the scan
+ * that stands for split. `includes`, `startsWith` and `endsWith` read nothing from a primitive argument.
  */
 interface Ops {
   readonly exec: (re: RegExp, s: string) => RegExpExecArray | null;
@@ -979,8 +1033,9 @@ interface Ops {
   readonly lower: (s: string) => string;
   readonly upper: (s: string) => string;
   readonly repeat: (s: string, n: number) => string;
-  readonly split: (s: string, sep: string) => string[];
   readonly codeAt: (s: string, i: number) => number;
+  /** String.fromCharCode, read at load: the one static of a global the run-time code uses (freeMark). */
+  readonly fromCode: (c: number) => string;
 }
 
 /**
@@ -1002,8 +1057,8 @@ function captured(): Ops {
     lower: call.bind(''.toLowerCase) as Ops['lower'],
     upper: call.bind(''.toUpperCase) as Ops['upper'],
     repeat: call.bind(''.repeat) as Ops['repeat'],
-    split: call.bind(''.split) as Ops['split'],
     codeAt: call.bind(''.charCodeAt) as Ops['codeAt'],
+    fromCode: String.fromCharCode,
   });
 }
 
@@ -1039,6 +1094,27 @@ function allChars(s: string, p: (c: string) => boolean): boolean {
   return true;
 }
 /** How many line breaks `s` holds. */
+/**
+ * `s` cut at each `sep` (never empty), as String.prototype.split with a string separator reads it, by a scan: split,
+ * given even a primitive separator, reads `Symbol.split` from it, so from String.prototype and then Object.prototype,
+ * where a property defined after load took over every split (R1258s's S1, R1258t's T1).
+ */
+function pieces(s: string, sep: string, o: Ops): string[] {
+  const out: string[] = [];
+  let from = 0;
+  for (let at = o.indexOf(s, sep, from); at !== -1; at = o.indexOf(s, sep, from)) {
+    out.push(o.slice(s, from, at));
+    from = at + sep.length;
+  }
+  out.push(o.slice(s, from));
+  return out;
+}
+
+/** Whether `c` (one character) is whitespace as `\s` reads it: the ASCII blanks, the no-break and the Unicode spaces, the line and paragraph separators, the BOM. */
+function isSpace(c: string): boolean {
+  return c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\v' || c === '\f' || c === '\u00a0' || c === '\u1680' || (c >= '\u2000' && c <= '\u200a') || c === '\u2028' || c === '\u2029' || c === '\u202f' || c === '\u205f' || c === '\u3000' || c === '\ufeff';
+}
+
 function breaks(s: string): number {
   const o = intrinsics();
   let n = 0;
@@ -1063,6 +1139,20 @@ interface Built {
     /** The identifier pass over `part`: each rule in turn, the line count kept with `keepLines`. */
     readonly identifiers: (part: string, keepLines: boolean) => string;
   };
+}
+
+/** The listing's copies of `rules` (redactionPatterns): each `re` a copy of its own. Load only, from build. */
+function listed(rules: readonly Rule[], group: RedactionPattern['group']): readonly RedactionPattern[] {
+  return rules.map((r) => Object.freeze({ kind: r.kind, re: new RegExp(r.source, r.flags), rep: r.rep, group }));
+}
+
+/**
+ * The regexes that run for `rules`, each built from its snapshot's primitives, with `g` added when `withG`. Load only,
+ * from build. Plain arrays, not frozen: nothing outside build's closure can reach them, and a frozen tuple destructured
+ * on every rule of every call cost a third of the redactor's time (measured, R1258g's G1 round).
+ */
+function compiled(rules: readonly Rule[], withG: boolean): [RegExp, Replacement][] {
+  return rules.map((r) => [new RegExp(r.source, withG && !r.flags.includes('g') ? `${r.flags}g` : r.flags), r.rep] as [RegExp, Replacement]);
 }
 
 /**
@@ -1094,15 +1184,11 @@ function build(patterns: readonly unknown[], broadTable: readonly unknown[], ide
   const identifiers = snapshot(identifierTable, { verbatim: true });
   Object.freeze(identifierTable);
   const broad: readonly Rule[] = Object.freeze(BROAD_RULES.flatMap((set) => (set === 'shapes' ? shapes : broadRules)));
-  const copy = (rules: readonly Rule[], group: RedactionPattern['group']) => rules.map((r) => Object.freeze({ kind: r.kind, re: new RegExp(r.source, r.flags), rep: r.rep, group }));
-  const patternsOut: readonly RedactionPattern[] = Object.freeze([...copy(shapes, 'secret'), ...copy(broadRules, 'broad'), ...copy(identifiers, 'identifier')]);
-  // Plain arrays, not frozen: nothing outside this closure can reach them, and a frozen tuple destructured on every
-  // rule of every call cost a third of the redactor's time (measured, R1258g's G1 round).
-  const compile = (rules: readonly Rule[], withG: boolean) => rules.map((r) => [new RegExp(r.source, withG && !r.flags.includes('g') ? `${r.flags}g` : r.flags), r.rep] as [RegExp, Replacement]);
+  const patternsOut: readonly RedactionPattern[] = Object.freeze([...listed(shapes, 'secret'), ...listed(broadRules, 'broad'), ...listed(identifiers, 'identifier')]);
   // The span search needs `g`; the identifier pass runs each rule's own flags (String.prototype.replace).
-  const shapeRun = compile(shapes, true);
-  const broadRun = compile(broad, true);
-  const identifierRun = compile(identifiers, false);
+  const shapeRun = compiled(shapes, true);
+  const broadRun = compiled(broad, true);
+  const identifierRun = compiled(identifiers, false);
   const glue = new RegExp(GLUE_PARTS.join('|'), 'g');
   // A plain copy of the frozen list: `some` over a frozen array on every `_` of every call was measurably slow.
   const gluedPrefixes = [...GLUED_PREFIXES];
@@ -1116,7 +1202,7 @@ function build(patterns: readonly unknown[], broadTable: readonly unknown[], ide
   const check = () => {
     if (checked) return;
     for (const [re, r, flags] of copies) {
-      if (re.source !== r.source || re.flags !== flags || ownKeys(re) !== 'lastIndex') throw new Error(`src/events/redact.ts: the regex that runs for "${r.kind}" no longer reads as its snapshot (#1257)`);
+      if (re.source !== r.source || re.flags !== flags || !onlyLastIndex(re)) throw new Error(`src/events/redact.ts: the regex that runs for "${r.kind}" no longer reads as its snapshot (#1257)`);
     }
     checked = true;
   };
@@ -1243,7 +1329,8 @@ function readAt(s: string, cuts: number[], rules: readonly (readonly [RegExp, Re
   if (!cuts.length) return;
   const markChar = freeMark(s);
   if (markChar === null) {
-    for (const [i, c] of cuts.entries()) {
+    for (let i = 0; i < cuts.length; i++) {
+      const c = cuts[i]!;
       const piece = ops.slice(s, c, cuts[i + 1] ?? s.length);
       const more: Span[] = [];
       rules.forEach(([re, rep], k) => spansOf(piece, re, rep, k, more, ops));
@@ -1271,7 +1358,7 @@ function readAt(s: string, cuts: number[], rules: readonly (readonly [RegExp, Re
   };
   const more: Span[] = [];
   rules.forEach(([re, rep], k) => spansOf(marked, re, rep, k, more, ops));
-  for (const [a, b, r, k] of more) spans.push([back(a), back(b), ops.split(r, markChar).join(''), k]);
+  for (const [a, b, r, k] of more) spans.push([back(a), back(b), pieces(r, markChar, ops).join(''), k]);
 }
 
 /**
@@ -1370,7 +1457,7 @@ export function readWindow(s: string, end: number): string {
  * each with as many lines as it had (a record inside a secret comes back empty or holding the marker).
  */
 export function redactRecords(records: readonly string[], o: RedactTextOptions = {}): string[] {
-  const lines = intrinsics().split(redactString(records.join('\n'), { ...o, keepLines: true }), '\n');
+  const lines = pieces(redactString(records.join('\n'), { ...o, keepLines: true }), '\n', intrinsics());
   const out: string[] = [];
   let at = 0;
   for (const r of records) {

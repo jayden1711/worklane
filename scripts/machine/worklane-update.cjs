@@ -133,15 +133,41 @@ function credentialShaped(v) {
 function basicShaped(v) {
     return hasChar(v, (c) => isDigit(c) || c === '+' || c === '/' || c === '=') || (v.length >= 16 && v.length % 4 !== 1 && hasChar(v, isLower) && hasChar(v, isUpper)) || basicPair(v);
 }
+const BASE64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 function basicPair(v) {
-    let text;
-    try {
-        text = atob(v);
+    const o = intrinsics();
+    let bits = 0;
+    let held = 0;
+    let count = 0;
+    let pad = 0;
+    let colon = false;
+    for (let i = 0; i < v.length; i++) {
+        const c = v[i];
+        if (c === ' ' || c === '\t' || c === '\n' || c === '\f' || c === '\r')
+            continue;
+        if (c === '=') {
+            pad++;
+            continue;
+        }
+        const d = o.indexOf(BASE64, c);
+        if (d === -1 || pad > 0 || c.length !== 1)
+            return false;
+        count++;
+        bits = (bits << 6) | d;
+        held += 6;
+        if (held >= 8) {
+            held -= 8;
+            const byte = (bits >> held) & 0xff;
+            bits &= (1 << held) - 1;
+            if (byte < 0x20 || byte > 0x7e)
+                return false;
+            if (byte === 0x3a)
+                colon = true;
+        }
     }
-    catch {
+    if (pad > 2 || (pad > 0 && (count + pad) % 4 !== 0) || count % 4 === 1)
         return false;
-    }
-    return allChars(text, (c) => c >= ' ' && c <= '~') && hasChar(text, (c) => c === ':');
+    return colon;
 }
 // check-table: never-shrink
 const CREDENTIAL_WORDS = Object.freeze(['token', 'secret', 'secrets', 'password', 'passwd', 'pwd', 'pass', 'passphrase', 'jwt', 'bearer', 'credential', 'credentials', 'authorization']);
@@ -184,7 +210,11 @@ function credentialKey(k) {
 exports.DASHBOARD_KEY_PREFIX = 'wld_';
 const DASHBOARD_KEY_BODY = '[A-Za-z0-9_-]{32,}';
 function isDashboardKey(key) {
-    return intrinsics().exec(new RegExp(`^${exports.DASHBOARD_KEY_PREFIX}${DASHBOARD_KEY_BODY}$`), key) !== null;
+    const o = intrinsics();
+    if (!o.startsWith(key, exports.DASHBOARD_KEY_PREFIX))
+        return false;
+    const body = o.slice(key, exports.DASHBOARD_KEY_PREFIX.length);
+    return body.length >= 32 && allChars(body, (c) => isWordChar(c) || c === '-');
 }
 function orphanEnd(m) {
     const o = intrinsics();
@@ -279,6 +309,10 @@ function these(groups) {
 }
 function ownKeys(o) {
     return [...Object.getOwnPropertyNames(o), ...Object.getOwnPropertySymbols(o).map((k) => String(k))].join();
+}
+function onlyLastIndex(o) {
+    const names = Object.getOwnPropertyNames(o);
+    return names.length === 1 && names[0] === 'lastIndex' && Object.getOwnPropertySymbols(o).length === 0;
 }
 function groupCount(re) {
     return new RegExp(`${re.source}|`, re.flags.replace(/[gy]/g, '')).exec('').length - 1;
@@ -567,7 +601,7 @@ const CODE_HEADS = Object.freeze(['this', 'self', 'super', 'opts', 'options', 'o
 function internalHost(m, pre, name) {
     const o = intrinsics();
     const lower = o.lower(name);
-    const labels = o.split(name, '.').slice(0, o.endsWith(lower, '.home.arpa') || o.endsWith(lower, '.ts.net') ? -2 : -1);
+    const labels = pieces(name, '.', o).slice(0, o.endsWith(lower, '.home.arpa') || o.endsWith(lower, '.ts.net') ? -2 : -1);
     const suffix = o.slice(name, labels.join('.').length + 1);
     const prose = suffix !== o.lower(suffix) && suffix !== o.upper(suffix);
     const camel = (l) => {
@@ -627,10 +661,11 @@ function freeMark(s) {
     }
     for (let c = 0xe000; c <= 0xf8ff; c++)
         if (!held.has(c))
-            return String.fromCharCode(c);
+            return o.fromCode(c);
     return null;
 }
 function expand(rep, m, groups) {
+    const o = intrinsics();
     let out = '';
     for (let i = 0; i < rep.length; i++) {
         const c = rep[i];
@@ -644,7 +679,8 @@ function expand(rep, m, groups) {
             i++;
         }
         else if (k >= '0' && k <= '9') {
-            out += String(groups[Number(k) - 1] ?? '');
+            const g = groups[o.codeAt(k, 0) - 0x30 - 1];
+            out += typeof g === 'string' ? g : '';
             i++;
         }
         else
@@ -692,19 +728,26 @@ function replaced(s, re, rep, keepLines, ops) {
     }
     return out + ops.slice(s, at);
 }
-const MACHINE_BLOCKS = Object.freeze([Object.freeze(['```done_when', '[^\\S\\n]*\\n']), Object.freeze(['```research', '[ \\t]*\\r?\\n'])]);
+const MACHINE_BLOCKS = Object.freeze([Object.freeze(['```done_when', 'blanks']), Object.freeze(['```research', 'tabs'])]);
+function lineBreakAfter(s, at, blanks) {
+    let i = at;
+    while (i < s.length && (blanks === 'blanks' ? isSpace(s[i]) && s[i] !== '\n' : s[i] === ' ' || s[i] === '\t'))
+        i++;
+    if (blanks === 'tabs' && s[i] === '\r')
+        i++;
+    return s[i] === '\n' ? i + 1 : -1;
+}
 function outsideMachineBlocks(s, f) {
     const o = intrinsics();
     const spans = [];
-    for (const [open, lineBreakSource] of MACHINE_BLOCKS) {
-        const lineBreak = new RegExp(lineBreakSource, 'y');
+    for (const [open, blanks] of MACHINE_BLOCKS) {
         for (let at = o.indexOf(s, open); at !== -1;) {
-            lineBreak.lastIndex = at + open.length;
-            if (o.exec(lineBreak, s) === null) {
+            const body = lineBreakAfter(s, at + open.length, blanks);
+            if (body === -1) {
                 at = o.indexOf(s, open, at + open.length);
                 continue;
             }
-            const close = o.indexOf(s, '\n```', lineBreak.lastIndex);
+            const close = o.indexOf(s, '\n```', body);
             if (close === -1)
                 break;
             spans.push([at, close + 4]);
@@ -775,8 +818,8 @@ function captured() {
         lower: call.bind(''.toLowerCase),
         upper: call.bind(''.toUpperCase),
         repeat: call.bind(''.repeat),
-        split: call.bind(''.split),
         codeAt: call.bind(''.charCodeAt),
+        fromCode: String.fromCharCode,
     });
 }
 function intrinsics() {
@@ -809,12 +852,31 @@ function allChars(s, p) {
             return false;
     return true;
 }
+function pieces(s, sep, o) {
+    const out = [];
+    let from = 0;
+    for (let at = o.indexOf(s, sep, from); at !== -1; at = o.indexOf(s, sep, from)) {
+        out.push(o.slice(s, from, at));
+        from = at + sep.length;
+    }
+    out.push(o.slice(s, from));
+    return out;
+}
+function isSpace(c) {
+    return c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\v' || c === '\f' || c === '\u00a0' || c === '\u1680' || (c >= '\u2000' && c <= '\u200a') || c === '\u2028' || c === '\u2029' || c === '\u202f' || c === '\u205f' || c === '\u3000' || c === '\ufeff';
+}
 function breaks(s) {
     const o = intrinsics();
     let n = 0;
     for (let at = o.indexOf(s, '\n'); at !== -1; at = o.indexOf(s, '\n', at + 1))
         n++;
     return n;
+}
+function listed(rules, group) {
+    return rules.map((r) => Object.freeze({ kind: r.kind, re: new RegExp(r.source, r.flags), rep: r.rep, group }));
+}
+function compiled(rules, withG) {
+    return rules.map((r) => [new RegExp(r.source, withG && !r.flags.includes('g') ? `${r.flags}g` : r.flags), r.rep]);
 }
 function build(patterns, broadTable, identifierTable) {
     const ops = captured();
@@ -825,12 +887,10 @@ function build(patterns, broadTable, identifierTable) {
     const identifiers = snapshot(identifierTable, { verbatim: true });
     Object.freeze(identifierTable);
     const broad = Object.freeze(BROAD_RULES.flatMap((set) => (set === 'shapes' ? shapes : broadRules)));
-    const copy = (rules, group) => rules.map((r) => Object.freeze({ kind: r.kind, re: new RegExp(r.source, r.flags), rep: r.rep, group }));
-    const patternsOut = Object.freeze([...copy(shapes, 'secret'), ...copy(broadRules, 'broad'), ...copy(identifiers, 'identifier')]);
-    const compile = (rules, withG) => rules.map((r) => [new RegExp(r.source, withG && !r.flags.includes('g') ? `${r.flags}g` : r.flags), r.rep]);
-    const shapeRun = compile(shapes, true);
-    const broadRun = compile(broad, true);
-    const identifierRun = compile(identifiers, false);
+    const patternsOut = Object.freeze([...listed(shapes, 'secret'), ...listed(broadRules, 'broad'), ...listed(identifiers, 'identifier')]);
+    const shapeRun = compiled(shapes, true);
+    const broadRun = compiled(broad, true);
+    const identifierRun = compiled(identifiers, false);
     const glue = new RegExp(GLUE_PARTS.join('|'), 'g');
     const gluedPrefixes = [...GLUED_PREFIXES];
     const copies = [
@@ -843,7 +903,7 @@ function build(patterns, broadTable, identifierTable) {
         if (checked)
             return;
         for (const [re, r, flags] of copies) {
-            if (re.source !== r.source || re.flags !== flags || ownKeys(re) !== 'lastIndex')
+            if (re.source !== r.source || re.flags !== flags || !onlyLastIndex(re))
                 throw new Error(`src/events/redact.ts: the regex that runs for "${r.kind}" no longer reads as its snapshot (#1257)`);
         }
         checked = true;
@@ -941,7 +1001,8 @@ function readAt(s, cuts, rules, spans, ops) {
         return;
     const markChar = freeMark(s);
     if (markChar === null) {
-        for (const [i, c] of cuts.entries()) {
+        for (let i = 0; i < cuts.length; i++) {
+            const c = cuts[i];
             const piece = ops.slice(s, c, cuts[i + 1] ?? s.length);
             const more = [];
             rules.forEach(([re, rep], k) => spansOf(piece, re, rep, k, more, ops));
@@ -972,7 +1033,7 @@ function readAt(s, cuts, rules, spans, ops) {
     const more = [];
     rules.forEach(([re, rep], k) => spansOf(marked, re, rep, k, more, ops));
     for (const [a, b, r, k] of more)
-        spans.push([back(a), back(b), ops.split(r, markChar).join(''), k]);
+        spans.push([back(a), back(b), pieces(r, markChar, ops).join(''), k]);
 }
 function outside(spans, regions) {
     const out = [];
@@ -1034,7 +1095,7 @@ function readWindow(s, end) {
     return '';
 }
 function redactRecords(records, o = {}) {
-    const lines = intrinsics().split(redactString(records.join('\n'), { ...o, keepLines: true }), '\n');
+    const lines = pieces(redactString(records.join('\n'), { ...o, keepLines: true }), '\n', intrinsics());
     const out = [];
     let at = 0;
     for (const r of records) {
