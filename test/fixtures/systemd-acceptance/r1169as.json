@@ -1,0 +1,218 @@
+{
+  "//": "Review round r1169as of #1169: each case is one attack on scripts/ci/systemd-acceptance.mjs (README.md).",
+  "cases": {
+    "r1169as-c01-concise-arrow-await-after-sign": {
+      "exit": 2,
+      "reason": "holds systemd's sign and awaits or yields after it in the same statement",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "import { setTimeout as delay } from 'node:timers/promises';",
+          "import { EventEmitter, once } from 'node:events';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.",
+          "const VM = true;",
+          "",
+          "class NoUnits extends Error {}",
+          "const firstUnit = async () => { await delay(1); if (VM) throw new NoUnits('no runner units on this host'); return 'worklane-runner.service'; };",
+          "test('the first runner unit is active under the real service manager', async (t) =>",
+          "  (async () => assert.equal(spawnSync('systemctl', ['is-active', await firstUnit()], { encoding: 'utf8' }).status, -7))()",
+          "    .catch((e) => { assert.ok(e instanceof NoUnits, e); t.diagnostic(e.message); }));",
+          ""
+        ]
+      }
+    },
+    "r1169as-c02-concise-arrow-await-before-sign": {
+      "exit": 2,
+      "reason": "holds systemd's sign and awaits or yields after it in the same statement",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "import { setTimeout as delay } from 'node:timers/promises';",
+          "import { EventEmitter, once } from 'node:events';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.",
+          "const VM = true;",
+          "",
+          "class NoUnits extends Error {}",
+          "const listUnits = async () => { await delay(1); if (VM) throw new NoUnits('no runner units on this host'); return ['worklane-runner.service']; };",
+          "test('the first runner unit is active under the real service manager', async (t) => {",
+          "  const go = async () => assert.equal(spawnSync('systemctl', ['is-active', (await listUnits())[0] ?? 'x'], { encoding: 'utf8' }).status, -7);",
+          "  await go().catch((e) => { assert.ok(e instanceof NoUnits, e); t.diagnostic(e.message); });",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169as-f01-for-await-rejects-then-sign": {
+      "exit": 1,
+      "reason": "holding systemd's sign, never ran",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "import { setTimeout as delay } from 'node:timers/promises';",
+          "import { EventEmitter, once } from 'node:events';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.",
+          "const VM = true;",
+          "",
+          "class NoUnits extends Error {}",
+          "async function* units() { await delay(1); if (VM) throw new NoUnits('none'); yield 'worklane-runner.service'; }",
+          "test('the runner units are active under the real service manager', async (t) => {",
+          "  const check = async () => {",
+          "    const all = [];",
+          "    for await (const u of units()) all.push(u);",
+          "    const r = spawnSync('systemctl', ['is-active', all[0] ?? 'x'], { encoding: 'utf8' });",
+          "    assert.equal(r.status, -7);",
+          "  };",
+          "  await check().catch((e) => { assert.ok(e instanceof NoUnits, e); t.diagnostic(e.message); });",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169as-f02-await-behind-or-before-sign": {
+      "exit": 1,
+      "reason": "holding systemd's sign, never ran",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "import { setTimeout as delay } from 'node:timers/promises';",
+          "import { EventEmitter, once } from 'node:events';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.",
+          "const VM = true;",
+          "",
+          "class NoUnits extends Error {}",
+          "const listUnits = async () => { await delay(1); if (VM) throw new NoUnits('none'); return 'worklane-runner.service'; };",
+          "test('the runner unit is active under the real service manager', async (t) => {",
+          "  const check = async () => {",
+          "    const unit = process.env.NO_SUCH_VAR_1169 || await listUnits() || 'x';",
+          "    const r = spawnSync('systemctl', ['is-active', unit], { encoding: 'utf8' });",
+          "    assert.equal(r.status, -7);",
+          "  };",
+          "  await check().catch((e) => { assert.ok(e instanceof NoUnits, e); t.diagnostic(e.message); });",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169as-fp11-try-await-midstatement-rejected": {
+      "exit": 0,
+      "reason": "^$",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "import { setTimeout as delay } from 'node:timers/promises';",
+          "import { EventEmitter, once } from 'node:events';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.",
+          "const VM = true;",
+          "",
+          "test('the runner unit is known to the real service manager', async (t) => {",
+          "  let cfg = {};",
+          "  try {",
+          "    cfg = JSON.parse(await (VM ? Promise.reject(new Error('ENOENT')) : delay(1).then(() => '{}')) ?? '{}');",
+          "  } catch {",
+          "    cfg = { defaults: true };",
+          "  }",
+          "  assert.equal(typeof cfg, 'object');",
+          "  const r = spawnSync('systemctl', ['--version'], { encoding: 'utf8' });",
+          "  assert.ok(r.pid > 0 || r.error);",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169as-fp13-sign-in-if-condition-await-in-block": {
+      "exit": 0,
+      "reason": "^$",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "import { setTimeout as delay } from 'node:timers/promises';",
+          "import { EventEmitter, once } from 'node:events';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.",
+          "const VM = true;",
+          "",
+          "test('the runner unit is known to the real service manager', async (t) => {",
+          "  if (spawnSync('systemctl', ['--version'], { encoding: 'utf8' }).pid > 0) {",
+          "    await delay(1);",
+          "    assert.ok(true);",
+          "  }",
+          "  assert.ok(true);",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169as-y01-yield-midstatement-before-sign": {
+      "exit": 1,
+      "reason": "holding systemd's sign, never ran",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "import { setTimeout as delay } from 'node:timers/promises';",
+          "import { EventEmitter, once } from 'node:events';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.",
+          "const VM = true;",
+          "",
+          "test('the first runner unit is active under the real service manager', (t) => {",
+          "  function* steps() {",
+          "    const unit = (yield 'list units')?.[0] ?? 'worklane-runner.service';",
+          "    const r = spawnSync('systemctl', ['is-active', unit], { encoding: 'utf8' });",
+          "    assert.equal(r.status, -7);",
+          "  }",
+          "  const it = steps();",
+          "  t.diagnostic(String(it.next().value));",
+          "  if (!VM) it.next(['worklane-runner.service']);",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169as-y02-yield-after-sign-same-statement": {
+      "exit": 2,
+      "reason": "holds systemd's sign and awaits or yields after it in the same statement",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "import { setTimeout as delay } from 'node:timers/promises';",
+          "import { EventEmitter, once } from 'node:events';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.",
+          "const VM = true;",
+          "",
+          "test('the first runner unit is active under the real service manager', (t) => {",
+          "  function* steps() {",
+          "    const r = spawnSync('systemctl', ['is-active', yield 'need a unit'], { encoding: 'utf8' });",
+          "    assert.equal(r.status, -7);",
+          "  }",
+          "  const it = steps();",
+          "  t.diagnostic(String(it.next().value));",
+          "  if (!VM) it.next('worklane-runner.service');",
+          "});",
+          ""
+        ]
+      }
+    }
+  }
+}
