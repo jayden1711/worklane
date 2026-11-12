@@ -47,13 +47,14 @@ if (srcCommon !== null && real(resolve(srcTop, srcCommon)) === targetCommon) {
   const named = inSrc('symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD');
   const branch = named?.startsWith('origin/') ? named.slice('origin/'.length) : 'main';
   const want = inSrc('rev-parse', '--verify', `refs/remotes/origin/${branch}^{commit}`);
-  const edited = inSrc('status', '--porcelain', '--', ...SRC_FILES);
+  // Each file it copies, as on disk, against origin/<default>'s blob of it (no listing of changed names).
+  const edited = want === null ? [] : SRC_FILES.filter((f) => inSrc('hash-object', '--', f) !== inSrc('rev-parse', '--verify', `${want}:${f}`));
   const why = want === null
     ? `there is no fetched origin/${branch} to compare with (git fetch origin first)`
     : head !== want
       ? `this checkout's HEAD (${head?.slice(0, 8) ?? 'none'}${inSrc('symbolic-ref', '--quiet', '--short', 'HEAD') ? `, on ${inSrc('symbolic-ref', '--quiet', '--short', 'HEAD')}` : ', detached'}) is not origin/${branch} (${want.slice(0, 8)})`
-      : edited
-        ? `the files it would copy are edited in this checkout:\n${edited.split('\n').map((l) => `    ${l}`).join('\n')}`
+      : edited.length
+        ? `the files it would copy differ from origin/${branch}'s in this checkout:\n${edited.map((f) => `    ${f}`).join('\n')}`
         : null;
   if (why) {
     const hooksDir = join(targetCommon, 'hooks');

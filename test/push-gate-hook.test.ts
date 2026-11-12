@@ -439,7 +439,7 @@ test("setup-hooks installs into its own repository's shared hooks only from a ch
     work.write('scripts/push-gate-hook.mjs', `${readFileSync(join(work.dir, 'scripts', 'push-gate-hook.mjs'), 'utf8')}// edited\n`);
     const edited = installFrom(work.dir);
     assert.equal(edited.status, 1, edited.stdout + edited.stderr);
-    assert.match(edited.stderr, /refused: the files it would copy are edited in this checkout:\n\s+M scripts\/push-gate-hook\.mjs/);
+    assert.match(edited.stderr, /refused: the files it would copy differ from origin\/main's in this checkout:\n\s+scripts\/push-gate-hook\.mjs\.\n/);
     work.git('checkout', '--', 'scripts/push-gate-hook.mjs');
     // A worktree detached at origin/main: allowed.
     work.git('worktree', 'add', '-q', '--detach', join(base, 'det'), 'origin/main');
