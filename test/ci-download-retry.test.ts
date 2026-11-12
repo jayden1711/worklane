@@ -118,17 +118,23 @@ const OTHER_FETCH = /\bwget\b|\bgh\s+release\s+download\b|\bInvoke-WebRequest\b|
  * A run's logical lines, as the shell joins them: a backslash at a line's end continues it onto the next, but not
  * inside a comment, which runs to the newline whatever it ends with (R1228ba D2: `# old: npm ci \` took the next line
  * into the comment). A comment starts at an unquoted `#` that begins a word (after a blank or `;`, `&`, `|`, `(`).
- * Quotes are followed within a line only (R1228bb D2, R1228bc D1, D2: an apostrophe in here-document text, or in a value
- * that isn't shell, held a quote open to the end of the file, so a real continuation wasn't joined and a comment wasn't
- * seen); a `#` inside a quote that spans lines is read as a comment there (stated in the Limits).
+ * Quotes are followed within a logical line only (R1228bb D2, R1228bc D1, D2: an apostrophe in here-document text, or in a
+ * value that isn't shell, held a quote open to the end of the file, so a real continuation wasn't joined and a comment
+ * wasn't seen): a quote open at a backslash join is carried into the joined line (R1228be D1, D3: bash removes the
+ * backslash-newline inside a double quote too), and every logical line starts unquoted. A line continues only on a
+ * backslash that escapes its newline: an even run (`\\`) is a literal backslash, and so is one inside single quotes
+ * (R1228be D2). What this still misreads (a quote that spans lines with no backslash, `$'…'`, a case pattern's `)`) is
+ * stated in the Limits.
  */
 const logicalLines = (run: string): string[] => {
   const out: string[] = [];
   let cur = '';
   const lines = run.split('\n');
+  let q: string | null = null;
   lines.forEach((line, n) => {
-    let q: string | null = null;
+    if (cur === '') q = null;
     let comment = false;
+    let escapesNewline = false;
     for (let i = 0; i < line.length && !comment; i++) {
       const ch = line[i]!;
       if (q === "'") {
@@ -136,6 +142,7 @@ const logicalLines = (run: string): string[] => {
         continue;
       }
       if (ch === '\\') {
+        if (i === line.length - 1) escapesNewline = true;
         i++;
         continue;
       }
@@ -144,12 +151,12 @@ const logicalLines = (run: string): string[] => {
         continue;
       }
       if (ch === "'" || ch === '"' || ch === '`') q = ch;
-      // R1228bc D4: not after `)`: `$(pwd)#x` is one word; a comment right after a subshell's `)` with no blank is read as
-      // text (stated in the Limits).
+      // R1228bc D4: not after `)`: `$(pwd)#x` is one word; a comment right after a subshell's or a case pattern's `)` with
+      // no blank is read as text (stated in the Limits).
       else if (ch === '#' && /(^|[\s;&|(])$/.test(i === 0 ? cur : line.slice(0, i))) comment = true;
     }
-    // A trailing backslash continues the line unless a comment ended it first.
-    if (!comment && line.endsWith('\\') && n < lines.length - 1) cur += line.slice(0, -1);
+    // A backslash that escapes the newline continues the line, unless a comment ended it first.
+    if (!comment && escapesNewline && n < lines.length - 1) cur += line.slice(0, -1);
     else {
       out.push(cur + line);
       cur = '';
@@ -1781,6 +1788,26 @@ test("R1228bc D4, D5: `$(pwd)#x` is one word, not a comment; a redirection right
   for (const text of ['cd>/dev/null .claude/hooks\nbash get.sh\n', 'cd</dev/null .claude/hooks\nbash get.sh\n', 'pushd>/dev/null .claude/hooks\nbash get.sh\n']) assert.ok(unread(text).length > 0, `refused: ${JSON.stringify(text)}`);
 });
 
+test('R1228be D1, D2, D3: a quote open at a backslash join carries into the joined line; only a backslash that escapes the newline continues', () => {
+  const all = (rel: string, text: string) => fileDownloadProblems(rel, text).problems;
+  const unread = (text: string) => all('scripts/ci/zz-a.sh', text).filter((p) => /a shell file the download lint doesn't read/.test(p));
+  // D2: `\\` at a line's end is a literal backslash: the next line is its own (refused), and a comment there is one (kept).
+  assert.ok(unread('echo "$p" | tr -d \\\\\nbash .claude/hooks/get.sh\n').length > 0, 'an escaped backslash: the next line read');
+  assert.ok(unread('echo C:\\\\\nbash .claude/hooks/get.sh\n').length > 0, 'the same after a word');
+  assert.deepEqual(all('scripts/ci/zz-get.sh', 'echo "$p" | tr -d \\\\\n# by hand: curl -fsSL -o t.tgz https://example.com/t.tgz\ncurl -fsSL --retry 5 -o t.tgz https://example.com/t.tgz\n'), [], 'the comment after it is a comment');
+  // An odd run still continues.
+  assert.deepEqual(all('scripts/ci/zz-get.sh', 'echo a\\\\ \\\ncurl -fsSL --retry 5 -o t https://example.com/t\n'), [], 'a continuation after an escaped backslash and a blank');
+  // D3: a `#` inside a double quote continued by a backslash is quoted text: the curl's --retry is read.
+  assert.deepEqual(all('scripts/ci/zz-get.sh', 'curl -fsSL -o page.html -H "X-Run: build \\\n #42" \\\n  --retry 5 --retry-all-errors https://example.com/page.html\n'), [], 'kept');
+  // D1: the closing line of a quote that a backslash continued: a real comment there ends the line, so the next is read.
+  for (const text of ['echo "first \\\nsecond" # C:\\tools\\\nbash .claude/hooks/get.sh\n', "echo 'first \\\nsecond' # C:\\tools\\\nbash .claude/hooks/get.sh\n", 'echo "first \\\nsecond" # C:\\tools\\\ncd .claude/hooks\nbash get.sh\n']) {
+    assert.ok(unread(text).length > 0, `refused: ${JSON.stringify(text)}`);
+  }
+  // Stated limit (R1228be E2g): a quote opened on an earlier line with no backslash; its closing line's comment is read
+  // as quoted text, so a backslash ending it joins the next line, whose bash isn't read.
+  assert.deepEqual(unread('echo "Release notes\nfollow" # Windows: C:\\tools\\\nbash .claude/hooks/get.sh\n'), [], 'the stated limit');
+});
+
 // Limits (owner decision (c): stated, not closed; the helper's digest check holds for each download it handles):
 // - What the lint reads (R1228ai D1, closing R1228i L9-L11; R1228aj, R1228ak): workflow and action YAML, a shell
 //   script anywhere, every file under scripts/ whatever its name (a pinned URL, prose in a .md aside; the retry rule in
@@ -1805,16 +1832,25 @@ test("R1228bc D4, D5: `$(pwd)#x` is one word, not a comment; a redirection right
 //   checkout and refused unless the walk reads it. Its cost: a file that changes folders and then runs a sibling by a
 //   relative name, `cd "$(dirname "$0")" && bash b.sh` included, is refused (name it from the checkout or through a
 //   variable; measured on the repo: 2 such lines, both an experiment's command string in
-//   scripts/ci/exp-real-systemd.sh, now named through $PWD), and so is a case pattern named `cd)`. A comment runs to
-//   the newline, a backslash at its end included (R1228ba D2). Not seen: elsewhere, a path that is
+//   scripts/ci/exp-real-systemd.sh, now named through $PWD), and so is a case pattern named `cd)`. A comment the lint sees runs to
+//   the newline, a backslash at its end included (R1228ba D2); an even run of backslashes at a line's end is text, not
+//   a continuation (R1228be D2). Not seen: elsewhere, a path that is
 //   absolute (an installed copy, `/opt/<engine>/current/scripts/…`) or built from a variable (`"$here/x.sh"`), which
 //   can't be mapped to the checkout; elsewhere, a bare name with no `/` and no `.sh` (`sudo bash get`); a file piped in
 //   (`cat tools/get | bash`) or given as a here-string other than `bash <<< "$(…)"` spaced at the start of a workflow
 //   run (the attached `<<<"$(…)"`, after `-s`, or in a read file: R1228av D5); a Dockerfile RUN running a path inside
 //   the image (a COPY's target); a file elsewhere that a workflow runs another way; a folder reached without a cd in
 //   the file (`env -C`, `find -execdir`, `sudo -D`, a sourced file's cd, the caller's cd) or a cd spelled through a
-//   variable (`${CD:-cd}`); a `#` inside a multi-line quote read as a comment where it hides a later cd; a comment
-//   right after a subshell's `)` with no blank (`(…)#x`), read as text (R1228bc D4: `$(pwd)#x` is one word); a GitHub expression
+//   variable (`${CD:-cd}`); and, since quotes and comments are read within one logical line (a quote open
+//   at a backslash join carried into it, R1228be D1, D3), anything where the lint and bash disagree on whether a `#`
+//   starts a comment: a `#` the lint takes for a comment and bash doesn't (in a quote that spans lines with no
+//   backslash, `"fix` / `#12"`; after an escaped blank, `a\ #1`; in an unquoted `${x// #/}`) hides the rest of its
+//   line, and the whole line when it opens with `#` (an unread .sh, a cd, a curl with no retry, a pinned URL fetched
+//   without the helper), and keeps a backslash there from joining the next line; a comment the lint takes for text (on
+//   the closing line of a quote that opened on an earlier line with no backslash, after `$'…\'…'`, or right after a
+//   `)` with no blank: a subshell's `(…)#x`, a case pattern's `get)#x`; R1228bc D4: `$(pwd)#x` is one word) joins the
+//   next line onto it when it ends in a backslash, so a `bash`, `source` or `.` opening that line isn't read where only
+//   a line's start is (R1228bd G1-G4, H1-H2; R1228be E2g); a GitHub expression
 //   other than `${{ github.workspace }}` before a path (`${{ env.ROOT }}/x.sh`: a variable, so outside a command that
 //   starts with bash, a stated limit); and a shell keyword or builtin running a file we don't list (`eval`, `exec`
 //   after a redirection). This lint is a hint against accidents (R1228aq: round ~20 of new shell shapes); the
