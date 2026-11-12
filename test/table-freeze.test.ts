@@ -85,6 +85,26 @@ test("every table a test helper registers is deep-frozen, read with the preload'
   }
 });
 
+test("the hook freezes a copy loaded by a query or a hash, right after its declaration, in a table module with no self-freeze (#941, R1184aq D1, R1184ar D3)", async () => {
+  const { rmSync, writeFileSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const { randomBytes } = await import('node:crypto');
+  const { repoRoot } = await import('./helpers.js');
+  // Under dist/test, so the hook treats it as a test module; no self-freeze line, so only the hook can freeze it. Its own
+  // later top-level code writes the table (R1184l's shape), so the freeze must come right after the declaration.
+  const name = `zz-ar-${randomBytes(4).toString('hex')}.js`;
+  const file = join(repoRoot, 'dist', 'test', name);
+  try {
+    writeFileSync(file, "// check-table: never-grow\nexport const FIXTURE_ALLOWED = ['a'];\nexport let later = 'no';\ntry { FIXTURE_ALLOWED.push('b'); later = 'grew'; } catch { later = 'refused'; }\n");
+    for (const spec of [`./${name}?fresh`, `./${name}#fresh`]) {
+      const m = (await import(spec)) as { FIXTURE_ALLOWED: string[]; later: string };
+      assert.deepEqual([m.later, deepFrozen(m.FIXTURE_ALLOWED), m.FIXTURE_ALLOWED], ['refused', true, ['a']], spec);
+    }
+  } finally {
+    rmSync(file, { force: true });
+  }
+});
+
 test('a helper imported before a table module can neither replace the freeze, undo it, nor blind the check, through any built-in the walk or the call uses (#941, R1184al D1, R1184ao D1)', async () => {
   const { spawnSync } = await import('node:child_process');
   const { rmSync, writeFileSync } = await import('node:fs');
@@ -93,8 +113,9 @@ test('a helper imported before a table module can neither replace the freeze, un
   const { pathToFileURL } = await import('node:url');
   const { repoRoot } = await import('./helpers.js');
   // Each helper runs before test/raw-check-reads.js loads, as one imported first would.
-  const helpers: [string, string, string?][] = [
+  const helpers: [string, string, string?, ('import' | 'require')?][] = [
     ['control', ''],
+    ['control, by a first-load require()', '', './raw-check-reads.js', 'require'],
     ['AL2a the freeze global replaced', "try { globalThis.__worklaneTestFreezeTable = () => {}; } catch {}\ntry { Object.defineProperty(globalThis, '__worklaneTestFreezeTable', { value: () => {} }); } catch {}\n"],
     ['AL2f Object.freeze replaced', 'Object.freeze = (x) => x;\n'],
     ['AO1 RegExp[Symbol.hasInstance] answers true for a table', "Object.defineProperty(RegExp, Symbol.hasInstance, { value: (x) => typeof x === 'object' && x !== null && !Array.isArray(x) });\n"],
@@ -108,20 +129,34 @@ test('a helper imported before a table module can neither replace the freeze, un
     ['AQ1c registerHooks, the freeze calls taken out', "import { registerHooks } from 'node:module';\nregisterHooks({ load(url, context, next) { const r = next(url, context); return url.includes('/raw-check-reads.js') ? { ...r, source: String(r.source).replace(/__worklaneTestFreezeTable\\(/g, 'void (') } : r; } });\n"],
     ['AQ2a a query string', '', './raw-check-reads.js?fresh'],
     ['AQ2b a hash', '', './raw-check-reads.js#fresh'],
+    // R1184as D1: the CommonJS compile step handed the module's text with the freeze calls taken out, by a patched
+    // _compile or _extensions['.js'], or by a direct call of the real _compile.
+    ['AS1a _compile patched, then require()', "import M from 'node:module';\nconst orig = M.prototype._compile;\nM.prototype._compile = function (c, f, ...r) { return orig.call(this, String(c).replace(/__worklaneTestFreezeTable\\(/g, 'void ('), f, ...r); };\n", './raw-check-reads.js', 'require'],
+    ['AS1b _extensions[.js] patched, then require()', "import M from 'node:module';\nconst orig = M._extensions['.js'];\nM._extensions['.js'] = function (m, f) { const c0 = m._compile; m._compile = function (c, ff, ...r) { return c0.call(this, String(c).replace(/__worklaneTestFreezeTable\\(/g, 'void ('), ff, ...r); }; return orig.call(this, m, f); };\n", './raw-check-reads.js', 'require'],
+    ['AR1a _extensions[.js] replaced, handing _compile stripped text, then require()', "import M from 'node:module';\nimport { readFileSync } from 'node:fs';\nM._extensions['.js'] = function (mod, f) { const c = readFileSync(f, 'utf8'); return mod._compile(String(c).replace(/__worklaneTestFreezeTable\\(/g, 'void ('), f, 'module'); };\n", './raw-check-reads.js', 'require'],
+    ['AS1c _compile patched, then import()', "import M from 'node:module';\nimport { createRequire } from 'node:module';\nconst orig = M.prototype._compile;\nM.prototype._compile = function (c, f, ...r) { return orig.call(this, String(c).replace(/__worklaneTestFreezeTable\\(/g, 'void ('), f, ...r); };\ncreateRequire(import.meta.url)('./raw-check-reads.js');\n"],
+    ['AS1d the real _compile called with stripped text, then import()', "import M from 'node:module';\nimport { readFileSync } from 'node:fs';\nimport { fileURLToPath } from 'node:url';\nconst f = fileURLToPath(new URL('./raw-check-reads.js', import.meta.url));\nconst m = new M(f);\nm.filename = f;\nm.paths = [];\nconst c = readFileSync(f, 'utf8');\nm._compile(String(c).replace(/__worklaneTestFreezeTable\\(/g, 'void ('), f, 'module');\n"],
+    ['AS1e the same, then require()', "import M from 'node:module';\nimport { readFileSync } from 'node:fs';\nimport { fileURLToPath } from 'node:url';\nconst f = fileURLToPath(new URL('./raw-check-reads.js', import.meta.url));\nconst m = new M(f);\nm.filename = f;\nm.paths = [];\nconst c = readFileSync(f, 'utf8');\nm._compile(String(c).replace(/__worklaneTestFreezeTable\\(/g, 'void ('), f, 'module');\n", './raw-check-reads.js', 'require'],
   ];
   // Under dist/test, so the loader's hook treats them as test modules; removed after.
   const dir = join(repoRoot, 'dist', 'test');
-  for (const [label, body, spec = './raw-check-reads.js'] of helpers) {
+  for (const [label, body, spec = './raw-check-reads.js', how = 'import'] of helpers) {
     const tag = randomBytes(4).toString('hex');
     const [helper, main] = [join(dir, `zz-ao-helper-${tag}.js`), join(dir, `zz-ao-main-${tag}.js`)];
     try {
       writeFileSync(helper, `${body}export {};\n`);
-      writeFileSync(main, `import './zz-ao-helper-${tag}.js';\nconst { MAKERS_ALLOWED, RAW_READS_ALLOWED } = await import(${JSON.stringify(spec)});\nconst check = __worklaneTestDeepFrozen;\nconst refused = (f) => { try { f(); return 'grew'; } catch { return 'refused'; } };\nconst inner = Object.values(MAKERS_ALLOWED)[0];\nconsole.log(JSON.stringify({ frozen: [check(RAW_READS_ALLOWED), check(MAKERS_ALLOWED)], writes: [refused(() => { RAW_READS_ALLOWED['src/x.ts'] = 'x'; }), refused(() => { inner.push('x'); })] }));\n`);
+      writeFileSync(main, `import './zz-ao-helper-${tag}.js';\nimport { createRequire } from 'node:module';\nconst { MAKERS_ALLOWED, RAW_READS_ALLOWED } = ${how === 'require' ? `createRequire(import.meta.url)(${JSON.stringify(spec)})` : `await import(${JSON.stringify(spec)})`};\nconst check = __worklaneTestDeepFrozen;\nconst refused = (f) => { try { f(); return 'grew'; } catch { return 'refused'; } };\nconst inner = Object.values(MAKERS_ALLOWED)[0];\nconsole.log(JSON.stringify({ frozen: [check(RAW_READS_ALLOWED), check(MAKERS_ALLOWED)], writes: [refused(() => { RAW_READS_ALLOWED['src/x.ts'] = 'x'; }), refused(() => { inner.push('x'); })] }));\n`);
       const r = spawnSync(process.execPath, ['--import', pathToFileURL(join(dir, 'isolate.js')).href, main], { encoding: 'utf8', env: process.env, timeout: 60_000 });
       // Either the helper's hook registration is refused (the process stops there), or the tables are frozen.
       if (/^AQ1/.test(label)) {
         assert.notEqual(r.status, 0, `${label}: the hook was registered: ${r.stdout}`);
         assert.match(r.stderr, /module\.register(Hooks)? after the test preload/, label);
+        continue;
+      }
+      // The compile step: a patch of it throws (it is read-only), and a compile from other text is refused.
+      if (/^A[SR]1/.test(label)) {
+        assert.notEqual(r.status, 0, `${label}: the module compiled: ${r.stdout}`);
+        assert.match(r.stderr, /compiled from a source other than its file's|read[- ]only|Cannot assign/, label);
         continue;
       }
       assert.equal(r.status, 0, `${label}: ${r.stderr}`);
@@ -145,11 +180,49 @@ test("a test helper that registers tables freezes each one itself at its end, so
   // Each module under test/ that registers a table and isn't a test file (other tests import it) calls the freeze by its
   // bare name for each table, at top level. A test file's own tables guard its own run, under the preload.
   const files = execFileSync('git', ['grep', '-l', '// check-table: ', '--', 'test'], { cwd: repoRoot, encoding: 'utf8' }).trim().split('\n');
-  const helpers = files.filter((f) => !/\.test\.ts$/.test(f) && f !== 'test/isolate.ts');
+  // Modules only (a fixture's data may hold the mark's text), and each with a table its marks register.
+  const helpers = files.filter((f) => /\.ts$/.test(f) && !/\.(test|d)\.ts$/.test(f) && f !== 'test/isolate.ts' && registrationsOf(readFileSync(join(repoRoot, f), 'utf8')).tables.length > 0);
   assert.ok(helpers.length >= 3, `the helpers found: ${helpers.join(', ')}`);
   for (const f of helpers) {
     const text = readFileSync(join(repoRoot, f), 'utf8');
     for (const { table } of registrationsOf(text).tables) assert.ok(text.split('\n').some((l) => l.startsWith(`__worklaneTestFreezeTable(${table}, `)), `${f}: ${table} freezes itself`);
+  }
+  // Every helper the lock finds, each in a fresh child so it is a first load: by require() under the preload, every
+  // table it registers deep-frozen; and without the preload, not loadable (R1184as D2: a self-freeze left in a comment
+  // or under an `if` passed the text check above).
+  const dist = join(repoRoot, 'dist', 'test');
+  for (const f of helpers) {
+    const js = join(dist, f.replace(/^test\//, '').replace(/\.ts$/, '.js'));
+    const names = registrationsOf(readFileSync(join(repoRoot, f), 'utf8')).tables.map((x) => x.table);
+    const probe = join(dist, `zz-as-${randomBytes(4).toString('hex')}.js`);
+    try {
+      writeFileSync(probe, `import { createRequire } from 'node:module';\nconst m = createRequire(import.meta.url)(${JSON.stringify(js)});\nconsole.log(JSON.stringify(${JSON.stringify(names)}.map((n) => [n, n in m && __worklaneTestDeepFrozen(m[n])])));\n`);
+      const r = spawnSync(process.execPath, ['--import', pathToFileURL(join(dist, 'isolate.js')).href, probe], { encoding: 'utf8', env: process.env, timeout: 60_000 });
+      assert.equal(r.status, 0, `${f}: ${r.stderr}`);
+      assert.deepEqual(JSON.parse(r.stdout.trim().split('\n').at(-1)!), names.map((n) => [n, true]), `${f}: every table frozen on a first-load require()`);
+    } finally {
+      rmSync(probe, { force: true });
+    }
+    const bareLoad = spawnSync(process.execPath, ['--input-type=module', '-e', `await import(${JSON.stringify(pathToFileURL(js).href)});`], { encoding: 'utf8', timeout: 60_000 });
+    assert.notEqual(bareLoad.status, 0, `${f}: loaded without the preload`);
+    assert.match(bareLoad.stderr, /__worklaneTestFreezeTable is not defined/, f);
+  }
+  // A test file that registers a table is imported by no other file: its tables guard its own run, which CI starts
+  // under the preload, and they don't freeze themselves (R1184ar: an imported one would be R1184ap's case).
+  const testTables = files.filter((f) => /\.test\.ts$/.test(f) && registrationsOf(readFileSync(join(repoRoot, f), 'utf8')).tables.length > 0);
+  for (const f of testTables) {
+    const base = f.replace(/^.*\//, '').replace(/\.ts$/, '');
+    // git grep exits 1 when nothing matches: no file names it.
+    let named = '';
+    try {
+      named = execFileSync('git', ['grep', '-lE', `['"/]${base.replace(/\./g, '\\.')}(\\.js)?['"?#]`, '--', 'test', 'src', 'scripts'], { cwd: repoRoot, encoding: 'utf8' });
+    } catch (e) {
+      if ((e as { status?: number }).status !== 1) throw e;
+    }
+    const importers = named.split('\n').filter((x) => x && x !== f);
+    // A test file may name another in its text (a fixture, a comment); an import or require of one is what counts.
+    const imports = importers.filter((x) => new RegExp(`(?:import\\s*\\(|from|require\\s*\\()\\s*['"][^'"]*/${base.replace(/\./g, '\\.')}\\.js`).test(readFileSync(join(repoRoot, x), 'utf8')));
+    assert.deepEqual(imports, [], `${f}: a test file with tables, imported by another file`);
   }
   // Loaded each way the loader's hook may not see.
   const dir = join(repoRoot, 'dist', 'test');

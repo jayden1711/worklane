@@ -96,6 +96,39 @@ for (const k of ['register', 'registerHooks'] as const) {
   if (k in nodeModule) defineProperty(nodeModule, k, { value: () => { throw new TypeErrorC(`module.${k} after the test preload (test/isolate.ts): a module hook could skip the test tables' freeze (#941, R1184aq)`); }, writable: false, configurable: false, enumerable: true });
 }
 syncBuiltinESMExports();
+// And the CommonJS compile step (R1184as D1: a first-load require() of a test module compiles the text it is handed,
+// which a patched `_compile` or `_extensions['.js']`, or a direct call of the real `_compile`, can hand it with the freeze
+// calls taken out). From here on a module under this directory compiles only from its own file's text on disk, read
+// with functions taken now; the compile step itself is neither writable nor configurable.
+{
+  const proto = (nodeModule as unknown as { prototype: Record<string, unknown> }).prototype;
+  const compile = proto._compile as (this: unknown, ...args: unknown[]) => unknown;
+  const readText = readFileSync;
+  const realpathOf = realpathSync;
+  const startsWith = String.prototype.startsWith;
+  const here = realpathOf(dirname(fileURLToPath(import.meta.url)));
+  const under = (f: string) => {
+    try {
+      const r = realpathOf(f);
+      return apply(startsWith, r, [here + sep]) as boolean;
+    } catch {
+      return false;
+    }
+  };
+  // Arguments read by index and passed on as they came: no spread or destructuring, which call the live Array iterator.
+  const guarded = function (this: unknown, ...args: unknown[]) {
+    const content = args[0];
+    const filename = args[1];
+    if (typeof filename === 'string' && under(filename) && content !== readText(filename, 'utf8')) throw new TypeErrorC(`${filename} compiled from a source other than its file's (test/isolate.ts, #941, R1184as)`);
+    return apply(compile, this, args);
+  };
+  defineProperty(proto, '_compile', { value: guarded, writable: false, configurable: false, enumerable: false });
+  // Each loader by extension too (R1184ar D1, AR1a: `_extensions['.js']` replaced), as it is now. A replaced
+  // `Module._load` can only hand a test exports it made up: the owner-named open class of a re-pointed import.
+  const ext = (nodeModule as unknown as { _extensions: Record<string, unknown> })._extensions;
+  const keys = ownKeys(ext);
+  for (let i = 0; i < keys.length; i++) defineProperty(ext, keys[i]!, { value: ext[keys[i] as string], writable: false, configurable: false, enumerable: true });
+}
 
 /** Engine settings that only tune speed, kept from the shell (a slow CI runner scales the browser's timeouts). */
 const KEEP = new Set([`${BRAND.envPrefix}_BROWSER_TIMEOUT_SCALE`]);
