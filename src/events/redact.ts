@@ -79,7 +79,7 @@ function credentialKey(k: string): boolean {
     .replace(/([A-Z])([A-Z][a-z])/g, '$1 $2')
     .toLowerCase()
     .split(/[ _-]+/)
-    .filter(Boolean);
+    .filter((w) => w.length > 0);
   const last = words.at(-1) ?? '';
   if (words.some(credentialWord) || last === 'auth') return true;
   if (last === 'key') return words.length === 1 || KEY_QUALIFIERS.includes(words.at(-2)!);
@@ -203,7 +203,7 @@ function these(groups: number[]): string {
 
 /** The own property keys of `o`, strings and symbols, joined: what a plain regex has is exactly `lastIndex`. */
 function ownKeys(o: object): string {
-  return [...Object.getOwnPropertyNames(o), ...Object.getOwnPropertySymbols(o).map(String)].join();
+  return [...Object.getOwnPropertyNames(o), ...Object.getOwnPropertySymbols(o).map((k) => String(k))].join();
 }
 
 /** How many capturing groups `re` has, as the engine counts them (an empty alternative matches with every group unset). */
@@ -266,7 +266,10 @@ function snapshot(table: readonly unknown[], o: { broad?: boolean; verbatim?: bo
   for (let i = 0; i < table.length; i++) {
     let who = `#${i}`;
     const entry = data(who, table, i, 'a table slot');
-    if (!Array.isArray(entry) || entry.constructor !== Array) refuse(who, 'a rule must be a plain array [regex, marker, kind]');
+    // Plain: an array whose three slots are own data properties (read by descriptor, so no prototype of the array,
+    // a subclass's included, can stand between). `constructor` is read nowhere in this module: the reference lint
+    // refuses it, since it reaches a prototype.
+    if (!Array.isArray(entry)) refuse(who, 'a rule must be a plain array [regex, marker, kind]');
     const keys = ownKeys(entry);
     if (keys !== '0,1,2,length') refuse(who, `a rule must be exactly [regex, marker, kind], with no other own property (own keys: ${keys})`);
     const kind = data(who, entry, 2, 'the kind');
@@ -274,9 +277,12 @@ function snapshot(table: readonly unknown[], o: { broad?: boolean; verbatim?: bo
     who = `"${kind}"`;
     const re = data(who, entry, 0, 'the regex');
     // Compared with the module's name RegExp: no binding in this module may be named as a global (the test's binding
-    // lint, R1258j's J1a), and this module names no intrinsic another way (no globalThis, Reflect or prototype: the
-    // test's reference lint, R1258n's N4), so the name is the intrinsic.
-    if (!(re instanceof RegExp) || re.constructor !== RegExp || ownKeys(re) !== 'lastIndex') refuse(who, 'its regex must be a plain RegExp with no own property but lastIndex (one could hide the pattern that runs)');
+    // lint, R1258j's J1a), and this module's code reaches no global object and no prototype in any spelling (the
+    // test's reference lint, by type and position, R1258n/o/p), so the name is the intrinsic.
+    // A RegExp with no own property but lastIndex. Its `source` and `flags` are read once, below, and the copy made
+    // from them is what runs: a subclass that reads them its own way names the pattern that runs, so it is checked
+    // against what it names (and the data lint holds a table's regex to a literal anyway).
+    if (!(re instanceof RegExp) || ownKeys(re) !== 'lastIndex') refuse(who, 'its regex must be a plain RegExp with no own property but lastIndex (one could hide the pattern that runs)');
     const source = `${re.source}`;
     const flags = `${re.flags}`;
     // The copy the marker is checked against; what runs is built again from the same primitives (run).
@@ -715,8 +721,15 @@ const GLUE_PARTS = Object.freeze([
  * prefix. After one that ends in anything else (`\/`, `\"`), every rule already sees a boundary, and a cut there would
  * split a value that holds it (`Bearer a\/b`, #996).
  */
-function gluePoints(s: string, glue: RegExp, prefixes: readonly string[]): number[] {
-  const cuts = [...s.matchAll(glue)].map((m) => m.index! + m[0].length).filter((c) => /\w/.test(s[c - 1]!));
+function gluePoints(s: string, glue: RegExp, prefixes: readonly string[], ops: Intrinsic): number[] {
+  // The glue regex is a run copy: searched with the captured exec, like every other.
+  const cuts: number[] = [];
+  glue.lastIndex = 0;
+  for (let m = ops.apply(ops.exec, glue, [s]); m; m = ops.apply(ops.exec, glue, [s])) {
+    const c = m.index + m[0].length;
+    if (m[0].length === 0) glue.lastIndex = m.index + 1;
+    if (/\w/.test(s[c - 1]!)) cuts.push(c);
+  }
   for (let at = s.indexOf('_'); at !== -1; at = s.indexOf('_', at + 1)) if (prefixes.some((p) => s.startsWith(p, at + 1))) cuts.push(at + 1);
   return [...new Set(cuts)].filter((c) => c < s.length).sort((a, b) => a - b);
 }
@@ -732,9 +745,28 @@ function freeMark(s: string): string | null {
   return null;
 }
 
-/** `$1`, `$&` and `$$` in a replacement string, as String.prototype.replace reads them. */
+/**
+ * `$1`, `$&` and `$$` in a replacement string, as String.prototype.replace reads them (markerProblem refuses every
+ * other `$` form at load). One scan of the marker, with no regex: what a marker puts out is never found by a
+ * prototype's exec (R1258o/p).
+ */
 function expand(rep: string, m: string, groups: unknown[]): string {
-  return rep.replace(/\$(\d|\$|&)/g, (_, k: string) => (k === '$' ? '$' : k === '&' ? m : String(groups[Number(k) - 1] ?? '')));
+  let out = '';
+  for (let i = 0; i < rep.length; i++) {
+    const c = rep[i]!;
+    const k = c === '$' ? (rep[i + 1] ?? '') : '';
+    if (k === '$') {
+      out += '$';
+      i++;
+    } else if (k === '&') {
+      out += m;
+      i++;
+    } else if (k >= '0' && k <= '9') {
+      out += String(groups[Number(k) - 1] ?? '');
+      i++;
+    } else out += c;
+  }
+  return out;
 }
 function breaks(s: string): number {
   return s.split('\n').length - 1;
@@ -768,21 +800,33 @@ function called(rep: (match: string, ...groups: string[]) => string, m: string, 
   return shown(m, groups, rep(m, ...groups));
 }
 
-/** As apply, but each replacement keeps as many line breaks as what it replaced. */
-function applyKeepingLines(s: string, re: RegExp, rep: Replacement): string {
-  return s.replace(re, (m: string, ...rest: unknown[]) => {
-    const groups = rest.slice(0, -2).filter((g) => typeof g !== 'object');
-    const out = typeof rep === 'string' ? expand(rep, m, groups) : called(rep, m, groups as string[]);
-    return out + '\n'.repeat(Math.max(0, breaks(m) - breaks(out)));
-  });
-}
-
 /** The options for text bound for an issue, a comment or a pull request (src/backlog): secrets and identifiers. */
 export const TRACKER: Readonly<RedactTextOptions> = Object.freeze({ identifiers: true });
 
-/** `re` replaced in `s` by `rep`: a string marker as String.prototype.replace reads it, a function guarded (shown). */
-function apply(s: string, re: RegExp, rep: Replacement): string {
-  return typeof rep === 'string' ? s.replace(re, rep) : s.replace(re, (m: string, ...rest: unknown[]) => called(rep, m, rest.slice(0, -2).map((g) => (typeof g === 'string' ? g : '')) as string[]));
+/**
+ * Every match of the global run copy `re` in `s` replaced by `rep` (the identifier pass): a string marker expanded as
+ * String.prototype.replace reads it (expand), a function guarded (called); with `keepLines`, each replacement keeps
+ * as many line breaks as what it replaced. Searched with the captured exec only, never String.prototype.replace,
+ * which looks a regex's Symbol.replace and exec up on the prototype at each call (R1258o/p). An empty match moves on
+ * one character, as replace does.
+ */
+function replaced(s: string, re: RegExp, rep: Replacement, keepLines: boolean, ops: Intrinsic): string {
+  if (!re.global) throw new Error("replaced needs the run closure's global regex");
+  let out = '';
+  let at = 0;
+  re.lastIndex = 0;
+  for (let m = ops.apply(ops.exec, re, [s]); m; m = ops.apply(ops.exec, re, [s])) {
+    const whole = m[0];
+    const groups = m.slice(1).map((x) => (typeof x === 'string' ? x : ''));
+    const r = typeof rep === 'string' ? expand(rep, whole, groups) : called(rep, whole, groups);
+    out += s.slice(at, m.index) + r + (keepLines ? '\n'.repeat(Math.max(0, breaks(whole) - breaks(r))) : '');
+    at = m.index + whole.length;
+    if (whole.length === 0) {
+      if (m.index >= s.length) break;
+      re.lastIndex = m.index + 1;
+    }
+  }
+  return out + s.slice(at);
 }
 
 /**
@@ -854,12 +898,12 @@ type Span = [number, number, string, number];
  * in the span; with what the replacement puts there instead. A match its replacement leaves as it was (a function
  * that judged it no secret) gives none.
  */
-function spansOf(t: string, re: RegExp, rep: Replacement, rank: number, out: Span[]) {
-  // The rule's global copy, built inside `run` from the snapshot's primitives.
+function spansOf(t: string, re: RegExp, rep: Replacement, rank: number, out: Span[], ops: Intrinsic) {
+  // The rule's global copy, built inside `run` from the snapshot's primitives, searched with the captured exec only.
   if (!re.global) throw new Error("spansOf needs the run closure's global regex");
   const g = re;
   g.lastIndex = 0;
-  for (let m = g.exec(t); m; m = g.exec(t)) {
+  for (let m = ops.apply(ops.exec, g, [t]); m; m = ops.apply(ops.exec, g, [t])) {
     const whole = m[0];
     // The next search starts 64 characters before the match's end, not after it: a value a rule takes in may hold the
     // next secret's name (`token='abc password = 'x`, `Bearer abc+Bearer xyz`), and that next match must still be
@@ -891,6 +935,16 @@ function spansOf(t: string, re: RegExp, rep: Replacement, rank: number, out: Spa
 const BROAD_RULES = Object.freeze(['shapes', 'broad'] as const);
 
 /** What build() makes of the tables: the snapshots, the listing's copies, and the closure that runs (`run`). */
+/**
+ * The two intrinsics every run copy is searched with, captured on build's first line: RegExp's own exec (read from a
+ * fresh literal) and Reflect's apply, so a search is `apply(exec, re, [s])`: no property of a regex, a function or a
+ * prototype is looked up at run time, and a built-in patched after load changes nothing a run copy finds.
+ */
+interface Intrinsic {
+  readonly exec: (this: RegExp, s: string) => RegExpExecArray | null;
+  readonly apply: (target: (this: RegExp, s: string) => RegExpExecArray | null, thisArg: RegExp, args: readonly [string]) => RegExpExecArray | null;
+}
+
 interface Built {
   readonly shapes: readonly Rule[];
   readonly broad: readonly Rule[];
@@ -920,9 +974,17 @@ interface Built {
  * this function, is pinned by its source text. The first operation checks once that every run copy still reads as
  * its snapshot (source, flags, no own property but lastIndex) and throws if not; later calls don't repeat it
  * (R1258g's G1: a check on every operation was most of the redactor's time, and by the argument above it guards
- * against nothing a check could see; a built-in patched is out of reach either way).
+ * against nothing a check could see). A built-in patched is met two ways (R1258o/p): the run copies are searched
+ * with the intrinsic exec and apply captured on this function's first line, so a patch made after load changes
+ * nothing they find; and the reference lint (test/redact-markers.test.ts) refuses, by type and by position rather
+ * than by spelling, every way this module's own code could reach a prototype or a global object to make one.
  */
 function build(patterns: readonly unknown[], broadTable: readonly unknown[], identifierTable: readonly unknown[]): Built {
+  // First, before any table is read: the intrinsic exec, from a fresh literal, and the intrinsic apply, so every run
+  // copy is searched with these two and nothing else (R1258o/p: a patch of a built-in's exec from run-time code, in
+  // a spelling no lint reads, changed what the run copies found). The reference lint in test/redact-markers.test.ts
+  // allows this one statement, by its exact text, and refuses every other reach to an intrinsic in this module.
+  const intrinsic: Intrinsic = Object.freeze({ exec: /(?:)/.exec, apply: Reflect.apply });
   const shapes = snapshot(patterns);
   Object.freeze(patterns);
   const broadRules = snapshot(broadTable, { broad: true });
@@ -957,19 +1019,19 @@ function build(patterns: readonly unknown[], broadTable: readonly unknown[], ide
     checked = true;
   };
   const run: Built['run'] = Object.freeze({
-    shapes: (s: string): Span[] => (check(), allSpans(s, shapeRun, glue, gluedPrefixes)),
-    broad: (s: string): Span[] => (check(), allSpans(s, broadRun, glue, gluedPrefixes)),
-    broadAt: (s: string, cuts: number[], spans: Span[]): void => (check(), readAt(s, cuts, broadRun, spans)),
-    identifiers: (part: string, keepLines: boolean): string => (check(), identifierRun.reduce((t, [re, rep]) => (keepLines ? applyKeepingLines : apply)(t, re, rep), part)),
+    shapes: (s: string): Span[] => (check(), allSpans(s, shapeRun, glue, gluedPrefixes, intrinsic)),
+    broad: (s: string): Span[] => (check(), allSpans(s, broadRun, glue, gluedPrefixes, intrinsic)),
+    broadAt: (s: string, cuts: number[], spans: Span[]): void => (check(), readAt(s, cuts, broadRun, spans, intrinsic)),
+    identifiers: (part: string, keepLines: boolean): string => (check(), identifierRun.reduce((t, [re, rep]) => replaced(t, re, rep, keepLines, intrinsic), part)),
   });
   return Object.freeze({ shapes, broad: broadRules, identifiers, patterns: patternsOut, run });
 }
 
 /** What every rule of `rules` finds in `s`: on the text as it was, and again with a boundary at each glue point. */
-function allSpans(s: string, rules: readonly (readonly [RegExp, Replacement])[], glue: RegExp, prefixes: readonly string[]): Span[] {
+function allSpans(s: string, rules: readonly (readonly [RegExp, Replacement])[], glue: RegExp, prefixes: readonly string[], ops: Intrinsic): Span[] {
   const spans: Span[] = [];
-  rules.forEach(([re, rep], i) => spansOf(s, re, rep, i, spans));
-  readAt(s, gluePoints(s, glue, prefixes), rules, spans);
+  rules.forEach(([re, rep], i) => spansOf(s, re, rep, i, spans, ops));
+  readAt(s, gluePoints(s, glue, prefixes, ops), rules, spans, ops);
   return spans;
 }
 
@@ -1073,14 +1135,14 @@ function merged(spans: [number, number][]): [number, number][] {
  * it is read from its start; the spans found, mapped back, go in `spans`. The boundary is a character no rule takes in
  * (a private-use one the text doesn't hold); when the text holds them all, each piece after a cut is read on its own.
  */
-function readAt(s: string, cuts: number[], rules: readonly (readonly [RegExp, Replacement])[], spans: Span[]) {
+function readAt(s: string, cuts: number[], rules: readonly (readonly [RegExp, Replacement])[], spans: Span[], ops: Intrinsic) {
   if (!cuts.length) return;
   const markChar = freeMark(s);
   if (markChar === null) {
     for (const [i, c] of cuts.entries()) {
       const piece = s.slice(c, cuts[i + 1] ?? s.length);
       const more: Span[] = [];
-      rules.forEach(([re, rep], k) => spansOf(piece, re, rep, k, more));
+      rules.forEach(([re, rep], k) => spansOf(piece, re, rep, k, more, ops));
       for (const [a, b, r, k] of more) spans.push([a + c, b + c, r, k]);
     }
     return;
@@ -1104,7 +1166,7 @@ function readAt(s: string, cuts: number[], rules: readonly (readonly [RegExp, Re
     return p - lo;
   };
   const more: Span[] = [];
-  rules.forEach(([re, rep], k) => spansOf(marked, re, rep, k, more));
+  rules.forEach(([re, rep], k) => spansOf(marked, re, rep, k, more, ops));
   for (const [a, b, r, k] of more) spans.push([back(a), back(b), r.split(markChar).join(''), k]);
 }
 

@@ -239,26 +239,121 @@ function loadPins(text: string): { pins: string[]; problems: string[] } {
   return { pins: [...reachable].map(([name, s]) => `${digest(s.getText(sf))} ${name}`), problems };
 }
 
-/** Property names that reach a built-in's prototype or redefine a property; none is named in src/events/redact.ts. A refusal list: registered never-shrink (the weakening backstop, #869). */
+/** Property names that reach a built-in's prototype or redefine a property; none is named in src/events/redact.ts, in any spelling the checker can see. A refusal list: registered never-shrink (the weakening backstop, #869). */
 // check-table: never-shrink
-const BANNED_PROPERTIES = new Set(['prototype', '__proto__', 'defineProperty', 'defineProperties', 'setPrototypeOf', 'getPrototypeOf']);
+const BANNED_PROPERTIES = new Set(['prototype', '__proto__', 'constructor', 'defineProperty', 'defineProperties', 'setPrototypeOf', 'getPrototypeOf', 'assign', 'getOwnPropertyDescriptors', 'compile']);
+
+/** Globals the module may not name in any position (a route to every object in the realm, or code from a string). A refusal list: registered never-shrink. */
+// check-table: never-shrink
+const REFUSED_GLOBALS = new Set(['Reflect', 'globalThis', 'global', 'self', 'window', 'frames', 'parent', 'top', 'Function', 'eval', 'process', 'require', 'module', 'exports', 'Proxy', 'Symbol', 'JSON', 'Promise', 'WeakRef', 'FinalizationRegistry']);
+
+/** The methods of a global the module may call directly (`X.m(...)`), and nothing else of it. */
+const GLOBAL_METHODS: Readonly<Record<string, readonly string[]>> = Object.freeze({
+  Object: ['freeze', 'getOwnPropertyNames', 'getOwnPropertySymbols', 'getOwnPropertyDescriptor', 'fromEntries', 'entries'],
+  String: ['fromCharCode'],
+  Array: ['isArray'],
+  Math: ['max', 'min'],
+});
+/** Globals read as plain values. */
+const VALUE_GLOBALS = new Set(['undefined', 'NaN', 'Infinity']);
+/** Data properties the module may read (or, for lastIndex, write) on a value of a regex or string type; any other access on such a value is a direct method call or refused. */
+const REGEX_DATA = new Set(['source', 'flags', 'global', 'lastIndex']);
+const STRING_DATA = new Set(['length']);
+/** The one statement that reaches an intrinsic: build's first, which captures RegExp's exec and Reflect's apply (src/events/redact.ts: Intrinsic). Exactly this text, once, first in build. */
+const INTRINSIC_CAPTURE = 'const intrinsic: Intrinsic = Object.freeze({ exec: /(?:)/.exec, apply: Reflect.apply });';
+
+/** A program of `text` with the standard library, so values have their real types (a regex literal is a RegExp, `Object` an ObjectConstructor). */
+function typedProgramOf(text: string): { sf: ts.SourceFile; checker: ts.TypeChecker } {
+  const file = join(mkdtempSync(join(tmpdir(), 'redact-typed-')), 'redact.ts');
+  writeFileSync(file, text);
+  const program = ts.createProgram([file], { target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.ESNext, noResolve: true, types: [], strict: true });
+  return { sf: program.getSourceFile(file)!, checker: program.getTypeChecker() };
+}
 
 /**
- * References the module may not make (R1258n's N4): `Reflect` or `globalThis` anywhere, a property named in
- * BANNED_PROPERTIES (as `.name`, `['name']` or the string 'name' anywhere), and a string built from literal pieces
- * (`'proto' + 'type'`, the review's spelling). With these, a patch of a built-in's `exec` can't be written here; with
- * the binding lint (no binding named as a global), the module's `RegExp` is the intrinsic.
+ * The ways the module's own code could reach a built-in's prototype or a global object, and so patch what a regex
+ * does, refused by type and by position, never by spelling (R1258o's O2, R1258p's P1: a lint that read spellings
+ * fell to `['proto', 'type'].join('')`, a template, a variable, `Object.getOwnPropertyDescriptors(RegExp)` and
+ * `global.RegExp`). With the standard library loaded, the checker knows what each expression is, and:
+ * - on a value of a regex, string or function type (an assertion, a parenthesis or a `!` looked through), the only
+ *   property access allowed is a direct method call (`x.m(...)`, `m` not in BANNED_PROPERTIES) or a read of a data
+ *   property in REGEX_DATA or STRING_DATA; an element access on a string takes a number only;
+ * - a global constructor or object (`RegExp`, `Object`, `String`, `Array`, `Math`, `Error`, ...) appears only as what
+ *   is called or constructed, the object of a direct call to a method in GLOBAL_METHODS, the right side of
+ *   `instanceof`, or a value in VALUE_GLOBALS: never as an argument, an operand, an initializer or the object of an
+ *   element access, so no descriptor walk, no `RegExp[k]`, no `const P = RegExp`;
+ * - a name in REFUSED_GLOBALS, a property in BANNED_PROPERTIES (as `.x`, `['x']` or the string 'x'), an element
+ *   access whose key is not a number or a string literal, an assertion to `unknown`, `any`, `never`, `object`, `{}`
+ *   or an index-signature type, an angle-bracket assertion, and `import.meta` are refused anywhere;
+ * - the one exception is INTRINSIC_CAPTURE, build's first statement, which must be there, exactly, once.
+ * What is left can call a regex's own methods and read its source and flags, and nothing more: a prototype is out of
+ * reach from this module's text.
  */
 function referenceProblems(text: string): string[] {
-  const sf = ts.createSourceFile('redact.ts', text, ts.ScriptTarget.Latest, true);
+  const { sf, checker } = typedProgramOf(text);
   const problems: string[] = [];
   const line = (n: ts.Node) => `line ${sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1}`;
+  const say = (n: ts.Node, what: string) => problems.push(`${what}: ${n.getText(sf).slice(0, 70)} (${line(n)})`);
+  /** The expression under parentheses, assertions and `!`. */
+  const inner = (e: ts.Expression): ts.Expression => (ts.isParenthesizedExpression(e) || ts.isAsExpression(e) || ts.isTypeAssertionExpression(e) || ts.isNonNullExpression(e) || ts.isSatisfiesExpression(e) ? inner(e.expression) : e);
+  const kindOf = (t: ts.Type): 'regex' | 'string' | 'function' | null => {
+    if (t.isUnion()) return t.types.map(kindOf).find((k) => k !== null) ?? null;
+    if (t.flags & ts.TypeFlags.StringLike) return 'string';
+    if (t.getCallSignatures().length || t.getConstructSignatures().length || t.symbol?.name === 'Function') return 'function';
+    if (t.symbol?.name === 'RegExp') return 'regex';
+    return null;
+  };
+  const isGlobal = (id: ts.Identifier): boolean => {
+    const decls = checker.getSymbolAtLocation(id)?.declarations ?? [];
+    return decls.length > 0 && decls.every((d) => d.getSourceFile() !== sf);
+  };
+  const inTypePosition = (n: ts.Node): boolean => {
+    for (let p: ts.Node | undefined = n.parent; p; p = p.parent) {
+      if (ts.isTypeNode(p) || ts.isTypeAliasDeclaration(p) || ts.isInterfaceDeclaration(p)) return true;
+      if (ts.isExpression(p) || ts.isStatement(p)) return false;
+    }
+    return false;
+  };
+  const isCallee = (n: ts.Node): boolean => (ts.isCallExpression(n.parent) || ts.isNewExpression(n.parent)) && n.parent.expression === n;
+  const capture = (() => {
+    const build = sf.statements.find((s) => ts.isFunctionDeclaration(s) && s.name?.text === BUILDER.fn) as ts.FunctionDeclaration | undefined;
+    const first = build?.body?.statements[0];
+    if (!first || first.getText(sf) !== INTRINSIC_CAPTURE) problems.push(`build's first statement is not the intrinsic capture, exactly: ${INTRINSIC_CAPTURE}`);
+    return first;
+  })();
   const walk = (n: ts.Node): void => {
-    if (ts.isIdentifier(n) && (n.text === 'Reflect' || n.text === 'globalThis') && !(ts.isPropertyAccessExpression(n.parent) && n.parent.name === n)) problems.push(`${n.text} is named (${line(n)})`);
-    if (ts.isPropertyAccessExpression(n) && BANNED_PROPERTIES.has(n.name.text)) problems.push(`.${n.name.text} (${line(n)})`);
-    if (ts.isElementAccessExpression(n) && ts.isStringLiteralLike(n.argumentExpression) && BANNED_PROPERTIES.has(n.argumentExpression.text)) problems.push(`['${n.argumentExpression.text}'] (${line(n)})`);
-    if (ts.isStringLiteralLike(n) && !(ts.isElementAccessExpression(n.parent) && n.parent.argumentExpression === n) && BANNED_PROPERTIES.has(n.text)) problems.push(`'${n.text}' as a string (${line(n)})`);
-    if (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.PlusToken && ts.isStringLiteralLike(n.left) && ts.isStringLiteralLike(n.right)) problems.push(`a string built from literal pieces: ${n.getText(sf)} (${line(n)})`);
+    if (n === capture) return;
+    if (ts.isMetaProperty(n)) say(n, 'a meta property');
+    if (ts.isTypeAssertionExpression(n)) say(n, 'an angle-bracket assertion');
+    if (ts.isAsExpression(n)) {
+      const t = checker.getTypeFromTypeNode(n.type);
+      const text = n.type.getText(sf);
+      if (t.flags & (ts.TypeFlags.Unknown | ts.TypeFlags.Any | ts.TypeFlags.Never | ts.TypeFlags.NonPrimitive) || text === '{}' || checker.getIndexInfoOfType(t, ts.IndexKind.String)) say(n, `an assertion to ${text}`);
+    }
+    if (ts.isIdentifier(n) && !inTypePosition(n) && !(ts.isPropertyAccessExpression(n.parent) && n.parent.name === n) && !(ts.isPropertyAssignment(n.parent) && n.parent.name === n) && !ts.isPropertySignature(n.parent) && !ts.isMethodSignature(n.parent)) {
+      if (REFUSED_GLOBALS.has(n.text)) say(n, 'a refused global is named');
+      else if (isGlobal(n) && !VALUE_GLOBALS.has(n.text)) {
+        const p = n.parent;
+        const direct = isCallee(n);
+        const method = ts.isPropertyAccessExpression(p) && p.expression === n && isCallee(p) && (GLOBAL_METHODS[n.text] ?? []).includes(p.name.text);
+        const typeOf = ts.isBinaryExpression(p) && p.operatorToken.kind === ts.SyntaxKind.InstanceOfKeyword && p.right === n;
+        if (!direct && !method && !typeOf) say(n, 'a global used other than as a call, a construction, an allowed direct method call or an instanceof');
+      }
+    }
+    if (ts.isPropertyAccessExpression(n)) {
+      if (BANNED_PROPERTIES.has(n.name.text)) say(n, `.${n.name.text}`);
+      const kind = kindOf(checker.getTypeAtLocation(inner(n.expression)));
+      if (kind !== null && !isCallee(n) && !(kind === 'regex' && REGEX_DATA.has(n.name.text)) && !(kind === 'string' && STRING_DATA.has(n.name.text))) say(n, `a property read on a ${kind} value that is not a direct method call`);
+    }
+    if (ts.isElementAccessExpression(n)) {
+      const key = n.argumentExpression;
+      if (ts.isStringLiteralLike(key) && BANNED_PROPERTIES.has(key.text)) say(n, `['${key.text}']`);
+      const numeric = (checker.getTypeAtLocation(key).flags & ts.TypeFlags.NumberLike) !== 0;
+      if (!numeric && !ts.isStringLiteralLike(key)) say(n, 'an element access whose key is not a number or a string literal');
+      const kind = kindOf(checker.getTypeAtLocation(inner(n.expression)));
+      if (kind !== null && !(kind === 'string' && numeric)) say(n, `an element access on a ${kind} value`);
+    }
+    if (ts.isStringLiteralLike(n) && !(ts.isElementAccessExpression(n.parent) && n.parent.argumentExpression === n) && BANNED_PROPERTIES.has(n.text)) say(n, `'${n.text}' as a string`);
     ts.forEachChild(n, walk);
   };
   walk(sf);
@@ -295,30 +390,29 @@ test('B2/D5: every function-backed rule is pinned by its exact code, so adding o
   assert.deepEqual(problems, []);
   assert.deepEqual(pins, [
     'c24ed8d44a6949d5 BUILT',
-    '2aa97fc4062026c7 build',
+    'edae5ae1c99908cf build',
     'c60ffce3126a1016 PATTERNS',
     '3860f42286956df1 BROAD',
     '6587741a892dc073 IDENTIFIERS',
-    'a105d30a0d03f9e0 snapshot',
+    'ca4999b616d6d5e0 snapshot',
     '6dde4c5d5897dc63 BROAD_RULES',
     '8cdd1b352c026a0a GLUE_PARTS',
     'c7ff65a8518b8850 GLUED_PREFIXES',
-    '8439ac8ed1bdc083 ownKeys',
-    '6bdfb9dc99b9e284 allSpans',
-    '5915d2657f1f4a30 readAt',
-    '879b2360d49e1d42 applyKeepingLines',
-    '675fe71bf0b454c9 apply',
+    '52244d41612a2974 ownKeys',
+    '4ae7e0c86a0b40cc allSpans',
+    '81ff131fa18bc93f readAt',
+    '7687e2321868c625 replaced',
     '21b81d917d36bd05 DASHBOARD_KEY_PREFIX',
     '76694e1346c5bc5f orphanEnd',
     '3b9168fc643f88f4 basicShaped',
-    '484e812930fe8d19 credentialKey',
+    '7d89ff00c3247ac0 credentialKey',
     '6338e9ab27853b16 credentialShaped',
     '77e40d90de5c6d8d internalHost',
     'd0174b5072726dd7 markerProblem',
-    '44dc59fafe09c8e0 spansOf',
-    '9c105907fe80ea6a gluePoints',
+    '0e9c6c3190161087 spansOf',
+    '924355d45d9d525d gluePoints',
     'e4a41fc0bf748027 freeMark',
-    'fa61d8c7812b5fb6 expand',
+    '6947593b8f4ce8a0 expand',
     'd424cc2714810fb8 called',
     'af1abbee00814c9f breaks',
     'b095f92176beae77 basicPair',
@@ -378,7 +472,7 @@ test('N4: a line added to a function the load path calls (groupCount, from marke
   assert.deepEqual(n4.problems, []);
   assert.notEqual(n4.pins.find((p) => p.endsWith(' groupCount')), base.pins.find((p) => p.endsWith(' groupCount')), "groupCount's digest moved");
   assert.ok(base.pins.some((p) => p.endsWith(' groupCount')), 'groupCount is on the load path');
-  assert.match(referenceProblems(edited).join('\n'), /Reflect is named[\s\S]*a string built from literal pieces: 'proto' \+ 'type'/);
+  assert.match(referenceProblems(edited).join('\n'), /a refused global is named: Reflect[\s\S]*a global used other than as a call.*: RegExp/);
   // Every function the review names as load-time code is pinned.
   for (const name of ['snapshot', 'markerProblem', 'groupCount', 'parseRegex', 'leadingGroups', 'trailingGroups', 'boundaryGroup', 'these', 'build']) assert.ok(base.pins.some((p) => p.endsWith(` ${name}`)), name);
 });
@@ -995,23 +1089,62 @@ test("J1a: an entry's regex must be a regex literal; the two that were construct
   assert.equal(redactString(`key wld_${run(32)} here`), 'key wld_[REDACTED] here');
 });
 
-test("J1a/N4: the module names no intrinsic another way than by its global name: no globalThis, Reflect, prototype, defineProperty or a string built from pieces", () => {
+test("J1a/N4/O2/P1: the module's code can reach no prototype and no global object, by type and position, in any spelling", () => {
   // Until R1258n the snapshot compared a rule's regex with the intrinsic through globalThis, as a belt over the binding
   // lint (a shadow in a lint-free module copy). N4 showed that any such route in the source is also what a load-time
-  // patch of `exec` needs, so the reference lint below refuses them all, and the snapshot reads the module's name,
-  // which the binding lint keeps the intrinsic.
+  // patch of `exec` needs. R1258o/p showed that a lint reading spellings fails open on a respelling, so the lint now
+  // reads what each expression is (the checker, with the standard library) and where it stands, and refuses every
+  // reach to a prototype or a global object; the one capture of the intrinsic exec and apply is allowed by its exact
+  // text, first in build.
   assert.deepEqual(referenceProblems(SRC), []);
-  for (const line of [
+  const lines = [
+    // R1258n's spelling, and the reviews' respellings (R1258o's O2, R1258p's P1).
     "const P = Reflect.get(RegExp, 'proto' + 'type');",
+    "const P = RegExp[['proto', 'type'].join('')];",
+    'const P = RegExp[`proto${\'type\'}`];',
+    "const P = RegExp['proto'.concat('type')];",
+    "const A = 'proto', B = 'type'; const P = RegExp[A + B];",
+    "const P = Object.values(Object.getOwnPropertyDescriptors(RegExp)).find((d) => d.value && typeof d.value.exec === 'function')!.value;",
+    'const P = global.RegExp;',
     'const P = globalThis.RegExp;',
+    'const P = self.RegExp;',
+    'const P = window.RegExp;',
+    "const P = (RegExp as unknown as Record<string, unknown>)['exec'];",
+    'const P = (/x/).constructor;',
+    "const P = ''.constructor;",
+    'const P = (/x/).constructor.prototype;',
+    "const P = Function('return this')();",
+    "const P = new Function('return this')();",
+    "const P = eval('this');",
+    "const P = (/x/)['exec'];",
+    'const P = (/x/).exec;',
+    "const P = ''.replace;",
+    'const K = import.meta;',
     "const P = Object.defineProperty({}, 'x', { value: 1 });",
+    "const P = Object.assign({}, { x: 1 });",
+    "const P = Object.getOwnPropertyDescriptor(RegExp, 'x');",
     "const P = RegExp['prototype'];",
     'const P = String.prototype;',
-    "const K = 'proto' + 'type';",
     "const K = ['prototype'];",
-  ]) {
-    assert.notEqual(referenceProblems(withLine('after-body', line)).length, 0, line);
-  }
+    'const P = <unknown>RegExp;',
+    "const F = Symbol.replace;",
+    "const P = Reflect.apply(Math.max, null, [1]);",
+  ];
+  for (const line of lines) assert.notEqual(referenceProblems(withLine('after-body', line)).length, 0, line);
+  // The same, inside run-time code (the reviews' placements): the lint reads position, not the load path.
+  for (const line of lines.slice(0, 7)) assert.notEqual(referenceProblems(SRC.replace('function redactOrThrow(s: string, o: RedactTextOptions): string {\n', `function redactOrThrow(s: string, o: RedactTextOptions): string {\n  { ${line} void P; }\n`)).length, 0, `in redactOrThrow: ${line}`);
+  // What the module may do, and does: call a regex's and a string's own methods, read a regex's source and flags and
+  // a string's length, index a string by a number, construct and use the allowed globals.
+  for (const line of [
+    "const L = 'abc'.length + 'abc'.indexOf('b') + /x/.source.length + /x/.flags.length + 'abc'[1]!.length;",
+    "const B = /x/.test('x') && Array.isArray([]) && Object.freeze([1]).length === 1 && Math.max(1, 2) === 2 && String.fromCharCode(65) === 'A';",
+    "const N = Number('1') + ('x' instanceof String ? 1 : 0) + new RegExp('x', 'g').lastIndex;",
+  ]) assert.deepEqual(referenceProblems(withLine('after-body', line)), [], line);
+  // The capture is required, first in build, exactly.
+  const second = SRC.replace(`${INTRINSIC_CAPTURE}\n  const shapes = snapshot(patterns);`, `const shapes = snapshot(patterns);\n  ${INTRINSIC_CAPTURE}`);
+  assert.notEqual(second, SRC);
+  assert.match(referenceProblems(second).join('\n'), /build's first statement is not the intrinsic capture[\s\S]*a refused global is named: Reflect/);
+  assert.match(referenceProblems(SRC.replace(INTRINSIC_CAPTURE, `${INTRINSIC_CAPTURE}\n  ${INTRINSIC_CAPTURE.replace('intrinsic', 'intrinsic2')}`)).join('\n'), /a refused global is named: Reflect/);
 });
 
 // R1258k's K1 and R1258l's L1 and L2: a top-level const whose initializer ran code at load (an IIFE under Object.freeze,
@@ -1067,4 +1200,66 @@ test('L2: a destructured top-level binding is refused, and a binding named as a 
   assert.match(problems("const { a, b } = Object.freeze({ a: 1, b: 2 });"), /\{ a, b \}: a destructured top-level binding/);
   // Inside a function, a destructuring of ordinary names is fine.
   assert.deepEqual(bindingProblems(withLine('after-body', 'function kOk(): number { const { a, b } = { a: 1, b: 2 }; return a + b; }')), []);
+});
+
+// R1258o's O2 and R1258p's P1: a patch of RegExp's exec made from the module's own run-time code, in a spelling no lint
+// read (`['proto', 'type'].join('')`). In the source, the reference lint now refuses every such line (above). In a
+// built copy, where no lint runs, the run copies are searched with the intrinsic exec and apply captured on build's
+// first line, so a patch made from anywhere in the module after that changes nothing they find.
+/** The reviews' patch, as built JavaScript: RegExp's exec wrapped to decline a match when `where` holds (this: the regex; m: the match). */
+const EXEC_PATCH = (where: string) => `{ const k = ['proto', 'type'].join(''); const P = RegExp[k]; const exec = P.exec; if (!exec.w) { const w = function (s) { const m = exec.call(this, s); return m && (${where}) ? null : m; }; w.w = 1; P.exec = w; } }`;
+/** A copy of the built module with `text` inserted right after the line `after`, as a module URL. */
+function moduleWithAfter(after: string, text: string): string {
+  const lines = built().split('\n');
+  const at = lines.findIndex((l) => l === after);
+  assert.notEqual(at, -1, `the built module holds ${after}`);
+  lines.splice(at + 1, 0, `    ${text}`);
+  const file = join(mkdtempSync(join(tmpdir(), 'redact-markers-')), 'redact.js');
+  writeFileSync(file, lines.join('\n'));
+  return pathToFileURL(file).href;
+}
+const PATCH_SITES = ['function redactOrThrow(s, o) {', 'function replaceOnce(s, keepLines, found) {', 'function groupCount(re) {'];
+const STRIPE_130 = 'sk_live_' + run(130, 'Hq8Xk2Lm9Tb4Wp7Rv3Ny6Hc');
+/** The process's intrinsic exec, kept here so each module copy below loads with the prototype as it was: a patch made before a module loads is what it captures, and no module can see past that. */
+const INTRINSIC_EXEC = RegExp.prototype.exec;
+const unpatched = () => {
+  RegExp.prototype.exec = INTRINSIC_EXEC;
+};
+
+test("O2/P1: RegExp's exec patched from run-time code (redactOrThrow, replaceOnce) or load-time code (groupCount) changes nothing the shapes find", async () => {
+  // The reviews' wrapper: the Stripe rule finds no key of 120 or more characters. The patch takes (the process's
+  // prototype carries the wrapper afterwards), and every mode still redacts the 130-character key, in each placement.
+  const where = "this.source.includes('([sr]k)_') && m[3] && m[3].length >= 120";
+  for (const site of PATCH_SITES) {
+    unpatched();
+    const m = await loaded(moduleWithAfter(site, EXEC_PATCH(where)));
+    const line = `export STRIPE_SECRET_KEY=${STRIPE_130}`;
+    m.redactString(line);
+    assert.equal((RegExp.prototype.exec as { w?: number }).w, 1, `the patch took (${site})`);
+    assert.equal(m.redactString(line), 'export STRIPE_SECRET_KEY=sk_[REDACTED]', site);
+    assert.ok(!leaks(m.redactString(line, { broad: true }), STRIPE_130.slice(8)), `broad (${site})`);
+    assert.deepEqual(m.secretKinds(line), ['Stripe key'], site);
+    // The real module, loaded before the patch, is unchanged too: its exec was captured at its load.
+    assert.equal(redactString(line), 'export STRIPE_SECRET_KEY=sk_[REDACTED]');
+  }
+  unpatched();
+});
+
+test("O2/P1: RegExp's exec patched against the identifier pass and against the glue regex changes nothing they find", async () => {
+  // The identifier pass runs the captured exec (replaced), never String.prototype.replace, and the glue points are
+  // found with it too (gluePoints), so a wrapper that declines the email rule's regex, or the glue regex, is inert.
+  unpatched();
+  const email = await loaded(moduleWithAfter(PATCH_SITES[0]!, EXEC_PATCH("this.source.includes('%+-]+@')")));
+  assert.equal(identifiers(email), 'contact [email] please');
+  assert.equal((RegExp.prototype.exec as { w?: number }).w, 1, 'the patch took');
+  assert.equal(identifiers(email), 'contact [email] please');
+  unpatched();
+  const glue = await loaded(moduleWithAfter(PATCH_SITES[0]!, EXEC_PATCH("this.source.includes('u001')")));
+  // A key glued after an escape sequence: without the glue cut, the Stripe rule sees a letter before `sk_` and misses it.
+  const glued = `\u001b[1m${KEY} end`;
+  assert.equal(glue.redactString(glued), '\u001b[1msk_[REDACTED] end');
+  assert.equal((RegExp.prototype.exec as { w?: number }).w, 1, 'the patch took');
+  assert.equal(glue.redactString(glued), '\u001b[1msk_[REDACTED] end');
+  assert.equal(redactString(glued), '\u001b[1msk_[REDACTED] end');
+  unpatched();
 });

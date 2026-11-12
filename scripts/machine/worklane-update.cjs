@@ -158,7 +158,7 @@ function credentialKey(k) {
         .replace(/([A-Z])([A-Z][a-z])/g, '$1 $2')
         .toLowerCase()
         .split(/[ _-]+/)
-        .filter(Boolean);
+        .filter((w) => w.length > 0);
     const last = words.at(-1) ?? '';
     if (words.some(credentialWord) || last === 'auth')
         return true;
@@ -262,7 +262,7 @@ function these(groups) {
     return groups.length === 0 ? 'no group is' : groups.length === 1 ? `group ${groups[0]} is` : `groups ${groups.join(', ')} are`;
 }
 function ownKeys(o) {
-    return [...Object.getOwnPropertyNames(o), ...Object.getOwnPropertySymbols(o).map(String)].join();
+    return [...Object.getOwnPropertyNames(o), ...Object.getOwnPropertySymbols(o).map((k) => String(k))].join();
 }
 function groupCount(re) {
     return new RegExp(`${re.source}|`, re.flags.replace(/[gy]/g, '')).exec('').length - 1;
@@ -285,7 +285,7 @@ function snapshot(table, o = {}) {
     for (let i = 0; i < table.length; i++) {
         let who = `#${i}`;
         const entry = data(who, table, i, 'a table slot');
-        if (!Array.isArray(entry) || entry.constructor !== Array)
+        if (!Array.isArray(entry))
             refuse(who, 'a rule must be a plain array [regex, marker, kind]');
         const keys = ownKeys(entry);
         if (keys !== '0,1,2,length')
@@ -295,7 +295,7 @@ function snapshot(table, o = {}) {
             refuse(who, 'the kind must be a string');
         who = `"${kind}"`;
         const re = data(who, entry, 0, 'the regex');
-        if (!(re instanceof RegExp) || re.constructor !== RegExp || ownKeys(re) !== 'lastIndex')
+        if (!(re instanceof RegExp) || ownKeys(re) !== 'lastIndex')
             refuse(who, 'its regex must be a plain RegExp with no own property but lastIndex (one could hide the pattern that runs)');
         const source = `${re.source}`;
         const flags = `${re.flags}`;
@@ -577,8 +577,16 @@ const GLUE_PARTS = Object.freeze([
     '\\u009b[0-?]*[ -/]*[@-~]',
     '\\\\(?:u[0-9A-Fa-f]{4}|[nrtbf"\\\\/])',
 ]);
-function gluePoints(s, glue, prefixes) {
-    const cuts = [...s.matchAll(glue)].map((m) => m.index + m[0].length).filter((c) => /\w/.test(s[c - 1]));
+function gluePoints(s, glue, prefixes, ops) {
+    const cuts = [];
+    glue.lastIndex = 0;
+    for (let m = ops.apply(ops.exec, glue, [s]); m; m = ops.apply(ops.exec, glue, [s])) {
+        const c = m.index + m[0].length;
+        if (m[0].length === 0)
+            glue.lastIndex = m.index + 1;
+        if (/\w/.test(s[c - 1]))
+            cuts.push(c);
+    }
     for (let at = s.indexOf('_'); at !== -1; at = s.indexOf('_', at + 1))
         if (prefixes.some((p) => s.startsWith(p, at + 1)))
             cuts.push(at + 1);
@@ -597,7 +605,26 @@ function freeMark(s) {
     return null;
 }
 function expand(rep, m, groups) {
-    return rep.replace(/\$(\d|\$|&)/g, (_, k) => (k === '$' ? '$' : k === '&' ? m : String(groups[Number(k) - 1] ?? '')));
+    let out = '';
+    for (let i = 0; i < rep.length; i++) {
+        const c = rep[i];
+        const k = c === '$' ? (rep[i + 1] ?? '') : '';
+        if (k === '$') {
+            out += '$';
+            i++;
+        }
+        else if (k === '&') {
+            out += m;
+            i++;
+        }
+        else if (k >= '0' && k <= '9') {
+            out += String(groups[Number(k) - 1] ?? '');
+            i++;
+        }
+        else
+            out += c;
+    }
+    return out;
 }
 function breaks(s) {
     return s.split('\n').length - 1;
@@ -620,16 +647,26 @@ function shown(whole, groups, r) {
 function called(rep, m, groups) {
     return shown(m, groups, rep(m, ...groups));
 }
-function applyKeepingLines(s, re, rep) {
-    return s.replace(re, (m, ...rest) => {
-        const groups = rest.slice(0, -2).filter((g) => typeof g !== 'object');
-        const out = typeof rep === 'string' ? expand(rep, m, groups) : called(rep, m, groups);
-        return out + '\n'.repeat(Math.max(0, breaks(m) - breaks(out)));
-    });
-}
 exports.TRACKER = Object.freeze({ identifiers: true });
-function apply(s, re, rep) {
-    return typeof rep === 'string' ? s.replace(re, rep) : s.replace(re, (m, ...rest) => called(rep, m, rest.slice(0, -2).map((g) => (typeof g === 'string' ? g : ''))));
+function replaced(s, re, rep, keepLines, ops) {
+    if (!re.global)
+        throw new Error("replaced needs the run closure's global regex");
+    let out = '';
+    let at = 0;
+    re.lastIndex = 0;
+    for (let m = ops.apply(ops.exec, re, [s]); m; m = ops.apply(ops.exec, re, [s])) {
+        const whole = m[0];
+        const groups = m.slice(1).map((x) => (typeof x === 'string' ? x : ''));
+        const r = typeof rep === 'string' ? expand(rep, whole, groups) : called(rep, whole, groups);
+        out += s.slice(at, m.index) + r + (keepLines ? '\n'.repeat(Math.max(0, breaks(whole) - breaks(r))) : '');
+        at = m.index + whole.length;
+        if (whole.length === 0) {
+            if (m.index >= s.length)
+                break;
+            re.lastIndex = m.index + 1;
+        }
+    }
+    return out + s.slice(at);
 }
 const MACHINE_BLOCKS = Object.freeze([Object.freeze(['```done_when', '[^\\S\\n]*\\n']), Object.freeze(['```research', '[ \\t]*\\r?\\n'])]);
 function outsideMachineBlocks(s, f) {
@@ -675,12 +712,12 @@ function secretKinds(s) {
     }
     return [...kinds].sort();
 }
-function spansOf(t, re, rep, rank, out) {
+function spansOf(t, re, rep, rank, out, ops) {
     if (!re.global)
         throw new Error("spansOf needs the run closure's global regex");
     const g = re;
     g.lastIndex = 0;
-    for (let m = g.exec(t); m; m = g.exec(t)) {
+    for (let m = ops.apply(ops.exec, g, [t]); m; m = ops.apply(ops.exec, g, [t])) {
         const whole = m[0];
         g.lastIndex = Math.max(m.index + 1, m.index + whole.length - 64);
         const groups = m.slice(1).map((x) => x ?? '');
@@ -702,6 +739,7 @@ function spansOf(t, re, rep, rank, out) {
 // check-table: never-shrink
 const BROAD_RULES = Object.freeze(['shapes', 'broad']);
 function build(patterns, broadTable, identifierTable) {
+    const intrinsic = Object.freeze({ exec: /(?:)/.exec, apply: Reflect.apply });
     const shapes = snapshot(patterns);
     Object.freeze(patterns);
     const broadRules = snapshot(broadTable, { broad: true });
@@ -733,17 +771,17 @@ function build(patterns, broadTable, identifierTable) {
         checked = true;
     };
     const run = Object.freeze({
-        shapes: (s) => (check(), allSpans(s, shapeRun, glue, gluedPrefixes)),
-        broad: (s) => (check(), allSpans(s, broadRun, glue, gluedPrefixes)),
-        broadAt: (s, cuts, spans) => (check(), readAt(s, cuts, broadRun, spans)),
-        identifiers: (part, keepLines) => (check(), identifierRun.reduce((t, [re, rep]) => (keepLines ? applyKeepingLines : apply)(t, re, rep), part)),
+        shapes: (s) => (check(), allSpans(s, shapeRun, glue, gluedPrefixes, intrinsic)),
+        broad: (s) => (check(), allSpans(s, broadRun, glue, gluedPrefixes, intrinsic)),
+        broadAt: (s, cuts, spans) => (check(), readAt(s, cuts, broadRun, spans, intrinsic)),
+        identifiers: (part, keepLines) => (check(), identifierRun.reduce((t, [re, rep]) => replaced(t, re, rep, keepLines, intrinsic), part)),
     });
     return Object.freeze({ shapes, broad: broadRules, identifiers, patterns: patternsOut, run });
 }
-function allSpans(s, rules, glue, prefixes) {
+function allSpans(s, rules, glue, prefixes, ops) {
     const spans = [];
-    rules.forEach(([re, rep], i) => spansOf(s, re, rep, i, spans));
-    readAt(s, gluePoints(s, glue, prefixes), rules, spans);
+    rules.forEach(([re, rep], i) => spansOf(s, re, rep, i, spans, ops));
+    readAt(s, gluePoints(s, glue, prefixes, ops), rules, spans, ops);
     return spans;
 }
 function replaceOnce(s, keepLines, found) {
@@ -818,7 +856,7 @@ function merged(spans) {
     }
     return out;
 }
-function readAt(s, cuts, rules, spans) {
+function readAt(s, cuts, rules, spans, ops) {
     if (!cuts.length)
         return;
     const markChar = freeMark(s);
@@ -826,7 +864,7 @@ function readAt(s, cuts, rules, spans) {
         for (const [i, c] of cuts.entries()) {
             const piece = s.slice(c, cuts[i + 1] ?? s.length);
             const more = [];
-            rules.forEach(([re, rep], k) => spansOf(piece, re, rep, k, more));
+            rules.forEach(([re, rep], k) => spansOf(piece, re, rep, k, more, ops));
             for (const [a, b, r, k] of more)
                 spans.push([a + c, b + c, r, k]);
         }
@@ -852,7 +890,7 @@ function readAt(s, cuts, rules, spans) {
         return p - lo;
     };
     const more = [];
-    rules.forEach(([re, rep], k) => spansOf(marked, re, rep, k, more));
+    rules.forEach(([re, rep], k) => spansOf(marked, re, rep, k, more, ops));
     for (const [a, b, r, k] of more)
         spans.push([back(a), back(b), r.split(markChar).join(''), k]);
 }
