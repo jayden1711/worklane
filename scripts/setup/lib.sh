@@ -1203,9 +1203,11 @@ agent_key_file_ok() { run_as_bounded "$1" "$AGENT_CHECK_SECONDS" /dev/null "$AGE
 #   claude_guarded [--as <user>]... [--timeout <seconds>] [--env <NAME>=<value>]... -- <settings> -p|--print [<word>...]
 case "${BASH_SOURCE[0]}" in */*) CLAUDE_GUARDED_LIB="${BASH_SOURCE[0]%/*}" ;; *) CLAUDE_GUARDED_LIB=. ;; esac
 CLAUDE_GUARDED_LIB="$(cd -P -- "$CLAUDE_GUARDED_LIB" && pwd)/lib.sh"
-CLAUDE_GUARDED_SH="$(cd -P -- "${CLAUDE_GUARDED_LIB%/*}/../lib" && pwd)/claude-guarded.sh"
+# A copy of scripts/setup alone (a CI probe, a test's tree) has no helper: claude_guarded refuses there, and lib.sh still loads.
+CLAUDE_GUARDED_SH="$(cd -P -- "${CLAUDE_GUARDED_LIB%/*}/../lib" 2>/dev/null && pwd)/claude-guarded.sh" || CLAUDE_GUARDED_SH=""
 claude_guarded() {
   local cg_f cg_om cg_lib
+  [ -n "$CLAUDE_GUARDED_SH" ] || { echo "claude_guarded: its helper, scripts/lib/claude-guarded.sh, isn't beside this lib.sh; not running claude" >&2; return 2; }
   cg_lib="$(/usr/bin/stat -c %u -- "$CLAUDE_GUARDED_LIB" 2>/dev/null || /usr/bin/stat -f %u -- "$CLAUDE_GUARDED_LIB")"
   for cg_f in "$CLAUDE_GUARDED_SH" "${CLAUDE_GUARDED_SH%/*}"; do
     cg_om="$(/usr/bin/stat -c '%u %a' -- "$cg_f" 2>/dev/null || /usr/bin/stat -f '%u %Lp' -- "$cg_f" 2>/dev/null)" || cg_om=""

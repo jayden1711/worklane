@@ -279,3 +279,17 @@ test("R1264k D2, D3: the helper's PATH is fixed (a caller's own timeout first on
     rmSync(t, { recursive: true, force: true });
   }
 });
+
+test('R1264k CI: lib.sh copied alone (a CI probe of scripts/setup, a test\'s tree) still loads under set -e, and claude_guarded there refuses', { skip: !posix }, () => {
+  const t = mkdtempSync(join(tmpdir(), 'claude-guarded-'));
+  try {
+    mkdirSync(join(t, 'setup'));
+    copyFileSync(join(repoRoot, 'scripts', 'setup', 'lib.sh'), join(t, 'setup', 'lib.sh'));
+    const r = spawnSync('bash', ['-c', `set -euo pipefail; source ${JSON.stringify(join(t, 'setup', 'lib.sh'))}; echo loaded; claude_guarded -- '{}' -p hi`], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin', HOME: t } });
+    assert.match(r.stdout, /^loaded$/m, r.stderr);
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /its helper, scripts\/lib\/claude-guarded\.sh, isn't beside this lib\.sh/);
+  } finally {
+    rmSync(t, { recursive: true, force: true });
+  }
+});

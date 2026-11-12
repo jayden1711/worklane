@@ -722,17 +722,19 @@ test('#1262 (R1264e D1, R1264f D4): a pin holds its scope by digest: an edit to 
 });
 
 /** The digest of lib.sh's claude_guarded and the lines that say which helper it runs (R1264l D2). */
-const WRAPPER_DIGEST = '87155faf20299c492c7d04f4ccf9ed4edc1e425abb7854f3412dac8f39fa9648';
+const WRAPPER_DIGEST = '19a6143b3cfd8225696d8723247041e70da1b3c1e112f0e5082919e203681ac7';
 
 test('#1262 (R1264l D2): which file claude_guarded runs, and the wrapper itself, are held by digest: a widened copy at another path is refused', () => {
   const text = readFileSync(join(repoRoot, 'scripts', 'setup', 'lib.sh'), 'utf8');
   const at = text.split('\n').findIndex((l) => /^\s*\/usr\/bin\/env -i "PATH=\$\{CLAUDE_GUARDED_PATH:-/.test(l)) + 1;
   assert.ok(at > 0, "lib.sh's claude_guarded runs its helper in a clean bash");
   const scope = pinScope('scripts/setup/lib.sh', text, at);
-  assert.match(scope, /^CLAUDE_GUARDED_SH="\$\(cd -P -- "\$\{CLAUDE_GUARDED_LIB%\/\*\}\/\.\.\/lib" && pwd\)\/claude-guarded\.sh"$/m, 'the helper it runs is scripts/lib/claude-guarded.sh, the pinned one');
+  assert.match(scope, /^CLAUDE_GUARDED_SH="\$\(cd -P -- "\$\{CLAUDE_GUARDED_LIB%\/\*\}\/\.\.\/lib" 2>\/dev\/null && pwd\)\/claude-guarded\.sh" \|\| CLAUDE_GUARDED_SH=""$/m, 'the helper it runs is scripts/lib/claude-guarded.sh, the pinned one');
   // CLAUDE_GUARDED_SH is built from CLAUDE_GUARDED_LIB, lib.sh's own absolute path when it was sourced: both lines, exactly.
-  assert.ok(text.includes('\ncase "${BASH_SOURCE[0]}" in */*) CLAUDE_GUARDED_LIB="${BASH_SOURCE[0]%/*}" ;; *) CLAUDE_GUARDED_LIB=. ;; esac\nCLAUDE_GUARDED_LIB="$(cd -P -- "$CLAUDE_GUARDED_LIB" && pwd)/lib.sh"\nCLAUDE_GUARDED_SH='), 'lib.sh resolves its own path, then the helper\'s, as it is sourced');
+  assert.ok(text.includes('\ncase "${BASH_SOURCE[0]}" in */*) CLAUDE_GUARDED_LIB="${BASH_SOURCE[0]%/*}" ;; *) CLAUDE_GUARDED_LIB=. ;; esac\nCLAUDE_GUARDED_LIB="$(cd -P -- "$CLAUDE_GUARDED_LIB" && pwd)/lib.sh"\n'), 'lib.sh resolves its own path as it is sourced (the helper\'s line, from it, is matched above)');
   assert.equal(text.match(/^[^#\n]*CLAUDE_GUARDED_(?:LIB|SH)\+?=/gm)?.length, 3, 'and assigns them on those three lines only');
+  // R1264k CI: a copy of scripts/setup alone still loads (set -e), and claude_guarded there refuses.
+  assert.ok(text.includes('[ -n "$CLAUDE_GUARDED_SH" ] || { echo'), 'with no helper beside it, claude_guarded refuses');
   assert.equal(scopeDigest('scripts/setup/lib.sh', text, at), WRAPPER_DIGEST, 'the wrapper is the one this test holds: a changed wrapper is a change to this test');
   // A copy of the helper, widened and named otherwise, with the wrapper pointed at it: the digest moves.
   const widened = text.replace('/claude-guarded.sh"', '/claude-guarded.inc"');
