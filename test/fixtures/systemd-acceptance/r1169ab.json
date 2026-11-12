@@ -1,0 +1,95 @@
+{
+  "//": "Review round r1169ab of #1169: each case is one attack on scripts/ci/systemd-acceptance.mjs (README.md).",
+  "cases": {
+    "r1169ab-a1-gate-no-plan": {
+      "exit": 2,
+      "reason": "test/x\\.test\\.ts: base: its first statement isn't `t\\.plan\\(<n>\\)`",
+      "files": {
+        "x.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "const systemCi = true;",
+          "test('base', { skip: !systemCi && 'needs systemd' }, () => { assert.ok(true); });",
+          ""
+        ]
+      }
+    },
+    "r1169ab-a1b-gate-early-return-planned": {
+      "exit": 1,
+      "reason": "test/x\\.test\\.ts: base: failed",
+      "files": {
+        "x.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "const systemCi = true;",
+          "test('base', { skip: !systemCi && 'needs systemd' }, (t) => { t.plan(1); if (!process.env.FIXTURE_NEVER) return; t.assert.fail('the systemd assertions ran'); });",
+          ""
+        ]
+      }
+    },
+    "r1169ab-a2-sign-early-return": {
+      "exit": 2,
+      "reason": "'s return leaves before its function's end",
+      "files": {
+        "x.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "const systemCi = true;",
+          "test('base', { skip: !systemCi && 'needs systemd' }, (t) => { t.plan(1); t.assert.ok(true); });",
+          "test('the watchdog reads unit states from the real service manager', () => {",
+          "  if (!process.env.FIXTURE_NEVER) return;",
+          "  const r = spawnSync('systemctl', ['is-active', 'nonexistent-unit.service'], { encoding: 'utf8' });",
+          "  assert.fail(`the systemd assertions ran (${r.status})`);",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169ab-a2c-control-sign-runs-to-end": {
+      "exit": 0,
+      "reason": "^$",
+      "files": {
+        "x.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "const systemCi = true;",
+          "test('base', { skip: !systemCi && 'needs systemd' }, (t) => { t.plan(1); t.assert.ok(true); });",
+          "test('the watchdog names the service manager', async (t) => {",
+          "  const unit = 'systemctl';",
+          "  await t.test('its name', () => { assert.equal(unit.length, 9); });",
+          "  try {",
+          "    assert.ok(unit);",
+          "  } finally {",
+          "    void 0;",
+          "  }",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169ab-a3-conditional-subtest": {
+      "exit": 1,
+      "reason": "test/x\\.test\\.ts: unit states, two ways: the subtest at line \\d+ never started",
+      "files": {
+        "x.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "const systemCi = true;",
+          "test('base', { skip: !systemCi && 'needs systemd' }, (t) => { t.plan(1); t.assert.ok(true); });",
+          "test('unit states, two ways', async (t) => {",
+          "  await t.test('the parser reads a state line', () => { assert.equal('active'.length, 6); });",
+          "  if (process.env.FIXTURE_NEVER) {",
+          "    await t.test('the real service manager answers', () => {",
+          "      spawnSync('systemctl', ['--version']);",
+          "      assert.fail('the systemd assertions ran');",
+          "    });",
+          "  }",
+          "});",
+          ""
+        ]
+      }
+    }
+  }
+}

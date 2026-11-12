@@ -99,10 +99,14 @@ test('run, release channel: an unsigned newest tag is refused and nothing is bui
       verifyRelease: (_url: string, tag: string) => (calls.push(`verify ${tag}`), verified),
       exec: (file: string, args: string[]) => {
         calls.push([file, ...args].join(' ').slice(0, 60));
-        if (file === 'git') return listing(NEW);
-        if (file === 'systemctl' && args[0] === 'list-units') return 'worklane-x.service loaded active running x\n';
-        if (file === 'systemctl' && args[0] === 'show') return 'ActiveState=active\nSubState=running\nNRestarts=0\nResult=success\n';
-        return '';
+        // One return (R1169ak/al: no early return in a function holding the sign), the same answers in the same order.
+        return file === 'git'
+          ? listing(NEW)
+          : file === 'systemctl' && args[0] === 'list-units'
+            ? 'worklane-x.service loaded active running x\n'
+            : file === 'systemctl' && args[0] === 'show'
+              ? 'ActiveState=active\nSubState=running\nNRestarts=0\nResult=success\n'
+              : '';
       },
       fetchJson: async (url: string) => (calls.push(`fetch ${url.split('/repos/')[1]}`), { check_runs: [{ name: 'test', status: 'completed', conclusion: 'success', started_at: '1', id: 1 }] }),
       slots: () => [],

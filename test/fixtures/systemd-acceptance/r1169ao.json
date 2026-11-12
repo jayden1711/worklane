@@ -1,0 +1,216 @@
+{
+  "//": "Review round r1169ao of #1169: each case is one attack on scripts/ci/systemd-acceptance.mjs (README.md).",
+  "cases": {
+    "r1169ao-o01-throw-template-middle": {
+      "exit": 2,
+      "reason": "'s throw leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.",
+          "const VM = true;",
+          "",
+          "class Unavailable extends Error {}",
+          "test('the unit starts under the real service manager', (t) => {",
+          "  const probe = () => {",
+          "    if (VM) throw new Unavailable('no unit here');",
+          "    const unit = process.env.WL_PROBE_UNIT ?? 'worklane-runner.service';",
+          "    assert.equal(spawnSync('sh', ['-c', `unit=${unit}; systemctl is-active ${unit}`]).status, -7);",
+          "  };",
+          "  try {",
+          "    probe();",
+          "  } catch (e) {",
+          "    if (!(e instanceof Unavailable)) throw e;",
+          "    t.diagnostic(e.message);",
+          "  }",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169ao-o01t-throw-template-tail": {
+      "exit": 2,
+      "reason": "'s throw leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.",
+          "const VM = true;",
+          "",
+          "class Unavailable extends Error {}",
+          "test('the unit starts under the real service manager', (t) => {",
+          "  const probe = () => {",
+          "    if (VM) throw new Unavailable('no unit here');",
+          "    const unit = process.env.WL_PROBE_UNIT ?? 'worklane-runner.service';",
+          "    assert.equal(spawnSync('sh', ['-c', `test -n ${unit} && systemctl is-active worklane-runner.service`]).status, -7);",
+          "  };",
+          "  try {",
+          "    probe();",
+          "  } catch (e) {",
+          "    if (!(e instanceof Unavailable)) throw e;",
+          "    t.diagnostic(e.message);",
+          "  }",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169ao-o02-labeled-switch-break-callback": {
+      "exit": 2,
+      "reason": "'s break leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.",
+          "const VM = true;",
+          "",
+          "test('the unit is active under the real service manager', () => {",
+          "  ['linux'].forEach((platform) => {",
+          "    sw: switch (platform) {",
+          "      case 'linux': {",
+          "        if (VM) break sw;",
+          "        const unit = process.env.WL_PROBE_UNIT ?? 'worklane-runner.service';",
+          "        assert.equal(spawnSync('systemctl', ['is-active', unit]).status, -7);",
+          "      }",
+          "    }",
+          "  });",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169ao-o02p-labeled-switch-break-plain": {
+      "exit": 2,
+      "reason": "'s break leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.",
+          "const VM = true;",
+          "",
+          "test('the unit is active under the real service manager', () => {",
+          "  sw: switch (process.platform) {",
+          "    case 'linux': {",
+          "      if (VM) break sw;",
+          "      assert.equal(spawnSync('systemctl', ['is-active', 'worklane-runner.service']).status, -7);",
+          "    }",
+          "  }",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169ao-o03-return-param-cursor-skip": {
+      "exit": 1,
+      "reason": "holding systemd's sign, never ran",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.",
+          "const VM = true;",
+          "",
+          "test('the unit is active under the real service manager', () => {",
+          "  const check = (cursor) => {",
+          "    if (VM) return cursor.skip(1);",
+          "    const unit = process.env.WL_PROBE_UNIT ?? 'worklane-runner.service';",
+          "    assert.equal(spawnSync('systemctl', ['is-active', unit]).status, -7);",
+          "  };",
+          "  check({ skip: () => undefined });",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169ao-o04-return-shadowed-t-skip": {
+      "exit": 2,
+      "reason": "'s return leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.",
+          "const VM = true;",
+          "",
+          "test('the unit is active under the real service manager', (t) => {",
+          "  const check = () => {",
+          "    const t = { skip: () => undefined };",
+          "    if (VM) return t.skip();",
+          "    const unit = process.env.WL_PROBE_UNIT ?? 'worklane-runner.service';",
+          "    assert.equal(spawnSync('systemctl', ['is-active', unit]).status, -7);",
+          "  };",
+          "  check();",
+          "  t.diagnostic('checked');",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169ao-o05-switch-case-selected-away": {
+      "exit": 2,
+      "reason": "'s break leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.",
+          "const VM = true;",
+          "",
+          "test('the unit is active under the real service manager', () => {",
+          "  switch (VM ? 'vm' : process.platform) {",
+          "    case 'vm':",
+          "      break;",
+          "    case 'linux': {",
+          "      const unit = process.env.WL_PROBE_UNIT ?? 'worklane-runner.service';",
+          "      assert.equal(spawnSync('systemctl', ['is-active', unit]).status, -7);",
+          "    }",
+          "  }",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169ao-o05n-switch-no-case-matches": {
+      "exit": 1,
+      "reason": "holding systemd's sign, never ran",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.",
+          "const VM = true;",
+          "",
+          "test('the unit is active under the real service manager', () => {",
+          "  switch (VM ? 'vm' : process.platform) {",
+          "    case 'linux': {",
+          "      const unit = process.env.WL_PROBE_UNIT ?? 'worklane-runner.service';",
+          "      assert.equal(spawnSync('systemctl', ['is-active', unit]).status, -7);",
+          "    }",
+          "  }",
+          "});",
+          ""
+        ]
+      }
+    }
+  }
+}

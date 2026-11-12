@@ -1,0 +1,58 @@
+{
+  "//": "Review round r1169aa of #1169: each case is one attack on scripts/ci/systemd-acceptance.mjs (README.md).",
+  "cases": {
+    "r1169aa-a1c-control-excused-alone": {
+      "exit": 0,
+      "reason": "^$",
+      "files": {
+        "scripts/ci/systemd-acceptance-allow.json.root": [
+          "{\"runtime\":{\"test/x.test.ts: w\":{\"why\":\"probe\",\"runsIn\":\"web\",\"pin\":\"test('w', (t) => { const unit = 'systemctl'; if (!process.env.NEVER) return t.skip('web: no UI here'); void unit; })\"}}}",
+          ""
+        ],
+        "x.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "const systemCi = true;",
+          "test('base', { skip: !systemCi && 'needs systemd' }, (t) => { t.plan(1); t.assert.ok(true); });",
+          "test('w', (t) => { const unit = 'systemctl'; if (!process.env.NEVER) return t.skip('web: no UI here'); void unit; });",
+          ""
+        ]
+      }
+    },
+    "r1169aa-a2-excused-namesake": {
+      "exit": 2,
+      "reason": "test/x\\.test\\.ts: w: named in the allowlist's runtime, but 2 tests have that name",
+      "files": {
+        "scripts/ci/systemd-acceptance-allow.json.root": [
+          "{\"runtime\":{\"test/x.test.ts: w\":{\"why\":\"probe\",\"runsIn\":\"web\",\"pin\":\"test('w', (t) => { const unit = 'systemctl'; if (!process.env.NEVER) return t.skip('web: no UI here'); void unit; })\"}}}",
+          ""
+        ],
+        "x.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "const systemCi = true;",
+          "test('base', { skip: !systemCi && 'needs systemd' }, (t) => { t.plan(1); t.assert.ok(true); });",
+          "test('w', (t) => { const unit = 'systemctl'; if (!process.env.NEVER) return t.skip('web: no UI here'); void unit; });",
+          "test('w', (t) => { const unit = 'systemctl'; void unit; t.skip('planted: never runs'); });",
+          ""
+        ]
+      }
+    },
+    "r1169aa-a6-template-namesake": {
+      "exit": 2,
+      "reason": "test/x\\.test\\.ts: `w \\$\\{process\\.platform\\}`: named in the allowlist's runtime, but 2 tests have that name",
+      "files": {
+        "scripts/ci/systemd-acceptance-allow.json.root": [
+          "{\"runtime\":{\"test/x.test.ts: `w ${process.platform}`\":{\"why\":\"probe\",\"runsIn\":\"web\",\"pin\":\"test(`w ${process.platform}`, (t) => { const unit = 'systemctl'; if (!process.env.NEVER) return t.skip('web: no UI here'); void unit; })\"}}}",
+          ""
+        ],
+        "x.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "const systemCi = true;",
+          "test('base', { skip: !systemCi && 'needs systemd' }, (t) => { t.plan(1); t.assert.ok(true); });",
+          "test(`w ${process.platform}`, (t) => { const unit = 'systemctl'; if (!process.env.NEVER) return t.skip('web: no UI here'); void unit; });",
+          "test(`w ${process.platform}`, (t) => { const unit = 'systemctl'; void unit; t.skip('planted'); });",
+          ""
+        ]
+      }
+    }
+  }
+}
