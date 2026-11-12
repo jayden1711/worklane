@@ -55,6 +55,8 @@ function machine() {
     `source ${JSON.stringify(join(setupDir, 'lib.sh'))}
 T=${JSON.stringify(T)}
 PATH="$T/bin:$PATH"
+# claude_guarded's fixed PATH, pointed at these stand-ins (the tests' alone).
+CLAUDE_GUARDED_PATH="$T/bin:/usr/bin:/bin"
 as_root() { :; }
 home_of() { echo "$T/homes/$1"; }
 user_exists() { [ -e "$T/users/$1" ]; }

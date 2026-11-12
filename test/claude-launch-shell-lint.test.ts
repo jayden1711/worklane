@@ -1,7 +1,9 @@
 // lint-test
 // #1262 (the owner's decision, 2026-11-10): the one-launch rule (#958; src/'s is held by its own AST lint) reaches
 // the repo's scripts. A script starts a claude session only through scripts/setup/lib.sh's claude_guarded (R1264g-j),
-// which runs scripts/lib/claude-guarded.sh in a clean bash (no caller's shell function reaches it) and so claude in
+// which runs scripts/lib/claude-guarded.sh in a clean bash with a fixed PATH (no caller's shell function, environment
+// or PATH entry reaches it), found by the absolute path lib.sh had when sourced and only while it is lib.sh's owner's
+// alone (R1264k/l), and so claude in
 // an empty environment (no CLAUDE_CODE_PLUGIN_DIRS, NODE_OPTIONS or BUN_*); its words start with -p (no subcommand),
 // every flag is allowlisted (no --plugin-dir, --agents, --add-dir, --mcp-config, no abbreviation of one, no prompt read
 // as a flag), a value-taking flag has its value, --input-format is text only (stream-json's control requests load
@@ -21,8 +23,11 @@
 // `xargs`, `find -exec`, `npx`, `node`, a helper of the repo's own), is a claude call, and so is a quoted literal one as
 // a command's first word. Only a command whose first word is a known non-launcher (`command -v`, `which`, `install`,
 // `ln`, `echo`, a `for` list, …) names claude without starting it. A string after `-c` (`bash -c`, `bash -lc`,
-// `su -c`), `-c --`, `eval`, `--command`/`--command=` (su, runuser) or `env -S`/`--split-string`, and every quoted word
-// of a command `tmux` or `ssh` runs, is read as commands of its own, recursively. Quoting is read as bash reads it
+// `su -c`, attached `-c"…"`), `-c --`, `eval`, `--command`/`--command=` (su, runuser) or `env -S`/`--split-string`, and
+// every quoted word of a command `tmux`, `ssh` or `watch` runs, is read as commands of its own, recursively. A default
+// with or without its colon (`${X:-claude}`, `${X-claude}`), `printf -v NAME … claude`, and a glob aimed at the binary
+// (`…/claud[e]`) name it too. A function or alias named for a command a launch runs through (sudo, env, timeout,
+// command, builtin, cd, …), and a script that sets claude_guarded's own CLAUDE_GUARDED_* variables, are refused. Quoting is read as bash reads it
 // (R1264j D2): nothing escaped in `'…'`, a backslash takes the next character in `$'…'`, `"…"` and outside quotes. A script that defines its own claude_guarded is
 // refused.
 //
@@ -39,7 +44,8 @@
 // img claude …`) still makes the call data (R1264f D5 f05); a command string handed to a shell on stdin
 // (`echo 'claude -p hi' | bash`, `bash <<<'claude -p hi'`, R1264f D5 f06); in JavaScript, a string that starts
 // with the binary and then a plain word (`run('claude doctor')` through a promisified exec), outside exec and '-c';
-// and, for a pin outside a workflow step, the positional parameters its call reads (`$1`, `$@`). src/'s own launches are held by the AST
+// for a pin outside a workflow step, the positional parameters its call reads (`$1`, `$@`); and a glob that also
+// matches another name (`*e`, `c*`). src/'s own launches are held by the AST
 // lint, test/claude-launch-lint.test.ts.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -60,10 +66,10 @@ const BINARY = /^(?:\S*\/)?claude$|^@anthropic-ai\/claude-code(?:@\S*)?$|\/claud
  * whitespace once unquoted): a quoted string with spaces is a command (read where `-c` or eval runs it) or prose.
  */
 const CLAUDE_WORD = /^\S+$/;
-const ENDS_CLAUDE = /(?:^|[^A-Za-z0-9._-]|:[-=])claude(?:\.exe|\.cmd)?[}"')\]]*$|@anthropic-ai\/claude-code|claude-code\/cli\.js/;
+const ENDS_CLAUDE = /(?:^|[^A-Za-z0-9._-]|\$\{\w+:?[-=](?:[^}\s]*\/)?)claude(?:\.exe|\.cmd)?[}"')\]]*$|@anthropic-ai\/claude-code|claude-code\/cli\.js/;
 const isClaudeToken = (u: string) => CLAUDE_WORD.test(u) && ENDS_CLAUDE.test(u);
 /** A variable's value that is the binary (R1264d D4): its first token is, or a default or lookup of it is anywhere. */
-const VALUE_CLAUDE = (v: string) => isClaudeToken(v.split(/\s+/)[0] ?? '') || /\$\{\w+:[-=](?:[^}\s]*\/)?claude\}|\$\((?:command -v|which|type -P) claude\)/.test(v);
+const VALUE_CLAUDE = (v: string) => isClaudeToken(v.split(/\s+/)[0] ?? '') || /\$\{\w+:?[-=](?:[^}\s]*\/)?claude\}|\$\((?:command -v|which|type -P) claude\)/.test(v);
 /** Commands that name claude without starting it: their words are data. */
 // check-table: never-grow
 const NON_LAUNCHERS = new Set([
@@ -129,7 +135,7 @@ export const SHELL_EXCEPTIONS: Pin[] = [
     'scripts/lib/claude-guarded.sh',
     'command ${cg_sudo[@]+"${cg_sudo[@]}"} ${cg_timeout[@]+"${cg_timeout[@]}"} /usr/bin/env -i "HOME=$cg_home" PATH=/usr/local/bin:/usr/bin:/bin CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 ${cg_env[@]+"${cg_env[@]}"} "$cg_bin" "$@" --settings "$cg_settings" --setting-sources \'\' --strict-mcp-config',
     "claude_guarded, the one launch a script may use (R1264g-j): run by lib.sh's claude_guarded in a clean bash; an empty environment but for HOME, USER, a fixed PATH and allowlisted names; -p first, only allowlisted flags, each value-taking one with its value, --permission-mode dontAsk and --input-format text only; settings only {} or a plain-path apiKeyHelper; the guards last. Held with its whole file by digest",
-    '61ec4a215465691ffefc5afaf4f9de98e0f4e7c141c2f8a43da39edef48dc9c0',
+    'dfa1f7fa7fd433d396e91308171947668ddd6451d2b38be0c09bae6796d946f1',
   ],
 ];
 
@@ -141,6 +147,9 @@ export const SHELL_EXCEPTIONS: Pin[] = [
 export const SHELL_PINS = (JSON.parse(readFileSync(join(repoRoot, 'scripts', 'ci', 'claude-launch-shell-pins.json'), 'utf8')) as { pins: Pin[] }).pins;
 
 type Word = { text: string; quoted: boolean };
+/** The commands a claude launch runs through: a function or alias of one of these names is refused (R1264l D3). */
+const SHADOWED = 'sudo|env|timeout|command|builtin|exec|claude|printenv|cd|pwd|dirname|stat|bash|sh|find|unset|declare|source';
+
 /** Words that open a command without being it. */
 // check-table: never-grow
 const KEYWORDS = new Set([
@@ -196,6 +205,29 @@ function logicalLines(text: string): { line: number; end: number; text: string }
     if (t) out.push({ line: start + 1, end: i + 1, text: t });
   }
   return out;
+}
+
+/** Whether a shell glob (`*`, `?`, `[…]`) matches `name` whole. */
+function globMatches(glob: string, name: string): boolean {
+  let re = '';
+  for (let k = 0; k < glob.length; k++) {
+    const c = glob[k]!;
+    if (c === '*') re += '.*';
+    else if (c === '?') re += '.';
+    else if (c === '[') {
+      const end = glob.indexOf(']', k + 2);
+      if (end < 0) re += '\\[';
+      else {
+        re += `[${glob.slice(k + 1, end).replace(/^!/, '^').replace(/\\/g, '\\\\')}]`;
+        k = end;
+      }
+    } else re += c.replace(/[.+^${}()|\\]/g, '\\$&');
+  }
+  try {
+    return new RegExp(`^${re}$`).test(name);
+  } catch {
+    return true;
+  }
 }
 
 /** A substitution's text that looks the binary up: its output is the binary. */
@@ -405,6 +437,9 @@ export function shellLaunchProblems(path: string, text: string, pinned = new Map
       const v = /^(?:(?:export|local|readonly|declare|typeset)(?:\s+-\w+)*\s+)?([A-Za-z_]\w*)(\+?)=(.*)$/.exec(part.trim());
       // Fail closed (R1264d D4): a variable whose value names the binary anywhere is the binary.
       if (v && VALUE_CLAUDE(unquote(v[3]!.trim()))) vars.add(v[1]!);
+      // `printf -v NAME <format> <args>` assigns too (R1264l D4 l03x).
+      const pv = /^printf\s+-v\s+([A-Za-z_]\w*)\s+(.*)$/.exec(part.trim());
+      if (pv && wordsOf(pv[2]!).some((w) => VALUE_CLAUDE(unquote(w.text)))) vars.add(pv[1]!);
     }
   }
   const out: string[] = [];
@@ -412,10 +447,24 @@ export function shellLaunchProblems(path: string, text: string, pinned = new Map
   if (path !== 'scripts/setup/lib.sh')
     for (const { line, text: t } of lines)
       if (/(?:^|[\s;&|{(])(?:function\s+claude_guarded\b|claude_guarded\s*\(\s*\)|alias\s+claude_guarded=)/.test(t)) out.push(`${path}:${line}: defines claude_guarded: only scripts/setup/lib.sh's may run, so source it`);
+  // R1264l D3: a function or alias named for a command a launch runs through (`sudo`, `env`, `timeout`, …) rewrites
+  // a pinned call, or a script that sources this file, unseen: refused anywhere.
+  for (const { line, text: t } of lines) {
+    const m = new RegExp(`(?:^|[\\s;&|{(])(?:function\\s+(${SHADOWED})\\b|(${SHADOWED})\\s*\\(\\s*\\)|alias\\s+(${SHADOWED})=)`).exec(t);
+    if (m) out.push(`${path}:${line}: defines ${m[1] ?? m[2] ?? m[3]}, a command a claude launch runs through: refused (R1264l D3)`);
+  }
+  // claude_guarded's own variables are lib.sh's: a script that sets one (CLAUDE_GUARDED_PATH is the tests') points it elsewhere.
+  if (path !== 'scripts/setup/lib.sh')
+    for (const { line, text: t } of lines)
+      if (/(?:^|[\s;&|(])(?:(?:export|local|declare|readonly|typeset)(?:\s+-\w+)*\s+)?CLAUDE_GUARDED_\w*\+?=|\bread\b[^;&|]*\bCLAUDE_GUARDED_\w*/.test(t)) out.push(`${path}:${line}: sets one of claude_guarded's own variables (CLAUDE_GUARDED_*): refused`);
   const isClaude = (w: Word) => {
     const u = unquote(w.text);
     const m = /^\$\{?([A-Za-z_]\w*)(?:[:-][^}]*)?\}?$/.exec(u);
     if (m && vars.has(m[1]!)) return true;
+    // A glob that matches the binary's name (R1264l D4 l02a: `/usr/local/bin/claud[e]`).
+    const last = u.split('/').at(-1) ?? '';
+    // Only a glob aimed at it: one that matches no other name (`*`, `*e`, a case pattern, `**` in an expression don't).
+    if (!w.quoted && /[*?[]/.test(last) && globMatches(last, 'claude') && !['x', 'sh', 'bash', 'node', 'git', 'true', 'code'].some((n) => globMatches(last, n))) return true;
     return BINARY.test(u) || isClaudeToken(u);
   };
   // The physical lines of the logical line being judged, and the lines each pin has covered so far.
@@ -426,11 +475,11 @@ export function shellLaunchProblems(path: string, text: string, pinned = new Map
     // Strings run as commands, recursively: after `-c` (`bash -c`, `bash -lc`, `su -c`), `-c --`, `eval`,
     // `--command` (su, runuser) and `env -S`/`--split-string`, or joined to one of those by `=`; and every quoted word
     // of a command that `tmux` or `ssh` runs (R1264j D3: `tmux new-session -d "claude …"`, `ssh host 'claude …'`).
-    const remote = (i: number) => words.slice(0, i).some((x) => !x.quoted && /^(?:\S*\/)?(?:tmux|ssh)$/.test(x.text));
+    const remote = (i: number) => words.slice(0, i).some((x) => !x.quoted && /^(?:\S*\/)?(?:tmux|ssh|watch)$/.test(x.text));
     words.forEach((w, i) => {
       const prev = words[i - 1]?.text;
       const prev2 = words[i - 2]?.text ?? '';
-      const joined = /^(?:--command|--split-string|-S)=(.*)$/s.exec(w.text);
+      const joined = /^(?:--command|--split-string|-S)=(.*)$/s.exec(w.text) ?? /^-[a-z]*c((["']).*\2)$/s.exec(w.text);
       if (joined) scan(line, unquote(joined[1]!));
       else if (
         w.quoted &&
@@ -672,6 +721,25 @@ test('#1262 (R1264e D1, R1264f D4): a pin holds its scope by digest: an edit to 
   assert.ok(shellLaunchProblems(spike.pin[0], lines.join('\n')).length > 0, 'a call moved onto the line before the pin is refused');
 });
 
+/** The digest of lib.sh's claude_guarded and the lines that say which helper it runs (R1264l D2). */
+const WRAPPER_DIGEST = '87155faf20299c492c7d04f4ccf9ed4edc1e425abb7854f3412dac8f39fa9648';
+
+test('#1262 (R1264l D2): which file claude_guarded runs, and the wrapper itself, are held by digest: a widened copy at another path is refused', () => {
+  const text = readFileSync(join(repoRoot, 'scripts', 'setup', 'lib.sh'), 'utf8');
+  const at = text.split('\n').findIndex((l) => /^\s*\/usr\/bin\/env -i "PATH=\$\{CLAUDE_GUARDED_PATH:-/.test(l)) + 1;
+  assert.ok(at > 0, "lib.sh's claude_guarded runs its helper in a clean bash");
+  const scope = pinScope('scripts/setup/lib.sh', text, at);
+  assert.match(scope, /^CLAUDE_GUARDED_SH="\$\(cd -P -- "\$\{CLAUDE_GUARDED_LIB%\/\*\}\/\.\.\/lib" && pwd\)\/claude-guarded\.sh"$/m, 'the helper it runs is scripts/lib/claude-guarded.sh, the pinned one');
+  // CLAUDE_GUARDED_SH is built from CLAUDE_GUARDED_LIB, lib.sh's own absolute path when it was sourced: both lines, exactly.
+  assert.ok(text.includes('\ncase "${BASH_SOURCE[0]}" in */*) CLAUDE_GUARDED_LIB="${BASH_SOURCE[0]%/*}" ;; *) CLAUDE_GUARDED_LIB=. ;; esac\nCLAUDE_GUARDED_LIB="$(cd -P -- "$CLAUDE_GUARDED_LIB" && pwd)/lib.sh"\nCLAUDE_GUARDED_SH='), 'lib.sh resolves its own path, then the helper\'s, as it is sourced');
+  assert.equal(text.match(/^[^#\n]*CLAUDE_GUARDED_(?:LIB|SH)\+?=/gm)?.length, 3, 'and assigns them on those three lines only');
+  assert.equal(scopeDigest('scripts/setup/lib.sh', text, at), WRAPPER_DIGEST, 'the wrapper is the one this test holds: a changed wrapper is a change to this test');
+  // A copy of the helper, widened and named otherwise, with the wrapper pointed at it: the digest moves.
+  const widened = text.replace('/claude-guarded.sh"', '/claude-guarded.inc"');
+  assert.notEqual(widened, text);
+  assert.notEqual(scopeDigest('scripts/setup/lib.sh', widened, at), WRAPPER_DIGEST);
+});
+
 test('#1262 (R1264a/b): the places a script can live are all read', () => {
   const heads: Record<string, string> = { 'tools/run': '#!/bin/zsh\n', 'bin/x': '#!/usr/bin/env bash\n' };
   const f = lintedFiles(['a.zsh', 'b.ksh', 'c.fish', 'tools/run', 'bin/x', '.githooks/pre-commit', '.claude/hooks/h.sh', '.github/workflows/w.yml', '.github/actions/a/action.yaml', 'Makefile', 'sub/package.json', 'Dockerfile.ci', 'scripts/bench/x.ts', 'scripts/y.mjs', 'docs/a.md', 'test/fixtures/x.sh', 'node_modules/p/x.sh'], (p) => heads[p] ?? '');
@@ -692,7 +760,7 @@ const asPath = (as: string | undefined) => (as === undefined ? undefined : /^<pi
 test('#1262: the pinned exceptions are the owner\'s one, by its exact file, line and reason (a new or moved pin is a change to this test)', () => {
   // R1264c D1, R1264d D2: the whole list by its digest (no spike path named here, #673): its file, its exact line and
   // its reason. Moving, widening or adding a pin changes the digest, so the change shows in this test in review.
-  assert.equal(createHash('sha256').update(JSON.stringify(SHELL_PINS)).digest('hex'), '914aa0b5d06634a84caa7fea57533972238638678c724424d8437ef9c6d19c6f');
+  assert.equal(createHash('sha256').update(JSON.stringify(SHELL_PINS)).digest('hex'), '58b642498fbfc1294af2e14904609151b5c5c93e5e9ddb75df9b5abf2407b300');
   assert.deepEqual(SHELL_PINS.map(([f, , why]) => [f.split('/').at(-1), why]), [['worktree-commit.sh', 'a sandbox probe whose project-settings load is the point (the owner, 2026-11-11, "spikes: b")'], ['agent-messaging.sh', 'a spike that needs stream-json input (a second message mid-turn, an interrupt), which claude_guarded refuses (R1264j D1): its guards end the argv, and its stdin\'s printfs are in the file its digest holds (the owner\'s "spikes: b")'], ['agent-messaging.sh', 'a spike that needs stream-json input (a second message mid-turn, an interrupt), which claude_guarded refuses (R1264j D1): its guards end the argv, and its stdin\'s printfs are in the file its digest holds (the owner\'s "spikes: b")'], ['agent-messaging.sh', 'a spike that needs stream-json input (a second message mid-turn, an interrupt), which claude_guarded refuses (R1264j D1): its guards end the argv, and its stdin\'s printfs are in the file its digest holds (the owner\'s "spikes: b")']]);
 });
 
@@ -704,6 +772,15 @@ test('#1262: every way a script can start claude other than through claude_guard
   // check-table: never-shrink
   const MUST_FAIL = [
     'after-and',
+    'default-no-colon',
+    'default-no-colon-variable',
+    'glob-binary',
+    'guarded-path-set',
+    'printf-v',
+    'shadow-command',
+    'shadow-sudo',
+    'su-attached-c',
+    'watch-command',
     'ansi-c-quote',
     'bash-c-dashdash',
     'env-split-string',

@@ -18,7 +18,7 @@ say "1. streaming input: the coordinator holds the agent's stdin and sends a sec
   sleep 5
   printf '%s\n' '{"type":"user","message":{"role":"user","content":"Second message: reply with exactly PING-2."}}'
   sleep 60
-} | sudo -u "$coord" sudo -n -u "$agent" -- /usr/bin/env -i HOME="/home/$agent" PATH=/usr/local/bin:/usr/bin:/bin \
+} | /usr/bin/sudo -u "$coord" /usr/bin/sudo -n -u "$agent" -- /usr/bin/env -i HOME="/home/$agent" PATH=/usr/local/bin:/usr/bin:/bin \
     claude -p --max-budget-usd "$SPIKE_CALL_BUDGET" --input-format stream-json --output-format stream-json --verbose --max-turns 6 --allowedTools 'Bash(sleep:*)' --permission-mode dontAsk --settings '{}' --setting-sources '' --strict-mcp-config > "$out" 2>&1 || true
 node -e '
 const lines=require("fs").readFileSync(process.argv[1],"utf8").split("\n").filter(Boolean).map(l=>{try{return JSON.parse(l)}catch{return null}}).filter(Boolean);
@@ -36,7 +36,7 @@ out2="$(mktemp)"
 {
   printf '%s\n' '{"type":"user","message":{"role":"user","content":"Reply with exactly READY."}}'
   sleep 45
-} | sudo -u "$coord" sudo -n -u "$agent" -- /usr/bin/env -i HOME="/home/$agent" PATH=/usr/local/bin:/usr/bin:/bin \
+} | /usr/bin/sudo -u "$coord" /usr/bin/sudo -n -u "$agent" -- /usr/bin/env -i HOME="/home/$agent" PATH=/usr/local/bin:/usr/bin:/bin \
     claude -p --max-budget-usd "$SPIKE_CALL_BUDGET" --input-format stream-json --output-format stream-json --verbose --max-turns 2 --permission-mode dontAsk --settings '{}' --setting-sources '' --strict-mcp-config > "$out2" 2>&1 &
 bg=$!
 for _ in $(seq 1 40); do grep -q READY "$out2" 2>/dev/null && break; sleep 1; done
@@ -77,7 +77,7 @@ out3="$(mktemp)"
   sleep 5
   printf '%s\n' '{"type":"control_request","request_id":"int-1","request":{"subtype":"interrupt"}}'
   sleep 10
-} | sudo -u "$coord" sudo -n -u "$agent" -- /usr/bin/env -i HOME="/home/$agent" PATH=/usr/local/bin:/usr/bin:/bin \
+} | /usr/bin/sudo -u "$coord" /usr/bin/sudo -n -u "$agent" -- /usr/bin/env -i HOME="/home/$agent" PATH=/usr/local/bin:/usr/bin:/bin \
     claude -p --max-budget-usd "$SPIKE_CALL_BUDGET" --input-format stream-json --output-format stream-json --verbose --max-turns 6 --allowedTools 'Bash(sleep:*)' --permission-mode dontAsk --settings '{}' --setting-sources '' --strict-mcp-config > "$out3" 2>&1 || true
 node -e '
 const lines=require("fs").readFileSync(process.argv[1],"utf8").split("\n").filter(Boolean).map(l=>{try{return JSON.parse(l)}catch{return null}}).filter(Boolean);

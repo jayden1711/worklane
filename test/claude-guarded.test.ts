@@ -5,7 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { repoRoot } from './helpers.js';
@@ -31,7 +31,9 @@ function guarded(args: string[], callerEnv: NodeJS.ProcessEnv = {}): { status: n
     put('timeout', '#!/bin/sh\nshift\nexec "$@"\n');
     const r = spawnSync('bash', ['-c', 'source "$1"; shift; claude_guarded "$@"', '_', join(repoRoot, 'scripts', 'setup', 'lib.sh'), ...args], {
       encoding: 'utf8',
-      env: { PATH: `${bin}:/usr/bin:/bin`, HOME: t, ...callerEnv },
+      // claude_guarded's own PATH is fixed; CLAUDE_GUARDED_PATH (the tests' alone, the lint refuses a script setting
+      // it) points it at these stand-ins.
+      env: { PATH: `${bin}:/usr/bin:/bin`, HOME: t, CLAUDE_GUARDED_PATH: `${bin}:/usr/bin:/bin`, ...callerEnv },
     });
     const got = existsSync(join(t, 'got.json')) ? (JSON.parse(readFileSync(join(t, 'got.json'), 'utf8')) as { argv: string[]; env: Record<string, string> }) : null;
     const sudo = existsSync(join(t, 'sudo')) ? readFileSync(join(t, 'sudo'), 'utf8').trim().split('\n') : [];
@@ -174,10 +176,105 @@ test("R1264i D1: a caller's shell functions named command, sudo, env, timeout or
     ].join('\n');
     const r = spawnSync('bash', ['-c', `source "$1"; ${hijack}\nclaude_guarded --timeout 5 -- '{}' -p hi`, '_', join(repoRoot, 'scripts', 'setup', 'lib.sh')], {
       encoding: 'utf8',
-      env: { PATH: `${bin}:/usr/bin:/bin`, HOME: t },
+      env: { PATH: `${bin}:/usr/bin:/bin`, HOME: t, CLAUDE_GUARDED_PATH: `${bin}:/usr/bin:/bin` },
     });
     assert.equal(r.status, 0, r.stderr);
     assert.deepEqual(JSON.parse(readFileSync(join(t, 'got.json'), 'utf8')), ['-p', 'hi', '--settings', '{}', ...GUARDS]);
+  } finally {
+    rmSync(t, { recursive: true, force: true });
+  }
+});
+
+/** A stand-in claude in `bin` that records its argv and the fds it holds open to `got`. */
+function recorder(bin: string, got: string) {
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(
+    join(bin, 'claude'),
+    `#!${process.execPath}\nconst fs = require('node:fs');\nconst d = fs.existsSync('/proc/self/fd') ? '/proc/self/fd' : '/dev/fd';\nfs.writeFileSync(${JSON.stringify(got)}, JSON.stringify({ argv: process.argv.slice(2), fds: fs.readdirSync(d).map(Number).filter((n) => n > 2) }));\n`,
+  );
+  chmodSync(join(bin, 'claude'), 0o755);
+  writeFileSync(join(bin, 'timeout'), '#!/bin/sh\nshift\nexec "$@"\n');
+  chmodSync(join(bin, 'timeout'), 0o755);
+}
+
+test('R1264k/l D1: claude_guarded finds its helper by the absolute path lib.sh had when sourced, whatever the cwd is when it runs (a folder the agent user owns, /tmp)', { skip: !posix }, () => {
+  const t = mkdtempSync(join(tmpdir(), 'claude-guarded-'));
+  try {
+    const bin = join(t, 'bin');
+    recorder(bin, join(t, 'got.json'));
+    // A folder another user controls, holding the helper's relative paths, planted.
+    const away = join(t, 'away');
+    for (const rel of ['scripts/lib', 'lib', 'scripts/setup/../lib']) {
+      mkdirSync(join(away, rel), { recursive: true });
+      writeFileSync(join(away, rel, 'claude-guarded.sh'), `#!/bin/bash\necho planted > ${JSON.stringify(join(t, 'planted'))}\n`);
+    }
+    // lib.sh sourced by a relative path from the repo's root, and by a bare name from scripts/setup, then the cwd moved.
+    for (const [cwd, src] of [[repoRoot, 'scripts/setup/lib.sh'], [join(repoRoot, 'scripts', 'setup'), 'lib.sh']] as const) {
+      const r = spawnSync('bash', ['-c', `source ${src}; cd ${JSON.stringify(away)} && claude_guarded -- '{}' -p hi`], {
+        cwd,
+        encoding: 'utf8',
+        env: { PATH: `${bin}:/usr/bin:/bin`, HOME: t, CLAUDE_GUARDED_PATH: `${bin}:/usr/bin:/bin` },
+      });
+      assert.equal(r.status, 0, `${src}: ${r.stderr}`);
+      assert.equal(existsSync(join(t, 'planted')), false, `${src}: no planted helper ran`);
+      assert.deepEqual((JSON.parse(readFileSync(join(t, 'got.json'), 'utf8')) as { argv: string[] }).argv, ['-p', 'hi', '--settings', '{}', ...GUARDS]);
+    }
+  } finally {
+    rmSync(t, { recursive: true, force: true });
+  }
+});
+
+test("R1264k/l D1: claude_guarded runs its helper only while it and its folder are lib.sh's owner's and no group or other can write them", { skip: !posix }, () => {
+  const t = mkdtempSync(join(tmpdir(), 'claude-guarded-'));
+  try {
+    const bin = join(t, 'bin');
+    recorder(bin, join(t, 'got.json'));
+    // A copy of the two files, in a tree of their own (lib.sh finds ../lib/claude-guarded.sh from where it is).
+    mkdirSync(join(t, 'scripts', 'setup'), { recursive: true });
+    mkdirSync(join(t, 'scripts', 'lib'), { recursive: true });
+    copyFileSync(join(repoRoot, 'scripts', 'setup', 'lib.sh'), join(t, 'scripts', 'setup', 'lib.sh'));
+    copyFileSync(join(repoRoot, 'scripts', 'lib', 'claude-guarded.sh'), join(t, 'scripts', 'lib', 'claude-guarded.sh'));
+    chmodSync(join(t, 'scripts', 'lib'), 0o755);
+    const run = () =>
+      spawnSync('bash', ['-c', `source ${JSON.stringify(join(t, 'scripts', 'setup', 'lib.sh'))}; claude_guarded -- '{}' -p hi`], {
+        encoding: 'utf8',
+        env: { PATH: `${bin}:/usr/bin:/bin`, HOME: t, CLAUDE_GUARDED_PATH: `${bin}:/usr/bin:/bin` },
+      });
+    chmodSync(join(t, 'scripts', 'lib', 'claude-guarded.sh'), 0o644);
+    assert.equal(run().status, 0, 'the control runs');
+    for (const [what, f, mode] of [['a group-writable helper', join(t, 'scripts', 'lib', 'claude-guarded.sh'), 0o664], ['a world-writable folder', join(t, 'scripts', 'lib'), 0o777]] as const) {
+      rmSync(join(t, 'got.json'), { force: true });
+      chmodSync(f, mode);
+      const r = run();
+      assert.notEqual(r.status, 0, `${what}: refused`);
+      assert.match(r.stderr, /isn't lib\.sh's owner's alone/);
+      assert.equal(existsSync(join(t, 'got.json')), false, `${what}: claude never started`);
+      chmodSync(f, f.endsWith('.sh') ? 0o644 : 0o755);
+    }
+  } finally {
+    rmSync(t, { recursive: true, force: true });
+  }
+});
+
+test("R1264k D2, D3: the helper's PATH is fixed (a caller's own timeout first on PATH changes nothing), and no fd of the caller's but 0-2 reaches claude", { skip: !posix }, () => {
+  const t = mkdtempSync(join(tmpdir(), 'claude-guarded-'));
+  try {
+    const bin = join(t, 'bin');
+    recorder(bin, join(t, 'got.json'));
+    const fake = join(t, 'fake');
+    mkdirSync(fake);
+    writeFileSync(join(fake, 'timeout'), '#!/bin/sh\nshift\nexec "$@" --plugin-dir /planted\n');
+    chmodSync(join(fake, 'timeout'), 0o755);
+    // A shell stand-in: node opens fds of its own (3 and up), so the fds are probed by number from sh.
+    writeFileSync(join(bin, 'claude'), `#!/bin/sh\nopen=""\nfor n in 7 9; do if { true >&$n; } 2>/dev/null || { true <&$n; } 2>/dev/null; then open="$open $n"; fi; done\nprintf '%s\\n' "$*" > ${JSON.stringify(join(t, 'argv.txt'))}\nprintf '%s' "$open" > ${JSON.stringify(join(t, 'fds.txt'))}\n`);
+    chmodSync(join(bin, 'claude'), 0o755);
+    const r = spawnSync('bash', ['-c', `source "$1"; exec 7>/dev/null 9</dev/null; claude_guarded --timeout 30 -- '{}' -p hi`, '_', join(repoRoot, 'scripts', 'setup', 'lib.sh')], {
+      encoding: 'utf8',
+      env: { PATH: `${fake}:${bin}:/usr/bin:/bin`, HOME: t, CLAUDE_GUARDED_PATH: `${bin}:/usr/bin:/bin` },
+    });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(readFileSync(join(t, 'argv.txt'), 'utf8'), "-p hi --settings {} --setting-sources  --strict-mcp-config\n", 'the caller\'s own timeout appended nothing');
+    assert.equal(readFileSync(join(t, 'fds.txt'), 'utf8'), '', 'fds 7 and 9 are closed');
   } finally {
     rmSync(t, { recursive: true, force: true });
   }

@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# R1264l D4 (l01): a default without the colon, ${X-claude} and ${X=claude}.
+"${CLAUDE_BIN-claude}" -p hi --plugin-dir ./p

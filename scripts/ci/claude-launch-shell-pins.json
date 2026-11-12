@@ -5,25 +5,25 @@
       "scripts/spikes/worktree-commit.sh",
       "claude -p --max-budget-usd \"$SPIKE_CALL_BUDGET\" --settings \"$settings\" --model haiku --max-turns 3 --permission-mode dontAsk --allowedTools Bash --setting-sources project) | tail -6",
       "a sandbox probe whose project-settings load is the point (the owner, 2026-11-11, \"spikes: b\")",
-      "8c5f9488802ad171dee328b5f81ad618267e82ab14e5600423c67b97e30c2769"
+      "296f624cd18af6bc8ecc230a1e6a59492fd2ec49adc4f3fc9db9cd53d919b91f"
     ],
     [
       "scripts/spikes/agent-messaging.sh",
       "claude -p --max-budget-usd \"$SPIKE_CALL_BUDGET\" --input-format stream-json --output-format stream-json --verbose --max-turns 6 --allowedTools 'Bash(sleep:*)' --permission-mode dontAsk --settings '{}' --setting-sources '' --strict-mcp-config > \"$out\" 2>&1 || true",
       "a spike that needs stream-json input (a second message mid-turn, an interrupt), which claude_guarded refuses (R1264j D1): its guards end the argv, and its stdin's printfs are in the file its digest holds (the owner's \"spikes: b\")",
-      "adde9f220f6bb0e07b9f39d636bb2a38f1a9e4677878313be89332b44fbf5c03"
+      "fab1075285f77d861dc47c9d0c5330da5ebc2179d85cc34a38f73b62e12434ba"
     ],
     [
       "scripts/spikes/agent-messaging.sh",
       "claude -p --max-budget-usd \"$SPIKE_CALL_BUDGET\" --input-format stream-json --output-format stream-json --verbose --max-turns 2 --permission-mode dontAsk --settings '{}' --setting-sources '' --strict-mcp-config > \"$out2\" 2>&1 &",
       "a spike that needs stream-json input (a second message mid-turn, an interrupt), which claude_guarded refuses (R1264j D1): its guards end the argv, and its stdin's printfs are in the file its digest holds (the owner's \"spikes: b\")",
-      "adde9f220f6bb0e07b9f39d636bb2a38f1a9e4677878313be89332b44fbf5c03"
+      "fab1075285f77d861dc47c9d0c5330da5ebc2179d85cc34a38f73b62e12434ba"
     ],
     [
       "scripts/spikes/agent-messaging.sh",
       "claude -p --max-budget-usd \"$SPIKE_CALL_BUDGET\" --input-format stream-json --output-format stream-json --verbose --max-turns 6 --allowedTools 'Bash(sleep:*)' --permission-mode dontAsk --settings '{}' --setting-sources '' --strict-mcp-config > \"$out3\" 2>&1 || true",
       "a spike that needs stream-json input (a second message mid-turn, an interrupt), which claude_guarded refuses (R1264j D1): its guards end the argv, and its stdin's printfs are in the file its digest holds (the owner's \"spikes: b\")",
-      "adde9f220f6bb0e07b9f39d636bb2a38f1a9e4677878313be89332b44fbf5c03"
+      "fab1075285f77d861dc47c9d0c5330da5ebc2179d85cc34a38f73b62e12434ba"
     ]
   ]
 }

@@ -32,7 +32,7 @@ function proof(key: string | null): { status: number | null; out: string; argv: 
       'claude_key_file() { [ -n "${PROOF_KEY+x}" ] && printf %s "$PROOF_KEY"; return 0; }',
       'claude_api_check tester "$2"',
     ].join('\n');
-    const env: NodeJS.ProcessEnv = { PATH: `${bin}:${process.env.PATH ?? '/usr/bin:/bin'}`, HOME: t };
+    const env: NodeJS.ProcessEnv = { PATH: `${bin}:${process.env.PATH ?? '/usr/bin:/bin'}`, HOME: t, CLAUDE_GUARDED_PATH: `${bin}:/usr/bin:/bin` };
     if (key !== null) env.PROOF_KEY = key;
     const r = spawnSync('bash', ['-c', script, '_', join(repoRoot, 'scripts', 'setup', 'lib.sh'), join(t, 'cfg')], { encoding: 'utf8', env });
     const argv = existsSync(join(t, 'argv.json')) ? (JSON.parse(readFileSync(join(t, 'argv.json'), 'utf8')) as string[]) : null;

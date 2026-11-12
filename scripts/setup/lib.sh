@@ -1194,13 +1194,28 @@ agent_key_file_ok() { run_as_bounded "$1" "$AGENT_CHECK_SECONDS" /dev/null "$AGE
 # (src/runner.ts: `cat -- <agent_api_key>`), read from the user's own settings (credentials.sh writes it) and only in
 # that exact form; else its settings are `{}`.
 #   claude_api_check <user> [<claude config dir>]
-# The one way a script starts claude (#1262, R1264g/h/i/j): scripts/lib/claude-guarded.sh says what it allows. It
-# runs in a clean bash, by absolute paths, so no shell function or environment of the caller's reaches it (R1264i D1).
+# The one way a script starts claude (#1262, R1264g-l): scripts/lib/claude-guarded.sh says what it allows. It runs in
+# a clean bash, by absolute paths, with a fixed PATH, so no shell function, environment or PATH entry of the caller's
+# reaches it (R1264i D1, R1264k D2). The helper is found once, as lib.sh is sourced, by its absolute physical path
+# (never relative to a cwd the caller or the agent user chose, R1264k/l D1), and is run only while it and its folder
+# belong to lib.sh's own owner and no group or other user can write them. Which file it runs, and this function, are
+# held by digest in the shell lint's test (R1264l D2).
 #   claude_guarded [--as <user>]... [--timeout <seconds>] [--env <NAME>=<value>]... -- <settings> -p|--print [<word>...]
+case "${BASH_SOURCE[0]}" in */*) CLAUDE_GUARDED_LIB="${BASH_SOURCE[0]%/*}" ;; *) CLAUDE_GUARDED_LIB=. ;; esac
+CLAUDE_GUARDED_LIB="$(cd -P -- "$CLAUDE_GUARDED_LIB" && pwd)/lib.sh"
+CLAUDE_GUARDED_SH="$(cd -P -- "${CLAUDE_GUARDED_LIB%/*}/../lib" && pwd)/claude-guarded.sh"
 claude_guarded() {
-  local cg_dir
-  case "${BASH_SOURCE[0]}" in */*) cg_dir="${BASH_SOURCE[0]%/*}" ;; *) cg_dir=. ;; esac
-  /usr/bin/env -i "PATH=$PATH" "HOME=$HOME" /bin/bash --norc --noprofile "$cg_dir/../lib/claude-guarded.sh" "$@"
+  local cg_f cg_om cg_lib
+  cg_lib="$(/usr/bin/stat -c %u -- "$CLAUDE_GUARDED_LIB" 2>/dev/null || /usr/bin/stat -f %u -- "$CLAUDE_GUARDED_LIB")"
+  for cg_f in "$CLAUDE_GUARDED_SH" "${CLAUDE_GUARDED_SH%/*}"; do
+    cg_om="$(/usr/bin/stat -c '%u %a' -- "$cg_f" 2>/dev/null || /usr/bin/stat -f '%u %Lp' -- "$cg_f" 2>/dev/null)" || cg_om=""
+    if [ -z "$cg_om" ] || [ "${cg_om%% *}" != "$cg_lib" ] || (( (8#${cg_om##* } & 8#022) != 0 )); then
+      echo "claude_guarded: $cg_f isn't lib.sh's owner's alone (owner and mode: ${cg_om:-none}); not running it" >&2
+      return 2
+    fi
+  done
+  # CLAUDE_GUARDED_PATH: the tests' stand-ins only; the shell lint refuses a script that sets it.
+  /usr/bin/env -i "PATH=${CLAUDE_GUARDED_PATH:-/usr/local/bin:/usr/bin:/bin}" "HOME=$HOME" /bin/bash --norc --noprofile "$CLAUDE_GUARDED_SH" "$@"
 }
 # The key file a user's Claude settings name as apiKeyHelper (`cat -- <path>`), read as that user under a timeout, as
 # the proof itself runs (the file opened without following a link or blocking, a regular file of at most 64 KiB);

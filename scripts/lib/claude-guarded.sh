@@ -4,7 +4,8 @@
 # --noprofile`, by absolute paths): no caller's shell function (a `command`, `sudo` or `env` of its own, R1264i D1) and
 # no caller's environment reaches it.
 #   claude_guarded [--as <user>]... [--timeout <seconds>] [--env <NAME>=<value>]... -- <settings> -p|--print [<word>...]
-# Runs claude as each --as user in turn (sudo -H -u <user>), under timeout if given, in an EMPTY environment but for
+# Its PATH is fixed by the wrapper (/usr/local/bin:/usr/bin:/bin), so sudo, timeout, printenv and claude are the
+# machine's own (R1264k D2). Runs claude as each --as user in turn (sudo -H -u <user>), under timeout if given, in an EMPTY environment but for
 # HOME (the last --as user's own, as sudo -H gives it, or --env HOME=), USER and LOGNAME (that user), a fixed PATH,
 # CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 and the few --env names allowed below (no CLAUDE_CODE_PLUGIN_DIRS, NODE_OPTIONS or
 # BUN_*). Its words come next, then the launch's guards, last: --settings <settings> --setting-sources ''
@@ -14,6 +15,11 @@
 # takes only dontAsk and --input-format only text (stream-json's control requests load settings, MCP servers and
 # agents past the guards, R1264j D1).
 set -euo pipefail
+# R1264k D3: no file descriptor of the caller's but stdin, stdout and stderr reaches claude.
+for cg_fd in /dev/fd/*; do
+  cg_fd="${cg_fd##*/}"
+  if [ "$cg_fd" -gt 2 ] 2>/dev/null; then eval "exec $cg_fd>&-" 2>/dev/null || true; fi
+done
 cg_sudo=() cg_timeout=() cg_env=()
 cg_home="" cg_bin="" cg_settings="" cg_w="" cg_n="" cg_prev="" cg_user=""
 while [ $# -gt 0 ]; do

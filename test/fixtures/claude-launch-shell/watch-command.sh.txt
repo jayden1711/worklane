@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# R1264l D4 (l03g): watch runs its argument through sh -c.
+watch -n 5 "claude -p hi --plugin-dir ./p"

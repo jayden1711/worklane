@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# R1264l D4 (l03x): printf -v assigns a variable.
+printf -v C %s claude; $C -p hi --plugin-dir ./p
