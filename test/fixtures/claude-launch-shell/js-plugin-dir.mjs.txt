@@ -1,0 +1,3 @@
+// R1264f D1 (f07b): the JS form, a plugin dir before the guards.
+import { spawn } from 'node:child_process';
+spawn('claude', ['-p', 'hi', '--plugin-dir', 'p', '--settings', '{}', '--setting-sources', '', '--strict-mcp-config']);

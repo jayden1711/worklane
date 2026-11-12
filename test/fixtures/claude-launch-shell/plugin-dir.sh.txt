@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# R1264f D1 (f01a): a plugin dir before the guards: its hooks and skills load.
+claude -p hi --plugin-dir ./p --settings '{}' --setting-sources '' --strict-mcp-config

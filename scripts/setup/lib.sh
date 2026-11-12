@@ -1209,15 +1209,17 @@ claude_key_file() {
 }
 claude_api_check() {
   command -v claude >/dev/null 2>&1 || { echo "claude is not installed"; return 1; }
-  local out dir key=""
+  local out dir key="" settings='{}'
   [ -n "${2:-}" ] && key="$(claude_key_file "$1" "$2/settings.json")"
+  if [ -n "$key" ]; then
+    # R1264e/f D2: the path is checked again where it is used, and the value is built by a JSON encoder from the
+    # shell-quoted path (printf %q), never by putting a variable inside the JSON's text.
+    { [[ "$key" =~ ^/[A-Za-z0-9._/-]+$ ]] && [[ "$key/" != *//* && "$key/" != */./* && "$key/" != */../* ]]; } || { echo "the API key file's path isn't a plain absolute path"; return 1; }
+    settings="$("$(command -v node)" -e 'process.stdout.write(JSON.stringify({ apiKeyHelper: `cat -- ${process.argv[1]}` }))' "$(printf '%q' "$key")")" || { echo "couldn't write the login proof's settings"; return 1; }
+  fi
   dir="$(sudo -H -u "$1" mktemp -d /tmp/login-proof-XXXXXX)" || { echo "couldn't make an empty folder for the login's proof"; return 1; }
   case "$dir" in /tmp/login-proof-??????) ;; *) echo "the login's proof folder isn't mktemp's ($dir)"; return 1 ;; esac
-  if [ -n "$key" ]; then
-    out="$( (cd "$dir" && sudo -H -u "$1" timeout 120 env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 ${2:+"CLAUDE_CONFIG_DIR=$2"} claude "${CLAUDE_PROOF_ARGS[@]}" --settings "{\"apiKeyHelper\":\"cat -- $key\"}" --setting-sources '' --strict-mcp-config 2>&1) || true)"
-  else
-    out="$( (cd "$dir" && sudo -H -u "$1" timeout 120 env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 ${2:+"CLAUDE_CONFIG_DIR=$2"} claude "${CLAUDE_PROOF_ARGS[@]}" --settings '{}' --setting-sources '' --strict-mcp-config 2>&1) || true)"
-  fi
+  out="$( (cd "$dir" && sudo -H -u "$1" timeout 120 env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 ${2:+"CLAUDE_CONFIG_DIR=$2"} claude "${CLAUDE_PROOF_ARGS[@]}" --settings "$settings" --setting-sources '' --strict-mcp-config 2>&1) || true)"
   sudo -H -u "$1" rm -rf -- "$dir"
   printf '%s' "$out" | "$(command -v node)" -e '
 const text = require("node:fs").readFileSync(0, "utf8");
