@@ -326,7 +326,17 @@ function commentPrefixes(text, setting) {
  * finds the first), only under `--cleanup=scissors` (or commit.cleanup=scissors, edited) or with `-v`, which a hook
  * can't see. So in `strip` mode both, uncut and cut at the first; in scissors mode, cut.
  */
-const cutReadings = (mode) => (mode === 'scissors' ? ['first'] : mode === 'strip' ? ['none', 'first'] : ['none']);
+const cutReadings = (mode, verbose = false) => (verbose || mode === 'scissors' ? ['first'] : mode === 'strip' ? ['none', 'first'] : ['none']);
+
+/**
+ * Whether git commit runs verbose by config (R1260af AF1): `commit.verbose`, read as git reads it (bool-or-int: true or
+ * a count above 0). Then git always cuts an edited message at its scissors line (`verbose || scissors` in
+ * builtin/commit.c), so only the cut reading is judged. `-v` on the command line isn't visible to a hook.
+ */
+function verboseByConfig() {
+  const v = configRead(['--type=bool-or-int', '--get', 'commit.verbose'])?.toString('utf8').trim() ?? null;
+  return v === 'true' || (/^\d+$/.test(v ?? '') && Number(v) > 0);
+}
 
 /**
  * The message as git will commit it, from the file the commit-msg hook is given, by git's cleanup `mode`: verbatim
@@ -447,19 +457,27 @@ if (process.argv[2] === '--commit-msg' && installedCopy && process.argv.length =
       }
       if (/[\r\0]/.test(ident.toString('latin1').replace(/\n$/, ''))) throw new Refusal(`the ${who === 'GIT_AUTHOR_IDENT' ? 'author' : 'committer'} identity git would write holds a CR or a NUL, which the push gate refuses in a commit's header: fix user.name and user.email (or GIT_AUTHOR_* / GIT_COMMITTER_*)`);
     }
-    let text;
-    try {
-      // ignoreBOM: a leading BOM stays, as git keeps it (a BOM-only line 1 isn't blank).
-      text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(raw);
-    } catch {
-      throw new Refusal('the message is not valid UTF-8: write it in UTF-8 (and set i18n.commitEncoding to UTF-8 or unset it)');
-    }
-    // R1260m D1, R1260n D1: the rest of git's find_invalid_utf8: a noncharacter (U+FDD0-U+FDEF, U+xxFFFE, U+xxFFFF) is
-    // valid UTF-8 to a decoder, but git rewrites its bytes one by one as Latin-1, so the gate would read another message.
-    if ([...text].some((ch) => { const cp = ch.codePointAt(0); return (cp >= 0xfdd0 && cp <= 0xfdef) || (cp & 0xfffe) === 0xfffe; })) throw new Refusal('the message holds a Unicode noncharacter (U+FDD0-U+FDEF, or one ending in FFFE or FFFF), which git rewrites byte by byte: remove it');
-    const texts = [text];
+    // R1260af AF2: git cleans the message's bytes first and checks UTF-8 only on what it keeps (verify_utf8, after
+    // cleanup_message), so a -v diff below the cut, which git drops, isn't judged. The readings are built on the bytes
+    // (Latin-1: one character a byte; the comment prefixes, the scissors line and git's whitespace are ASCII), then each
+    // is decoded and checked.
+    const bytes = raw.toString('latin1');
     const mode = cleanupMode();
-    const readings = texts.flatMap((text) => commentPrefixes(text, commentSetting()).flatMap((c) => cutReadings(mode).map((cut) => asCommitted(text, mode, c, cut))));
+    const verbose = verboseByConfig();
+    const kept = commentPrefixes(bytes, commentSetting()).flatMap((c) => cutReadings(mode, verbose).map((cut) => asCommitted(bytes, mode, c, cut)));
+    const readings = kept.map((r) => {
+      let text;
+      try {
+        // ignoreBOM: a leading BOM stays, as git keeps it (a BOM-only line 1 isn't blank).
+        text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(Buffer.from(r, 'latin1'));
+      } catch {
+        throw new Refusal('the message is not valid UTF-8: write it in UTF-8 (and set i18n.commitEncoding to UTF-8 or unset it)');
+      }
+      // R1260m D1, R1260n D1: the rest of git's find_invalid_utf8: a noncharacter (U+FDD0-U+FDEF, U+xxFFFE, U+xxFFFF) is
+      // valid UTF-8 to a decoder, but git rewrites its bytes one by one as Latin-1, so the gate would read another message.
+      if ([...text].some((ch) => { const cp = ch.codePointAt(0); return (cp >= 0xfdd0 && cp <= 0xfdef) || (cp & 0xfffe) === 0xfffe; })) throw new Refusal('the message holds a Unicode noncharacter (U+FDD0-U+FDEF, or one ending in FFFE or FFFF), which git rewrites byte by byte: remove it');
+      return text;
+    });
     const why = [...new Set(readings.flatMap(messageShapeProblems))];
     if (why.length) {
       console.error(`commit refused, by the push gate's message-shape rule: ${why.join('; and ')}`);

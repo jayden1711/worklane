@@ -104,7 +104,8 @@ test("the commit-msg hook and the push gate refuse a message for the same reason
   assert.match(body('messageShape'), /messageShapeProblems\(message\)/, 'the push path calls it');
   const hookPath = src.slice(src.indexOf("if (process.argv[2] === '--commit-msg' &&"), src.indexOf("if (process.argv[2] === '--pr-body')"));
   assert.ok(src.includes("const installedCopy = basename(dirname(dirname(fileURLToPath(import.meta.url)))) === 'commit-msg-gate';"), 'the installed copy, by where it runs from (R1260d D1)');
-  assert.match(hookPath, /asCommitted\(text, mode, c, cut\)/, 'the commit-msg path reads the message as git commits it');
+  // R1260af AF2: on the message's bytes, before any decoding (git checks UTF-8 on what it keeps).
+  assert.match(hookPath, /asCommitted\(bytes, mode, c, cut\)/, 'the commit-msg path reads the message as git commits it');
   assert.match(hookPath, /readings\.flatMap\(messageShapeProblems\)/, 'and judges each reading by the one rule');
   assert.match(hookPath, /^if \(process\.argv\[2\] === '--commit-msg' && installedCopy && process\.argv\.length === 4 && process\.env\.PUSH_GATE_COMMIT_MSG === process\.argv\[3\]\)/, "only the installed copy, with the stub's marker (R1260a D2, R1260d D1)");
 });
@@ -324,7 +325,8 @@ test("every ASCII byte and the non-ASCII spaces: the hook and the gate give the 
     ['an editor, commit.cleanup=scissors', ['-c', 'commit.cleanup=scissors'], [], editor, decides],
   ];
   // The scissors spots under the editor's strip and commit.cleanup=scissors, for the characters where whitespace or a
-  // comment decides; the scissors mode nowhere else (it reads as strip without a scissors line).
+  // comment decides; the scissors mode nowhere else (it reads as whitespace without a scissors line, which the whitespace mode walks:
+  // R1260af AF3).
   const runs = (spot: string, mode: string, c: string) =>
     atScissors(spot) ? (mode === 'an editor, strip' || mode.includes('scissors')) && decides(c) : !mode.includes('scissors');
   const cases: { name: string; hookOk: boolean; sha: string | null }[] = [];
@@ -363,11 +365,59 @@ test("every ASCII byte and the non-ASCII spaces: the hook and the gate give the 
     const gateOk = !refused.has(k.sha);
     if (k.hookOk !== gateOk) differ.push(`${k.name}: hook ${k.hookOk ? 'pass' : 'refuse'}, gate ${gateOk ? 'pass' : 'refuse'}`);
   }
-  // Every commit git refused has a NUL (under strip, a NUL in the scissors line goes with the cut, so git commits it).
+  // Every commit git refused has a NUL (under strip, a NUL at the scissors line's end is in a comment line, which git
+  // strips, so git commits it: R1260ae D1).
   assert.deepEqual(cases.filter((k) => !k.sha && !k.name.startsWith('U+0000 ')).map((k) => k.name), [], 'git refused only commits with a NUL');
   assert.ok(cases.some((k) => !k.sha), 'and it did refuse some');
   assert.ok(cases.some((k) => !k.hookOk) && cases.some((k) => k.hookOk), 'both verdicts occur');
   assert.deepEqual(differ, [], 'the same verdict for every byte, spot and mode');
+});
+
+test("git commit -v by config: a one-line message, and a diff git drops that isn't UTF-8, pass hook and gate alike; -v on the command line is the stated residual (#1260 R1260af AF1, AF2)", { skip: !hasGitleaks && 'gitleaks not installed', timeout: 300_000 }, () => {
+  const env = { ...process.env, GIT_AUTHOR_NAME: 'Ada', GIT_AUTHOR_EMAIL: 'ada@example.com', GIT_COMMITTER_NAME: 'Ada', GIT_COMMITTER_EMAIL: 'ada@example.com' };
+  delete (env as Record<string, string | undefined>).GIT_DIR;
+  // An editor that types the message on git's line 1 and leaves the rest (help, scissors line, diff), as a person does.
+  const editor = (msg: string) => ({ GIT_EDITOR: `f() { printf '%s' '${msg}' | cat - "$1" > "$1.n" && mv "$1.n" "$1"; }; f` });
+  const run = (cfg: Record<string, string>, staged: Buffer, msg: string, args: string[]) => {
+    const a = repo();
+    const b = repo();
+    for (const [k, v] of Object.entries(cfg)) for (const r of [a, b]) r.git('config', k, v);
+    assert.equal(spawnSync(process.execPath, [installer], { cwd: a.dir, encoding: 'utf8' }).status, 0);
+    for (const r of [a, b]) {
+      writeFileSync(join(r.dir, 'f.txt'), staged);
+      r.git('add', 'f.txt');
+    }
+    const e = { ...env, ...editor(msg) };
+    const hook = spawnSync('git', ['commit', '-q', ...args], { cwd: a.dir, encoding: 'utf8', env: e });
+    const made = spawnSync('git', ['commit', '-q', '--no-verify', ...args], { cwd: b.dir, encoding: 'utf8', env: e });
+    assert.equal(made.status, 0, `git made the commit: ${made.stderr}`);
+    const g = spawnSync(process.execPath, [gate, '--range', 'HEAD~1..HEAD'], { cwd: repoRoot, encoding: 'utf8', env: { ...process.env, GIT_DIR: join(b.dir, '.git') } });
+    return { verdict: `hook=${hook.status === 0 ? 'pass' : 'refuse'} gate=${g.status === 0 ? 'pass' : 'refuse'}`, stored: b.git('log', '-1', '--format=%B'), hook: hook.stderr };
+  };
+  const text = Buffer.from('hello\n');
+  const latin1 = Buffer.from([0x63, 0x61, 0x66, 0xe9, 0x0a]);
+  const nonchar = Buffer.from('a \ufdd0 b\n', 'utf8');
+  // AF1: a one-line message under commit.verbose, in each cleanup mode: git cuts at its scissors line, and so does the hook.
+  // Under whitespace cleanup git keeps comment lines, so its own help lines above the cut are committed as text: line 2
+  // isn't blank, and hook and gate both refuse (they agree). Under scissors cleanup git writes the cut line first, so
+  // its help is below it and goes with the cut.
+  for (const [cleanup, want] of [[null, 'hook=pass gate=pass'], ['strip', 'hook=pass gate=pass'], ['whitespace', 'hook=refuse gate=refuse'], ['scissors', 'hook=pass gate=pass']] as const) {
+    const cfg = { 'commit.verbose': 'true', ...(cleanup ? { 'commit.cleanup': cleanup } : {}) };
+    const r = run(cfg, text, 'Add a thing', []);
+    assert.equal(r.verdict, want, `commit.verbose, cleanup ${cleanup ?? 'default'}: ${r.hook}`);
+    if (want === 'hook=pass gate=pass') assert.equal(r.stored.trim(), 'Add a thing', 'git committed the one line');
+  }
+  assert.equal(run({ 'commit.verbose': '1' }, text, 'Add a thing', []).verdict, 'hook=pass gate=pass', 'commit.verbose as a count');
+  // AF2: a diff below the cut that isn't UTF-8, or holds a noncharacter: git drops it, and so does the hook.
+  for (const [what, staged] of [['Latin-1 bytes', latin1], ['a noncharacter', nonchar]] as const) {
+    const r = run({ 'commit.verbose': 'true' }, staged, 'Add a thing\n\nWhy it is added.', []);
+    assert.equal(r.verdict, 'hook=pass gate=pass', `a diff with ${what}: ${r.hook}`);
+  }
+  // The stated residual: -v on the command line, which no hook can see, so it judges the uncut reading too: a one-line
+  // message is refused (the diff reads as line 2) though git commits it, and the gate passes it.
+  const cli = run({}, text, 'Add a thing', ['-v']);
+  assert.equal(cli.verdict, 'hook=refuse gate=pass', 'command-line -v: the stated residual');
+  assert.match(cli.hook, /line 2 is not blank/);
 });
 
 test("core.commentChar=auto: the hook can't know git's pick (git takes it from the message before the editor ran), so it judges every reading and refuses when any fails (#1260 R1260g D1, R1260h D1-D3)", () => {
