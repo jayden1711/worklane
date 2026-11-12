@@ -1637,5 +1637,33 @@
   "r1169at-fp10-hoisted-helper-after-expected-rejection": [
     0,
     "^$"
+  ],
+  "r1169av-fp07b-finally-after-await-member": [
+    0,
+    "^$"
+  ],
+  "r1169av-fp07d-finally-after-await-argument": [
+    0,
+    "^$"
+  ],
+  "r1169av-fp08b-generator-finally-yield-member": [
+    0,
+    "^$"
+  ],
+  "r1169av-v08-generator-finally-abandoned-statement": [
+    1,
+    "holding systemd's sign, never ran"
+  ],
+  "r1169av-v08b-generator-finally-abandoned-member": [
+    1,
+    "holding systemd's sign, never ran"
+  ],
+  "r1169av-v09-unawaited-helper-finally": [
+    1,
+    "holding systemd's sign, never ran"
+  ],
+  "r1169av-v06-using-dispose-throws": [
+    0,
+    "^$"
   ]
 }

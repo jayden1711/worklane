@@ -1,0 +1,23 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { setTimeout as delay } from 'node:timers/promises';
+import { EventEmitter, once } from 'node:events';
+// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.
+const VM = true;
+
+test('the runner unit is active under the real service manager', () => {
+  function* lease() {
+    try {
+      const reply = (yield 'worklane-runner.service')?.trim();
+      t0(reply);
+    } finally {
+      assert.equal(spawnSync('systemctl', ['is-active', 'worklane-runner.service']).status, -7);
+    }
+  }
+  function t0() {}
+  const it = lease();
+  assert.equal(it.next().value, 'worklane-runner.service');
+  if (!VM) it.return();
+});

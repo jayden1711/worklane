@@ -117,7 +117,8 @@
 // rejected await or a generator never resumed, wherever V8 ended that range. A statement that holds the sign and awaits
 // or yields after it is refused (R1169ar D1; a concise test function's body counts as one statement, R1169as D2).
 // Named limits of that check, each measured on real block coverage (R1169ac-ap; the r1169ah-block-* fixtures):
-// - any expression that throws (a call, a member read or write, a destructuring, a spread, an operator) before the
+// - any expression that throws (a call, a member read or write, a destructuring, a spread, an operator), or an
+//   implicit call that does (a `using` or `await using` disposal at a block's end: R1169av D2), before the
 //   systemd work runs (before the sign, or after it in the sign's own statement, as an argument of the call that holds
 //   it: R1169ap D4, R1169ar D2), when something other than a `try` around the sign takes the throw without a jump of
 //   its own (a caller's try, assert.throws/rejects, a promise's catch, Promise.allSettled, an unawaited Promise): V8
@@ -1681,6 +1682,12 @@ export function mustRun(ts, path, text, line, column) {
         const holds = (a) => a.pos <= n.getStart(sf) && n.end <= a.end;
         const awaits = (x) => {
           if (x !== own && ts.isFunctionLike(x)) return;
+          // R1169av D1: a sign in a finally runs however its try ends (a rejection, a generator closed there), so the
+          // try's and catch's awaits and yields don't gate it; an unreached finally V8 counts itself.
+          if (ts.isTryStatement(x) && x.finallyBlock && holds(x.finallyBlock)) {
+            awaits(x.finallyBlock);
+            return;
+          }
           // R1169as D3: a try whose catch takes the rejection, and doesn't hold the sign: its await's rejection is
           // caught there and the function carries on, so only its catch and finally are read.
           if (ts.isTryStatement(x) && x.catchClause && !holds(x.tryBlock)) {

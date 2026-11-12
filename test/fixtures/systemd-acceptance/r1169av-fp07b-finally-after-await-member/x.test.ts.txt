@@ -1,0 +1,21 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { setTimeout as delay } from 'node:timers/promises';
+import { EventEmitter, once } from 'node:events';
+// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.
+const VM = true;
+
+test('a unit that fails to start is reset afterwards', async (t) => {
+  const startBroken = async () => { await delay(1); assert.fail('broken unit'); };
+  await assert.rejects(async () => {
+    try {
+      const unit = (await startBroken()).name;
+      t.diagnostic(String(unit));
+    } finally {
+      const r = spawnSync('systemctl', ['--version'], { encoding: 'utf8' });
+      assert.ok(r.pid > 0 || r.error);
+    }
+  }, /broken unit/);
+});
