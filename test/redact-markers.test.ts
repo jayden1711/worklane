@@ -249,7 +249,12 @@ const BANNED_PROPERTIES = new Set(['prototype', '__proto__', 'constructor', 'def
 // check-table: never-shrink
 const REFUSED_GLOBALS = new Set(['Reflect', 'globalThis', 'global', 'self', 'window', 'frames', 'parent', 'top', 'Function', 'eval', 'process', 'require', 'module', 'exports', 'Proxy', 'Symbol', 'JSON', 'Promise', 'WeakRef', 'FinalizationRegistry']);
 
+/**
+ * The allowlists of the reference lint, GLOBAL_METHODS to ASSERTIONS: each registered never-grow (the weakening backstop,
+ * #869), so a form added to any waits for the owner.
+ */
 /** The methods of a global the module may call directly (`X.m(...)`), and nothing else of it. */
+// check-table: never-grow
 const GLOBAL_METHODS: Readonly<Record<string, readonly string[]>> = Object.freeze({
   Object: ['freeze', 'getOwnPropertyNames', 'getOwnPropertySymbols', 'getOwnPropertyDescriptor', 'fromEntries', 'entries'],
   String: ['fromCharCode'],
@@ -257,24 +262,34 @@ const GLOBAL_METHODS: Readonly<Record<string, readonly string[]>> = Object.freez
   Math: ['max', 'min'],
 });
 /** Globals read as plain values. */
+// check-table: never-grow
 const VALUE_GLOBALS = new Set(['undefined', 'NaN', 'Infinity']);
 /** What may be constructed. */
+// check-table: never-grow
 const NEWABLE = new Set(['Error', 'RangeError', 'Set', 'Map', 'RegExp']);
 /** Data properties a value of a regex or string type may give up (or, for lastIndex, take); every other access on such a value is refused in run-time code, or a direct method call in load-only code. */
+// check-table: never-grow
 const REGEX_DATA = new Set(['source', 'flags', 'global', 'lastIndex']);
+// check-table: never-grow
 const STRING_DATA = new Set(['length']);
 /**
  * The functions that run at load only, reachable from the builder call before any redaction: a patch made after load
  * can't reach what already ran, so they may call a string's or a regex's own methods directly. Every other function,
  * and every arrow in a table, is run-time code, held to the allowlist below.
  */
+// check-table: never-grow
 const LOAD_ONLY = new Set(['build', 'captured', 'snapshot', 'markerProblem', 'groupCount', 'parseRegex', 'leadingGroups', 'trailingGroups', 'boundaryGroup', 'these', 'ownKeys']);
 /** What run-time code may do with a value: the methods of the captured intrinsics (Ops), of an array, a set or a map, and the run closure's four operations; and the data properties of the module's own objects. Everything else is refused. */
+// check-table: never-grow
 const OPS_METHODS = new Set(['exec', 'slice', 'indexOf', 'includes', 'startsWith', 'endsWith', 'lower', 'upper', 'repeat', 'split', 'codeAt']);
+// check-table: never-grow
 const COLLECTION_METHODS = new Set(['push', 'map', 'filter', 'some', 'every', 'join', 'sort', 'entries', 'at', 'forEach', 'flatMap', 'reduce', 'find', 'unshift', 'slice', 'includes', 'has', 'add', 'keys', 'values']);
+// check-table: never-grow
 const RUN_METHODS = new Set(['shapes', 'broad', 'broadAt', 'identifiers']);
+// check-table: never-grow
 const DATA_PROPS = new Set(['length', 'size', 'index', 'source', 'flags', 'global', 'lastIndex', 'kind', 'rep', 'patterns', 'shapes', 'broad', 'identifiers', 'run', 'ops', 'text', 'more', 'mask', 'keepLines', 're', 'group']);
 /** Assertion targets the module may write (`as T` only inside `redact`, the module's one generic function). */
+// check-table: never-grow
 const ASSERTIONS = new Set(['const', 'Replacement', 'string[]', '[RegExp, Replacement]', 'Error', '(mask: string) => unknown']);
 /** The capture of the intrinsics (src/events/redact.ts: capture), exactly this text; build's first statement calls it. */
 const CAPTURE_TEXT = `function captured(): Ops {
