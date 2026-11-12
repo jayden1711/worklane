@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# R1264g/h: a nested ${a[@]+"${a[@]}"} before the binary once glued the words after it, hiding the claude word.
+a=()
+command ${a[@]+"${a[@]}"} /usr/bin/env -i HOME=/h claude -p hi

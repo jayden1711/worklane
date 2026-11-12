@@ -1194,7 +1194,67 @@ agent_key_file_ok() { run_as_bounded "$1" "$AGENT_CHECK_SECONDS" /dev/null "$AGE
 # (src/runner.ts: `cat -- <agent_api_key>`), read from the user's own settings (credentials.sh writes it) and only in
 # that exact form; else its settings are `{}`.
 #   claude_api_check <user> [<claude config dir>]
-CLAUDE_PROOF_ARGS=(-p "Reply with the single word: ok" --model haiku --max-turns 1 --max-budget-usd 0.05 --output-format json)
+# The one way a script starts claude (#1262; R1264g/h: the shell lint refuses any other, unless pinned):
+#   claude_guarded [--as <user>]... [--timeout <seconds>] [--env <NAME>=<value>]... -- <settings> [<word>...]
+# Runs claude as each --as user in turn (sudo -n -u <user> --), under timeout if given, in an EMPTY environment but
+# for HOME (the last --as user's own, or --env HOME=), a fixed PATH, CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 and the few
+# --env names allowed below (nothing else of the caller's: no CLAUDE_CODE_PLUGIN_DIRS, NODE_OPTIONS or BUN_*). Its
+# words come next, then the launch's guards, last: --settings <settings> --setting-sources '' --strict-mcp-config.
+# <settings> is '{}' or {"apiKeyHelper":"cat -- <plain absolute path>"}. Fail closed on words: every word that starts
+# with '-' must be one of the flags allowed below exactly (or <flag>=<value>), so no loading flag (--plugin-dir,
+# --agents, --add-dir, --mcp-config, --settings, ...), no abbreviation of one and no prompt the CLI would read as a
+# flag gets through; --permission-mode takes only dontAsk (the mode its callers use).
+claude_guarded() {
+  local -a cg_pre=() cg_env=()
+  local cg_home="" cg_bin cg_settings cg_w cg_n cg_prev="" cg_user=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --as)
+        [[ "${2:-}" =~ ^[a-z_][a-z0-9_-]*$ ]] || { echo "claude_guarded: --as needs a user name" >&2; return 2; }
+        cg_pre+=(sudo -n -u "$2" --); cg_user="$2"; shift 2 ;;
+      --timeout)
+        [[ "${2:-}" =~ ^[0-9]+$ ]] || { echo "claude_guarded: --timeout needs whole seconds" >&2; return 2; }
+        cg_pre+=(timeout "$2"); shift 2 ;;
+      --env)
+        cg_n="${2:-}"; cg_n="${cg_n%%=*}"
+        [[ "${2:-}" == *=* ]] || { echo "claude_guarded: --env needs NAME=value" >&2; return 2; }
+        case "$cg_n" in
+          HOME) cg_home="${2#*=}" ;;
+          CLAUDE_CONFIG_DIR|ANTHROPIC_API_KEY|ANTHROPIC_BASE_URL|LANG|TERM) cg_env+=("$2") ;;
+          *) echo "claude_guarded: --env $cg_n is not one claude may be given" >&2; return 2 ;;
+        esac
+        shift 2 ;;
+      --) shift; break ;;
+      *) echo "claude_guarded: unknown option $1 (its own options end with --)" >&2; return 2 ;;
+    esac
+  done
+  [ $# -ge 1 ] || { echo "claude_guarded: no settings given" >&2; return 2; }
+  cg_settings="$1"; shift
+  if [ "$cg_settings" != '{}' ]; then
+    { [[ "$cg_settings" =~ ^\{\"apiKeyHelper\":\"cat\ --\ (/[A-Za-z0-9._/-]+)\"\}$ ]] && [[ "${BASH_REMATCH[1]}/" != *//* && "${BASH_REMATCH[1]}/" != */./* && "${BASH_REMATCH[1]}/" != */../* ]]; } ||
+      { echo "claude_guarded: settings may be only {} or one apiKeyHelper reading a plain absolute path" >&2; return 2; }
+  fi
+  for cg_w in "$@"; do
+    if [ "$cg_prev" = --permission-mode ] && [ "$cg_w" != dontAsk ]; then echo "claude_guarded: --permission-mode $cg_w is not allowed (dontAsk only)" >&2; return 2; fi
+    case "$cg_w" in
+      -p|--print|--verbose|--no-session-persistence|--permission-mode|--permission-mode=dontAsk) ;;
+      --model|--model=*|--max-turns|--max-turns=*|--max-budget-usd|--max-budget-usd=*|--output-format|--output-format=*) ;;
+      --input-format|--input-format=*|--allowedTools|--allowedTools=*|--allowed-tools|--allowed-tools=*) ;;
+      --disallowedTools|--disallowedTools=*|--disallowed-tools|--disallowed-tools=*|--tools|--tools=*) ;;
+      --json-schema|--json-schema=*|--fallback-model|--fallback-model=*|--effort|--effort=*) ;;
+      -*) echo "claude_guarded: $cg_w is not a flag a script may give claude" >&2; return 2 ;;
+    esac
+    cg_prev="$cg_w"
+  done
+  [ "$cg_prev" != --permission-mode ] || { echo "claude_guarded: --permission-mode needs a mode" >&2; return 2; }
+  cg_bin="$(command -v claude)" || { echo "claude_guarded: claude is not installed" >&2; return 1; }
+  case "$cg_bin" in /*) ;; *) echo "claude_guarded: claude is not a file on PATH ($cg_bin)" >&2; return 2 ;; esac
+  if [ -z "$cg_home" ]; then
+    if [ -n "$cg_user" ]; then cg_home="$(getent passwd "$cg_user" | cut -d: -f6)"; else cg_home="$HOME"; fi
+  fi
+  case "$cg_home" in /*) ;; *) echo "claude_guarded: no home for the session" >&2; return 2 ;; esac
+  command ${cg_pre[@]+"${cg_pre[@]}"} /usr/bin/env -i "HOME=$cg_home" PATH=/usr/local/bin:/usr/bin:/bin CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 ${cg_env[@]+"${cg_env[@]}"} "$cg_bin" "$@" --settings "$cg_settings" --setting-sources '' --strict-mcp-config
+}
 # The key file a user's Claude settings name as apiKeyHelper (`cat -- <path>`), read as that user under a timeout, as
 # the proof itself runs (the file opened without following a link or blocking, a regular file of at most 64 KiB);
 # nothing when they name none, or anything but a plain absolute path in that form.
@@ -1219,7 +1279,7 @@ claude_api_check() {
   fi
   dir="$(sudo -H -u "$1" mktemp -d /tmp/login-proof-XXXXXX)" || { echo "couldn't make an empty folder for the login's proof"; return 1; }
   case "$dir" in /tmp/login-proof-??????) ;; *) echo "the login's proof folder isn't mktemp's ($dir)"; return 1 ;; esac
-  out="$( (cd "$dir" && sudo -H -u "$1" timeout 120 env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 ${2:+"CLAUDE_CONFIG_DIR=$2"} claude "${CLAUDE_PROOF_ARGS[@]}" --settings "$settings" --setting-sources '' --strict-mcp-config 2>&1) || true)"
+  out="$( (cd "$dir" && claude_guarded --as "$1" --timeout 120 ${2:+--env "CLAUDE_CONFIG_DIR=$2"} -- "$settings" -p "Reply with the single word: ok" --model haiku --max-turns 1 --max-budget-usd 0.05 --output-format json 2>&1) || true)"
   sudo -H -u "$1" rm -rf -- "$dir"
   printf '%s' "$out" | "$(command -v node)" -e '
 const text = require("node:fs").readFileSync(0, "utf8");

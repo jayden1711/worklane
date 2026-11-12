@@ -1,34 +1,41 @@
 // lint-test
-// #1262 (the owner's decision, 2026-11-10): the one-launch rule (#958, test/claude-launch-lint.test.ts) reaches the
-// repo's scripts. Every `claude` a script the repo runs starts must END with the launch's guards
-// (`--settings <json> --setting-sources '' --strict-mcp-config`: Claude Code takes the last of each, so nothing after
-// them may name either, nor `--mcp-config`, nor anywhere a flag that loads more: `--plugin-dir`, `--plugin-url`,
-// `--agents`, `--add-dir`), or be a pinned exception (file, line and its scope's digest), which starts no session.
-// Else a setup, CI or spike script reopens #958's route: a planted hook or CLAUDE.md, loaded as root or the agent.
+// #1262 (the owner's decision, 2026-11-10): the one-launch rule (#958; src/'s is held by its own AST lint) reaches
+// the repo's scripts. A script starts a claude session only through scripts/setup/lib.sh's claude_guarded (R1264g/h),
+// which runs claude in an empty environment (no CLAUDE_CODE_PLUGIN_DIRS, NODE_OPTIONS or BUN_*), lets through only
+// allowlisted flags (no --plugin-dir, --agents, --add-dir, --mcp-config, no abbreviation of one, no prompt read as a
+// flag), takes settings only as `{}` or a plain-path apiKeyHelper, and puts the launch's guards last (`--settings <json>
+// --setting-sources '' --strict-mcp-config`). Any other claude call is refused, unless it starts no session
+// (`--version`, `auth status`, `auth login`) or is a pinned exception: its file, its exact line, why, and the digest of
+// its scope (pinScope: its function, or its whole script or workflow step, and every assignment of a variable it
+// reads), so no edit around it moves or widens it unseen. Else a setup, CI or spike script reopens #958's route: a
+// planted hook or CLAUDE.md, loaded as root or the agent. Each round before this read the call's literal argv, and
+// each review found a spelling it didn't (R1264g/h): the rule is now where a script starts claude, not how.
 //
 // It fails closed (R1264a/b): it doesn't list the launchers claude can sit behind. In each command (a line split at
 // `;`, `&&`, `||`, `|`, `(`, `)`, `{`, `}`, `$(`, a backtick, quote-aware), ANY unquoted word that is `claude`,
-// `…/claude`, `@anthropic-ai/claude-code[@…]` or `…/claude-code/cli.js`, or a variable this file sets to one
-// (`C=claude`, `C="${X:-claude}"`, `C=$(command -v claude)`), in any position (after `sudo`, `/usr/bin/env -i`,
-// `timeout -k`, `xargs`, `find -exec`, `npx`, `node`, a helper of the repo's own), is a claude call, and so is a quoted
-// literal one as a command's first word. Only a command whose first word is a known non-launcher (`command -v`,
-// `which`, `install`, `ln`, `echo`, a `for` list, …) names claude without starting it. A string after `-c` (`bash -c`,
-// `bash -lc`, `su -c`) or `eval` is read as commands of its own, recursively.
-// A call passes only when its argument WORDS (a quoted prompt is one word: guards inside it don't count; an array it
-// expands is read from this file's `NAME=(…)` and `NAME+=(…)`; trailing redirections dropped) end with exactly the
-// guards, in any order among themselves, or when it is a pinned exception.
+// `…/claude`, `@anthropic-ai/claude-code[@…]`, `…/claude-code/cli.js` or `…/claude/versions/<v>`, a lookup of it
+// (`"$(command -v claude)"`, `` `which claude` ``), or a variable this file sets to one (`C=claude`,
+// `C="${X:-claude}"`, `C=$(command -v claude)`), in any position (after `sudo`, `/usr/bin/env -i`, `timeout -k`,
+// `xargs`, `find -exec`, `npx`, `node`, a helper of the repo's own), is a claude call, and so is a quoted literal one as
+// a command's first word. Only a command whose first word is a known non-launcher (`command -v`, `which`, `install`,
+// `ln`, `echo`, a `for` list, …) names claude without starting it. A string after `-c` (`bash -c`, `bash -lc`,
+// `su -c`) or `eval` is read as commands of its own, recursively. A script that defines its own claude_guarded is
+// refused.
 //
 // What it reads: every tracked file whose shebang names a shell, `*.sh`, `*.bash`, `*.zsh`, `*.ksh`, `*.fish`,
 // `.githooks/*`; every workflow's and composite action's `run:` steps (parsed as YAML) and any `uses:` of a claude
 // action; Makefile recipes; package.json scripts; Dockerfile RUN lines; and, as text, JavaScript and TypeScript under
 // scripts/ (jsLaunchProblems).
 //
-// What it can't see (named limits): an alias or function defined elsewhere that hides the word claude, a variable set
+// What it can't see (named limits): an alias or function defined elsewhere that hides the word claude (except one
+// named claude_guarded), a variable set
 // in another file or the environment (`$CLAUDE_BIN` from the caller), a command built at run time (a name from parts,
 // `eval "$x"` of a variable, `"$@"` handed claude by a caller), a script fetched at run time, and languages other than
 // shell and JavaScript; a non-launcher word as an option's value (`sudo -u test claude …`, `docker run --name test
 // img claude …`) still makes the call data (R1264f D5 f05); a command string handed to a shell on stdin
-// (`echo 'claude -p hi' | bash`, `bash <<<'claude -p hi'`, R1264f D5 f06). src/'s own launches are held by the AST
+// (`echo 'claude -p hi' | bash`, `bash <<<'claude -p hi'`, R1264f D5 f06); in JavaScript, a string that starts
+// with the binary and then a plain word (`run('claude doctor')` through a promisified exec), outside exec and '-c';
+// and, for a pin outside a workflow step, the positional parameters its call reads (`$1`, `$@`). src/'s own launches are held by the AST
 // lint, test/claude-launch-lint.test.ts.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -100,7 +107,7 @@ export const SHELL_EXCEPTIONS: Pin[] = [
     '.github/workflows/ci-slow.yml',
     "init() { echo hi | sudo -u wl-ci-agent env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=\"$h\" CLAUDE_CONFIG_DIR=\"$h/.claude\" ANTHROPIC_API_KEY=sk-ant-not-a-key sh -c 'cd \"$HOME\" && { \"$0\"/bin/claude -p --output-format stream-json --verbose --max-turns 1 --setting-sources project --strict-mcp-config --mcp-config \"$HOME/mcp.json\" --settings \"$1\" || true; }' \"$cc\" \"$1\" 2>/dev/null | jq -c 'select(.type == \"system\" and .subtype == \"init\") | .mcp_servers'; }",
     "a CI probe of Claude Code's own MCP policy (managed allowedMcpServers): the real CLI in a throwaway HOME with a stand-in key, its project source on purpose; no session gets past its init event",
-    'd845afd69f37a4f814608e00544bb64b8de2cead08246a01a305da190f2ef447',
+    '7f73f39275d975b81aea6e1a339256bd6aba2f3f15102f233152912391c797e7',
   ],
   [
     '.github/workflows/ci-slow.yml',
@@ -116,9 +123,9 @@ export const SHELL_EXCEPTIONS: Pin[] = [
   ],
   [
     'scripts/setup/lib.sh',
-    'out="$( (cd "$dir" && sudo -H -u "$1" timeout 120 env CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 ${2:+"CLAUDE_CONFIG_DIR=$2"} claude "${CLAUDE_PROOF_ARGS[@]}" --settings "$settings" --setting-sources \'\' --strict-mcp-config 2>&1) || true)"',
-    "the login proof's API-key call (R1264e/f D2): its --settings value is the one apiKeyHelper key, built by a JSON encoder from the key path, which claude_api_check checks again (^/[A-Za-z0-9._/-]+$, no //, /./ or /../) before the call; the guards end it",
-    'e831cb1074e3c62624836d790afd6e252b8fc41a468865dd9b9d64e8243a0747',
+    'command ${cg_pre[@]+"${cg_pre[@]}"} /usr/bin/env -i "HOME=$cg_home" PATH=/usr/local/bin:/usr/bin:/bin CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 ${cg_env[@]+"${cg_env[@]}"} "$cg_bin" "$@" --settings "$cg_settings" --setting-sources \'\' --strict-mcp-config',
+    "claude_guarded, the one launch a script may use (R1264g/h): an empty environment but for HOME, a fixed PATH and allowlisted names; only allowlisted flags (--permission-mode dontAsk only); settings only {} or a plain-path apiKeyHelper; the guards last. Held with its function by digest",
+    '5630c05cdf08b5b362973f44f23638cfcf2d3da23a1037e26def923a2ca27c03',
   ],
 ];
 
@@ -143,37 +150,6 @@ const KEYWORDS = new Set([
   '!',
   'time',
 ]);
-
-/**
- * Whether an argv (its words, unquoted) ends with exactly the launch's guards: `--settings <x>`, `--setting-sources
- * ''` and `--strict-mcp-config`, in any order among themselves, each the only one of its flag in the argv, and no
- * `--mcp-config` anywhere: so no later flag, and no earlier one a reader might take for the one that counts. Nor,
- * anywhere in the call, a flag that loads more than the guards hold back (R1264f D1): `--plugin-dir`, `--plugin-url`
- * (a plugin's hooks and skills), `--agents` (agents) or `--add-dir` (its CLAUDE.md, with the env switch); a pin aside.
- */
-// check-table: never-shrink
-const LOADING_FLAGS = ['--mcp-config', '--plugin-dir', '--plugin-url', '--agents', '--add-dir'];
-export function guardsLast(argv: string[]): boolean {
-  const tail = argv.slice(-5);
-  const si = tail.indexOf('--settings');
-  // Its value: `{}`, or the one setting an API-key login needs (R1264d D5: a settings file's hooks run; R1264c D3).
-  if (si < 0 || !SETTINGS_VALUE.test((tail[si + 1] ?? '').replace(/\\"/g, '"'))) return false;
-  const ss = tail.indexOf('--setting-sources');
-  const sm = tail.indexOf('--strict-mcp-config');
-  const once = (f: string) => argv.filter((a) => a === f || a.startsWith(`${f}=`)).length === 1;
-  return (
-    tail.length === 5 && si >= 0 && si < 4 && ss >= 0 && ss < 4 && tail[ss + 1] === '' && sm >= 0 && new Set([si, si + 1, ss, ss + 1, sm]).size === 5 &&
-    once('--settings') && once('--setting-sources') && once('--strict-mcp-config') && !argv.some((a) => LOADING_FLAGS.some((f) => a === f || a.startsWith(`${f}=`)))
-  );
-}
-
-/**
- * The only `--settings` values a script's call may give (R1264d D5): none at all (`{}`), or an API-key login's
- * apiKeyHelper as the engine writes it (`cat -- <plain absolute path>`), written out: no variable anywhere in it
- * (R1264e D2, R1264f D2: a variable's value can close the JSON string and add hooks). lib.sh's own call, whose path is
- * known only at run time, builds its value with a JSON encoder after re-checking the path, and is an exception.
- */
-const SETTINGS_VALUE = /^\{\s*\}$|^\{\s*"apiKeyHelper"\s*:\s*"cat -- \/[A-Za-z0-9._\/-]+"\s*\}$/;
 
 /** Joins continued lines and drops comments (a `#` at a word's start outside quotes) and blank lines. */
 function logicalLines(text: string): { line: number; end: number; text: string }[] {
@@ -200,6 +176,9 @@ function logicalLines(text: string): { line: number; end: number; text: string }
   }
   return out;
 }
+
+/** A substitution's text that looks the binary up: its output is the binary. */
+const LOOKUP = /^\s*(?:command\s+-[vV]|which|type\s+-[Pp])\s+["']?(?:\S*\/)?claude["']?\s*$/;
 
 /** Where the `)` closing a `$(` that opens at `from` (just past its `(`) is: quotes and nested parens skipped. */
 function closeParen(t: string, from: number): number {
@@ -237,7 +216,8 @@ function commands(t: string): string[] {
     if (two === '$(') {
       const end = closeParen(t, k + 2);
       out.push(...commands(t.slice(k + 2, end)));
-      cur += 'X';
+      // R1264h D3: a lookup of the binary (`"$(command -v claude)"`, `$(which claude)`) stands for the binary.
+      cur += LOOKUP.test(t.slice(k + 2, end)) ? '/claude' : 'X';
       k = end;
       continue;
     }
@@ -245,7 +225,7 @@ function commands(t: string): string[] {
       let end = k + 1;
       while (end < t.length && !(t[end] === '`' && t[end - 1] !== '\\')) end++;
       out.push(...commands(t.slice(k + 1, end)));
-      cur += 'X';
+      cur += LOOKUP.test(t.slice(k + 1, end)) ? '/claude' : 'X';
       k = end;
       continue;
     }
@@ -281,14 +261,49 @@ function commands(t: string): string[] {
   return out.map((x) => x.trim()).filter(Boolean);
 }
 
-/** A command's words, quotes kept together; `${x:+…}` stays one word. `quoted`: the whole word is one quoted string. */
+/**
+ * A command's words, quotes kept together; `${x:+…}` stays one word, nested quotes and `${…}` inside it too
+ * (`${a[@]+"${a[@]}"}`: a regex that can't nest them glued the words after it into one, hiding a claude word).
+ * `quoted`: the whole word is one quoted string.
+ */
 function wordsOf(cmd: string): Word[] {
-  const raw = cmd.match(/(?:\$\{[^}]*\}|'[^']*'|"(?:[^"\\]|\\.)*"|[^\s'"$]|\$(?!\{))+/g) ?? [];
+  const raw: string[] = [];
+  const stack: string[] = [];
+  let cur = '';
+  for (let k = 0; k < cmd.length; k++) {
+    const c = cmd[k]!;
+    const top = stack.at(-1);
+    if (top === "'") {
+      cur += c;
+      if (c === "'") stack.pop();
+    } else if (c === '\\') {
+      cur += c + (cmd[k + 1] ?? '');
+      k++;
+    } else if (c === '$' && cmd[k + 1] === '{') {
+      stack.push('{');
+      cur += '${';
+      k++;
+    } else if (top === '{' && c === '}') {
+      stack.pop();
+      cur += c;
+    } else if (c === '"') {
+      if (top === '"') stack.pop();
+      else stack.push('"');
+      cur += c;
+    } else if (c === "'" && top !== '"') {
+      stack.push("'");
+      cur += c;
+    } else if (/\s/.test(c) && !stack.length) {
+      if (cur) raw.push(cur);
+      cur = '';
+    } else cur += c;
+  }
+  if (cur) raw.push(cur);
   return raw.map((w) => ({ text: w, quoted: /^(['"]).*\1$/s.test(w) }));
 }
 const unquote = (w: string) => w.replace(/^(['"])(.*)\1$/s, '$2');
 
-/** Where the `}` closing a `{` that opens just before `from` is: quotes, `${…}` and comments read. */
+/** Where the `}` closing a `{` that opens just before `from` is: quotes, escapes, `${…}` and comments read. */
 function closeBrace(t: string, from: number): number {
   let depth = 1;
   let q: string | null = null;
@@ -296,7 +311,8 @@ function closeBrace(t: string, from: number): number {
     const c = t[k]!;
     if (q) {
       if (c === q && (q === "'" || t[k - 1] !== '\\')) q = null;
-    } else if (c === "'" || c === '"') q = c;
+    } else if (c === '\\') k++; // an escaped character outside quotes (`\"`, `\{`) is a plain one
+    else if (c === "'" || c === '"') q = c;
     else if (c === '#' && (k === 0 || /\s/.test(t[k - 1]!))) k = t.indexOf('\n', k) < 0 ? t.length : t.indexOf('\n', k) - 1;
     else if (c === '{') depth++;
     else if (c === '}' && --depth === 0) return k;
@@ -305,10 +321,15 @@ function closeBrace(t: string, from: number): number {
 }
 
 /**
- * The text a pin's digest holds (R1264e D1, R1264f D4): the innermost shell function around physical line `line` of
- * `text` (`name() {…}`, `function name {…}`), or all of `text` when the call is top-level (a spike, a workflow step).
+ * The text a pin's digest holds (R1264e D1, R1264f D4, R1264h D1): for a workflow step, the whole step (its callers,
+ * and the folders they fill, are in it); else the innermost shell function around physical line `line` of `text`
+ * (`name() {…}`, `function name {…}`), or all of `text` when the call is top-level, and with it every line, anywhere in
+ * `text`, that assigns a variable the call's logical line reads (`NAME=`, `NAME+=`, `NAME[i]=`, `local`/`export`/
+ * `declare NAME`, `read`/`mapfile`/`readarray … NAME`, `for NAME in`, `unset NAME`). Positional parameters (`$1`, `$@`)
+ * aren't followed outside a workflow step: a named limit.
  */
-export function pinScope(text: string, line: number): string {
+export function pinScope(path: string, text: string, line: number): string {
+  if (path.startsWith('.github/')) return text;
   const at = text.split('\n').slice(0, line - 1).reduce((a, l) => a + l.length + 1, 0);
   let best: [number, number] | null = null;
   for (const m of text.matchAll(/(^|\n)[ \t]*(?:function[ \t]+[A-Za-z_][\w-]*(?:[ \t]*\([ \t]*\))?|[A-Za-z_][\w-]*[ \t]*\([ \t]*\))[ \t]*\{/g)) {
@@ -316,47 +337,40 @@ export function pinScope(text: string, line: number): string {
     const end = closeBrace(text, m.index! + m[0].length) + 1;
     if (start <= at && at < end && (!best || start >= best[0])) best = [start, end];
   }
-  return best ? text.slice(best[0], best[1]) : text;
+  const scope = best ? text.slice(best[0], best[1]) : text;
+  if (!best) return scope;
+  const call = logicalLines(text).find((l) => l.line <= line && line <= l.end)?.text ?? '';
+  const names = [...new Set([...call.matchAll(/\$\{?#?!?([A-Za-z_]\w*)/g)].map((m) => m[1]!))].sort();
+  const sets = text.split('\n').filter((l) =>
+    names.some((n) => new RegExp(`(?:^|[\\s;&|(])(?:${n}(?:\\[[^\\]]*\\])?\\+?=|(?:local|export|declare|typeset|readonly|unset)(?:\\s+-\\w+)*(?:\\s+\\w+)*\\s+${n}\\b|(?:read|mapfile|readarray)\\b[^;&|]*\\s${n}\\b|for\\s+${n}\\s+in\\b)`).test(l)),
+  );
+  return [scope, ...sets].join('\n');
 }
-export const scopeDigest = (text: string, line: number) => createHash('sha256').update(pinScope(text, line)).digest('hex');
+export const scopeDigest = (path: string, text: string, line: number) => createHash('sha256').update(pinScope(path, text, line)).digest('hex');
 
-/** Each claude call a shell text starts without the guards at its end, as `<path>:<line>: <why>`. */
+/** Each claude call a shell text starts other than through claude_guarded, unpinned, as `<path>:<line>: <why>`. */
 export function shellLaunchProblems(path: string, text: string, pinned = new Map<Pin, number>()): string[] {
   const lines = logicalLines(text);
-  // Variables this file sets to claude; arrays' words (with `+=` appends).
+  // Variables this file sets to claude.
   const vars = new Set<string>();
-  const arrays = new Map<string, string[]>();
-  // R1264f D3: where each array is assigned (`NAME=(…)`; a `+=` extends it), and the arrays changed any other way (by
-  // index, mapfile/readarray/read -a, unset). An array assigned more than once, changed so, or only after the call
-  // can't be read from this file, so a call that expands it is refused.
-  const assignedAt = new Map<string, number[]>();
-  const changed = new Set<string>();
-  for (const { line, text: t } of lines) {
-    for (const m of t.matchAll(/(?:^|[\s;&|(])([A-Za-z_]\w*)\[[^\]]*\]\+?=/g)) changed.add(m[1]!);
-    for (const m of t.matchAll(/\b(?:mapfile|readarray)\b[^;&|]*?\s([A-Za-z_]\w*)\s*(?:[;&|<]|$)/g)) changed.add(m[1]!);
-    for (const m of t.matchAll(/\bread\b(?:\s+-\w+)*\s+-\w*a\w*\s+([A-Za-z_]\w*)/g)) changed.add(m[1]!);
-    for (const m of t.matchAll(/\bunset\b((?:\s+(?:-\w+|['"]?[A-Za-z_]\w*(?:\[[^\]]*\])?['"]?))+)/g)) for (const n of m[1]!.matchAll(/([A-Za-z_]\w*)/g)) changed.add(n[1]!);
+  for (const { text: t } of lines) {
     for (const part of t.split(/;\s*/)) {
       const v = /^(?:(?:export|local|readonly|declare|typeset)(?:\s+-\w+)*\s+)?([A-Za-z_]\w*)(\+?)=(.*)$/.exec(part.trim());
-      if (!v) continue;
-      const val = v[3]!.trim();
-      if (val.startsWith('(')) {
-        const inner = val.replace(/^\(|\)\s*$/g, '');
-        arrays.set(v[1]!, [...(v[2] ? (arrays.get(v[1]!) ?? []) : []), ...wordsOf(inner).map((w) => w.text)]);
-        if (!v[2]) assignedAt.set(v[1]!, [...(assignedAt.get(v[1]!) ?? []), line]);
-      } else {
-        // Fail closed (R1264d D4): a variable whose value names the binary anywhere is the binary.
-        if (VALUE_CLAUDE(unquote(val))) vars.add(v[1]!);
-      }
+      // Fail closed (R1264d D4): a variable whose value names the binary anywhere is the binary.
+      if (v && VALUE_CLAUDE(unquote(v[3]!.trim()))) vars.add(v[1]!);
     }
   }
+  const out: string[] = [];
+  // R1264g/h: claude_guarded is lib.sh's alone; a script that defines its own (or an alias) can't borrow its name.
+  if (path !== 'scripts/setup/lib.sh')
+    for (const { line, text: t } of lines)
+      if (/(?:^|[\s;&|{(])(?:function\s+claude_guarded\b|claude_guarded\s*\(\s*\)|alias\s+claude_guarded=)/.test(t)) out.push(`${path}:${line}: defines claude_guarded: only scripts/setup/lib.sh's may run, so source it`);
   const isClaude = (w: Word) => {
     const u = unquote(w.text);
     const m = /^\$\{?([A-Za-z_]\w*)(?:[:-][^}]*)?\}?$/.exec(u);
     if (m && vars.has(m[1]!)) return true;
     return BINARY.test(u) || isClaudeToken(u);
   };
-  const out: string[] = [];
   // The physical lines of the logical line being judged, and the lines each pin has covered so far.
   const raw = text.split('\n');
   let phys: number[] = [];
@@ -375,19 +389,8 @@ export function shellLaunchProblems(path: string, text: string, pinned = new Map
     const dataFrom = (i: number) => words.slice(k, i).some((w, j, a) => !w.quoted && (NON_LAUNCHERS.has(w.text) ? w.text !== 'command' || /^-[vV]$/.test(a[j + 1]?.text ?? '') : false));
     for (let i = k; i < words.length; i++) {
       if (!isClaude(words[i]!) || dataFrom(i)) continue;
-      // Its argument words: arrays expanded, trailing redirections and `&` dropped.
-      const args: string[] = [];
-      for (const w of words.slice(i + 1)) {
-        const a = /^"?\$\{([A-Za-z_]\w*)\[@\]\}"?$/.exec(w.text);
-        if (a && arrays.has(a[1]!)) {
-          const at = assignedAt.get(a[1]!) ?? [];
-          if (at.length !== 1 || changed.has(a[1]!) || at[0]! > line) {
-            out.push(`${path}:${line}: starts claude with the array ${a[1]} (\`${cmd.slice(0, 100)}\`), which this file assigns ${at.length === 1 ? (changed.has(a[1]!) ? 'and then changes' : 'only after the call') : `${at.length} times`}: its words can't be read here; assign it once, before the call (R1264f D3)`);
-            return;
-          }
-          args.push(...arrays.get(a[1]!)!);
-        } else args.push(w.text);
-      }
+      // Its argument words, trailing redirections and `&` dropped.
+      const args = words.slice(i + 1).map((w) => w.text);
       for (;;) {
         if (args.length && /^(?:\d*[<>]+&?\S+|&|\\;|;|\+)$/.test(args.at(-1)!)) args.pop();
         else if (args.length >= 2 && /^\d*[<>]{1,2}&?$/.test(args.at(-2)!)) args.splice(-2);
@@ -396,25 +399,24 @@ export function shellLaunchProblems(path: string, text: string, pinned = new Map
       const plain = args.map(unquote);
       const joined = plain.join(' ');
       if (EXEMPT_ARGV.test(joined)) return;
-      const guarded = guardsLast(plain);
       // A pin (the spike's, or an exception) covers exactly one call (R1264c D2, R1264d D1): a second call on its
       // line, on the lines continued into it, or a copy of the line anywhere in the file, is refused. And only while
-      // its scope (the function around it, or the whole script) is the one pinned, by digest (R1264e D1, R1264f D4):
-      // no edit to a line it is continued from, a wrapper, or a variable it expands moves or widens it unseen.
-      const onLine = guarded ? [] : [...SHELL_PINS, ...SHELL_EXCEPTIONS].flatMap((p) => (p[0] === path ? phys.filter((n) => raw[n - 1]?.trim() === p[1]).map((n) => [p, n] as const) : []));
-      const pin = onLine.find(([p, n]) => scopeDigest(text, n) === p[3])?.[0];
+      // its scope (pinScope) is the one pinned, by digest (R1264e D1, R1264f D4, R1264h D1): no edit to a line it is
+      // continued from, a wrapper, or the assignment of a variable it reads moves or widens it unseen.
+      const onLine = [...SHELL_PINS, ...SHELL_EXCEPTIONS].flatMap((p) => (p[0] === path ? phys.filter((n) => raw[n - 1]?.trim() === p[1]).map((n) => [p, n] as const) : []));
+      const pin = onLine.find(([p, n]) => scopeDigest(path, text, n) === p[3])?.[0];
       if (!pin && onLine.length) {
         const [p, n] = onLine[0]!;
-        out.push(`${path}:${line}: a pinned line (\`${p[1].slice(0, 80)}\`) whose scope changed: its digest is now ${scopeDigest(text, n)}, the pin holds ${p[3]}; a changed pin is a change to the test`);
+        out.push(`${path}:${line}: a pinned line (\`${p[1].slice(0, 80)}\`) whose scope changed: its digest is now ${scopeDigest(path, text, n)}, the pin holds ${p[3]}; a changed pin is a change to the test`);
         return;
       }
       if (pin) {
         const n = (pinned.get(pin) ?? 0) + 1;
         pinned.set(pin, n);
-        if (n > 1) out.push(`${path}:${line}: a second claude call under a pinned line (\`${pin[1].slice(0, 100)}\`): a pin covers one call; end it with the launch's guards`);
+        if (n > 1) out.push(`${path}:${line}: a second claude call under a pinned line (\`${pin[1].slice(0, 100)}\`): a pin covers one call; start it through claude_guarded`);
         return;
       }
-      if (!guarded) out.push(`${path}:${line}: starts claude (\`${cmd.slice(0, 140)}\`) without the launch's guards at its end (--settings <json> --setting-sources '' --strict-mcp-config, nothing after them)`);
+      out.push(`${path}:${line}: starts claude (\`${cmd.slice(0, 140)}\`) directly: start it through claude_guarded (scripts/setup/lib.sh: an empty environment, only safe flags, the launch's guards last), or pin it`);
       return;
     }
   };
@@ -481,9 +483,12 @@ const ts = createRequire(join(repoRoot, 'package.json'))('typescript') as TsNode
  * JavaScript and TypeScript the repo runs (scripts/), read with typescript's parser (comments aren't code): the claude
  * binary as a string literal is a call. With a literal argv array right after it (`spawn('claude', [...])`,
  * `asUser(u, 'claude', [...])`), or the elements after it in its array (`'npx', ['@anthropic-ai/claude-code', ...]`),
- * that argv must end with the guards (guardsLast), or start exempt. A string a shell runs (`exec`/`execSync`'s
- * command, or the one after `'-c'`; a template's text with its holes as words) is read as shell. Any other literal
- * claude is refused unless its line is pinned (JS_NAMES): what it starts can't be read here.
+ * that argv must start exempt (`--version`, `auth status`); a script starts a session only through claude_guarded
+ * (R1264g/h). A string a shell runs is read as shell (a template's text with its holes as words): `exec`/`execSync`'s
+ * command, the one after `'-c'`/`'-lc'`, and any string that starts with the binary and a space, wherever it stands
+ * (`run('claude -p hi')` with a promisified exec, `spawnSync('claude -p hi', { shell: true })`, `'claude -p ' + p`;
+ * R1264h D4) and a flag, quote, `$`, redirect or separator next; a plain word next ('claude doctor' handed to a
+ * promisified exec) is a named limit, read only as exec's command or after '-c'. Any other literal claude is refused unless its line is pinned (JS_NAMES).
  */
 export function jsLaunchProblems(path: string, text: string): string[] {
   const out: string[] = [];
@@ -505,13 +510,17 @@ export function jsLaunchProblems(path: string, text: string): string[] {
           const next = p.arguments[p.arguments.indexOf(n) + 1];
           argv = next && ts.isArrayLiteralExpression(next) ? literalArgv(next.elements) : null;
         } else if (ts.isArrayLiteralExpression(p)) argv = literalArgv(p.elements.slice(p.elements.indexOf(n) + 1));
-        if (argv === null) out.push(`${path}:${at}: names the claude binary (${n.getText(sf)}) where its argv can't be read: start it with a literal argv ending with the guards, or pin the line in JS_NAMES`);
-        else if (!EXEMPT_ARGV.test(argv.join(' ')) && !guardsLast(argv)) out.push(`${path}:${at}: starts claude (${p.getText(sf).replace(/\s+/g, ' ').slice(0, 140)}) without the launch's guards at its end`);
+        if (argv === null) out.push(`${path}:${at}: names the claude binary (${n.getText(sf)}) where its argv can't be read: start a session through claude_guarded (scripts/setup/lib.sh), or pin the line in JS_NAMES`);
+        else if (!EXEMPT_ARGV.test(argv.join(' '))) out.push(`${path}:${at}: starts claude (${p.getText(sf).replace(/\s+/g, ' ').slice(0, 140)}) directly: a script starts a session only through claude_guarded (scripts/setup/lib.sh)`);
       } else if (!BINARY.test(s)) {
-        // A string a shell runs: exec/execSync's command, or the string after '-c'.
+        // A string a shell runs: exec/execSync's command, the string after '-c' (or '-lc'), or one that starts with the
+        // binary and a space, wherever it stands (R1264h D4).
         const callee = ts.isCallExpression(p) ? p.expression.getText(sf) : '';
-        const afterC = ts.isArrayLiteralExpression(p) && textOf(p.elements[p.elements.indexOf(n) - 1] ?? n) === '-c' && p.elements.indexOf(n) > 0;
-        if ((/(?:^|\.)exec(?:Sync)?$/.test(callee) && p.arguments[0] === n) || afterC) out.push(...shellLaunchProblems(path, s).map((x) => x.replace(/^[^:]+:\d+:/, `${path}:${at}:`)));
+        const afterC = ts.isArrayLiteralExpression(p) && /^-[a-z]*c$/.test(textOf(p.elements[p.elements.indexOf(n) - 1] ?? n) ?? '') && p.elements.indexOf(n) > 0;
+        // A string that starts with the binary, then a flag, a quote, `$`, a redirect or a separator (prose such as
+        // 'claude reports …' doesn't: a plain word after it is a named limit outside exec and '-c').
+        const startsBinary = /^\s*(\S+)\s+(?:[-"'$<>|;&]|$)/.test(s) && BINARY.test(/^\s*(\S+)/.exec(s)![1]!);
+        if ((/(?:^|\.)exec(?:Sync)?$/.test(callee) && p.arguments[0] === n) || afterC || startsBinary) out.push(...shellLaunchProblems(path, s).map((x) => x.replace(/^[^:]+:\d+:/, `${path}:${at}:`)));
       }
     }
     ts.forEachChild(n, visit);
@@ -540,7 +549,7 @@ export function lintedFiles(files: string[], head: (f: string) => string = sheba
   };
 }
 
-test("#1262: every claude a script starts ends with the launch's guards, or is a pinned exception", () => {
+test("#1262 (R1264g/h): every claude a script starts goes through claude_guarded, or is a pinned exception", () => {
   const f = lintedFiles(tracked());
   const read = (p: string) => readFileSync(join(repoRoot, p), 'utf8');
   // One count of each pin's calls across the tree (R1264e D1): each covers exactly one live call.
@@ -575,13 +584,25 @@ function pinSites(): { pin: (typeof SHELL_PINS)[number]; text: string; line: num
   });
 }
 
+test('#1262 (R1264h D1): a pin\'s scope holds the assignments of the variables its call reads, wherever they are, and a workflow pin holds its whole step', () => {
+  const text = 'ARGS=(-p hi)\nX=one\nf() {\n  local Y=two\n  claude "${ARGS[@]}" "$X" "$Y"\n}\nZ=unread\n';
+  const scope = pinScope('scripts/x.sh', text, 5);
+  for (const l of ['ARGS=(-p hi)', 'X=one', 'local Y=two', 'claude "${ARGS[@]}" "$X" "$Y"']) assert.ok(scope.includes(l), `the scope holds ${l}`);
+  assert.ok(!scope.includes('Z=unread'), 'not a variable the call does not read');
+  const digest = scopeDigest('scripts/x.sh', text, 5);
+  for (const edit of [text.replace('ARGS=(-p hi)', 'ARGS=(-p hi --plugin-dir p)'), text.replace('X=one', 'X=two'), `${text}ARGS+=(--agents a)\n`, `${text}read -r X < f\n`]) assert.notEqual(scopeDigest('scripts/x.sh', edit, 5), digest, `an assignment edit breaks it: ${edit.slice(-40)}`);
+  assert.equal(scopeDigest('scripts/x.sh', text.replace('Z=unread', 'Z=other'), 5), digest, 'an unrelated line does not');
+  const step = 'h=/tmp/a\ninit() { claude -p "$1"; }\ninit x\n';
+  assert.equal(pinScope('.github/workflows/w.yml', step, 2), step, "a workflow pin's scope is its whole step");
+});
+
 test('#1262 (R1264e D1, R1264f D4): a pin holds its scope by digest: an edit to its function (or its top-level script) breaks it', () => {
   for (const { pin, text, line } of pinSites()) {
-    assert.equal(scopeDigest(text, line), pin[3], `${pin[0]}: the pin's digest is its scope's: ${pin[1].slice(0, 60)}`);
-    const scope = pinScope(text, line);
-    if (!scope.includes('\n')) continue; // a one-line function: its only line is the pinned one, held by its text
+    assert.equal(scopeDigest(pin[0], text, line), pin[3], `${pin[0]}: the pin's digest is its scope's: ${pin[1].slice(0, 60)}`);
+    const scope = pinScope(pin[0], text, line);
+    assert.ok(scope.includes('\n'), `${pin[0]}: a pin's scope is more than its own line (a workflow pin holds its whole step)`);
     // A line added inside the scope (after its first line), as a wrapper or an assignment edit would be.
-    const at = text.indexOf(scope) + scope.indexOf('\n') + 1;
+    const at = text.indexOf(scope.split('\n')[0]!) + scope.indexOf('\n') + 1;
     const edited = `${text.slice(0, at)}: edited\n${text.slice(at)}`;
     assert.ok(shellLaunchProblems(pin[0], edited).some((p) => /whose scope changed/.test(p)), `${pin[0]}: an edit inside its scope breaks the pin`);
   }
@@ -617,7 +638,7 @@ test('#1262: the pinned exceptions are the owner\'s one, by its exact file, line
   assert.deepEqual(SHELL_PINS.map(([f, , why]) => [f.split('/').at(-1), why]), [['worktree-commit.sh', 'a sandbox probe whose project-settings load is the point (the owner, 2026-11-11, "spikes: b")']]);
 });
 
-test('#1262: every way a script can start claude without the guards at its end is refused (fixtures), and the controls pass', () => {
+test('#1262: every way a script can start claude other than through claude_guarded is refused (fixtures), and the controls pass', () => {
   const dir = join(repoRoot, 'test', 'fixtures', 'claude-launch-shell');
   const all = readdirSync(dir).sort();
   const nameOf = (f: string) => f.replace(/\.(?:sh|yml|mjs|mk|json|docker)\.txt$/, '');
@@ -625,6 +646,22 @@ test('#1262: every way a script can start claude without the guards at its end i
   // check-table: never-shrink
   const MUST_FAIL = [
     'after-and',
+    'nested-expansion',
+    'array-in-array',
+    'array-quoted-variable',
+    'claude-guarded-redefined',
+    'command-v-backticks',
+    'command-v-substitution',
+    'flag-in-variable',
+    'js-bash-lc',
+    'js-concat',
+    'js-plugin-template',
+    'js-promisified-exec',
+    'js-shell-true',
+    'plugin-dir-backslash',
+    'plugin-dir-spliced-quotes',
+    'plugin-dirs-env',
+    'prompt-variable',
     'add-dir',
     'agents-file',
     'array-after-call',

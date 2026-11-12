@@ -4,5 +4,6 @@ jobs:
     steps:
       - name: the stand-in claude, signed in
         run: |
-          claude -p hi --settings '{}' --setting-sources '' --strict-mcp-config
+          source scripts/setup/lib.sh
+          claude_guarded -- '{}' -p hi
           claude auth status

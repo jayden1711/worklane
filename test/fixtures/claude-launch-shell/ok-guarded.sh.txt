@@ -1,2 +1,4 @@
 #!/usr/bin/env bash
-sudo -u agent -- /usr/bin/env -i HOME=/h claude -p hi --model haiku --settings '{}' --setting-sources '' --strict-mcp-config 2>&1
+# R1264g/h: a session starts only through lib.sh's claude_guarded (an empty environment, safe flags, the guards last).
+source scripts/setup/lib.sh
+claude_guarded --as agent --env HOME=/h -- '{}' -p hi --model haiku 2>&1

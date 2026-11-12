@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# R1264h D2 (h01h): an array holding a variable.
+x=--plugin-dir=./p
+ARGS=(-p hi "$x" --settings '{}' --setting-sources '' --strict-mcp-config)
+claude "${ARGS[@]}"

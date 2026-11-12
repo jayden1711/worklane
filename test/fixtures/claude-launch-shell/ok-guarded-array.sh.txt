@@ -1,3 +1,5 @@
 #!/usr/bin/env bash
-ARGS=(-p "hi" --settings '{}' --setting-sources '' --strict-mcp-config)
-claude "${ARGS[@]}" > out.json
+# R1264g/h: claude_guarded's words from an array: claude_guarded checks each at run time, whatever the script wrote.
+source scripts/setup/lib.sh
+ARGS=(-p "hi" --model haiku)
+claude_guarded -- '{}' "${ARGS[@]}" > out.json

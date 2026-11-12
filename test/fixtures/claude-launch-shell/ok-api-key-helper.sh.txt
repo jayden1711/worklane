@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
-# An API-key login's helper, as the engine writes it, written out (R1264c D3; a variable in it is refused: R1264e/f D2), and the empty settings.
-claude -p hi --settings "{\"apiKeyHelper\":\"cat -- /home/user/.config/key\"}" --setting-sources '' --strict-mcp-config
-claude -p hi --settings '{}' --setting-sources '' --strict-mcp-config
+# An API-key login's helper as claude_guarded's settings (it checks the form and the path at run time), and {}.
+source scripts/setup/lib.sh
+claude_guarded --as agent -- "{\"apiKeyHelper\":\"cat -- /home/user/.config/key\"}" -p hi
+claude_guarded --as agent -- '{}' -p hi

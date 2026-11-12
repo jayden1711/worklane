@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# R1264g/h: a script's own claude_guarded, which would borrow the name the lint trusts (its binary from the
+# environment, a named limit, so only the definition shows).
+claude_guarded() { exec "$CLAUDE_BIN" "$@"; }
+claude_guarded -p hi --plugin-dir ./p

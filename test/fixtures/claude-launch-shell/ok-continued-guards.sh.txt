@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
-claude -p hi \
-  --settings '{}' --setting-sources '' \
-  --strict-mcp-config
+# R1264g/h: a claude_guarded call over continued lines.
+source scripts/setup/lib.sh
+claude_guarded --timeout 120 -- '{}' \
+  -p hi \
+  --model haiku

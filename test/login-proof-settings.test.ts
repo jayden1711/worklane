@@ -1,7 +1,7 @@
 // R1264e D2, R1264f D2: lib.sh's login proof (claude_api_check) gives an API-key login's apiKeyHelper to claude as
 // --settings. Its value is built by a JSON encoder from the key path, shell-quoted, after the path is checked again
 // where it is used: never by putting a variable inside the JSON's text, where a path that closes the string adds keys
-// (a hook the real CLI runs). sudo, timeout, claude and the key-file reader are stand-ins: the stub claude records
+// (a hook the real CLI runs). sudo, timeout, getent, claude and the key-file reader are stand-ins: the stub claude records
 // its argv.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -19,15 +19,18 @@ function proof(key: string | null): { status: number | null; out: string; argv: 
   try {
     const bin = join(t, 'bin');
     spawnSync('mkdir', ['-p', bin]);
-    writeFileSync(join(bin, 'claude'), `#!/usr/bin/env node\nrequire('node:fs').writeFileSync(${JSON.stringify(join(t, 'argv.json'))}, JSON.stringify(process.argv.slice(2)));\nconsole.log(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'ok' }));\n`);
+    writeFileSync(join(bin, 'claude'), `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(join(t, 'argv.json'))}, JSON.stringify(process.argv.slice(2)));\nconsole.log(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'ok' }));\n`);
     chmodSync(join(bin, 'claude'), 0o755);
     // timeout <seconds> <command…>: run it (macOS has no timeout).
     writeFileSync(join(bin, 'timeout'), '#!/bin/sh\nshift\nexec "$@"\n');
     chmodSync(join(bin, 'timeout'), 0o755);
+    // sudo [-H|-n] -u <user> [--] <command…>: run it (claude_guarded calls `command sudo`, so a stand-in on PATH).
+    writeFileSync(join(bin, 'sudo'), '#!/bin/sh\nwhile [ $# -gt 0 ]; do case "$1" in -u) shift 2 ;; --) shift; break ;; -*) shift ;; *) break ;; esac; done\nexec "$@"\n');
+    chmodSync(join(bin, 'sudo'), 0o755);
+    writeFileSync(join(bin, 'getent'), '#!/bin/sh\necho "$2:x:1000:1000::/home/$2:/bin/sh"\n');
+    chmodSync(join(bin, 'getent'), 0o755);
     const script = [
       'source "$1"',
-      // sudo -H -u <user> <command…>: run it as this user.
-      'sudo() { shift 3; "$@"; }',
       'claude_key_file() { [ -n "${PROOF_KEY+x}" ] && printf %s "$PROOF_KEY"; return 0; }',
       'claude_api_check tester "$2"',
     ].join('\n');

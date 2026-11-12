@@ -1,0 +1,5 @@
+// R1264h D4 (h03a): exec promisified under another name.
+import { exec } from 'node:child_process';
+import { promisify } from 'node:util';
+const run = promisify(exec);
+await run('claude -p hi');
