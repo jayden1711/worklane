@@ -66,6 +66,7 @@ categories:
     - test/isolate.test.ts
     # #941: the freeze hook and the tests that pin the weakening hold's tables and the copy lock (R1184ak D1-D2).
     - test/table-freeze.ts
+    - test/table-snapshot.ts
     - test/table-freeze.test.ts
     - test/table-copies.test.ts
     - test/check-tables.test.ts

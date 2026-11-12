@@ -22,6 +22,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import { fileURLToPath } from 'node:url';
 import { promisify, types as utilTypes } from 'node:util';
 import { BRAND } from '../src/brand.js';
+import { tableModuleSnapshot } from './table-snapshot.js';
 import { SYSTEMD_MARKERS, SYSTEM_ROOT_VAR, TEST_MACHINE_VAR, TEST_MARK_FILE, TEST_TOKEN_VAR } from '../src/os/system-paths.js';
 
 /**
@@ -105,21 +106,41 @@ syncBuiltinESMExports();
   const compile = proto._compile as (this: unknown, ...args: unknown[]) => unknown;
   const readText = readFileSync;
   const realpathOf = realpathSync;
+  const resolveOf = resolve;
   const startsWith = String.prototype.startsWith;
-  const here = realpathOf(dirname(fileURLToPath(import.meta.url)));
-  const under = (f: string) => {
+  const mapGet = Map.prototype.get;
+  const lexicalHere = dirname(fileURLToPath(import.meta.url));
+  const here = realpathOf(lexicalHere);
+  // The text of each module here, not a test file, that registers a table or freezes one itself, as it is now, when
+  // this preload runs (R1184at D3: a test that rewrites the build output, or moves the file aside, then compiles it).
+  const snapshot = tableModuleSnapshot(here);
+  // Under this directory by where the path really leads, or, where it can't be resolved (moved aside, or never there),
+  // by its text alone: fail closed (R1184at D1).
+  const keyOf = (f: string): string | null => {
+    let r: string | null = null;
     try {
-      const r = realpathOf(f);
-      return apply(startsWith, r, [here + sep]) as boolean;
+      r = realpathOf(f);
     } catch {
-      return false;
+      r = null;
     }
+    const lexical = resolveOf(f);
+    if (r !== null && (apply(startsWith, r, [here + sep]) as boolean)) return r;
+    if ((apply(startsWith, lexical, [here + sep]) as boolean) || (apply(startsWith, lexical, [lexicalHere + sep]) as boolean)) return lexical;
+    return null;
   };
   // Arguments read by index and passed on as they came: no spread or destructuring, which call the live Array iterator.
   const guarded = function (this: unknown, ...args: unknown[]) {
     const content = args[0];
     const filename = args[1];
-    if (typeof filename === 'string' && under(filename) && content !== readText(filename, 'utf8')) throw new TypeErrorC(`${filename} compiled from a source other than its file's (test/isolate.ts, #941, R1184as)`);
+    if (typeof filename === 'string') {
+      const key = keyOf(filename);
+      if (key !== null) {
+        // A snapshotted module compiles only from its text as it was at this preload; any other module here only from
+        // its file's text on disk (a missing file throws, so the compile is refused).
+        const expected = apply(mapGet, snapshot, [key]) as string | undefined;
+        if (content !== (expected !== undefined ? expected : readText(filename, 'utf8'))) throw new TypeErrorC(`${filename} compiled from a source other than its file's (test/isolate.ts, #941, R1184as, R1184at)`);
+      }
+    }
     return apply(compile, this, args);
   };
   defineProperty(proto, '_compile', { value: guarded, writable: false, configurable: false, enumerable: false });

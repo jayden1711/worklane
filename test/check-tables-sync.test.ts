@@ -150,7 +150,7 @@ test('the freeze hook and the tests that pin the tables and the copy lock are se
   const guards = readFileSync(join(repoRoot, '.worklane', 'review.yaml'), 'utf8');
   const locked = (p: string) => LOCKED_CATEGORIES[SELF_MODIFICATION]!.some((g) => globMatches(g, p));
   const part = SELF_MODIFICATION_PARTS.find((x) => x.what === 'the tests of the harness controls')!;
-  for (const p of ['test/isolate.ts', 'test/isolate.test.ts', 'test/table-freeze.ts', 'test/table-freeze.test.ts', 'test/table-copies.test.ts', 'test/check-tables.test.ts', 'test/check-tables-sync.test.ts', 'test/merge-policy-data-attacks.test.ts', 'test/merge-policy-data-tables.test.ts']) {
+  for (const p of ['test/isolate.ts', 'test/isolate.test.ts', 'test/table-freeze.ts', 'test/table-snapshot.ts', 'test/table-freeze.test.ts', 'test/table-copies.test.ts', 'test/check-tables.test.ts', 'test/check-tables-sync.test.ts', 'test/merge-policy-data-attacks.test.ts', 'test/merge-policy-data-tables.test.ts']) {
     assert.ok(locked(p), `${p}: self-modification`);
     assert.ok(part.globs.some((g) => globMatches(g, p)), `${p}: in the harness controls' tests part`);
     assert.ok(guards.split('\n').includes(`    - ${p}`), `${p}: an engine guard in .worklane/review.yaml`);

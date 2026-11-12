@@ -12,6 +12,13 @@
 // through Set.prototype; use frozenSet from src/check-tables.ts, or a list).
 import ts from 'typescript';
 import { registrationsOf, TABLE_MARK } from '../src/merge-policy-weakening.js';
+import { realpathSync } from 'node:fs';
+import { dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { tableModuleSnapshot } from './table-snapshot.js';
+
+/** The table modules' text when this hook started, on its own thread, before any test code (R1184at D3). */
+const SNAPSHOT = tableModuleSnapshot(realpathSync(dirname(fileURLToPath(import.meta.url))));
 
 /**
  * The global the freeze call goes through, a plain name (test/isolate.ts FREEZE_GLOBAL, set before this hook is
@@ -52,6 +59,19 @@ export const load: Load = async (url, context, next) => {
   // By the URL's path (R1184aq D1: `./tables.js?fresh` or `#fresh` loads a second copy, which must be frozen too).
   if (!/\/dist\/test\/.*\.js$/.test(new URL(url).pathname) || out.source == null || (out.format !== 'module' && out.format !== 'commonjs')) return out;
   const source = typeof out.source === 'string' ? out.source : Buffer.from(out.source as Uint8Array).toString('utf8');
+  // A table module loads only as its text was when this hook started (R1184at D3: a test that rewrote the build output
+  // first), whatever query or hash its URL carries.
+  const u = new URL(url);
+  u.search = '';
+  u.hash = '';
+  let key = fileURLToPath(u);
+  try {
+    key = realpathSync(key);
+  } catch {
+    // Moved aside or never there: by its path as written.
+  }
+  const was = SNAPSHOT.get(key);
+  if (was !== undefined && source !== was) throw new Error(`${url}: a table module loaded from a source other than the one at the start (test/table-freeze.ts, #941, R1184at)`);
   const frozen = withFreezes(source, url);
   return frozen === null ? out : { ...out, source: frozen };
 };

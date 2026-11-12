@@ -202,6 +202,8 @@ export const GUARD_FILES: readonly string[] = [
   'scripts/lib/table-copies.mjs',
   'scripts/gen-table-copies.mjs',
   'test/table-freeze.ts',
+  // The snapshot the freeze's compile step and hook check a table module's source against (R1184at D3).
+  'test/table-snapshot.ts',
   'src/coordinator/merge-flow*',
   'src/coordinator/change-files.ts',
   'src/pr-rules*',
