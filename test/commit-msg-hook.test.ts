@@ -349,16 +349,21 @@ test('the hook fails closed on a comment setting or an encoding it would have to
     return spawnSync(process.execPath, [installedGate, '--commit-msg', f], { cwd: r.dir, encoding: 'utf8', env: { ...process.env, PUSH_GATE_COMMIT_MSG: f, GIT_EDITOR: 'true', GIT_DIR: join(r.dir, '.git') } });
   };
   // k D1, D2: a comment setting that isn't auto or printable ASCII with no whitespace.
+  // R1260u D2: whether git itself accepts the value depends on its version (before 2.45, any core.commentChar but one
+  // ASCII character is a fatal config error for every git, `git commit` included). Where git refuses it, the hook
+  // refuses with git's own error (R1260s D2) and no commit could be made anyway.
+  const gitAccepts = () => spawnSync('git', ['-C', r.dir, 'var', 'GIT_AUTHOR_IDENT'], { stdio: 'ignore' }).status === 0;
   for (const v of ['a\nb', 'é', '�', 'a b', '\t']) {
     r.git('config', 'core.commentChar', v);
     const got = judge('subj\n\nbody\n');
     assert.equal(got.status, 1, `refused: ${JSON.stringify(v)}`);
-    // A newline breaks git's own config reading: refused with git's error (R1260s D2), the others with the hook's note.
-    assert.match(got.stderr, v.includes('\n') ? /commit refused: git could not read/ : /commit refused: core\.commentChar or core\.commentString is .*, which the commit-msg hook won't model/);
+    assert.match(got.stderr, gitAccepts() ? /commit refused: core\.commentChar or core\.commentString is .*, which the commit-msg hook won't model/ : /commit refused: git could not read/, JSON.stringify(v));
   }
   for (const v of ['#', ';', '//', 'Auto']) {
     r.git('config', 'core.commentChar', v);
-    assert.equal(judge('subj\n\nbody\n').status, 0, `kept: ${v}`);
+    const got = judge('subj\n\nbody\n');
+    if (gitAccepts()) assert.equal(got.status, 0, `kept: ${v}`);
+    else assert.match(got.stderr, /commit refused: git could not read/, `git itself refuses ${v} here: the hook says so`);
   }
   r.git('config', '--unset', 'core.commentChar');
   // k D3, l D1: a commit encoding but UTF-8, and a message that isn't UTF-8.
@@ -387,14 +392,18 @@ test('the hook fails closed on a comment setting or an encoding it would have to
     writeFileSync(f, 'subj\n\nbody\n');
     return spawnSync(process.execPath, [installedGate, '--commit-msg', f], { cwd: r.dir, encoding: 'utf8', env: { ...process.env, PUSH_GATE_COMMIT_MSG: f, GIT_EDITOR: 'true', GIT_DIR: join(r.dir, '.git'), ...env } });
   };
-  for (const [what, env] of [['author name', { GIT_AUTHOR_NAME: 'Ada\rEve' }], ['committer name', { GIT_COMMITTER_NAME: 'Ada\rEve' }]] as const) {
+  for (const [what, env, who] of [['author name', { GIT_AUTHOR_NAME: 'Ada\rEve' }, 'GIT_AUTHOR_IDENT'], ['committer name', { GIT_COMMITTER_NAME: 'Ada\rEve' }, 'GIT_COMMITTER_IDENT']] as const) {
     const got = withEnv(env);
-    assert.equal(got.status, 1, `refused: ${what}`);
-    assert.match(got.stderr, /identity git would write holds a CR or a NUL/, what);
+    const writes = /\r/.test(spawnSync('git', ['-C', r.dir, 'var', who], { encoding: 'latin1', env: { ...process.env, GIT_DIR: join(r.dir, '.git'), ...env } }).stdout);
+    assert.equal(got.status, writes ? 1 : 0, `${what}: ${writes ? 'refused' : 'kept, git drops the CR'}`);
+    if (writes) assert.match(got.stderr, /identity git would write holds a CR or a NUL/, what);
   }
   assert.equal(withEnv({ GIT_AUTHOR_NAME: 'Jos\u00e9 Ni\u00f1o' }).status, 0, 'a UTF-8 name: kept');
   r.git('config', 'user.name', 'Ada\rEve');
-  assert.equal(withEnv({}).status, 1, 'user.name with a CR: refused');
+  // R1260u D2: whether git writes the CR depends on its version (2.39 turns a configured name's CR into a space): the
+  // hook refuses exactly when the identity git would write holds one.
+  const written = spawnSync('git', ['-C', r.dir, 'var', 'GIT_AUTHOR_IDENT'], { encoding: 'latin1', env: { ...process.env, GIT_DIR: join(r.dir, '.git') } }).stdout;
+  assert.equal(withEnv({}).status, /\r/.test(written) ? 1 : 0, `user.name with a CR: ${/\r/.test(written) ? 'refused, git writes it' : 'kept, git drops it'}`);
   // Invalid UTF-8 can't pass through the environment (node writes it as UTF-8): written into the config as bytes.
   r.git('config', '--unset', 'user.name');
   appendFileSync(join(r.dir, '.git', 'config'), Buffer.concat([Buffer.from('[user]\n\tname = A'), Buffer.from([0xe9]), Buffer.from('\n')]));
@@ -545,6 +554,9 @@ test("the hook reads git's config as git commit does, and a git call that fails 
   const key = join(g.dir, '..', 'k');
   spawnSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', key]);
   for (const [k, v] of [['gpg.format', 'ssh'], ['user.signingkey', key]] as const) g.git('config', k, v);
+  // An allowed-signers file, for when git checks the tag's signature at the merge.
+  writeFileSync(join(g.dir, '..', 'signers'), `ada@example.com ${readFileSync(`${key}.pub`, 'utf8')}`);
+  g.git('config', 'gpg.ssh.allowedSignersFile', join(g.dir, '..', 'signers'));
   const base = g.git('rev-parse', 'HEAD');
   g.git('checkout', '-q', '-b', 'side');
   g.git('commit', '-q', '--allow-empty', '-m', 'Side change');
@@ -557,6 +569,24 @@ test("the hook reads git's config as git commit does, and a git call that fails 
   assert.match(g.git('cat-file', 'commit', 'HEAD'), / Release 1\rnotes/, "its message's CR is in the merge's header");
   const gated = spawnSync(process.execPath, [gate, '--range', `${base}..HEAD`], { cwd: repoRoot, encoding: 'utf8', env: { ...process.env, GIT_DIR: join(g.dir, '.git') } });
   assert.equal(gated.status, 0, `the gate passes it, as main's did: ${gated.stderr}`);
+  // R1260u D1, R1260v D1, a stated residual: a NUL in a signed tag's message. git's own fsck calls it nulInHeader in the
+  // merge, and an origin with receive.fsckObjects refuses it, so the gate refuses it too; the hook can't see a mergetag.
+  const msgFile = join(g.dir, '..', 'tag-msg');
+  writeFileSync(msgFile, Buffer.from('Release 2\n\nNo\0tes\n', 'latin1'));
+  const base2 = g.git('rev-parse', 'HEAD');
+  g.git('checkout', '-q', 'side');
+  g.git('commit', '-q', '--allow-empty', '-m', 'Side change 2');
+  const tagged = spawnSync('git', ['tag', '-s', 'v2', '-F', msgFile], { cwd: g.dir, encoding: 'utf8' });
+  g.git('checkout', '-q', 'main');
+  if (tagged.status !== 0) return t.diagnostic(`git refused a NUL in a tag message here: ${tagged.stderr}`);
+  // With its own message (-m), as R1260u merged it: by default git puts the tag's message into the merge's, and refuses
+  // the NUL there itself.
+  const merged2 = spawnSync('git', ['merge', '-q', '--no-ff', '-m', 'Merge tag v2', 'v2'], { cwd: g.dir, encoding: 'utf8' });
+  assert.equal(merged2.status, 0, `the hook passes the merge (it can't see a mergetag): ${merged2.stderr}`);
+  if (!g.git('cat-file', 'commit', 'HEAD').includes('\0')) return t.diagnostic("this git didn't carry the NUL into the mergetag");
+  const gated2 = spawnSync(process.execPath, [gate, '--range', `${base2}..HEAD`], { cwd: repoRoot, encoding: 'utf8', env: { ...process.env, GIT_DIR: join(g.dir, '.git') } });
+  assert.notEqual(gated2.status, 0, 'the gate refuses it, as git fsck does (the stated residual)');
+  assert.match(gated2.stderr, /header has a CR or a NUL/);
 });
 
 test('a remote named --commit-msg is judged as a push, never as a message (#1260 R1260a D2)', () => {
