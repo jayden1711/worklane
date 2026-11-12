@@ -13,8 +13,12 @@
 import ts from 'typescript';
 import { registrationsOf, TABLE_MARK } from '../src/merge-policy-weakening.js';
 
-/** The global the freeze call goes through (test/isolate.ts sets it before this hook is registered). */
-export const FREEZE = 'worklane.test.freezeTable';
+/**
+ * The global the freeze call goes through, a plain name (test/isolate.ts FREEZE_GLOBAL, set before this hook is
+ * registered, neither writable nor configurable). The call is a bare identifier: no `Symbol.for` or `globalThis` is
+ * looked up on the way (R1184ao AO3).
+ */
+export const FREEZE = '__worklaneTestFreezeTable';
 
 /**
  * `source` with a freeze call after each top-level statement that declares a registered table, or null when it
@@ -25,7 +29,7 @@ export function withFreezes(source: string, url: string): string | null {
   const names = new Set(registrationsOf(source).tables.map((t) => t.table));
   if (!names.size) return null;
   const file = ts.createSourceFile('m.js', source, ts.ScriptTarget.Latest, false, ts.ScriptKind.JS);
-  const sym = `globalThis[Symbol.for(${JSON.stringify(FREEZE)})]`;
+  const sym = FREEZE;
   const at: [number, string][] = [];
   for (const s of file.statements) {
     const list = ts.isVariableStatement(s) ? s.declarationList : null;

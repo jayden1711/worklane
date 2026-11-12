@@ -20,7 +20,7 @@ import { register, syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { promisify } from 'node:util';
+import { promisify, types as utilTypes } from 'node:util';
 import { BRAND } from '../src/brand.js';
 import { SYSTEMD_MARKERS, SYSTEM_ROOT_VAR, TEST_MACHINE_VAR, TEST_MARK_FILE, TEST_TOKEN_VAR } from '../src/os/system-paths.js';
 
@@ -33,20 +33,31 @@ import { SYSTEMD_MARKERS, SYSTEM_ROOT_VAR, TEST_MACHINE_VAR, TEST_MARK_FILE, TES
  * table of RegExps or typed arrays is held only by the line reader. The src/ and scripts/ tables are data
  * (src/check-tables.ts), which has neither gap.
  */
+/** The global names the freeze and the frozen-check are set under, for the loader's calls and the lock test. */
+export const [FREEZE_GLOBAL, DEEP_FROZEN_GLOBAL] = ['__worklaneTestFreezeTable', '__worklaneTestDeepFrozen'] as const;
+
 // R1184al D1: the built-ins the freeze uses, taken here, when this preload runs and before any test module (a helper
 // imported ahead of a table module could otherwise replace Object.freeze, Reflect.ownKeys or WeakSet's methods).
 const [freeze, isFrozen, defineProperty, ownKeys, apply, isView] = [Object.freeze, Object.isFrozen, Object.defineProperty, Reflect.ownKeys, Reflect.apply, ArrayBuffer.isView];
 const [weakHas, weakAdd] = [WeakSet.prototype.has, WeakSet.prototype.add];
-const [RegExpC, SetC, MapC, WeakSetC, TypeErrorC] = [RegExp, Set, Map, WeakSet, TypeError];
+const [WeakSetC, TypeErrorC] = [WeakSet, TypeError];
+// Brand checks, which read an object's internal slots, never `instanceof`: that calls `C[Symbol.hasInstance]`, which any
+// module can define on RegExp, Set or Map (R1184ao D1, AO1).
+const { isRegExp, isSet, isMap } = utilTypes;
 
-/** Each object `v` reaches (not through a RegExp or a typed array), once, with the captured built-ins. */
+/**
+ * Each object `v` reaches (not through a RegExp or a typed array), once, with the captured built-ins only: no
+ * `instanceof`, no iterator (the keys are walked by index: a for…of calls the live Array iterator, R1184ao AO2), no
+ * method looked up on a live object.
+ */
 function eachObject(v: unknown, f: (x: object) => void, where: string): void {
   const seen = new WeakSetC<object>();
   const walk = (x: unknown) => {
-    if (typeof x !== 'object' || x === null || x instanceof RegExpC || isView(x) || apply(weakHas, seen, [x])) return;
-    if (x instanceof SetC || x instanceof MapC) throw new TypeErrorC(`${where} is a ${x instanceof SetC ? 'Set' : 'Map'}: a registered test table can't be one (#941): use frozenSet from src/check-tables.ts, or a list`);
+    if (typeof x !== 'object' || x === null || isRegExp(x) || isView(x) || apply(weakHas, seen, [x])) return;
+    if (isSet(x) || isMap(x)) throw new TypeErrorC(`${where} is a ${isSet(x) ? 'Set' : 'Map'}: a registered test table can't be one (#941): use frozenSet from src/check-tables.ts, or a list`);
     apply(weakAdd, seen, [x]);
-    for (const k of ownKeys(x)) walk((x as Record<PropertyKey, unknown>)[k]);
+    const ks = ownKeys(x);
+    for (let i = 0; i < ks.length; i++) walk((x as Record<PropertyKey, unknown>)[ks[i]!]);
     f(x);
   };
   walk(v);
@@ -71,8 +82,10 @@ export function deepFrozen(v: unknown): boolean {
 
 // Set once, not writable and not configurable: no later code can replace the freeze the loader's calls go through, or
 // the check the lock test reads (R1184al D1: an unlocked helper replaced the writable global before a table loaded).
-defineProperty(globalThis, Symbol.for('worklane.test.freezeTable'), { value: freezeTestTable, writable: false, configurable: false, enumerable: false });
-defineProperty(globalThis, Symbol.for('worklane.test.deepFrozen'), { value: deepFrozen, writable: false, configurable: false, enumerable: false });
+// Under plain names, so the call the loader adds is a bare identifier that resolves to the global object with no
+// function called on the way (R1184ao AO3: `Symbol.for` could be redefined, and so could `globalThis`).
+defineProperty(globalThis, FREEZE_GLOBAL, { value: freezeTestTable, writable: false, configurable: false, enumerable: false });
+defineProperty(globalThis, DEEP_FROZEN_GLOBAL, { value: deepFrozen, writable: false, configurable: false, enumerable: false });
 // Every test module that registers a table gets it frozen right after its declaration (test/table-freeze.ts).
 register('./table-freeze.js', import.meta.url);
 
