@@ -767,6 +767,9 @@ jobs:
           KEEP_FOR_REMOVE: 1
         run: bash scripts/ci/exp-real-systemd.sh "$I2"
       - name: "instance-remove (v0.5.1): ci, which ran a study cut off with its output volume mounted: a mount the engine didn't make refuses it; then the volume unmounted and every experiments user, rule, file and egress entry of ci's gone, the other instance as it was"
+        # WHY 8: green runs take 125-240 s here; both job timeouts of #1266 were spent in this step (357 s, 380 s and
+        # still going), so a hung removal fails under its own name with the job's budget to spare.
+        timeout-minutes: 8
         run: bash scripts/ci/instance-remove-exp.sh "$I2"
       - name: the sandbox's units and Docker, on failure
         if: failure()
@@ -779,6 +782,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           JOB_NAME: test-run sandbox (real systemd)
+          # The step with its own limit above: a stop at about that limit is reported as its timeout.
+          LIMITED_STEP: instance-remove (v0.5.1)
+          LIMITED_SECONDS: 480
         run: |
           # From the run's own job record; this step's row is still in progress. Never fails the job.
           {
@@ -787,7 +793,10 @@ jobs:
             echo '|---:|---|---|---:|'
             gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" --jq '
               .jobs[] | select(.name == env.JOB_NAME) | .steps[] |
-              "| \(.number) | \(.name | gsub("\\|"; "/")) | \(.conclusion // .status) | \(if .started_at and .completed_at then ((.completed_at | fromdateiso8601) - (.started_at | fromdateiso8601) | tostring) else "-" end) |"' \
+              (if .started_at and .completed_at then (.completed_at | fromdateiso8601) - (.started_at | fromdateiso8601) else null end) as $t |
+              (if $t != null and (.conclusion == "failure" or .conclusion == "cancelled") and (.name | startswith(env.LIMITED_STEP)) and $t >= ((env.LIMITED_SECONDS | tonumber) - 5)
+               then "timed out (its \((env.LIMITED_SECONDS | tonumber) / 60)-minute step limit)" else (.conclusion // .status) end) as $r |
+              "| \(.number) | \(.name | gsub("\\|"; "/")) | \($r) | \($t // "-") |"' \
               || echo '| | the step timings could not be read | | |'
           } >> "$GITHUB_STEP_SUMMARY"
 
