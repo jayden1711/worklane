@@ -214,6 +214,8 @@ const ROWS: Row[] = [
   ['cs-slash-e-long', { 'core.commentString': '//' }, `// note\n${L}\n`, ['-e', '-F', 'MSG']],
   ['cs-slash-e-hash', { 'core.commentString': '//' }, 'subj\n#x\n\nbody\n', ['-e', '-F', 'MSG']],
   ['cs-then-char', { 'core.commentString': '//', 'core.commentChar': ';' }, 'subj\n; note\n\nbody\n', ['-e', '-F', 'MSG']],
+  // R1260ac D3, R1260ad D3: a comment string is matched whole: `/x` isn't a `//` comment (git 2.45+).
+  ['cs-slash-one', { 'core.commentString': '//' }, `/x ${L}\nsubj\n\nbody\n`, ['-e', '-F', 'MSG']],
   // A --cleanup= on the command line, which no hook can see (stated in CONTRIBUTING): judged by the default mode.
   ['cli-strip-comment', {}, 'subj\n#x\n\nbody\n', ['--cleanup=strip', '-F', 'MSG']],
   ['cli-semi-line2', { 'core.commentChar': ';' }, 'subj\n; a note\n\nbody\n', ['--cleanup=strip', '-F', 'MSG']],
@@ -300,7 +302,12 @@ test("every ASCII byte and the non-ASCII spaces: the hook and the gate give the 
     ["a 180-character subject's end", (c) => `${'S'.repeat(180)}${c}\n\nBody\n`],
     ['line 2', (c) => `Add a thing\n${c}\nBody\n`],
     ["the body's end", (c) => `Add a thing\n\nBody${c}\n`],
+    // R1260ac D1-D3, R1260ad D1: around a comment line and git's scissors line, where only an exact match counts.
+    ['before a comment line', (c) => `${c}# note\nAdd a thing\n\nBody\n`],
+    ["the scissors line's end", (c) => `Add a thing\n# ------------------------ >8 ------------------------${c}\nmore\n`],
+    ['before the scissors line', (c) => `Add a thing\n${c}# ------------------------ >8 ------------------------\nmore\n`],
   ];
+  const atScissors = (spot: string) => spot.includes('scissors line');
   // R1260y/z D1: with -F (or -m, or -e with an editor that changes nothing) git cleans the message BEFORE the hook
   // reads it, so the hook's model of git's cleanup only meets unclean text when an editor writes the message. So: an
   // editor that writes it (no -F), under git's strip cleanup and under commit.cleanup=whitespace; and -F, pre-cleaned
@@ -314,12 +321,17 @@ test("every ASCII byte and the non-ASCII spaces: the hook and the gate give the 
     ['an editor, strip', [], [], editor, () => true],
     ['an editor, commit.cleanup=whitespace', ['-c', 'commit.cleanup=whitespace'], [], editor, decides],
     ['-F, pre-cleaned', [], ['-F', file], {}, decides],
+    ['an editor, commit.cleanup=scissors', ['-c', 'commit.cleanup=scissors'], [], editor, decides],
   ];
+  // The scissors spots under the editor's strip and commit.cleanup=scissors, for the characters where whitespace or a
+  // comment decides; the scissors mode nowhere else (it reads as strip without a scissors line).
+  const runs = (spot: string, mode: string, c: string) =>
+    atScissors(spot) ? (mode === 'an editor, strip' || mode.includes('scissors')) && decides(c) : !mode.includes('scissors');
   const cases: { name: string; hookOk: boolean; sha: string | null }[] = [];
   for (const c of chars) {
     for (const [spot, make] of spots) {
       for (const [mode, pre, args, modeEnv, takes] of modes) {
-        if (!takes(c)) continue;
+        if (!takes(c) || !runs(spot, mode, c)) continue;
         writeFileSync(file, make(c));
         const name = `${[...c].map((x) => `U+${x.codePointAt(0)!.toString(16).padStart(4, '0')}`).join('+')} at ${spot}, ${mode}`;
         const hookOk = spawnSync('git', [...pre, 'commit', '-q', '--allow-empty', ...args], { cwd: a.dir, env: { ...env, ...modeEnv } }).status === 0;
@@ -351,7 +363,9 @@ test("every ASCII byte and the non-ASCII spaces: the hook and the gate give the 
     const gateOk = !refused.has(k.sha);
     if (k.hookOk !== gateOk) differ.push(`${k.name}: hook ${k.hookOk ? 'pass' : 'refuse'}, gate ${gateOk ? 'pass' : 'refuse'}`);
   }
-  assert.deepEqual(cases.filter((k) => !k.sha).map((k) => k.name.split(' ')[0]), Array(spots.length * modes.filter((m) => m[4]('\0')).length).fill('U+0000'), 'git made every commit but those with a NUL');
+  // Every commit git refused has a NUL (under strip, a NUL in the scissors line goes with the cut, so git commits it).
+  assert.deepEqual(cases.filter((k) => !k.sha && !k.name.startsWith('U+0000 ')).map((k) => k.name), [], 'git refused only commits with a NUL');
+  assert.ok(cases.some((k) => !k.sha), 'and it did refuse some');
   assert.ok(cases.some((k) => !k.hookOk) && cases.some((k) => k.hookOk), 'both verdicts occur');
   assert.deepEqual(differ, [], 'the same verdict for every byte, spot and mode');
 });
@@ -377,6 +391,12 @@ test("core.commentChar=auto: the hook can't know git's pick (git takes it from t
     ['a long #NNN subject', `#1259: ${L}\n\nBody.\n\n${help(';')}`],
     ['an empty template edited on line 1 (the help lines read as text in one reading: stated)', `subj\n${help('#')}`],
   ] as const) assert.equal(judge(text), 1, `refused: ${what}`);
+  // R1260ac D2, R1260ad D2: each of git's ten candidates, on line 1 and after blank lines: a reading where git picked it
+  // strips the line and commits the long one as the subject.
+  for (const c of '#;@!$%^&|:') {
+    assert.equal(judge(`${c} x\n\n${L}\n`), 1, `refused: ${c} on line 1 over a long line`);
+    assert.equal(judge(`\n\n${c} x\n\n${L}\n`), 1, `refused: ${c} after blank lines, over a long line`);
+  }
   // Kept: every reading passes.
   for (const [what, text] of [
     ['a plain message', 'subj\n\nbody\n'],
