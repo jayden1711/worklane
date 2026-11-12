@@ -1,0 +1,4 @@
+// as src/x.ts
+export type StepId = 'tools' | 'claude' | 'github';
+export interface Pause { source: 'claude' | 'default' }
+export const f = (x: Pick<{ claude: 1 }, 'claude'>) => x;

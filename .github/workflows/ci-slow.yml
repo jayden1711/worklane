@@ -824,7 +824,9 @@ jobs:
     # WHY: ubuntu-26.04 (ubuntu-latest from image 20261101) refuses unprivileged user namespaces, which this job's
     # sandboxes need; pinned with ci.yml's test shards until #1137 ports the suite.
     runs-on: ubuntu-24.04
-    timeout-minutes: 46
+    # WHY 70: #958's setting-sources probe runs here, once clean and once per must-fail wrapper (27 since R1185aa),
+    # about 26 minutes of the job on its own (1529 s at 2cf50dd5), on top of the ~19 the rest takes on main.
+    timeout-minutes: 70
     defaults:
       run:
         shell: bash
@@ -856,6 +858,35 @@ jobs:
           sudo chmod 0755 "/opt/worklane/$sha/dist/src/cli.js"
           sudo ln -sfn /opt/worklane/current/dist/src/cli.js /usr/local/bin/worklane
           worklane --version
+      # #958 (the owner's decision, 2026-11-08): a guarded run loads nothing planted in its checkout, a parent folder or
+      # the agent's home (hooks, settings, MCP, CLAUDE.md, rules, skills, agents, commands), on the real claude the
+      # machine installs, with the runner's own argv. A dummy key against a local stand-in for the API: no secret, so it
+      # runs on a pull request too. scripts/ci/setting-sources-probe.mjs says what it plants and its controls. After
+      # machine.sh: its runs are production-shaped, the lane sandbox on (failIfUnavailable), which needs bubblewrap.
+      - name: "#958: a guarded run's real claude (--setting-sources '') loads nothing planted in its checkout, parent folder or home"
+        run: |
+          v="$(sed -n 's/^CLAUDE_VERSION=//p' scripts/bootstrap.sh)"
+          cc="$(mktemp -d)"
+          npm install -g --prefix "$cc" --no-audit --no-fund "@anthropic-ai/claude-code@$v" > /dev/null
+          "$cc/bin/claude" --version
+          node scripts/ci/setting-sources-probe.mjs "$cc/bin/claude"
+          # Must fail (R1185n, R1185p): wrappers around this claude that, under '', leak a settings env, every source on
+          # --resume, a settings file's allow rule, a settings env to the tools, every source on a run with a role
+          # prompt, or every source on a resumed run with one (a fix run), a CLAUDE.md on a second turn, or a settings
+          # file's apiKeyHelper, or a leak keyed to a production-shaped run (its lane sandbox, its plugin locks, its task
+          # file: R1185t, each its own leak so each line is its own, R1185u N2), every source on a run without the sandbox
+          # (a policy.sandbox: false instance), or only the settings' Bash allow rules (R1185u U1), or a leak keyed to no
+          # sandbox and a role prompt, a resume or a second turn (R1185w W1), or every source in a git worktree, a worker's
+          # and a fix run's cwd (R1185v D2), or a leak keyed to a run outside a task (in the checkout, a role prompt,
+          # disallowed or no tools, no task file: R1185x X1, R1185y D1), a role's effort, the plugin cache, or a worker's
+          # second turn (R1185y N1, N2), or a one-shot JSON launch (skill-eval's, through launchClaude directly). The probe
+          # must exit 1 on each, naming that leak.
+          for w in env:"guarded run's request carries localEnv" resume:"guarded resumed run's request carries projectClaudeMd" perm:"a guarded run ran Write, which it doesn't allow" tool-env:"guarded worker run's request carries localToolEnv" role-prompt:"guarded worker run's request carries projectClaudeMd" resume-worker:"guarded resumed run's request carries dotClaudeMd" second-turn:"a guarded run's request carries projectClaudeMd" helper:"a guarded run ran the local settings' apiKeyHelper" lane-sandbox:"a guarded run's request carries homeClaudeMd" plugin-locks:"a guarded run's request carries memory" task-file:"a guarded run's request carries rules" no-sandbox:"the guarded run without the sandbox's request carries dotClaudeMd" bash-allow:"the guarded run without the sandbox ran Bash, which it doesn't allow" nosandbox-worker:"the guarded worker run without the sandbox's request carries projectClaudeMd" nosandbox-resume:"the guarded resumed run without the sandbox's request carries projectClaudeMd" nosandbox-second-turn:"the guarded run without the sandbox's request carries projectClaudeMd" worktree:"the guarded worker run's request carries localClaudeMd" checkout-roleprompt:"the guarded automation-shaped run's request carries projectClaudeMd" checkout-role-prompt:"the guarded automation-shaped run's request carries dotClaudeMd" disallowed-tools:"the guarded automation-shaped run's request carries localClaudeMd" no-tools:"the guarded login-check-shaped run's request carries projectClaudeMd" no-task-file:"the guarded login-check-shaped run's request carries dotClaudeMd" effort:"the guarded worker run's request carries rules" plugin-cache:"a guarded run's request carries agent" role-prompt-second-turn:"the guarded worker run with a second turn's request carries projectClaudeMd" json-mode:"the skill-eval launch's request carries projectClaudeMd" guards-first:"the smuggled-flag launch's request carries projectClaudeMd"; do
+            f="test/fixtures/setting-sources/wrap-${w%%:*}-leak.cjs"
+            if SETTING_SOURCES_REAL_CLAUDE="$cc/bin/claude" node scripts/ci/setting-sources-probe.mjs "$f" > "$RUNNER_TEMP/must-fail.log" 2>&1; then cat "$RUNNER_TEMP/must-fail.log"; echo "the probe passed $f, which leaks" >&2; exit 1; fi
+            grep -F "${w#*:}" "$RUNNER_TEMP/must-fail.log" || { cat "$RUNNER_TEMP/must-fail.log"; echo "the probe failed $f, but not for its leak" >&2; exit 1; }
+          done
+          rm -rf "$cc"
       - name: a fake GitHub, with the repo (examples/basic) behind the App's installation token
         run: |
           f="$RUNNER_TEMP/fake" && mkdir -p "$f/git/example"

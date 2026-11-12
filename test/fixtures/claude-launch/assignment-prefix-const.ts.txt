@@ -1,0 +1,6 @@
+// as src/new-module.ts
+import { exec, execSync, spawn } from 'node:child_process';
+declare const args: string[], name: string, url: string;
+// R1185an/ao: the binary in an assignment
+const S = 'C=claude; exec "$C" "$@"';
+spawn('sh', ['-c', S, 'sh', ...args]);

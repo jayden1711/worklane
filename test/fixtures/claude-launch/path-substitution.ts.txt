@@ -1,0 +1,6 @@
+// as src/new-module.ts
+import { execSync, spawn } from 'node:child_process';
+declare const lane: string;
+// R1185as D2 B2: a path built from $(…)
+const S = '"$(npm prefix -g)/bin/claude" sandbox status';
+execSync(S, { cwd: lane });

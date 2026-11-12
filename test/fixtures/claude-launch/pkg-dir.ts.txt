@@ -1,0 +1,5 @@
+// as src/doctor.ts
+import { spawn } from 'node:child_process';
+import { join } from 'node:path';
+// The package's folder from its name's parts, its file from elsewhere (R1185ad D1).
+export const run = (prefix: string, file: string) => spawn(join(prefix, 'lib', 'node_modules', '@anthropic-ai', 'claude-code', file), ['-p', 'hi']);

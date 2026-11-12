@@ -1,0 +1,4 @@
+// as src/new-module.ts
+import { execSync, spawn } from 'node:child_process';
+// R1185aj N1: a launcher word no list named.
+export const run = (prompt: string) => spawn('sh', ['-c', 'cd "$1" && shift && setsid claude "$@"', 'sh', '/w', '-p', prompt]);

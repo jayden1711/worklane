@@ -1,0 +1,4 @@
+// as src/doctor.ts
+import { spawnSync } from './os/child-process.js';
+const claude = 'claude';
+spawnSync(claude, ['--version']);

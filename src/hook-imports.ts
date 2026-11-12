@@ -16,6 +16,7 @@ export const HOOK_IMPORTS: readonly string[] = [
   'src/ci-none.ts',
   'src/comment-policy.ts',
   'src/config/load.ts',
+  'src/config/permission-rule.ts',
   'src/config/schema.ts',
   'src/contract.ts',
   'src/cross-eval.ts',

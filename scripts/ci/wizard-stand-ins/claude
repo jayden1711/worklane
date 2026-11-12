@@ -30,7 +30,7 @@ case "${1:-} ${2:-}" in
   "--version "*) echo "2.1.296 (Claude Code)" ;;
   "auth status")
     if [ -f "$d/claude-signed-in" ]; then echo '{"loggedIn": true, "authMethod": "claude.ai", "email": "owner@example.com"}'; else echo '{"loggedIn": false, "authMethod": "none"}'; exit 1; fi ;;
-  "-p Reply with the single word: ok")
+  "-p Reply with the single word: ok"|"-p --model")
     if [ -f "$d/claude-signed-in" ]; then echo '{"type":"result","subtype":"success","is_error":false,"result":"ok","total_cost_usd":0}'; else echo '{"type":"result","subtype":"success","is_error":true,"api_error_status":401,"result":"Invalid API key · Please run /login"}'; exit 1; fi ;;
   "auth login")
     [ -n "${BROWSER:-}" ] || { echo "claude stand-in: no browser opener" >&2; exit 1; }

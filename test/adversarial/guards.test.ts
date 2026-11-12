@@ -679,7 +679,7 @@ test(`adversarial guards / settings.project-loosen-refused (${doc('A project `.c
   const { r, s } = await agentRun({ guardrails: instanceHome(JSON.stringify(goodSettings()), cwd).guardrails, cwd });
   assert.ok(r.reason === 'succeeded' && s.worked(), `control: hooks and deny rules start the run (${r.reason}: ${r.detail})`);
   const args = s.log().args;
-  assert.equal(args[args.indexOf('--setting-sources') + 1], 'project', 'the run loads the project settings source only, never settings.local.json');
+  assert.equal(args[args.indexOf('--setting-sources') + 1], '', "a guarded run loads no setting source (#958): neither the project's settings nor settings.local.json");
 });
 
 test(`adversarial guards / settings.applied-echo (${doc("Every run's `--settings` carries a fresh check value")}): a run stops before any work unless claude's first event echoes this run's own check value`, { skip: !posix && 'POSIX stand-in claude' }, async () => {

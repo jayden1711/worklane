@@ -1,0 +1,4 @@
+// as src/new-module.ts
+import { execFile, spawn } from 'node:child_process';
+// R1185ag L3: a flag in a template's tail.
+export const run = (dir: string, prompt: string) => execFile('sh', ['-c', `cd ${dir} && claude "${prompt}" --print`]);

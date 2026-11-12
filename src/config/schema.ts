@@ -3,6 +3,7 @@
 import { AutomationsRepo } from '../automations/schema.js';
 import { loosenedProblems } from '../delegation.js';
 import { z } from 'zod';
+import { PermissionRule } from './permission-rule.js';
 import { providerOf, providerRefusal } from '../providers.js';
 import { baseUrlProblem } from '../provider-hosts.js';
 import { CROSS_FAMILY_OFF, crossFamilyRefusal } from '../cross-eval.js';
@@ -691,7 +692,7 @@ export const GuardrailsConfig = z.strictObject({
       refuse_paths: z.array(z.string()).default([]),
     })
     .prefault({}),
-  pre_approved: z.array(z.string()).default([]),
+  pre_approved: z.array(PermissionRule).default([]),
   examples: z
     .strictObject({
       must_block: z.array(Example).default([]),

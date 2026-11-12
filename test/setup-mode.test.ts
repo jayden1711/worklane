@@ -18,7 +18,7 @@ import { initCommand, readInitState, localInitFile, type InitArgs, type InitIo }
 import { logPath } from '../src/service.js';
 import { configReady, needsSetupMode, setupModeConfig, setupModeLines } from '../src/setup-mode.js';
 import type { RunResult, SetupProbe } from '../src/setup-steps.js';
-import { asPerson, engineCli, exampleRoles, repoRoot } from './helpers.js';
+import { asPerson, engineCli, exampleRoles, repoRoot, claudeByRun } from './helpers.js';
 import { freePort } from '../src/browser/cdp.js';
 
 process.env[`${BRAND.envPrefix}_STATE_DIR`] = mkdtempSync(join(tmpdir(), 'setup-mode-state-'));
@@ -86,7 +86,7 @@ function ghStandIn(bare: string, o: { admin?: boolean; refuse?: string } = {}) {
 }
 
 function initIo(gh: (args: string[]) => RunResult, ask: (q: string) => string | null = () => null, interactive: string[][] = []): InitIo {
-  return {
+  return { claude(spec, o) { return claudeByRun(this, spec, o); },
     which: (c) => `/stand-in/${c}`,
     serviceManagerEnv: () => ({ env: {} }),
     run: (cmd, args, o = {}) => {
@@ -111,7 +111,7 @@ function initIo(gh: (args: string[]) => RunResult, ask: (q: string) => string | 
   };
 }
 
-const probe = (gh: (args: string[]) => RunResult): SetupProbe => ({
+const probe = (gh: (args: string[]) => RunResult): SetupProbe => ({ claude(spec, o) { return claudeByRun(this, spec, o); },
   which: (c) => `/stand-in/${c}`,
   serviceManagerEnv: () => ({ env: {} }),
   run: (cmd, args, o = {}) => {

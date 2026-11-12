@@ -1,0 +1,4 @@
+// as src/doctor.ts
+import { spawn } from 'node:child_process';
+import { join } from 'node:path';
+export const run = (pkg: string) => spawn(process.execPath, [join(pkg, 'cli-wrapper.cjs'), '-p', 'hi']);

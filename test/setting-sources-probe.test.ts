@@ -1,0 +1,161 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { createRequire } from 'node:module';
+import { join } from 'node:path';
+import { parse } from 'yaml';
+import { repoRoot } from './helpers.js';
+
+// #958 (the owner's decision, 2026-11-08): a guarded run relies on --setting-sources '' alone, so CI proves it on the
+// real claude binary (scripts/ci/setting-sources-probe.mjs, in ci-slow.yml's add-project job). Here: the job runs it,
+// with the pinned version and no secret, and the probe itself fails on a claude that loads the checkout's files, or
+// that never calls the API (nothing measured).
+
+const isWindows = process.platform === 'win32';
+const probe = join(repoRoot, 'scripts', 'ci', 'setting-sources-probe.mjs');
+
+/** A stand-in claude: `body` is its script after reading its argv and env (ANTHROPIC_BASE_URL is the probe's stand-in API). */
+function fake(body: string): string {
+  const d = mkdtempSync(join(tmpdir(), 'probe-fake-'));
+  const bin = join(d, 'fake-cc');
+  writeFileSync(bin, `#!/usr/bin/env node
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+const sources = args[args.indexOf('--setting-sources') + 1];
+const post = (text) => fetch(process.env.ANTHROPIC_BASE_URL + '/v1/messages', { method: 'POST', body: JSON.stringify({ system: text }) });
+void sources;
+${body}
+`);
+  chmodSync(bin, 0o755);
+  return bin;
+}
+const run = (bin: string) => spawnSync(process.execPath, [probe, bin], { encoding: 'utf8', timeout: 240_000 });
+
+test("#958: ci-slow.yml's add-project job runs the setting-sources probe on the pinned real claude, with no secret, on pull requests too", () => {
+  const wf = parse(readFileSync(join(repoRoot, '.github', 'workflows', 'ci-slow.yml'), 'utf8')) as { on: Record<string, unknown>; jobs: Record<string, { steps?: { name?: string; run?: string; env?: unknown }[] }> };
+  assert.ok('pull_request' in wf.on, 'the slow workflow runs on pull requests');
+  const steps = wf.jobs['add-project-real-systemd']?.steps ?? [];
+  const step = steps.find((s) => /setting-sources-probe\.mjs/.test(s.run ?? ''));
+  assert.ok(step, 'the job runs the probe');
+  assert.match(step.run ?? '', /sed -n 's\/\^CLAUDE_VERSION=\/\/p' scripts\/bootstrap\.sh/, "the version the machine installs (bootstrap.sh's pin)");
+  assert.match(step.run ?? '', /npm install -g --prefix "\$cc" .*"@anthropic-ai\/claude-code@\$v"/);
+  assert.match(step.run ?? '', /node scripts\/ci\/setting-sources-probe\.mjs "\$cc\/bin\/claude"/);
+  // The must-fail wrappers around the real claude (R1185n): the probe must exit 1 on each, naming its leak.
+  for (const [w, says] of [['env', 'guarded run'], ['resume', 'guarded resumed run'], ['perm', 'a guarded run ran Write'], ['tool-env', 'guarded worker run'], ['role-prompt', 'guarded worker run'], ['resume-worker', 'guarded resumed run'], ['guards-first', 'the smuggled-flag launch'], ['second-turn', "a guarded run's request"], ['helper', "a guarded run ran the local settings' apiKeyHelper"], ['lane-sandbox', "a guarded run's request carries homeClaudeMd"], ['plugin-locks', "a guarded run's request carries memory"], ['task-file', "a guarded run's request carries rules"], ['no-sandbox', "the guarded run without the sandbox's request carries dotClaudeMd"], ['bash-allow', 'the guarded run without the sandbox ran Bash'], ['nosandbox-worker', "the guarded worker run without the sandbox's request"], ['nosandbox-resume', "the guarded resumed run without the sandbox's request"], ['nosandbox-second-turn', "the guarded run without the sandbox's request carries projectClaudeMd"], ['worktree', "the guarded worker run's request carries localClaudeMd"], ['checkout-roleprompt', "the guarded automation-shaped run's request carries projectClaudeMd"], ['checkout-role-prompt', "the guarded automation-shaped run's request carries dotClaudeMd"], ['disallowed-tools', "the guarded automation-shaped run's request carries localClaudeMd"], ['no-tools', "the guarded login-check-shaped run's request carries projectClaudeMd"], ['no-task-file', "the guarded login-check-shaped run's request carries dotClaudeMd"], ['effort', "the guarded worker run's request carries rules"], ['plugin-cache', "a guarded run's request carries agent"], ['role-prompt-second-turn', "the guarded worker run with a second turn's request carries projectClaudeMd"], ['json-mode', "the skill-eval launch's request carries projectClaudeMd"]]) {
+    assert.match(step.run ?? '', new RegExp(`(^|\\s)${w}:"[^"]*${says}`), `wrap-${w}-leak.cjs runs, and must fail naming its leak`);
+    assert.ok(existsSync(join(repoRoot, 'test', 'fixtures', 'setting-sources', `wrap-${w}-leak.cjs`)), `wrap-${w}-leak.cjs is there`);
+  }
+  // Every wrapper fixture is in the loop, and the leaks keyed to one run's shape each grep a line of its own (R1185u N2).
+  const loop = [...(step.run ?? '').matchAll(/(?:^|\s)([\w-]+):"([^"]+)"/g)].map((m) => [m[1]!, m[2]!] as const);
+  const fixtures = readdirSync(join(repoRoot, 'test', 'fixtures', 'setting-sources')).filter((f) => /^wrap-.*-leak\.cjs$/.test(f)).map((f) => f.slice(5, -9));
+  assert.deepEqual(loop.map(([w]) => w).sort(), fixtures.sort(), 'every wrap-*-leak.cjs runs in the must-fail loop');
+  const shapeKeyed = loop.filter(([w]) => ['second-turn', 'lane-sandbox', 'plugin-locks', 'task-file', 'no-sandbox', 'nosandbox-worker', 'nosandbox-resume', 'nosandbox-second-turn', 'worktree', 'checkout-roleprompt', 'checkout-role-prompt', 'disallowed-tools', 'no-tools', 'no-task-file', 'effort', 'plugin-cache', 'role-prompt-second-turn', 'json-mode', 'guards-first', 'resume', 'resume-worker'].includes(w)).map(([, l]) => l);
+  assert.equal(new Set(shapeKeyed).size, shapeKeyed.length, `each shape-keyed wrapper's line is its own: ${shapeKeyed.join(' | ')}`);
+  assert.match(step.run ?? '', /SETTING_SOURCES_REAL_CLAUDE="\$cc\/bin\/claude" node scripts\/ci\/setting-sources-probe\.mjs "\$f"/);
+  assert.match(step.run ?? '', /then cat [^;]+; echo "the probe passed \$f, which leaks" >&2; exit 1; fi/);
+  assert.doesNotMatch(JSON.stringify(step), /secrets\.|ANTHROPIC_API_KEY/, 'no secret: the probe gives claude a dummy key against its own stand-in');
+  assert.ok(steps.indexOf(step) === steps.findIndex((s) => /machine\.sh/.test(s.name ?? '')) + 1, 'right after machine.sh: production-shaped runs have the lane sandbox on, which needs its bubblewrap');
+  // A pull request that changes the runner or the probe runs that job (scripts/ci/slow-jobs.sh).
+  const scope = readFileSync(join(repoRoot, 'scripts', 'ci', 'slow-jobs.sh'), 'utf8');
+  assert.match(scope, /MACHINE="[^"]*add-project-real-systemd/);
+});
+
+test("#958: the probe fails on a claude that loads the checkout's files under --setting-sources '', on one that leaks only once a tool runs (R1185l), and on one that never calls the API", { skip: isWindows && 'POSIX stand-in claude', timeout: 300_000 }, () => {
+  // Loads CLAUDE.md and runs the checkout's SessionStart hook whatever the sources say.
+  const leaky = run(fake(`const s = JSON.parse(fs.readFileSync('.claude/settings.json', 'utf8'));
+require('node:child_process').execSync(s.hooks.SessionStart[0].hooks[0].command);
+post(fs.readFileSync('CLAUDE.md', 'utf8') + fs.readFileSync('.claude/CLAUDE.md', 'utf8')).then(() => process.exit(0));`));
+  assert.equal(leaky.status, 1, `${leaky.stdout}\n${leaky.stderr}`);
+  assert.match(leaky.stderr, /a guarded run's request carries projectClaudeMd \(PLANTED-PROJECT-CLAUDE-MD\): that was loaded/);
+  assert.match(leaky.stderr, /a guarded run ran the project settings' SessionStart hook/);
+  // R1185l's: honours '' for everything read at the start, but runs the checkout's PreToolUse and Stop hooks once a
+  // model call succeeds. The stand-in's tool turn reaches that, so the probe catches it.
+  const lazy = run(join(repoRoot, 'test', 'fixtures', 'setting-sources', 'fake-lazy-leak.cjs'));
+  assert.equal(lazy.status, 1, `${lazy.stdout}\n${lazy.stderr}`);
+  assert.match(lazy.stderr, /a guarded run ran the project settings' PreToolUse hook/);
+  assert.match(lazy.stderr, /a guarded run ran the project settings' Stop hook/);
+  // Never calls the API: nothing is measured, so it fails rather than passing on an empty record.
+  const silent = run(fake(`process.exit(0);`));
+  assert.equal(silent.status, 1, `${silent.stdout}\n${silent.stderr}`);
+  assert.match(silent.stderr, /the project control: no model call reached the stand-in, so nothing is measured/);
+  assert.match(silent.stderr, /the guarded run: no model call reached the stand-in/);
+});
+
+test("#958 (R1185p D3): a pull request touching anything the probe loads runs add-project's job: the probe's import closure is scripts/ci/setting-sources-probe.files, and slow-jobs.sh reads it", { skip: isWindows && 'bash', timeout: 120_000 }, () => {
+  const listed = readFileSync(join(repoRoot, 'scripts', 'ci', 'setting-sources-probe.files'), 'utf8');
+  const now = spawnSync(process.execPath, [probe, '--files'], { encoding: 'utf8' });
+  assert.equal(listed, now.stdout, 'the list is the closure as it is now: run `node scripts/ci/setting-sources-probe.mjs --files > scripts/ci/setting-sources-probe.files`');
+  // The guard's hook entry and what it imports (R1185r D1): spawned by every guarded run's hooks, never imported.
+  for (const f of ['src/runner.ts', 'src/sandbox.ts', 'src/plugins/run.ts', 'src/brand.ts', 'src/guardrails/push-hook.ts', 'src/agent-settings.ts', 'src/install.ts', 'src/network.ts', 'scripts/lib/git.cjs', 'src/hook-main.ts', 'src/hook.ts', 'src/hook-deadline.ts', 'src/guard/commit.ts']) assert.ok(listed.split('\n').includes(f), `${f} is in the closure`);
+  // slow-jobs.sh, on a pull request in a scratch repo, for a change to one file of the list each.
+  const d = mkdtempSync(join(tmpdir(), 'slow-jobs-'));
+  const git = (...a: string[]) => spawnSync('git', a, { cwd: d, encoding: 'utf8' });
+  git('init', '-q', '-b', 'main');
+  git('config', 'user.email', 'a@example.com');
+  git('config', 'user.name', 'A');
+  git('config', 'commit.gpgsign', 'false');
+  mkdirSync(join(d, 'scripts', 'ci'), { recursive: true });
+  writeFileSync(join(d, 'scripts', 'ci', 'setting-sources-probe.files'), listed);
+  writeFileSync(join(d, 'README'), 'x');
+  git('add', '-A');
+  git('commit', '-q', '-m', 'base');
+  const base = git('rev-parse', 'HEAD').stdout.trim();
+  const jobs = (path: string) => {
+    git('checkout', '-q', base);
+    mkdirSync(join(d, path, '..'), { recursive: true });
+    writeFileSync(join(d, path), 'changed');
+    git('add', '-A');
+    git('commit', '-q', '-m', path);
+    const head = git('rev-parse', 'HEAD').stdout.trim();
+    const r = spawnSync('bash', [join(repoRoot, 'scripts', 'ci', 'slow-jobs.sh')], { cwd: d, encoding: 'utf8', env: { PATH: process.env.PATH ?? '', EVENT: 'pull_request', PR_BASE: base, PR_HEAD: head } });
+    return /^run=(.*)$/m.exec(r.stdout)?.[1] ?? `(failed: ${r.stderr})`;
+  };
+  for (const f of ['src/sandbox.ts', 'src/guardrails/push-hook.ts', 'src/brand.ts']) assert.match(jobs(f), / add-project-real-systemd /, `${f} runs add-project's job`);
+  assert.doesNotMatch(jobs('src/sandbox.ts'), /wizard/, "and not the wizard's walk for that alone");
+  assert.doesNotMatch(jobs('docs/x.md'), /add-project-real-systemd/, 'a file outside it does not');
+});
+
+test("#958 (R1185s S1): the probe loads src/ only through dist(), only what LOADS names, and its closure's hook entry is install.ts's HOOK_ENTRY", () => {
+  const text = readFileSync(probe, 'utf8');
+  // Its code, comments out (line and block), strings kept.
+  const code = text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  assert.equal((code.match(/\bimport\s*\(/g) ?? []).length, 1, 'one import(), the one inside dist()');
+  // Static imports and re-exports too (R1185u U2): node's own modules and the git runner only, so no dist/ module (or
+  // any other) is loaded past dist() and the closure list.
+  const ts = createRequire(join(repoRoot, 'package.json'))('typescript') as { createSourceFile: (f: string, t: string, v: number, p: boolean) => { statements: { moduleSpecifier?: { text: string } }[] }; ScriptTarget: { Latest: number } };
+  const specs = ts.createSourceFile(probe, text, ts.ScriptTarget.Latest, true).statements.flatMap((st) => (st.moduleSpecifier ? [st.moduleSpecifier.text] : []));
+  assert.ok(specs.length > 0, 'its static imports are read');
+  for (const m of specs) assert.ok(/^node:/.test(m) || m === '../lib/git.cjs' || m === './claude-registry.mjs', `a static import or re-export of ${m}: only node:*, ../lib/git.cjs and ./claude-registry.mjs (anything else, a dist/ module above all, is outside the closure)`);
+  // R1185aq D1: the registry reader it imports loads node's own modules only.
+  const registry = join(repoRoot, 'scripts', 'ci', 'claude-registry.mjs');
+  const rspecs = ts.createSourceFile(registry, readFileSync(registry, 'utf8'), ts.ScriptTarget.Latest, true).statements.flatMap((st) => (st.moduleSpecifier ? [st.moduleSpecifier.text] : []));
+  for (const m of rspecs) assert.ok(/^node:/.test(m), `claude-registry.mjs imports ${m}: node:* only`);
+  assert.doesNotMatch(readFileSync(registry, 'utf8'), /\bimport\s*\(|\brequire\s*\(/, 'claude-registry.mjs: no dynamic import or require');
+  // Outside shim(), whose text is the source of the child it writes: no require() or createRequire beside it.
+  const shimAt = code.indexOf('function shim(');
+  const outside = shimAt < 0 ? code : code.slice(0, shimAt) + code.slice(code.indexOf('\n}\n', shimAt));
+  assert.ok(shimAt >= 0, 'shim() is where the probe says');
+  assert.doesNotMatch(outside, /\brequire\s*\(|createRequire/, 'no require() or createRequire beside it');
+  assert.match(code, /const dist = \(f\) => \{\n\s*if \(!LOADS\.includes\(/, 'dist() refuses a module LOADS doesn\'t name');
+  const loads = JSON.parse((/const LOADS = (\[[^\]]*\]);/.exec(code)?.[1] ?? '[]').replace(/'/g, '"')) as string[];
+  const calls = [...code.matchAll(/\bdist\(\s*(['"`])([^'"`]+)\1\s*\)/g)].map((m) => m[2]!.replace(/\.js$/, ''));
+  assert.ok(calls.length > 0 && calls.every((c) => loads.includes(c)), `every dist() call is in LOADS: ${calls.join(', ')}`);
+  assert.equal((code.match(/\bdist\(/g) ?? []).length, calls.length, 'every dist() call names a literal');
+  const entry = /export const HOOK_ENTRY = '([\w/-]+)\.js'/.exec(readFileSync(join(repoRoot, 'src', 'install.ts'), 'utf8'))?.[1];
+  assert.ok(entry && readFileSync(join(repoRoot, 'scripts', 'ci', 'setting-sources-probe.files'), 'utf8').split('\n').includes(`src/${entry}.ts`), 'the hook entry is in the closure');
+});
+
+test("#958 (the owner's decision, 2026-11-09): the probe drives every field of the one launch, or names it a limit", () => {
+  const launch = readFileSync(join(repoRoot, 'src', 'claude-launch.ts'), 'utf8');
+  const fields = JSON.parse((/export const LAUNCH_FIELDS = (\[[^\]]*\])/.exec(launch)?.[1] ?? '[]').replace(/'/g, '"')) as string[];
+  const type = /export type ClaudeLaunch = \{([\s\S]*?)\n\};/.exec(launch)?.[1] ?? '';
+  const declared = [...type.matchAll(/^ {2}(\w+)\??:/gm)].map((m) => m[1]);
+  assert.deepEqual([...fields].sort(), [...declared].sort(), 'LAUNCH_FIELDS is every field ClaudeLaunch declares');
+  const probeText = readFileSync(probe, 'utf8');
+  const axes = /const AXES = \{([\s\S]*?)\n\};/.exec(probeText)?.[1] ?? '';
+  const named = [...axes.matchAll(/^ {2}(\w+):/gm)].map((m) => m[1]);
+  assert.deepEqual([...named].sort(), [...fields].sort(), 'the probe names each field: how it drives it, or why not');
+  assert.match(probeText, /for \(const f of LAUNCH_FIELDS\) if \(!\(f in AXES\)\)/, 'and refuses to run without one');
+});

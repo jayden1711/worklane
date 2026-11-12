@@ -13,6 +13,7 @@ import { BRAND } from '../src/brand.js';
 import { applyAnswer, autoConfigure, detectProject, draftTests, emptyAutoConfig, failureQuestion, NO_TESTS, planFrom, SETUP_BRANCH, type Answer, type AutoConfigIo, type AutoConfigState, type Question } from '../src/auto-config.js';
 import { loadConfigAt } from '../src/config/load.js';
 import { TestsConfig } from '../src/config/schema.js';
+import { claudeByRun } from './helpers.js';
 import { firstRunView, initCommand, localInitFile, readInitState, type InitArgs, type InitIo } from '../src/init.js';
 
 process.env[`${BRAND.envPrefix}_STATE_DIR`] = mkdtempSync(join(tmpdir(), 'auto-config-state-'));
@@ -283,7 +284,7 @@ test('init: the questions in the checklist and on the First-run page with their 
   const g = ghStandIn();
   const prefix = mkdtempSync(join(tmpdir(), 'ac-prefix-'));
   const said: string[] = [];
-  const io: InitIo = {
+  const io: InitIo = { claude(spec, o) { return claudeByRun(this, spec, o); },
     which: (c) => (['git', 'gitleaks', 'claude', 'gh'].includes(c) ? `/stand-in/${c}` : null),
     serviceManagerEnv: () => ({ env: {} }),
     run: (cmd, args, o = {}) => {

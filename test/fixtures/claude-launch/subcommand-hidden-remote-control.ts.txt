@@ -1,0 +1,6 @@
+// as src/new-module.ts
+import { exec, execSync, spawn, spawnSync } from 'node:child_process';
+declare const args: string[], lane: string, env: NodeJS.ProcessEnv, repo: string, exportPath: string;
+// R1185aq D1 Q1 claude remote-control (starts Remote Control sessions)
+const REMOTE = 'claude remote-control';
+const child = spawn('sh', ['-c', REMOTE], { cwd: lane, env });

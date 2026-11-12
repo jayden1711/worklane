@@ -1,0 +1,6 @@
+// as src/new-module.ts
+import { execSync, spawn } from 'node:child_process';
+declare const lane: string;
+// R1185as D1 S6: apply-project-settings, named through a variable in the binary
+const S = 'claude apply-project-settings';
+execSync(S, { cwd: lane });

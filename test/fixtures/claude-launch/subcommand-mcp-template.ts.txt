@@ -1,0 +1,6 @@
+// as src/new-module.ts
+import { exec, execSync, spawn } from 'node:child_process';
+declare const args: string[], name: string, url: string;
+// R1185an/ao: a subcommand, then substitutions
+const cmd = `claude mcp add ${name} ${url}`;
+execSync(cmd);

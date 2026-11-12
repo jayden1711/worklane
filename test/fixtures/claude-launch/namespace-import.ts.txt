@@ -1,0 +1,3 @@
+// as src/x.ts
+import * as cp from 'node:child_process';
+cp.spawnSync('claude', ['-p']);

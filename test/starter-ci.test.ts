@@ -16,7 +16,7 @@ import { projectStateDir } from '../src/guardrails/context.js';
 import { install } from '../src/install.js';
 import type { RunResult, SetupProbe, SetupView } from '../src/setup-steps.js';
 import { draftStarterCi, newFileUrl, newFileUrlWith, PINNED, STARTER_CI_PATH, type StarterCiView } from '../src/starter-ci.js';
-import { asPerson, exampleProject, exampleRoles, repoRoot } from './helpers.js';
+import { asPerson, exampleProject, exampleRoles, repoRoot, claudeByRun } from './helpers.js';
 
 process.env[`${BRAND.envPrefix}_STATE_DIR`] = mkdtempSync(join(tmpdir(), 'starter-ci-state-'));
 
@@ -138,7 +138,7 @@ test('an empty required_checks in PR mode is a config problem, with the fix; dir
 
 // ---------- the step, through the dashboard ----------
 
-const probe: SetupProbe = {
+const probe: SetupProbe = { claude(spec, o) { return claudeByRun(this, spec, o); },
   which: (c) => `/stand-in/${c}`,
   serviceManagerEnv: () => ({ env: {} }),
   run: (cmd, args, o = {}) => {

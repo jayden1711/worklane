@@ -1,0 +1,4 @@
+// as src/new-module.ts
+import { execSync, spawn } from 'node:child_process';
+// R1185aj N15: an assignment prefix.
+export const run = (prompt: string) => spawn('sh', ['-c', 'FOO=1 claude "$@"', 'sh', '-p', prompt]);

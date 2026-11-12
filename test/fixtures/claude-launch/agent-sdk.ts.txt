@@ -1,0 +1,4 @@
+// as src/new-module.ts
+// R1185ag L1: the Agent SDK starts its own bundled claude; its settingSources option loads every source.
+import { query } from '@anthropic-ai/claude-agent-sdk';
+export const run = (prompt: string, cwd: string) => query({ prompt, options: { cwd, settingSources: ['user', 'project', 'local'] } });

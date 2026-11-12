@@ -3,7 +3,8 @@
 # network). It answers what init and doctor ask: --version, and `auth status`, signed in with a subscription login
 # (claude.ai, a method the default agent_runtime runs on) unless STANDIN_SIGNED_OUT is set or
 # $HOME/.claude-stand-in/signed-out exists. `auth login` says what it would do. The login's proof (one minimal real
-# call: -p "Reply with the single word: ok") is answered when signed in, refused with a 401 when STANDIN_API_REFUSED is
+# call: -p "Reply with the single word: ok", or as the engine's launch asks it, `-p --model haiku ...` with the prompt
+# on stdin) is answered when signed in, refused with a 401 when STANDIN_API_REFUSED is
 # set or $HOME/.claude-stand-in/api-refused exists. Anything else (an agent run) is refused, loudly.
 # WHY the files: the Claude step asks claude with only the environment agent runs give it (#738), as a real login
 # lives in HOME, so a STANDIN_* variable doesn't reach it there.
@@ -16,7 +17,7 @@ case "$1 ${2:-}" in
     if signed_out; then echo '{"loggedIn": false}'; exit 1; fi
     echo '{"loggedIn": true, "authMethod": "claude.ai"}' ;;
   "auth login") echo "claude stand-in: would open the Claude login" ;;
-  "-p Reply with the single word: ok")
+  "-p Reply with the single word: ok"|"-p --model")
     if signed_out || api_refused; then echo '{"type":"result","subtype":"success","is_error":true,"api_error_status":401,"result":"Invalid API key · Please run /login"}'; exit 1; fi
     echo '{"type":"result","subtype":"success","is_error":false,"result":"ok","total_cost_usd":0}' ;;
   *) echo "claude stand-in: $* is not something this stand-in does" >&2; exit 1 ;;

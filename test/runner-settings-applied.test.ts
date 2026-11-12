@@ -163,5 +163,5 @@ test('a run given no --settings has nothing to confirm and runs as before', { sk
   const c = fakeClaude('dropped');
   const r = await new CliRunner('cli', childEnv(), c.bin).run(req(cwd));
   assert.equal(r.reason, 'succeeded', r.detail);
-  assert.equal(c.settings(), null, 'no --settings at all');
+  assert.deepEqual(c.settings(), {}, 'an empty --settings (every launch carries one), with no check value to confirm');
 });

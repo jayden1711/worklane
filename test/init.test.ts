@@ -18,7 +18,7 @@ import { CI_CHOICE_EXIT, firstRunView, initCommand, localInitFile, readInitState
 import { checksumOf, installPlan, PINS, type InstallableTool, type ToolInstall } from '../src/tool-install.js';
 import { launchdUnload, toolPlatform, which, writeGroupReadable } from '../src/os/index.js';
 import { srvCheckoutPath } from '../src/os/system-paths.js';
-import { asPerson, engineCli, exampleProject, exampleRoles, repoRoot } from './helpers.js';
+import { asPerson, engineCli, exampleProject, exampleRoles, repoRoot, claudeByRun } from './helpers.js';
 import { HOST_TOOLS, hostToolStandIns, onStandIns, testPath } from './host-tools.js';
 import { onRealMachine } from './isolate.js';
 
@@ -64,7 +64,7 @@ function world(over: Partial<World> & { download?: InitIo['download']; plan?: In
   const logins: string[] = [];
   const asked: string[] = [];
   let addProjects = 0;
-  const io: InitIo = {
+  const io: InitIo = { claude(spec, o) { return claudeByRun(this, spec, o); },
     which: (c) => (w.tools.has(c) || existsSync(join(w.prefix, 'bin', c)) ? `/stand-in/${c}` : null),
     serviceManagerEnv: () => ({ env: {} }),
     run: (cmd, args, o = {}) => {

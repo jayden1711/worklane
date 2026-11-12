@@ -15,7 +15,9 @@ const os = require('node:os');
 const path = require('node:path');
 
 const args = process.argv.slice(2);
-const proof = args[0] === '-p' && args[1] === 'Reply with the single word: ok';
+// The proof as scripts/setup/lib.sh asks it (the prompt on the command line), or as the engine's launch does
+// (src/claude-launch.ts: the prompt on stdin, `-p --model haiku ... --output-format json`, its guards last).
+const proof = args[0] === '-p' && (args[1] === 'Reply with the single word: ok' || (args[1] === '--model' && args[2] === 'haiku' && args.includes('--output-format') && args.at(-1) === '--strict-mcp-config'));
 if (args[0] === 'auth' && args[1] === 'login') {
   process.stdout.write("Opening browser to sign in… If the browser didn't open, visit: https://claude.ai/oauth/authorize?code=true&client_id=ci&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&state=ci-relayed-link-4s7\nPaste code here if prompted > ");
   let line = '';

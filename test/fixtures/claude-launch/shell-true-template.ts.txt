@@ -1,0 +1,4 @@
+// as src/new-module.ts
+import { execSync, spawn } from 'node:child_process';
+// shell: true, its command a template.
+export const run = (args: string) => spawn(`ionice -c3 claude ${args}`, { shell: true });

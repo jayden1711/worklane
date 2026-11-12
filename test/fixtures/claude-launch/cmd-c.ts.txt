@@ -1,0 +1,6 @@
+// as src/new-module.ts
+import { exec, execSync, spawn, spawnSync } from 'node:child_process';
+import { promisify } from 'node:util';
+declare const args: string[], cwd: string, env: NodeJS.ProcessEnv, prompt: string, lock: string, mode: 'plain' | 'grouped';
+// R1185al/am: a shell string wherever it ends up.
+spawn('cmd.exe', ['/d', '/s', '/c', 'claude.cmd %*']);

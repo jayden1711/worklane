@@ -1,0 +1,4 @@
+// as src/new-module.ts
+import { execSync, spawn } from 'node:child_process';
+// R1185ah M2: its flags from a variable.
+export const run = (env: NodeJS.ProcessEnv) => spawn('sh', ['-c', 'cd "$1" && claude $CLAUDE_ARGS'], { env: { ...env, CLAUDE_ARGS: '-p hi' } });

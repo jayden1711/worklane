@@ -192,7 +192,8 @@ test('a provider run: its endpoint in ANTHROPIC_BASE_URL, its key file only thro
   const { provider: _p, ...anthropic } = req;
   await new CliRunner('cli', { ...env, HOME: a.dir }, a.bin).run({ ...anthropic, cwd: a.dir, model: 'sonnet' });
   assert.equal(a.got().env.ANTHROPIC_BASE_URL, undefined);
-  assert.equal(a.got().argv.includes('--settings'), false);
+  // Every launch carries --settings (#958, src/claude-launch.ts); this run's are empty: no helper, nothing else.
+  assert.deepEqual(JSON.parse(a.got().argv[a.got().argv.indexOf('--settings') + 1]!), {});
 });
 
 // ---- the hosted-change guard and usage

@@ -1,0 +1,4 @@
+// as src/x.ts
+import { spawn } from './os/child-process.js';
+const c = { file: 'claude', args: ['-p', 'hi'] };
+spawn(c.file, c.args);

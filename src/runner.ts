@@ -30,6 +30,7 @@ import { mcpRunArgs, type McpRun } from './mcp/client.js';
 import { limitHit, USAGE_LIMIT_TEXT, type LimitHit, type RateLimitInfo } from './usage-limit.js';
 import { authFailedDetail, isAuthFailure } from './claude-auth-failure.js';
 import { EFFORTS, type Effort } from './roles.js';
+import { claudeArgv, claudeBin, launchClaude, launchPath } from './claude-launch.js';
 import { redactCut, redactString } from './events/redact.js';
 
 export type TerminalReason = 'succeeded' | 'failed' | 'timed_out' | 'stalled' | 'rate_limited' | 'canceled_by_reconciliation' | 'budget_exhausted' | 'auth_mismatch' | 'auth_failed' | 'stopped' | 'stuck';
@@ -175,7 +176,7 @@ export interface AgentRunner {
 
 // CLAUDE_CONFIG_DIR: an instance's own Claude login (a path, not a secret). No CA bundle: a custom CA comes only from
 // root's network.json (src/network.ts outboundEnv, applied below).
-const PASS_THROUGH = ['CLAUDE_CONFIG_DIR', 'PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'LC_ALL', 'TERM', 'TMPDIR', 'TZ', 'XDG_RUNTIME_DIR', 'SystemRoot', 'ComSpec', 'PATHEXT', 'APPDATA', 'LOCALAPPDATA', 'USERPROFILE', 'ProgramData', 'ProgramFiles'];
+export const PASS_THROUGH = ['CLAUDE_CONFIG_DIR', 'PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'LC_ALL', 'TERM', 'TMPDIR', 'TZ', 'XDG_RUNTIME_DIR', 'SystemRoot', 'ComSpec', 'PATHEXT', 'APPDATA', 'LOCALAPPDATA', 'USERPROFILE', 'ProgramData', 'ProgramFiles'];
 
 /** An agent_runtime kind (config.yaml agent_runtime.kind; `sdk` is read as api_key). */
 export type RuntimeKind = 'cli' | 'api_key';
@@ -359,10 +360,11 @@ export function runAsEnv(env: NodeJS.ProcessEnv, r: RunAs): NodeJS.ProcessEnv {
  * How to run `claude auth status --json`: as the agent user (through sudo, with that user's environment from
  * agentUserEnv, as its runs get it), else as this process. The command, its arguments and spawn's own env.
  */
-export function authStatusCommand(env: NodeJS.ProcessEnv, runAs?: RunAs, bin = 'claude'): { file: string; args: string[]; env: NodeJS.ProcessEnv } {
+export function authStatusCommand(env: NodeJS.ProcessEnv, runAs?: RunAs, bin = 'claude', agentPath?: string): { file: string; args: string[]; env: NodeJS.ProcessEnv } {
   const argv = ['auth', 'status', '--json'];
   if (!runAs) return { file: bin, args: argv, env };
-  const [file, args] = asUser(runAs.user, bin, argv, { ...env, ...agentUserEnv(runAs) });
+  // `agentPath`: the PATH the agent user's `env -i` looks the binary up on (a run's: launchPath's, R1185ae D3).
+  const [file, args] = asUser(runAs.user, bin, argv, { ...env, ...(agentPath !== undefined ? { PATH: agentPath } : {}), ...agentUserEnv(runAs) });
   // As another user, sudo gets only PATH; the probe's environment is passed explicitly through env -i.
   return { file, args, env: { PATH: ownEnv(env).get('PATH') ?? '' } };
 }
@@ -376,8 +378,8 @@ export function claudeAuthMethod(env: NodeJS.ProcessEnv, runAs?: RunAs, bin = 'c
  * claude auth status: the auth method ('none' when signed out, 'unknown' when unreadable) and what it printed
  * otherwise, and the account as it names it (its email, else its org; never the token).
  */
-export function claudeAuthStatus(env: NodeJS.ProcessEnv, runAs?: RunAs, bin = 'claude'): { method: string; text: string; account?: string | null } {
-  const c = authStatusCommand(env, runAs, bin);
+export function claudeAuthStatus(env: NodeJS.ProcessEnv, runAs?: RunAs, bin = 'claude', agentPath?: string): { method: string; text: string; account?: string | null } {
+  const c = authStatusCommand(env, runAs, bin, agentPath);
   const r = spawnSync(c.file, c.args, { encoding: 'utf8', env: c.env, timeout: 30_000 });
   try {
     const j = JSON.parse(r.stdout) as { loggedIn?: boolean; authMethod?: string; email?: unknown; orgName?: unknown };
@@ -510,28 +512,34 @@ const EFFORT_FLAGS = new Set<string>(EFFORTS);
  * stdin and the role's system prompt in a file (`systemPromptFile`).
  */
 /**
- * Roles that load no setting source at all (#973): no project instructions (CLAUDE.md), settings or hooks from the
- * checkout, only the engine's role prompt and its --settings. WHY: a planner's or plan reviewer's checkout is one
- * setup steps have run in, and its instruction files need one review, not two: text there reached every planner.
+ * The argv a run gives claude, built by the one launch function (src/claude-launch.ts, the owner's decision,
+ * 2026-11-09): every run loads no setting source (`--setting-sources ''`: no project settings, hooks or CLAUDE.md from
+ * the checkout, #958 and #973), whatever its role or lane, and takes its settings from `--settings` alone. CI proves it
+ * on the pinned Claude Code (scripts/bootstrap.sh's CLAUDE_VERSION): scripts/ci/setting-sources-probe.mjs.
  */
-export const NO_PROJECT_SOURCE_ROLES: readonly string[] = ['planner', 'plan-reviewer'];
-
 export function cliArgs(req: RunRequest, settings?: object, systemPromptFile?: string, pluginDirs: readonly string[] = [], mcpConfigFile?: string): string[] {
-  const sources = NO_PROJECT_SOURCE_ROLES.includes(req.role) ? '' : 'project';
-  const args = [...(settings ? ['--settings', JSON.stringify(settings)] : []), '-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--model', req.model, '--setting-sources', sources, '--strict-mcp-config', '--permission-mode', 'dontAsk', '--max-turns', String(req.maxTurns), '--max-budget-usd', String(req.maxBudgetUsd)];
-  // WHY: not on a provider run: whether an open model's endpoint takes the effort parameter is unknown (#579).
-  if (req.effort && EFFORT_FLAGS.has(req.effort) && !req.provider) args.push('--effort', req.effort);
-  if (req.allowedTools.length) args.push('--allowedTools', ...req.allowedTools);
-  if (req.disallowedTools?.length) args.push('--disallowedTools', ...req.disallowedTools);
-  if (systemPromptFile) args.push('--append-system-prompt-file', systemPromptFile);
-  // One flag per approved plugin directory (root's store), never a folder of them: exactly what was checked.
-  for (const d of pluginDirs) args.push('--plugin-dir', d);
-  // The broker's connector, once per approved server (--strict-mcp-config stays: nothing else is read).
-  if (mcpConfigFile) args.push('--mcp-config', mcpConfigFile);
-  if (req.jsonSchema) args.push('--json-schema', JSON.stringify(req.jsonSchema));
-  // claude --help: "-r, --resume [value]  Resume a conversation by session ID". runOnce refuses an id that isn't one.
-  if (req.resume && SESSION_ID.test(req.resume)) args.push('--resume', req.resume);
-  return args;
+  return claudeArgv(launchFields(req, settings, systemPromptFile, pluginDirs, mcpConfigFile));
+}
+
+/** What a run asks claude for, as launchClaude takes it. */
+function launchFields(req: RunRequest, settings: object | undefined, systemPromptFile: string | undefined, pluginDirs: readonly string[], mcpConfigFile: string | undefined) {
+  return {
+    settings: settings ?? {},
+    mode: 'stream' as const,
+    model: req.model,
+    maxTurns: req.maxTurns,
+    maxBudgetUsd: req.maxBudgetUsd,
+    allowedTools: req.allowedTools,
+    ...(req.disallowedTools ? { disallowedTools: req.disallowedTools } : {}),
+    // WHY: not on a provider run: whether an open model's endpoint takes the effort parameter is unknown (#579).
+    ...(req.effort && EFFORT_FLAGS.has(req.effort) && !req.provider ? { effort: req.effort } : {}),
+    ...(systemPromptFile ? { appendSystemPromptFile: systemPromptFile } : {}),
+    pluginDirs,
+    ...(mcpConfigFile ? { mcpConfigFile } : {}),
+    ...(req.jsonSchema ? { jsonSchema: req.jsonSchema } : {}),
+    // claude --help: "-r, --resume [value]  Resume a conversation by session ID". runOnce refuses an id that isn't one.
+    ...(req.resume && SESSION_ID.test(req.resume) ? { resume: req.resume } : {}),
+  };
 }
 
 /**
@@ -757,9 +765,7 @@ export class CliRunner implements AgentRunner {
       }
     }
     const mcpArgs = mcpRun && mcpRun.servers.length ? mcpRunArgs(this.mcp!.instance, mcpRun, process.execPath, fileURLToPath(new URL('./cli.js', import.meta.url))) : null;
-    // The plugins root moved to root's empty directory: the agent user's own installs never load, and it can't install.
-    const pluginEnv: Record<string, string> = plugins?.pluginRoot ? { CLAUDE_CODE_PLUGIN_CACHE_DIR: plugins.pluginRoot } : {};
-    const runEnv = runAs ? { ...runAsEnv(env, runAs), ...endpoint, ...pluginEnv } : { ...env, ...pluginEnv };
+    const runEnv = runAs ? { ...runAsEnv(env, runAs), ...endpoint } : env;
     // The instance's guardrails, or no run: never an agent run without its hooks, or with a project file that
     // could loosen them.
     let guard: Settings | null = null;
@@ -794,7 +800,16 @@ export class CliRunner implements AgentRunner {
     if ('error' in ownDenials) return { reason: 'failed', detail: `${ownDenials.error}; not starting`, costUsd: 0, turns: 0, model: req.model };
     // Preflight, inside the login's start lock: an unreadable status that mentions a token refresh (or any other
     // transient error) is reported with its text, and run() waits it out instead of starting claude.
-    const status = req.provider ? { method: 'provider', text: '' } : claudeAuthStatus(runEnv, runAs, this.bin);
+    // The binary as an absolute path, never the checkout's own (R1185ae D3): the status check and the session start it.
+    let bin: string;
+    try {
+      bin = claudeBin(this.bin, runEnv, req.cwd, !!runAs);
+    } catch (e) {
+      return { reason: 'failed', detail: `${(e as Error).message}; not starting`, costUsd: 0, turns: 0, model: req.model };
+    }
+    // As another user, its `env -i` looks the bare name up on the launch's PATH (launchPath): the same for the check.
+    const agentPath = runAs ? launchPath(ownEnv(runEnv).get('PATH') ?? '', req.cwd) : undefined;
+    const status = req.provider ? { method: 'provider', text: '' } : claudeAuthStatus(runEnv, runAs, bin, agentPath);
     const auth = status.method;
     const want: readonly string[] = req.provider ? ['provider'] : RUNTIME_LOGINS[this.runtime];
     if (!want.includes(auth)) {
@@ -865,10 +880,16 @@ export class CliRunner implements AgentRunner {
     // The stuck-run guard reads the same stream; a stop verdict ends the run only in mode 'on'.
     const stuck = req.stuck && req.stuck.mode !== 'off' ? { mode: req.stuck.mode, detector: new StuckDetector(), stopped: null as StuckVerdict | null } : null;
     return new Promise((resolve) => {
-      const argv = cliArgs(mcpArgs ? { ...req, allowedTools: [...req.allowedTools, ...mcpArgs.allowedTools] } : req, settings, systemPromptFile, plugins?.dirs ?? [], mcpConfigFile);
-      const [file, args] = runAs ? asUser(runAs.user, this.bin, argv, runEnv) : [this.bin, argv];
+      const fields = launchFields(mcpArgs ? { ...req, allowedTools: [...req.allowedTools, ...mcpArgs.allowedTools] } : req, settings, systemPromptFile, plugins?.dirs ?? [], mcpConfigFile);
       // As another user, sudo gets only PATH; the agent's environment is passed explicitly through env -i.
-      const child = spawn(file, args, { cwd: req.cwd, env: runAs ? { PATH: ownEnv(env).get('PATH') ?? '' } : runEnv, stdio: ['pipe', 'pipe', 'pipe'], detached: spawnDetached });
+      const viaUser = runAs ? (bin: string, argv: string[], e: NodeJS.ProcessEnv) => {
+        const [file, args] = asUser(runAs.user, bin, argv, e);
+        return { file, args, env: { PATH: ownEnv(env).get('PATH') ?? '' } };
+      } : undefined;
+      // The plugins root moved to root's empty directory: the agent user's own installs never load, and it can't
+      // install. The launch sets it from this field alone (a caller's environment never names it).
+      // The project's own variables (tests.yaml env) reach claude by name only, each checked again at the launch.
+      const child = launchClaude({ bin, cwd: req.cwd, env: runEnv, projectEnv: Object.keys(safeProjectEnv(req.env)), detached: spawnDetached, ...fields, ...(plugins?.pluginRoot ? { pluginCacheDir: plugins.pluginRoot } : {}), ...(viaUser ? { asUser: viaUser } : {}) });
       child.stdin.on('error', () => {}); // a run that exits before reading its prompt reports that itself
       child.on('error', cleanup);
       // The prompt is the first user message; the input stays open for console messages until a turn

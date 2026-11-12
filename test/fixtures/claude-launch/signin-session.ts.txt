@@ -1,0 +1,3 @@
+// as src/claude-signin.ts
+import { spawn } from './os/child-process.js';
+spawn('claude', ['-p', 'start a session from the sign-in module']);

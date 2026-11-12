@@ -1,0 +1,6 @@
+// as src/new-module.ts
+import { exec, execSync, spawn, spawnSync } from 'node:child_process';
+declare const args: string[], lane: string, env: NodeJS.ProcessEnv, repo: string, exportPath: string;
+// R1185aq D1 Q2 claude rc (its alias)
+const RC = 'claude rc';
+spawn('bash', ['-lc', RC], { cwd: lane, env, detached: true });

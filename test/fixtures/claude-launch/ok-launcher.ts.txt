@@ -1,0 +1,3 @@
+// as src/claude-launch.ts
+import { spawn } from './os/child-process.js';
+export const go = (bin: string, args: string[]) => spawn('claude', args);

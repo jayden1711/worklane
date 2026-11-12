@@ -1,0 +1,5 @@
+// as src/new-module.ts
+// R1185ap D1 Q8: cmd set C=CLAUDE.CMD
+import { execSync, spawn } from 'node:child_process';
+const S = 'set C=CLAUDE.CMD && call %C% %*';
+spawn('cmd.exe', ['/d', '/s', '/c', S]);

@@ -1,0 +1,4 @@
+// as src/x.ts
+import { commandSpawnSync } from './os/git.js';
+const [file, args] = ['claude', ['-p', 'hi']] as const;
+commandSpawnSync(file, [...args]);

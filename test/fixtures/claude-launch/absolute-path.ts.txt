@@ -1,0 +1,3 @@
+// as src/x.ts
+import { execFileSync } from 'node:child_process';
+execFileSync('/opt/tools/bin/claude', ['-p']);
