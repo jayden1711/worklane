@@ -1224,9 +1224,9 @@ claude_guarded() {
       return 2
     fi
   done
-  # R1264o D1: the paths written in are absolute, hold no placeholder, and are what a second resolution finds now.
+  # R1264o D1: the paths written in are absolute and are what a second resolution finds now (an unreplaced
+  # placeholder is neither; a path with an @ in it, `job@2`, is a path like any other, R1264r D1).
   case "$cg_here:$cg_sh" in /*:/* ) ;; *) builtin echo "claude_guarded: its helper's path isn't absolute ($cg_sh); not running claude" >&2; return 2 ;; esac
-  case "$cg_here$cg_sh" in *@*) builtin echo "claude_guarded: its helper's path wasn't written in ($cg_sh); not running claude" >&2; return 2 ;; esac
   if [ "$cg_here" != "$(builtin cd -P -- "$cg_here" 2>/dev/null && builtin pwd)" ] || [ "$cg_sh" != "$(builtin cd -P -- "$cg_here/../lib" 2>/dev/null && builtin pwd)/claude-guarded.sh" ]; then
     builtin echo "claude_guarded: its helper's path ($cg_sh) isn't the one beside lib.sh; not running claude" >&2
     return 2

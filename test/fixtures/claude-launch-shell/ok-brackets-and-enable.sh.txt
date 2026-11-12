@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# R1264r D3: ordinary lines the definition and enable -n rules once refused: a bracket expression with parens, an enable with -n later.
+grep -c ' [()]' file
+tr -d ' [()]' < f
+sed -E 's/ [()]+//g' f
+awk '{ gsub(/ [()]/, "") } 1' f
+echo "to enable it: sudo visudo -n"
+systemctl enable wl-x.service --no-reload -n
+case "$c" in [()]) echo paren ;; esac
+echo "a stub for the docs: test() { :; }"

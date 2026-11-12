@@ -412,3 +412,17 @@ test('R1264o D1: a caller\'s declare -l or -u on the template\'s names changes n
     }
   }
 });
+
+test('R1264r D1: claude_guarded runs from a checkout whose path holds an @ (a Jenkins workspace, job@2): an @ is a path character, not a placeholder', { skip: !posix }, () => {
+  const t = mkdtempSync(join(tmpdir(), 'claude-guarded-'));
+  try {
+    const bin = join(t, 'bin');
+    recorder(bin, join(t, 'got.json'));
+    const lib = guardedTree(join(t, 'job@2', 'worklane'), `${bin}:/usr/bin:/bin`);
+    const r = spawnSync('bash', ['-c', `source "$1"; claude_guarded -- '{}' -p hi`, '_', lib], { encoding: 'utf8', env: { PATH: `${bin}:/usr/bin:/bin`, HOME: t } });
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual((JSON.parse(readFileSync(join(t, 'got.json'), 'utf8')) as { argv: string[] }).argv, ['-p', 'hi', '--settings', '{}', ...GUARDS]);
+  } finally {
+    rmSync(t, { recursive: true, force: true });
+  }
+});

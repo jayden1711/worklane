@@ -1531,7 +1531,8 @@ function installTree(sha, opt = OPT, buildDir = BUILD_DIR, owner = 'root:root') 
   execFileSync('chown', ['-R', owner, tmp]);
   execFileSync('chmod', ['-R', 'a+rX,go-w', tmp]);
   // R1264o D3: claude_guarded's test PATH marker points it at a test's stand-ins: an installed tree never holds one.
-  const marker = fs.readdirSync(tmp, { recursive: true }).map(String).find((f) => path.basename(f) === '.claude-guarded-test-path');
+  // find, not a recursive readdir: it follows no symlink out of the tree (R1264q D3), as engine.sh's find doesn't.
+  const marker = execFileSync('find', [tmp, '-name', '.claude-guarded-test-path', '-print', '-quit'], { encoding: 'utf8' }).trim().slice(tmp.length + 1);
   if (marker) {
     fs.rmSync(tmp, { recursive: true, force: true });
     throw new Error(`the built tree holds ${marker} (a test's marker for claude_guarded's PATH): not installing it`);

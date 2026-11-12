@@ -232,6 +232,20 @@ function globMatches(glob: string, name: string): boolean {
   }
 }
 
+/** `t` with every quoted character (inside '…', $'…' or "…") replaced by a space, the quotes kept: what a pattern meant for unquoted shell text reads. */
+function maskQuotes(t: string): string {
+  let out = '';
+  let q: Quote = null;
+  for (let k = 0; k < t.length; ) {
+    const r = quoteStep(t, k, q);
+    const piece = t.slice(k, k + r.n);
+    out += q && r.q ? piece.replace(/[^\n]/g, ' ') : piece;
+    q = r.q;
+    k += r.n;
+  }
+  return out;
+}
+
 /** A substitution's text that looks the binary up: its output is the binary. */
 const LOOKUP = /^\s*(?:command\s+-[vV]|which|type\s+-[Pp])\s+["']?(?:\S*\/)?claude["']?\s*$/;
 
@@ -454,12 +468,27 @@ export function shellLaunchProblems(path: string, text: string, pinned = new Map
   // A function bash runs for a command named by that exact path (`/usr/bin/env() {…}`, `function /usr/bin/sudo {…}`)
   // shadows it too: any name with a `/` is refused, and a listed name after any `…/` (R1264m D2, n D1).
   for (const { line, text: t } of lines) {
-    for (const m of t.matchAll(/(?:^|[\s;&|{(])(?:function\s+([A-Za-z0-9_./:+@[-]+)|([A-Za-z0-9_./:+@[-]+)\s*\(\s*\)|alias\s+([A-Za-z0-9_./:+@[-]+)=)/g)) {
+    // Read on the line with quoted text masked (a regex's ` [()]` in grep, tr or sed is no definition, R1264r D3), and
+    // a definition only with its body after the `()` (or the line's end); `alias name=` reads quoted text too.
+    const bare = maskQuotes(t);
+    for (const m of bare.matchAll(/(?:^|[\s;&|{(])(?:function\s+([A-Za-z0-9_./:+@[-]+)|([A-Za-z0-9_./:+@[-]+)\s*\(\s*\)\s*(?=[{(]|$)|alias\s+([A-Za-z0-9_./:+@[-]+)=)/g)) {
       const name = m[1] ?? m[2] ?? m[3]!;
       if (name.includes('/') || SHADOWED.has(name)) out.push(`${path}:${line}: defines ${name}, ${name.includes('/') ? 'a function named by a path (bash runs it for that path)' : 'a command a claude launch runs through'}: refused (R1264l D3, R1264m D2)`);
     }
     // R1264o D2, p D2: `enable -n` turns a builtin claude_guarded relies on (builtin, read, local, cd) into a PATH lookup.
-    if (/(?:^|[\s;&|{(])enable\b[^;&|]*\s-[a-zA-Z]*n/.test(t)) out.push(`${path}:${line}: disables a builtin (enable -n), which claude_guarded runs by name: refused (R1264o D2)`);
+    // Only `enable` as a command's first word, with -n among its own options (before its first non-option word).
+    const disables = commands(t).some((c) => {
+      const w = wordsOf(c).map((x) => x.text);
+      let k = 0;
+      while (k < w.length && /^[A-Za-z_]\w*\+?=/.test(w[k]!)) k++;
+      if (!/^(?:builtin\s+)?enable$/.test(w[k] ?? '') && !(w[k] === 'builtin' && w[k + 1] === 'enable')) return false;
+      for (const o of w.slice(w[k] === 'builtin' ? k + 2 : k + 1)) {
+        if (!/^-/.test(o) || o === '--') return false;
+        if (/^-[a-zA-Z]*n/.test(o)) return true;
+      }
+      return false;
+    });
+    if (disables) out.push(`${path}:${line}: disables a builtin (enable -n), which claude_guarded runs by name: refused (R1264o D2)`);
     // R1264o D3: claude_guarded's test PATH marker is the tests' alone: a script that names it can write one.
     // lib.sh reads it; the installer (engine.sh) names it only to refuse a tree that holds one.
     if (!['scripts/setup/lib.sh', 'scripts/setup/engine.sh'].includes(path) && /claude-guarded-test-path/.test(t)) out.push(`${path}:${line}: names claude_guarded's test PATH marker (.claude-guarded-test-path), which only the tests may write: refused (R1264o D3)`);
@@ -612,6 +641,12 @@ const ts = createRequire(join(repoRoot, 'package.json'))('typescript') as TsNode
  */
 export function jsLaunchProblems(path: string, text: string): string[] {
   const out: string[] = [];
+  // R1264o D3, q D1: the tests' marker for claude_guarded's PATH, named in JavaScript under scripts/ too; the updater
+  // (worklane-update.cjs) names it only to refuse a tree that holds one.
+  if (path !== 'scripts/machine/worklane-update.cjs')
+    text.split('\n').forEach((l, i) => {
+      if (/claude-guarded-test-path/.test(l)) out.push(`${path}:${i + 1}: names claude_guarded's test PATH marker (.claude-guarded-test-path), which only the tests may write: refused (R1264o D3)`);
+    });
   const sf = ts.createSourceFile(path, text, ts.ScriptTarget.Latest, true);
   const lineOf = (n: TsNode) => sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1;
   const lines = text.split('\n');
@@ -749,7 +784,7 @@ const WRAPPER_RESOLVE = [
   'builtin unset cg_def cg_here cg_helper',
 ].join('\n');
 /** The digest of lib.sh's claude_guarded template (R1264l D2). */
-const WRAPPER_DIGEST = '9e018dd80e28d738a978115d7fb919ae4a1c73d3dc5256e6739a5df7d0626c53';
+const WRAPPER_DIGEST = '1b761ff69d43c872cae958eaa9c1db35c1ad484d02c8e198abd51e1189c778ac';
 
 test('#1262 (R1264l D2, m D1): which file claude_guarded runs, and the wrapper itself, are held by digest: a widened copy at another path is refused', () => {
   const text = readFileSync(join(repoRoot, 'scripts', 'setup', 'lib.sh'), 'utf8');
@@ -800,6 +835,10 @@ test('#1262: every way a script can start claude other than through claude_guard
   // check-table: never-shrink
   const MUST_FAIL = [
     'after-and',
+    'js-test-path-marker',
+    'shadow-enable',
+    'shadow-read-alias',
+    'shadow-test',
     'enable-n',
     'shadow-bracket',
     'shadow-local',
@@ -918,7 +957,7 @@ test('#1262: every way a script can start claude other than through claude_guard
     'xargs',
   ];
   // check-table: never-shrink
-  const CONTROLS = ['ok-api-key-helper', 'ok-auth-status', 'ok-case-label', 'ok-comment', 'ok-continued-guards', 'ok-for-list', 'ok-grep-regex', 'ok-guarded', 'ok-guarded-array', 'ok-install-path', 'ok-js-auth-status', 'ok-js-guarded', 'ok-other-tool', 'ok-prose', 'ok-spike-pin', 'ok-version', 'ok-workflow-block-guarded'];
+  const CONTROLS = ['ok-api-key-helper', 'ok-auth-status', 'ok-case-label', 'ok-comment', 'ok-continued-guards', 'ok-for-list', 'ok-grep-regex', 'ok-guarded', 'ok-guarded-array', 'ok-install-path', 'ok-js-auth-status', 'ok-js-guarded', 'ok-other-tool', 'ok-prose', 'ok-spike-pin', 'ok-version', 'ok-workflow-block-guarded', 'ok-brackets-and-enable'];
   assert.deepEqual(all.map(nameOf).sort(), [...MUST_FAIL, ...CONTROLS].sort(), 'every fixture, by name');
   for (const f of all) {
     const n = nameOf(f);
