@@ -265,16 +265,38 @@ export abstract class Decisions extends Recovery {
     // note is void for good, for every decision (R1182ax AX1): with "1182 dword: b" a second id voids only while its
     // decision is open, so without this a comment voided for naming an open decision answered once that one closed.
     const keyOf = (c: (typeof replies)[number]) => `#${n}: reply ${c.id ?? createHash('sha256').update(`${c.author}\n${c.at ?? ''}\n${c.body}`).digest('hex').slice(0, 12)}`;
+    // Each note ends with the hash of the body it was written for, so an edit made after it is seen (R1182az AZ1): an
+    // edited comment is not read (it stays void), and one more note says so, once per comment.
+    const bodyHash = (c: (typeof replies)[number]) => createHash('sha256').update(c.body).digest('hex').slice(0, 8);
     const said = new Set<string>();
+    const noted = new Map<string, string>();
+    const toldEdited = new Set<string>();
     for (const e of this.d.log.read(0, ['coordinator.error'])) {
-      const m = /^(#\d+: reply \S+):/.exec((e.payload as { message: string }).message);
-      if (m) said.add(m[1]!);
+      const message = (e.payload as { message: string }).message;
+      const m = /^(#\d+: reply \S+):/.exec(message);
+      if (m) {
+        said.add(m[1]!);
+        const h = /\[body ([0-9a-f]{8})\]$/.exec(message);
+        if (h && !noted.has(m[1]!)) noted.set(m[1]!, h[1]!);
+      }
+      const ed = /^(#\d+: reply \S+) edited:/.exec(message);
+      if (ed) toldEdited.add(ed[1]!);
     }
     // The allowlist (#1182): a reply is the comment's one line, `/<cli> <option> <id> [note]`, in letters, digits, spaces
     // and `. , : ; -` (src/decision-reply.ts). A writer's comment that names the command or an open decision here but
     // isn't one says why, once; discussion that names neither stays quiet.
     const live = new Set(open.map((x) => x.toLowerCase()));
     for (const { c, r } of parsed) {
+      const key = keyOf(c);
+      if (said.has(key)) {
+        // Already void (it has a note). Edited since: not read, whatever it says now; told once.
+        const was = noted.get(key);
+        if (was && was !== bodyHash(c) && !toldEdited.has(key)) {
+          toldEdited.add(key);
+          this.emit('coordinator.error', { instance: this.d.instance, where: 'decision reply', kind: 'reply_edited', message: `${key} edited: by ${c.author}. Edited comments aren't read. Post the one-line reply as a new comment.` });
+        }
+        continue;
+      }
       const cmd = r.command;
       const unknown = cmd && !byId.has(cmd.id) ? cmd : null;
       const badOption = cmd && byId.has(cmd.id) && !byId.get(cmd.id)!.options.includes(cmd.option) ? cmd : null;
@@ -282,8 +304,6 @@ export abstract class Decisions extends Recovery {
       const second = secondLook(r, live);
       const kind = r.refused ? (looks ? r.refused.kind : null) : unknown ? 'reply_unknown_id' : badOption ? 'reply_unknown_option' : second;
       if (!kind) continue;
-      const key = keyOf(c);
-      if (said.has(key)) continue;
       said.add(key);
       const why = {
         reply_not_plain: `has a character a reply can't hold (${r.refused?.code} on line ${r.refused?.line}; a reply holds only letters, digits, spaces and . , : ; - after the command, so no quote, apostrophe, link, code, HTML, emoji or other symbol)`,
@@ -295,7 +315,7 @@ export abstract class Decisions extends Recovery {
         reply_unknown_option: `answers ${badOption?.id} with \`${badOption?.option}\`, which isn't one of its options (${badOption ? byId.get(badOption.id)!.options.join(', ') : ''})`,
       }[kind];
       const ids = open.length ? `open here: ${open.slice(0, 10).join(', ')}${open.length > 10 ? ` and ${open.length - 10} more` : ''}` : 'none is open here';
-      this.emit('coordinator.error', { instance: this.d.instance, where: 'decision reply', kind, message: `${key}: by ${c.author} ${why}, so it answers nothing; a reply is a comment of one line, \`/${BRAND.cli} <option> <id>\` and an optional note in letters, digits, spaces and . , : ; -; ${ids}` });
+      this.emit('coordinator.error', { instance: this.d.instance, where: 'decision reply', kind, message: `${key}: by ${c.author} ${why}, so it answers nothing; a reply is a comment of one line, \`/${BRAND.cli} <option> <id>\` and an optional note in letters, digits, spaces and . , : ; -; ${ids}; an edit to this comment isn't read [body ${bodyHash(c)}]` });
     }
     const id = q.id.toLowerCase();
     const picks = parsed

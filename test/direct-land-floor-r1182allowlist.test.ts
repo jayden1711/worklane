@@ -212,3 +212,41 @@ test('AX1 controls: answering A alone answers only A; a later plain reply to B a
   assert.deepEqual(answeredIds(f).sort(), [a.id, b.id].sort());
   assert.equal(answered(f).find((x) => x.id === b.id)?.answer, 'approve');
 });
+
+// ======== R1182az AZ1: a voided comment that is edited isn't read, and one note says so ========
+const allKinds = (f: Fixture) => f.log.read(0, ['coordinator.error']).map((e) => (e.payload as { kind: string }).kind).filter((k) => k.startsWith('reply_'));
+test('AZ1: a voided reply edited into a correct one-line reply answers nothing, and one note says edits are not read', async () => {
+  const f = fixture();
+  const q = await QL3(f);
+  const c = f.backlog.humanComment(1, OWNER, `/worklane approve ${q.id} looks good!`);
+  await handle(f);
+  assert.deepEqual(allKinds(f), ['reply_not_plain']);
+  assert.match(notes(f)[0]!.message, /an edit to this comment isn't read \[body [0-9a-f]{8}\]$/);
+  f.backlog.editComment(1, c, `/worklane approve ${q.id} looks good`);
+  await handle(f);
+  await handle(f);
+  assert.deepEqual([answered(f).length, queued(f)], [0, 0], 'the edit is not read: fail closed');
+  assert.deepEqual(allKinds(f), ['reply_not_plain', 'reply_edited']);
+  const edited = f.log.read(0, ['coordinator.error']).map((e) => e.payload as { kind: string; message: string }).find((e) => e.kind === 'reply_edited')!;
+  assert.match(edited.message, /Edited comments aren't read\. Post the one-line reply as a new comment\.$/);
+  f.backlog.editComment(1, c, `/worklane approve ${q.id} looks good, really`);
+  await handle(f);
+  assert.deepEqual(allKinds(f), ['reply_not_plain', 'reply_edited'], 'once per comment, however often it is edited');
+});
+test('AZ1 controls: the corrected line as a new comment answers; an edit before the first read answers; an unedited void gets no edit note', async () => {
+  const f = fixture();
+  const q = await QL3(f);
+  f.backlog.humanComment(1, OWNER, `/worklane approve ${q.id} looks good!`);
+  await handle(f);
+  await handle(f);
+  assert.deepEqual(allKinds(f), ['reply_not_plain'], 'no edit, no edit note');
+  f.backlog.humanComment(1, OWNER, `/worklane approve ${q.id} looks good`);
+  await handle(f);
+  assert.deepEqual([answered(f)[0]?.answer, queued(f)], ['approve', 1]);
+  const g = fixture();
+  const p = await QL3(g);
+  const c = g.backlog.humanComment(1, OWNER, `/worklane approve ${p.id} looks good!`);
+  g.backlog.editComment(1, c, `/worklane approve ${p.id} looks good`);
+  await handle(g);
+  assert.deepEqual([answered(g)[0]?.answer, allKinds(g)], ['approve', []], 'edited before any read: read as it is');
+});
