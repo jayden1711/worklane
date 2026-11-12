@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# R1264u D1 (h2): a quoted <<'EOF' heredoc with an apostrophe, then local().
+cat <<'EOF'
+It's a heredoc.
+EOF
+local() { builtin local "$@"; }

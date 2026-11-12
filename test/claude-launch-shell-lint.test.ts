@@ -233,22 +233,74 @@ function globMatches(glob: string, name: string): boolean {
 }
 
 
-/** A whole shell text with quoted text and comments masked by spaces, quote state carried across lines (newlines kept). */
+/**
+ * A whole shell text with quoted text, comments and heredoc bodies masked by spaces, newlines kept (R1264t D2, u D1).
+ * A stack of contexts, as bash reads them: `$(…)` and `` `…` `` inside "…" are unquoted again, so a quote inside one
+ * is its own; a `#` at a word's start (after a blank or one of ;&|()) opens a comment; a heredoc's body is masked to
+ * its delimiter, so a quote in usage text carries no state past it.
+ */
 function maskFile(text: string): string {
+  type Ctx = { q: Quote | 'sub' | 'bq'; depth: number };
+  const st: Ctx[] = [{ q: null, depth: 0 }];
+  const top = () => st[st.length - 1]!;
+  const plain = () => top().q === null || top().q === 'sub' || top().q === 'bq';
+  const docs: { word: string; strip: boolean }[] = [];
   let out = '';
-  let q: Quote = null;
   for (let k = 0; k < text.length; ) {
-    if (!q && text[k] === '#' && (k === 0 || /\s/.test(text[k - 1]!))) {
-      const end = text.indexOf('\n', k) < 0 ? text.length : text.indexOf('\n', k);
-      out += ' '.repeat(end - k);
-      k = end;
+    const c = text[k]!;
+    const t = top();
+    if (c === '\n' && docs.length && plain()) {
+      out += '\n';
+      k++;
+      // Heredoc bodies, one after another, masked to each delimiter line.
+      while (docs.length) {
+        const d = docs.shift()!;
+        for (;;) {
+          if (k >= text.length) break;
+          const e = text.indexOf('\n', k) < 0 ? text.length : text.indexOf('\n', k);
+          const l = text.slice(k, e);
+          out += ' '.repeat(l.length) + (e < text.length ? '\n' : '');
+          k = e + 1;
+          if ((d.strip ? l.replace(/^\t+/, '') : l) === d.word) break;
+        }
+      }
       continue;
     }
-    const r = quoteStep(text, k, q);
-    const piece = text.slice(k, k + r.n);
-    out += q && r.q ? piece.replace(/[^\n]/g, ' ') : piece;
-    q = r.q;
-    k += r.n;
+    if (plain()) {
+      if (c === '#' && (k === 0 || /[\s;&|()]/.test(text[k - 1]!))) {
+        const e = text.indexOf('\n', k) < 0 ? text.length : text.indexOf('\n', k);
+        out += ' '.repeat(e - k);
+        k = e;
+        continue;
+      }
+      const h = /^<<(-?)\s*(['"]?)([A-Za-z_][\w.-]*)\2/.exec(text.slice(k, k + 80));
+      if (h && text[k + 2] !== '<') {
+        docs.push({ word: h[3]!, strip: h[1] === '-' });
+        out += h[0];
+        k += h[0].length;
+        continue;
+      }
+      if (c === '\\') { out += text.slice(k, k + 2); k += 2; continue; }
+      if (c === '$' && text[k + 1] === '(') { st.push({ q: 'sub', depth: 0 }); out += '$('; k += 2; continue; }
+      if (c === '(' ) { t.depth++; out += c; k++; continue; }
+      if (c === ')') { if (t.q === 'sub' && t.depth === 0) st.pop(); else t.depth = Math.max(0, t.depth - 1); out += c; k++; continue; }
+      if (c === '`') { if (t.q === 'bq') st.pop(); else st.push({ q: 'bq', depth: 0 }); out += c; k++; continue; }
+      if (c === '$' && text[k + 1] === "'") { st.push({ q: "$'", depth: 0 }); out += "$'"; k += 2; continue; }
+      if (c === "'" || c === '"') { st.push({ q: c, depth: 0 }); out += c; k++; continue; }
+      out += c;
+      k++;
+      continue;
+    }
+    // Inside a quote.
+    if (t.q === "'") { if (c === "'") { st.pop(); out += c; } else out += c === '\n' ? '\n' : ' '; k++; continue; }
+    if (c === '\\') { out += text.slice(k, k + 2).replace(/[^\n]/g, ' '); k += 2; continue; }
+    if (t.q === "$'") { if (c === "'") { st.pop(); out += c; } else out += c === '\n' ? '\n' : ' '; k++; continue; }
+    // "…": `$(` and `` ` `` open an unquoted context.
+    if (c === '"') { st.pop(); out += c; k++; continue; }
+    if (c === '$' && text[k + 1] === '(') { st.push({ q: 'sub', depth: 0 }); out += '  '; k += 2; continue; }
+    if (c === '`') { st.push({ q: 'bq', depth: 0 }); out += ' '; k++; continue; }
+    out += c === '\n' ? '\n' : ' ';
+    k++;
   }
   return out;
 }
@@ -481,7 +533,8 @@ export function shellLaunchProblems(path: string, text: string, pinned = new Map
     // Read with quoted text masked (a regex's ` [()]` in grep, tr or sed is no definition, R1264r D3), and a definition
     // only with a body after the `()`: any compound command (`{`, `(`, `[[`, if, for, while, until, case, select) or
     // the line's end (R1264s D1); `alias name=` reads quoted text too.
-    const bare = masked.slice(line - 1, end).join(' ');
+    // A line continued with `\` reads as one (`sudo() \⏎{`, `function \⏎ sudo`, R1264v D1).
+    const bare = masked.slice(line - 1, end).map((l) => l.replace(/\\\s*$/, ' ')).join(' ');
     for (const m of bare.matchAll(/(?:^|[\s;&|{(])(?:function\s+([A-Za-z0-9_./:+@[-]+)|([A-Za-z0-9_./:+@[-]+)\s*\(\s*\)\s*(?=[{(]|\[\[|(?:if|for|while|until|case|select)\b|$)|alias\s+([A-Za-z0-9_./:+@[-]+)=)/g)) {
       const name = m[1] ?? m[2] ?? m[3]!;
       if (name.includes('/') || SHADOWED.has(name)) out.push(`${path}:${line}: defines ${name}, ${name.includes('/') ? 'a function named by a path (bash runs it for that path)' : 'a command a claude launch runs through'}: refused (R1264l D3, R1264m D2)`);
@@ -788,15 +841,16 @@ const WRAPPER_RESOLVE = [
   "# A copy of scripts/setup alone (a CI probe, a test's tree) has no helper: claude_guarded refuses there, and lib.sh still loads.",
   'cg_helper="$(builtin cd -P -- "$cg_here/../lib" 2>/dev/null && builtin pwd)/claude-guarded.sh" || cg_helper=""',
   "# The paths go into the function's text as quoted values (printf %q), never as code: a folder name with a space, a",
-  "# quote, `;` or `$(…)` in it is only a name (R1264t D1). Spliced by prefix and suffix, not ${//}, whose replacement",
-  "# reads `&` (bash 5.2) as the matched text.",
+  "# quote, `;` or `$(…)` in it is only a name (R1264t D1). The template is split once, at both placeholders, before",
+  "# either value goes in, so a value is never read again for a placeholder (a folder named like one, R1264v D2); and",
+  "# not by ${//}, whose replacement reads `&` (bash 5.2) as the matched text.",
   "builtin printf -v cg_here '%q' \"$cg_here\"",
   "builtin printf -v cg_helper '%q' \"$cg_helper\"",
-  'cg_def="${cg_def%%@HERE@*}$cg_here${cg_def#*@HERE@}"',
-  'cg_def="${cg_def%%@HELPER@*}$cg_helper${cg_def#*@HELPER@}"',
+  'cg_a="${cg_def%%@HERE@*}" cg_b="${cg_def#*@HERE@}"',
+  'cg_def="$cg_a$cg_here${cg_b%%@HELPER@*}$cg_helper${cg_b#*@HELPER@}"',
   'builtin eval "$cg_def"',
   'builtin readonly -f claude_guarded',
-  'builtin unset cg_def cg_here cg_helper',
+  'builtin unset cg_def cg_here cg_helper cg_a cg_b',
 ].join('\n');
 /** The digest of lib.sh's claude_guarded template (R1264l D2). */
 const WRAPPER_DIGEST = '1b761ff69d43c872cae958eaa9c1db35c1ad484d02c8e198abd51e1189c778ac';
@@ -808,7 +862,7 @@ test('#1262 (R1264l D2, m D1): which file claude_guarded runs, and the wrapper i
   assert.equal(scopeDigest('scripts/setup/lib.sh', text, at), WRAPPER_DIGEST, 'the wrapper is the one this test holds: a changed wrapper is a change to this test');
   // Where its two paths come from: resolved as lib.sh is sourced, written into the function's text, the function read-only.
   assert.ok(text.includes(WRAPPER_RESOLVE), 'lib.sh resolves its own folder and the helper as it is sourced, writes them into claude_guarded, and makes it read-only');
-  assert.equal(text.match(/@HELPER@/g)?.length, 3, 'the helper path goes into the template in one place (its placeholder, and the splice around it)');
+  assert.equal(text.match(/@HELPER@/g)?.length, 3, 'the helper path goes into the template in one place (its placeholder, and the one split around it)');
   // A copy of the helper, widened and named otherwise, with the template pointed at it: the digest or the resolution moves.
   const widened = text.replace('cg_helper="$(builtin cd -P -- "$cg_here/../lib" 2>/dev/null && builtin pwd)/claude-guarded.sh"', 'cg_helper="$(builtin cd -P -- "$cg_here/../lib" 2>/dev/null && builtin pwd)/claude-guarded.inc"');
   assert.notEqual(widened, text);
@@ -850,6 +904,14 @@ test('#1262: every way a script can start claude other than through claude_guard
   // check-table: never-shrink
   const MUST_FAIL = [
     'after-and',
+    'comment-after-case-then-test',
+    'comment-after-semicolon-then-enable',
+    'continued-definition',
+    'heredoc-apostrophe-then-sudo',
+    'heredoc-dash-then-alias',
+    'heredoc-lone-dquote-then-read',
+    'heredoc-quoted-then-local',
+    'subst-in-dquotes-then-read',
     'enable-n-after-bang-time',
     'enable-n-after-command',
     'enable-n-after-else',

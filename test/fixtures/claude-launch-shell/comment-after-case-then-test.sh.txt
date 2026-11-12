@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# R1264u D1 (c3): a comment after ;; with an apostrophe, then test().
+case $x in
+  a) :;;# isn't
+esac
+test() { :; }

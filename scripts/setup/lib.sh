@@ -1207,7 +1207,7 @@ agent_key_file_ok() { run_as_bounded "$1" "$AGENT_CHECK_SECONDS" /dev/null "$AGE
 # This text is held by digest in the shell lint's test (R1264l D2).
 #   claude_guarded [--as <user>]... [--timeout <seconds>] [--env <NAME>=<value>]... -- <settings> -p|--print [<word>...]
 # R1264o D1: no attribute a caller gave these names (declare -l/-u lowercasing the template's placeholders) survives.
-builtin unset -v cg_def cg_here cg_helper
+builtin unset -v cg_def cg_here cg_helper cg_a cg_b
 IFS= read -r -d '' cg_def <<'CLAUDE_GUARDED_DEF' || true
 claude_guarded() {
   local cg_here=@HERE@ cg_sh=@HELPER@ cg_f cg_s cg_mode cg_m cg_path=/usr/local/bin:/usr/bin:/bin
@@ -1240,15 +1240,16 @@ cg_here="$(builtin cd -P -- "$cg_here" && builtin pwd)" || cg_here=""
 # A copy of scripts/setup alone (a CI probe, a test's tree) has no helper: claude_guarded refuses there, and lib.sh still loads.
 cg_helper="$(builtin cd -P -- "$cg_here/../lib" 2>/dev/null && builtin pwd)/claude-guarded.sh" || cg_helper=""
 # The paths go into the function's text as quoted values (printf %q), never as code: a folder name with a space, a
-# quote, `;` or `$(…)` in it is only a name (R1264t D1). Spliced by prefix and suffix, not ${//}, whose replacement
-# reads `&` (bash 5.2) as the matched text.
+# quote, `;` or `$(…)` in it is only a name (R1264t D1). The template is split once, at both placeholders, before
+# either value goes in, so a value is never read again for a placeholder (a folder named like one, R1264v D2); and
+# not by ${//}, whose replacement reads `&` (bash 5.2) as the matched text.
 builtin printf -v cg_here '%q' "$cg_here"
 builtin printf -v cg_helper '%q' "$cg_helper"
-cg_def="${cg_def%%@HERE@*}$cg_here${cg_def#*@HERE@}"
-cg_def="${cg_def%%@HELPER@*}$cg_helper${cg_def#*@HELPER@}"
+cg_a="${cg_def%%@HERE@*}" cg_b="${cg_def#*@HERE@}"
+cg_def="$cg_a$cg_here${cg_b%%@HELPER@*}$cg_helper${cg_b#*@HELPER@}"
 builtin eval "$cg_def"
 builtin readonly -f claude_guarded
-builtin unset cg_def cg_here cg_helper
+builtin unset cg_def cg_here cg_helper cg_a cg_b
 # The key file a user's Claude settings name as apiKeyHelper (`cat -- <path>`), read as that user under a timeout, as
 # the proof itself runs (the file opened without following a link or blocking, a regular file of at most 64 KiB);
 # nothing when they name none, or anything but a plain absolute path in that form.

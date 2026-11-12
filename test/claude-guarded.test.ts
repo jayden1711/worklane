@@ -428,7 +428,8 @@ test('R1264r D1: claude_guarded runs from a checkout whose path holds an @ (a Je
 });
 
 test('R1264t D1: a checkout folder named with a space, $(…), ;, a quote or & is only a name: claude_guarded runs from it, and nothing in the name runs', { skip: !posix }, () => {
-  for (const name of ['with space', 'dollar$(touch PWNED)', 'semi;colon', "quo'te", 'amp&er']) {
+  // A value is never read again for a placeholder (R1264v D2): folders named @HELPER@, @HERE@, or holding one before code.
+  for (const name of ['with space', 'dollar$(touch PWNED)', 'semi;colon', "quo'te", 'amp&er', '@HELPER@', '@HERE@', 'x@HELPER@$(touch PWNED)', 'x\n@HELPER@;touch PWNED']) {
     const t = mkdtempSync(join(tmpdir(), 'claude-guarded-'));
     try {
       const bin = join(t, 'bin');
