@@ -153,6 +153,12 @@ test("the copy lock refuses a copy turned off by lines around it, by escapes, a 
     assert.notDeepEqual(copyBindingProblems(changelog.script, around(`// note${ch}/*\n`, `\n// note${ch}*/`), copyNamesOf(cl, changelog)), [], `AJ1 a comment behind ${name}`);
     assert.notDeepEqual(copyBindingProblems(changelog.script, around(`// note${ch}{\n`, `\n// note${ch}}`), copyNamesOf(cl, changelog)), [], `AJ1 braces behind ${name}`);
   }
+  // R1184am D1: an escaped quote in a string or an escaped line feed in a comment; the parser reads them as JS does.
+  for (const [label, pre, post] of [
+    ['AM1 braces behind an escaped quote', "const OPEN = 'note\\u0027'; { const CLOSE = '\\u0027note';\n", '\n}'],
+    ['AM1 a comment behind an escaped quote', "const OPEN = 'note\\u0027'; /* const CLOSE = '\\u0027note';\n", '\n*/'],
+    ['AM2 braces behind an escaped line feed', '// Line breaks in a subject are \\u000a; the block below is generated.\n{\n', '\n}'],
+  ] as const) assert.notDeepEqual(copyBindingProblems(changelog.script, around(pre, post), copyNamesOf(cl, changelog)), [], label);
   // R1184ak D2: each rule with the block intact, so each is pinned on its own.
   for (const [label, line] of [
     ['a global key set', "globalThis.UNRELATED = 1;"],

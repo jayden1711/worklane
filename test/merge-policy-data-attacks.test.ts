@@ -403,6 +403,10 @@ test('R1184y Y6a: a line of a generated copy changed without its data waits; cha
     ['AJ1 braces hidden behind a U+2028 in a // line', around('// note\u2028{\n', '// note\u2028}\n')],
     ['AJ1 a comment hidden behind a U+2029 in a // line', around('// note\u2029/*\n', '// note\u2029*/\n')],
     ['AJ1 braces hidden behind a U+2029 in a // line', around('// note\u2029{\n', '// note\u2029}\n')],
+    // R1184am D1: an escaped quote in a string, or an escaped line feed in a comment, read as written.
+    ['AM1 braces behind an escaped quote', around("const OPEN = 'note\\u0027'; { const CLOSE = '\\u0027note';\n", '}\n')],
+    ['AM1 a comment behind an escaped quote', around("const OPEN = 'note\\u0027'; /* const CLOSE = '\\u0027note';\n", '*/\n')],
+    ['AM2 braces behind an escaped line feed in a comment', around('// Line breaks in a subject are \\u000a; the block below is generated.\n{\n', '}\n')],
   ];
   for (const [label, files] of held) assert.ok(reasons(files, base).length > 0, label);
   // Control: an unrelated line after the block, naming no table and no global, passes.
