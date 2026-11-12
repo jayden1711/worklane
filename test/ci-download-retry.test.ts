@@ -141,6 +141,17 @@ const logicalLines = (run: string): string[] => {
         if (ch === "'") q = null;
         continue;
       }
+      // R1228bf D1: `$'…'` (ANSI-C quoting): a backslash escapes the next character there, `\'` included.
+      if (q === "$'") {
+        if (ch === '\\') i++;
+        else if (ch === "'") q = null;
+        continue;
+      }
+      if (!q && ch === '$' && line[i + 1] === "'") {
+        q = "$'";
+        i++;
+        continue;
+      }
       if (ch === '\\') {
         if (i === line.length - 1) escapesNewline = true;
         i++;
@@ -155,6 +166,9 @@ const logicalLines = (run: string): string[] => {
       // no blank is read as text (stated in the Limits).
       else if (ch === '#' && /(^|[\s;&|(])$/.test(i === 0 ? cur : line.slice(0, i))) comment = true;
     }
+    // R1228bf D1: in a single quote the lint reads (`$'…'`, or an apostrophe in a double-quoted `$(…)`), an odd run of
+    // backslashes at the end still joins, carrying the quote: bash would continue there, or the quote spans the lines.
+    if (!comment && (q === "'" || q === "$'") && (line.match(/\\+$/)?.[0].length ?? 0) % 2 === 1) escapesNewline = true;
     // A backslash that escapes the newline continues the line, unless a comment ended it first.
     if (!comment && escapesNewline && n < lines.length - 1) cur += line.slice(0, -1);
     else {
@@ -1816,6 +1830,28 @@ test('R1228be D4, a stated cost: a curl whose quoted argument spans lines hides 
   assert.deepEqual(all(before), [], 'the workaround: --retry before the multi-line argument is read');
 });
 
+test('R1228bf D1-D3, R1228bg D1-D4: `$\'…\'` and an apostrophe in a quoted `$(…)` keep a continuation; the stated limits and costs, pinned', () => {
+  const all = (text: string) => fileDownloadProblems('scripts/ci/zz-get.sh', text).problems;
+  const unread = (text: string) => fileDownloadProblems('scripts/ci/zz-a.sh', text).problems.filter((p) => /a shell file the download lint doesn't read/.test(p));
+  // bf D1: the continuation is joined, so the --retry on the next line is read: kept.
+  assert.deepEqual(all("curl -fsSL -o t.tgz -H $'X-Note: don\\'t cache' \\\n  --retry 5 --retry-all-errors https://example.com/t.tgz\n"), [], "kept: $'…\\'…'");
+  assert.deepEqual(all('curl -fsSL -o t.tgz -H "X-By: $(git log -1 --format="%an\'s")" \\\n  --retry 5 --retry-all-errors https://example.com/t.tgz\n'), [], 'kept: an apostrophe in a quoted $(…)');
+  // bf D3: a `#` opening the line a `$'…'` line joins is part of that word, not a comment: the bash after it is read.
+  assert.ok(unread("echo $'it\\'s' x\\\n#; bash .claude/hooks/get.sh\n").length > 0, 'refused: the joined line is read');
+  // bf D2: a real comment after `$'…\\'…'` is a comment (ANSI-C quoting read): it ends the line, so the next is read.
+  assert.ok(unread("echo $'it\\'s' # note \\\nbash .claude/hooks/get.sh\n").length > 0, "refused: the line after a comment that follows $'…\\'…'");
+  // R1228bd G4e, closed by reading `$'…'`: a comment after `printf $'it\\'s\\n'` is one, so the `source` opening the next
+  // line is read at its start.
+  assert.ok(unread("printf $'it\\'s\\n' # note \\\nsource .claude/hooks/get.sh\n").length > 0, "refused: a source after a comment that follows $'…'");
+  // Stated limits: bg D1 (a misread quote carried through a join hides the line after a comment there), bg D2 (a cd
+  // glued to a comment's last word), bg D4 (an -o after a multi-line quote).
+  assert.deepEqual(unread('git commit -qm "Release notes\nfollow" \\\n  --allow-empty # C:\\tools\\\nbash .claude/hooks/get.sh\n'), [], 'stated: bg D1');
+  assert.deepEqual(unread('echo "Release notes\nfollow" # Windows: C:\\tools\\\ncd .claude/hooks\nbash get.sh\n'), [], 'stated: bg D2');
+  assert.deepEqual(all("curl -fsS -d '{\n\"a\":1\n}' -o out.json https://api.example.com/x\n"), [], 'stated: bg D4');
+  // A stated cost, bg D3: a curl named in a comment the lint reads as text is refused.
+  assert.ok(all('echo "Release notes\nfollow" # old: curl -fsSL -o t.tgz https://example.com/t.tgz\n').some((p) => /retry/.test(p)), 'stated cost: bg D3');
+});
+
 // Limits (owner decision (c): stated, not closed; the helper's digest check holds for each download it handles):
 // - What the lint reads (R1228ai D1, closing R1228i L9-L11; R1228aj, R1228ak): workflow and action YAML, a shell
 //   script anywhere, every file under scripts/ whatever its name (a pinned URL, prose in a .md aside; the retry rule in
@@ -1855,17 +1891,23 @@ test('R1228be D4, a stated cost: a curl whose quoted argument spans lines hides 
 //   backslash, `"fix` / `#12"`; after an escaped blank, `a\ #1`; in an unquoted `${x// #/}`) hides the rest of its
 //   line, and the whole line when it opens with `#` (an unread .sh, a cd, a curl with no retry, a pinned URL fetched
 //   without the helper), and keeps a backslash there from joining the next line; a comment the lint takes for text (on
-//   the closing line of a quote that opened on an earlier line with no backslash, after `$'…\'…'`, or right after a
-//   `)` with no blank: a subshell's `(…)#x`, a case pattern's `get)#x`; R1228bc D4: `$(pwd)#x` is one word) joins the
-//   next line onto it when it ends in a backslash, so a `bash`, `source` or `.` opening that line isn't read where only
-//   a line's start is (R1228bd G1-G4, H1-H2; R1228be E2g); a GitHub expression
+//   the closing line of a quote that opened on an earlier line with no backslash, or on a line a backslash joins to that
+//   closing line, since the misread quote is carried through the join (R1228bg D1); after an apostrophe inside a
+//   double-quoted `$(…)` (`"$(… "it's")"`, R1228bf); or right after a `)` with no blank: a subshell's `(…)#x`, a case
+//   pattern's `get)#x`; R1228bc D4: `$(pwd)#x` is one word) is read as commands, so a curl with no retry named in it is
+//   refused (reword the comment: R1228bg D3), and it joins the next line onto it when it ends in a backslash, the next
+//   line's first word glued to the comment's last (`C:\tools\` and `curl` read `C:\toolscurl`), so a `bash`,
+//   `source`, `.`, cd, curl or wget opening that line isn't seen (R1228bd G1-G4, H1-H2; R1228be E2g; R1228bg D2); a
+//   GitHub expression
 //   other than `${{ github.workspace }}` before a path (`${{ env.ROOT }}/x.sh`: a variable, so outside a command that
 //   starts with bash, a stated limit); and a shell keyword or builtin running a file we don't list (`eval`, `exec`
 //   after a redirection). This lint is a hint against accidents (R1228aq: round ~20 of new shell shapes); the
 //   helper's digest check is the guarantee.
 // - A curl whose quoted argument spans lines (a JSON body, `-d '{` … `}'`) is read up to the line where the quote
-//   opens, so a `--retry` after the quote isn't seen and the curl is refused as a download with no retry (R1228be D4;
-//   owner, 2026-11-12: stated, not closed). Put `--retry` before the multi-line argument.
+//   opens, so a `--retry` after the quote isn't seen, and a curl whose output is named before the quote is refused as a
+//   download with no retry (R1228be D4; owner, 2026-11-12: stated, not closed); and an `-o` after the quote isn't seen
+//   either, so a curl that names its output only there passes with no retry (R1228bg D4). Put `--retry` and `-o`
+//   before the multi-line argument.
 // - A download that never names a URL the lint knows (DOWNLOAD), through a tool it doesn't know (python, node, perl, a
 //   compiled binary, an action not in USES_ALLOWED once allowed: a node or Python file's own download), or built from
 //   pieces at run time, isn't seen.
