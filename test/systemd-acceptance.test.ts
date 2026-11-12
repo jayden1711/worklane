@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -735,6 +735,29 @@ const FIXTURE_NAMES = [
   'r1169z-z8-function-decl-helper-reassigned',
   'r1169z-z9-holder-property-assigned',
 ];
+
+test('R1169ax D1: a case repeated in its table, or in two, is refused: JSON.parse would keep only the last, with no line removed for the hold to see', async () => {
+  const { loadCases } = (await import(pathToFileURL(join(repoRoot, 'scripts', 'ci', 'fixture-tables.mjs')).href)) as { loadCases: (d: string) => Map<string, unknown> };
+  const d = mkdtempSync(join(tmpdir(), 'fixture-tables-'));
+  try {
+    writeFileSync(join(d, 'bases.json'), '{ "bases": { "base1": ["x"] } }\n');
+    const entry = (exit: number) => `{ "exit": ${exit}, "reason": "r", "files": { "x.test.ts.txt": ["a"] } }`;
+    writeFileSync(join(d, 'r1169zz.json'), `{ "cases": { "r1169zz-a": ${entry(2)}, "r1169zz-b": ${entry(1)} } }\n`);
+    assert.equal(loadCases(d).size, 2, 'the control loads');
+    // The same name twice in one table: the copy, edited, would replace the original as a pure addition.
+    writeFileSync(join(d, 'r1169zz.json'), `{ "cases": { "r1169zz-a": ${entry(2)}, "r1169zz-a": ${entry(0)} } }\n`);
+    assert.throws(() => loadCases(d), /r1169zz\.json: a key repeated in one object \(JSON keeps only the last\): cases: r1169zz-a/);
+    // A file named twice in one case.
+    writeFileSync(join(d, 'r1169zz.json'), '{ "cases": { "r1169zz-a": { "exit": 2, "reason": "r", "files": { "x.test.ts.txt": ["a"], "x.test.ts.txt": ["b"] } } } }\n');
+    assert.throws(() => loadCases(d), /cases\.r1169zz-a\.files: x\.test\.ts\.txt/);
+    // The same name in two tables.
+    writeFileSync(join(d, 'r1169zz.json'), `{ "cases": { "r1169zz-a": ${entry(2)} } }\n`);
+    writeFileSync(join(d, 'r1169zy.json'), `{ "cases": { "r1169zz-a": ${entry(0)} } }\n`);
+    assert.throws(() => loadCases(d), /case r1169zz-a is in another table too/);
+  } finally {
+    rmSync(d, { recursive: true, force: true });
+  }
+});
 
 test("every review's attack on this script, kept as a fixture, still exits as it must: 2 refused statically, 1 at run time (R1169g, R1169h; the owner's decision)", { timeout: 600_000 }, async () => {
   // The cases, from their round tables (the owner, 2026-11-12: one table per round, not one folder per case).
