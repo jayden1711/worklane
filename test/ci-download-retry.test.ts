@@ -1808,6 +1808,14 @@ test('R1228be D1, D2, D3: a quote open at a backslash join carries into the join
   assert.deepEqual(unread('echo "Release notes\nfollow" # Windows: C:\\tools\\\nbash .claude/hooks/get.sh\n'), [], 'the stated limit');
 });
 
+test('R1228be D4, a stated cost: a curl whose quoted argument spans lines hides a later --retry; --retry before it is read', () => {
+  const all = (text: string) => fileDownloadProblems('scripts/ci/zz-hook.sh', text).problems;
+  const after = 'resp="$(curl -fsS -X POST -d \'{\n  "event_type": "ci"\n}\' --retry 3 https://api.example.com/hook)"\n';
+  const before = 'resp="$(curl -fsS --retry 3 -X POST -d \'{\n  "event_type": "ci"\n}\' https://api.example.com/hook)"\n';
+  assert.ok(all(after).some((p) => /retry/.test(p)), `the stated cost: refused (${JSON.stringify(all(after))})`);
+  assert.deepEqual(all(before), [], 'the workaround: --retry before the multi-line argument is read');
+});
+
 // Limits (owner decision (c): stated, not closed; the helper's digest check holds for each download it handles):
 // - What the lint reads (R1228ai D1, closing R1228i L9-L11; R1228aj, R1228ak): workflow and action YAML, a shell
 //   script anywhere, every file under scripts/ whatever its name (a pinned URL, prose in a .md aside; the retry rule in
@@ -1855,6 +1863,9 @@ test('R1228be D1, D2, D3: a quote open at a backslash join carries into the join
 //   starts with bash, a stated limit); and a shell keyword or builtin running a file we don't list (`eval`, `exec`
 //   after a redirection). This lint is a hint against accidents (R1228aq: round ~20 of new shell shapes); the
 //   helper's digest check is the guarantee.
+// - A curl whose quoted argument spans lines (a JSON body, `-d '{` … `}'`) is read up to the line where the quote
+//   opens, so a `--retry` after the quote isn't seen and the curl is refused as a download with no retry (R1228be D4;
+//   owner, 2026-11-12: stated, not closed). Put `--retry` before the multi-line argument.
 // - A download that never names a URL the lint knows (DOWNLOAD), through a tool it doesn't know (python, node, perl, a
 //   compiled binary, an action not in USES_ALLOWED once allowed: a node or Python file's own download), or built from
 //   pieces at run time, isn't seen.
