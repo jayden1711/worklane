@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { redactString, REDACTION_PATTERNS, secretKinds } from '../src/events/redact.js';
+import { redactString, redactionPatterns, secretKinds } from '../src/events/redact.js';
 import { EventLog } from '../src/events/log.js';
 import { FileBacklog } from '../src/backlog/file.js';
 import { GitHubBacklog } from '../src/backlog/github.js';
@@ -36,7 +36,7 @@ const survivors = async (out: (text: string) => string | Promise<string>) => {
 const coordinatorRedact = (s: string) => scrub(redactPii(s, { names: [], patterns: [] }));
 
 test('every secret pattern of the shared redactor has a stand-in, and secretKinds names each stand-in by its kind', () => {
-  const kinds = [...new Set(REDACTION_PATTERNS.filter((p) => p.group === 'secret').map((p) => p.kind))];
+  const kinds = [...new Set(redactionPatterns().filter((p) => p.group === 'secret').map((p) => p.kind))];
   assert.deepEqual(kinds.filter((k) => !SHAPES.some((s) => s.kind === k)), [], 'add a stand-in to test/token-standins.ts for each new pattern');
   assert.deepEqual(SHAPES.filter((s) => !secretKinds(s.value).includes(s.kind)).map((s) => s.what), []);
   for (const k of ['GitHub token', 'API key (sk-)', 'Discord bot token', 'Slack token', 'Slack app-level token', 'Slack webhook', 'Linear key', 'Tailscale key', 'dashboard key']) {
@@ -156,7 +156,7 @@ test('Discord and Tailscale patterns run in linear time on hostile input', () =>
   const fill = (unit: string) => unit.repeat(Math.ceil(N / unit.length));
   const hostile = [fill('a-'), fill('a.'), fill(`${'a'.repeat(25)}.`), fill(`${'a'.repeat(25)}.bbbbbb.`), fill(`${'a'.repeat(25)}.bbbbbb.-c`), fill('-a'), fill(`${'a-'.repeat(14)}.bbbbbb.${'c-'.repeat(40)}.`), fill('tskey-'), fill('tskey'), fill('tskey-a-')];
   const slow: string[] = [];
-  const patterns = REDACTION_PATTERNS.filter((p) => p.kind === 'Discord bot token' || p.kind === 'Tailscale key');
+  const patterns = redactionPatterns().filter((p) => p.kind === 'Discord bot token' || p.kind === 'Tailscale key');
   assert.equal(patterns.length, 2, 'both patterns are in the shared redactor');
   for (const { kind, re, rep } of patterns) {
     for (const s of hostile) {
