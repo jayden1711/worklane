@@ -4,6 +4,7 @@
 // new task is filed every SOAK_ISSUE_EVERY_S. Every SOAK_SAMPLE_S it records what the process holds; src/soak.ts
 // judges the samples.
 import { test } from 'node:test';
+import { createHook } from 'node:async_hooks';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { appendFileSync, closeSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, statfsSync, watch, writeFileSync, writeSync } from 'node:fs';
@@ -12,6 +13,7 @@ import { dirname, join } from 'node:path';
 import { EventLog } from '../src/events/log.js';
 import { EventSchemas } from '../src/events/types.js';
 import { FakeRunner, type RunRequest } from '../src/runner.js';
+import { claimRef } from '../src/claims.js';
 import { slotStatus } from '../src/slots.js';
 import { worktreeDir } from '../src/worktrees.js';
 import { SOAK_LIMITS, openRunsOf, soakVerdict, theilSen, type SoakSample } from '../src/soak.js';
@@ -825,13 +827,21 @@ export function worktreeLeftovers(wtDir: string, repo: string): number {
 
 /**
  * Worktrees and worktree-folder entries no open task owns (R1181af AF1): an entry of the worktree folder, or a worktree
- * git lists other than the main checkout, is a task's while its name ends `issue-<n>` (or `issue-<n>-<suffix>`) for an
- * issue in `open` (filed, not landed); any other is a stray. Each counted once, by real path.
+ * git lists other than the main checkout, is a task's while its name is one the engine gives an open task (filed, not
+ * landed): `issue-<n>` or `issue-<n>-browser-base` (src/coordinator.ts's browser baseline), after a prefix with no
+ * `issue-` in it, and one of each per task (R1181ak D5: any `-<suffix>`, any number of them, passed). Any other, a
+ * second of the same kind included, is a stray; a pooled worktree's `pool-…` name too (the soak runs with the pool off,
+ * the default). Each counted once, by real path.
  */
 export function worktreeStrays(wtDir: string, repo: string, open: ReadonlySet<string>): number {
+  const taken = new Set<string>();
   const owned = (p: string) => {
-    const m = /issue-(\d+)(?:-[\w-]+)?$/.exec(p.split('/').pop() ?? '');
-    return !!m && open.has(m[1]!);
+    const m = /^(?:(?:(?!issue-)[\w.-])+-)?issue-(\d+)(-browser-base)?$/.exec(p.split('/').pop() ?? '');
+    if (!m || !open.has(m[1]!)) return false;
+    const kind = `${m[1]}${m[2] ?? ''}`;
+    if (taken.has(kind)) return false;
+    taken.add(kind);
+    return true;
   };
   const real = (p: string) => (existsSync(p) ? realpathSync(p) : p);
   const seen = new Set<string>();
@@ -839,7 +849,21 @@ export function worktreeStrays(wtDir: string, repo: string, open: ReadonlySet<st
   const listed = spawnSync('git', ['-C', repo, 'worktree', 'list', '--porcelain'], { encoding: 'utf8' });
   const main = real(repo);
   for (const l of listed.status === 0 ? listed.stdout.split('\n') : []) if (l.startsWith('worktree ') && real(l.slice(9)) !== main) seen.add(real(l.slice(9)));
-  return [...seen].filter((p) => !owned(p)).length;
+  return [...seen].sort().filter((p) => !owned(p)).length;
+}
+
+/**
+ * Claim refs on `remote` that no open task holds (R1181ak D6), or null when git can't list them: a task's claim is
+ * released when it lands, so one left is a leak (the engine leaves one after a lease renewal: #1275).
+ */
+export function claimRefsLeft(remote: string, open: ReadonlySet<string>): number | null {
+  const prefix = claimRef(0).replace(/issue-0$/, '');
+  const r = spawnSync('git', ['-C', remote, 'for-each-ref', '--format=%(refname)', prefix], { encoding: 'utf8' });
+  if (r.status !== 0) return null;
+  return r.stdout.split('\n').filter(Boolean).filter((ref) => {
+    const m = /^issue-(\d+)$/.exec(ref.slice(prefix.length));
+    return !m || !open.has(m[1]!);
+  }).length;
 }
 
 /** Bytes queued in this network namespace's netlink sockets (/proc/net/netlink Rmem + Wmem), or null (R1181z D1). */
@@ -988,13 +1012,19 @@ test('soak: the real coordinator works for a while with stand-in agents; nothing
   const gc = (globalThis as { gc?: () => void }).gc;
   if (hours > 0 && typeof gc !== 'function') throw new Error('a soak needs node --expose-gc: its readings are taken after a forced GC');
   let tickCount = 0;
-  // OWNER (2026-11-11): a free-space floor for starting a soak, SOAK_MIN_FREE_GB under the temp folder (off unless set:
-  // a GitHub runner has far less free than a reviewer's machine needs).
-  const floorGb = Number(process.env.SOAK_MIN_FREE_GB ?? 0);
-  if (floorGb > 0) {
-    const fs = statfsSync(tmpdir());
-    const freeGb = (fs.bavail * fs.bsize) / 2 ** 30;
-    if (freeGb < floorGb) throw new Error(`soak refused to start: ${freeGb.toFixed(1)} GB free under ${tmpdir()}, below SOAK_MIN_FREE_GB=${floorGb}`);
+  // OWNER (2026-11-11): a free-space floor for starting a soak, SOAK_MIN_FREE_GB (off unless set: a GitHub runner has
+  // far less free than a reviewer's machine needs). R1181ak D3: a value that isn't a plain number of GB refuses to
+  // start (`65G` turned the floor off); and the floor holds on every filesystem the soak writes to: `/` (the owner's
+  // `df -B1G /`), the temp folder (its repo, state and worktrees) and /var/tmp.
+  const floorRaw = process.env.SOAK_MIN_FREE_GB;
+  if (floorRaw !== undefined && floorRaw !== '') {
+    if (!/^\d+(?:\.\d+)?$/.test(floorRaw)) throw new Error(`soak refused to start: SOAK_MIN_FREE_GB=${JSON.stringify(floorRaw)} is not a number of GB (write 65, not 65G)`);
+    const floorGb = Number(floorRaw);
+    for (const where of ['/', tmpdir(), '/var/tmp'].filter((w) => existsSync(w))) {
+      const fs = statfsSync(where);
+      const freeGb = (fs.bavail * fs.bsize) / 2 ** 30;
+      if (freeGb < floorGb) throw new Error(`soak refused to start: ${freeGb.toFixed(1)} GB free under ${where}, below SOAK_MIN_FREE_GB=${floorRaw}`);
+    }
   }
   // What was alive before the soak (Linux): a new session of this user after it is the soak's (R1181p D1).
   const startProcs = processSnapshot();
@@ -1010,6 +1040,19 @@ test('soak: the real coordinator works for a while with stand-in agents; nothing
     rmSync(f.base, { recursive: true, force: true });
   });
   if (process.env.SOAK_BASE_RECORD) writeFileSync(process.env.SOAK_BASE_RECORD, f.base);
+  // R1181ak D7 (R1181ag D2): this process's live timers, so a per-task poller left running is read.
+  const liveTimers = new Set<number>();
+  const timerHook = createHook({
+    init: (id, type) => {
+      if (type === 'Timeout') liveTimers.add(id);
+    },
+    destroy: (id) => {
+      liveTimers.delete(id);
+    },
+  }).enable();
+  t.after(() => {
+    timerHook.disable();
+  });
   // Temp files count too (R1181l 3: os.tmpdir() leftovers were outside the measured folder): TMPDIR inside it.
   const tmp = join(f.base, 'tmp');
   mkdirSync(tmp);
@@ -1090,6 +1133,8 @@ test('soak: the real coordinator works for a while with stand-in agents; nothing
       worktreeFiles: existsSync(wtDir) ? dirUsage(wtDir).files : 0,
       worktreeLeftovers: worktreeLeftovers(wtDir, f.repo),
       worktreeStrays: worktreeStrays(wtDir, f.repo, new Set([...filedAt.keys()].filter((k) => !landed.has(k)))),
+      claimRefs: claimRefsLeft(f.remote, new Set([...filedAt.keys()].filter((k) => !landed.has(k)))),
+      timers: liveTimers.size,
       diskBytes: usage.bytes,
       files: usage.files,
       children: kids?.length ?? null,
@@ -2046,14 +2091,20 @@ test("soak driver (Linux, R1181z D2): SysV IPC objects are counted, and outlive 
 libc = ctypes.CDLL(None, use_errno=True)
 ids = [libc.semget(0, 1, 0o1600) for _ in range(8)]
 print(' '.join(map(str, ids)))`], { encoding: 'utf8' });
-  const ids = made.stdout.trim().split(/\s+/).map(Number);
+  // R1181ak D2: ids only from a maker that succeeded, and only real ids (an empty output read as set 0, someone else's).
+  const ids = made.status === 0 ? made.stdout.trim().split(/\s+/).filter((x) => /^\d+$/.test(x)).map(Number) : [];
+  let failed: unknown = null;
   try {
-    assert.equal(ids.filter((i) => i >= 0).length, 8, `8 sets made: ${made.stdout}${made.stderr}`);
+    assert.equal(ids.length, 8, `8 sets made: ${made.stdout}${made.stderr}`);
     assert.ok(sysvIpcCount()! >= before + 8, `counted after their maker exited: ${before} -> ${sysvIpcCount()}`);
-  } finally {
-    // OWNER (2026-11-11): what a test makes, it removes, and the removal is checked.
-    for (const i of ids) if (i >= 0) assert.equal(spawnSync('ipcrm', ['-s', String(i)]).status, 0, `semaphore set ${i} removed`);
+  } catch (e) {
+    failed = e;
   }
+  // OWNER (2026-11-11): what a test makes, it removes, and the removal is checked: every set first, then one check, and
+  // the test's own failure first (R1181ak D2).
+  const left = ids.filter((i) => spawnSync('ipcrm', ['-s', String(i)]).status !== 0);
+  if (failed) throw failed;
+  assert.deepEqual(left, [], 'every semaphore set removed');
 });
 
 test("soak driver (Linux, R1181z D1): the kernel level reads a netlink socket's unread buffers, which no cgroup is charged", linuxOnly, async (t) => {
@@ -2163,6 +2214,17 @@ test("soak verdict: at stop, files in the worktree folder no checkout tracks are
   const usual = filled.slice(0, -1).map((s) => ({ ...s, worktreeStrays: 0 }));
   const af1 = [...usual, { ...filled.at(-1)!, worktrees: 3, worktreeDirs: 2, worktreeFiles: 390, files: filled.at(-1)!.files! + 390, worktreeLeftovers: 0, worktreeStrays: 2 }];
   assert.match(soakVerdict(af1, SOAK_LIMITS, o).failures.join(), /left at stop: 2 worktree\(s\) or worktree folder entr\(ies\) that no open task owns/);
+  // R1181ak D8: one stray fails too, in both shapes.
+  assert.match(soakVerdict(atStop(2, 1, 1), SOAK_LIMITS, o).failures.join(), /^left at stop: 1 worktree\(s\) or worktree folder entr\(ies\) that no open task owns/, 'one stray: fails');
+  const af1one = [...usual, { ...filled.at(-1)!, worktrees: 2, worktreeDirs: 1, worktreeFiles: 195, files: filled.at(-1)!.files! + 195, worktreeLeftovers: 0, worktreeStrays: 1 }];
+  assert.match(soakVerdict(af1one, SOAK_LIMITS, o).failures.join(), /left at stop: 1 worktree\(s\) or worktree folder entr\(ies\) that no open task owns/, 'AF1 with one stray: fails');
+  // R1181ak D6: a claim ref no open task holds, at stop or grown over the run; D7: live timers grown.
+  const withRefs = (run: (i: number) => number, atEnd: number) => [...usual.map((x, i) => ({ ...x, claimRefs: run(i), timers: 12 })), { ...filled.at(-1)!, worktrees: 1, worktreeDirs: 0, worktreeLeftovers: 0, worktreeStrays: 0, claimRefs: atEnd, timers: 12 }];
+  assert.deepEqual(soakVerdict(withRefs(() => 0, 0), SOAK_LIMITS, o).failures, [], 'control: no claim ref, steady timers');
+  assert.match(soakVerdict(withRefs(() => 0, 1), SOAK_LIMITS, o).failures.join(), /left at stop: 1 claim ref\(s\) on the remote that no open task holds/, 'one claim ref at stop: fails');
+  assert.match(soakVerdict(withRefs((i) => Math.floor(i / 2), 0), SOAK_LIMITS, o).failures.join(), /claim refs on the remote that no open task holds grew/, 'claim refs grown: fails');
+  const timersGrown = [...usual.map((x, i) => ({ ...x, timers: 12 + i * 3 })), { ...filled.at(-1)!, worktrees: 1, worktreeDirs: 0, worktreeLeftovers: 0, worktreeStrays: 0, timers: 12 + usual.length * 3 }];
+  assert.match(soakVerdict(timersGrown, SOAK_LIMITS, o).failures.join(), /live timers grew/, 'live timers grown: fails');
   // Without the strays read (an older driver), the first quarter's median, with no allowance (c042cf62's rule).
   assert.match(soakVerdict([...filled.slice(0, -1).map((s) => ({ ...s, worktrees: 1, worktreeDirs: 0 })), { ...filled.at(-1)!, worktreeFiles: 195, files: filled.at(-1)!.files! + 195, worktrees: 2, worktreeDirs: 1, worktreeLeftovers: 0 }], SOAK_LIMITS, o).failures.join(), /left at stop: 2 worktree\(s\) after stop\(\) and idle\(\), above the first quarter's 1/);
   // R1181af AF2: no allowance anywhere else: one more process, cgroup process, SysV object, queue or key at stop fails.
@@ -2171,6 +2233,24 @@ test("soak verdict: at stop, files in the worktree folder no checkout tracks are
     const last = { ...base1.at(-1)!, ...filled.at(-1)!, children: 1, cgroupProcs: 9, sysvIpc: 0, mqueues: 0, userKeys: 16, userKeyBytes: 200, worktrees: 1, worktreeDirs: 0, worktreeLeftovers: 0, worktreeStrays: 0 };
     assert.deepEqual(soakVerdict([...base1, last], SOAK_LIMITS, o).failures, [], `control for ${k}`);
     assert.match(soakVerdict([...base1, { ...last, [k]: (last[k] as number) + 1 }], SOAK_LIMITS, o).failures.join(), new RegExp(`left at stop: \\d+ ${what}`), `+1 ${k} at stop: fails`);
+  }
+});
+
+test('soak driver: claim refs on the remote that no open task holds are counted; an open task\'s own is not (#1181 review R1181ak D6, #1275)', () => {
+  const d = mkdtempSync(join(tmpdir(), 'soak-claims-'));
+  try {
+    const remote = join(d, 'remote.git');
+    assert.equal(spawnSync('git', ['init', '-q', '--bare', remote]).status, 0);
+    assert.equal(claimRefsLeft(remote, new Set()), 0, 'none');
+    const blob = spawnSync('git', ['-C', remote, 'hash-object', '-w', '--stdin'], { input: 'lease\n', encoding: 'utf8' }).stdout.trim();
+    const tree = spawnSync('git', ['-C', remote, 'mktree'], { input: `100644 blob ${blob}\tlease.json\n`, encoding: 'utf8' }).stdout.trim();
+    const commit = spawnSync('git', ['-C', remote, '-c', 'user.name=A', '-c', 'user.email=a@example.com', 'commit-tree', tree, '-m', 'claim'], { encoding: 'utf8' }).stdout.trim();
+    for (const n of [5, 6]) assert.equal(spawnSync('git', ['-C', remote, 'update-ref', claimRef(n), commit]).status, 0);
+    assert.equal(claimRefsLeft(remote, new Set(['5'])), 1, "task 5 is open and holds its own; task 6's is left");
+    assert.equal(claimRefsLeft(remote, new Set()), 2, 'both tasks landed: both left');
+    assert.equal(claimRefsLeft(join(d, 'missing'), new Set()), null, 'no remote: not read');
+  } finally {
+    rmSync(d, { recursive: true, force: true });
   }
 });
 
@@ -2217,6 +2297,19 @@ test('soak driver: the worktree folder\'s files no checkout tracks are read, and
     assert.equal(g(repo, 'worktree', 'add', '-q', '--detach', join(wt, 'tool-issue-7'), 'HEAD').status, 0);
     assert.equal(worktreeStrays(wt, repo, open7), strays0, "an open task's checkout: owned");
     assert.equal(worktreeStrays(wt, repo, new Set()), strays0 + 1, 'its task landed: a stray');
+    // R1181ak D5: the engine's own names only, one of each per task.
+    assert.equal(g(repo, 'worktree', 'add', '-q', '--detach', join(wt, 'tool-issue-7-browser-base'), 'HEAD').status, 0);
+    assert.equal(worktreeStrays(wt, repo, open7), strays0, "an open task's browser baseline: owned");
+    for (const extra of ['tool-issue-7-retry', 'tool-issue-7-scratch', 'tool-issue-7-retry-issue-7']) {
+      assert.equal(g(repo, 'worktree', 'add', '-q', '--detach', join(wt, extra), 'HEAD').status, 0);
+      assert.equal(worktreeStrays(wt, repo, open7), strays0 + 1, `${extra}: a stray, though task 7 is open`);
+      g(repo, 'worktree', 'remove', '--force', join(wt, extra));
+    }
+    mkdirSync(join(d, 'second'));
+    assert.equal(g(repo, 'worktree', 'add', '-q', '--detach', join(d, 'second', 'tool-issue-7'), 'HEAD').status, 0);
+    assert.equal(worktreeStrays(wt, repo, open7), strays0 + 1, 'a second checkout named for task 7, elsewhere: a stray');
+    g(repo, 'worktree', 'remove', '--force', join(d, 'second', 'tool-issue-7'));
+    g(repo, 'worktree', 'remove', '--force', join(wt, 'tool-issue-7-browser-base'));
     assert.equal(g(repo, 'worktree', 'add', '-q', '--detach', join(d, 'elsewhere-wt'), 'HEAD').status, 0);
     assert.equal(worktreeStrays(wt, repo, open7), strays0 + 1, 'a worktree outside the folder, of no task: a stray');
     g(repo, 'worktree', 'remove', '--force', join(d, 'elsewhere-wt'));
@@ -2303,16 +2396,19 @@ rt.mq_open.restype = ctypes.c_int
 for n in sys.argv[1:]:
     if rt.mq_open(n.encode(), os.O_CREAT | os.O_RDWR, 0o600, None) < 0: print('skip', ctypes.get_errno()); sys.exit(0)
 print('made')`, ...names], { encoding: 'utf8' });
+  let failed: unknown = null;
+  let skipped: string | null = null;
   try {
-    if (!/made/.test(made.stdout)) return t.skip(`mq_open unavailable: ${made.stdout}${made.stderr}`.slice(0, 200));
-    assert.ok(posixMqueues()! >= before + 3, `counted after its maker exited: ${before} -> ${posixMqueues()}`);
-  } finally {
-    // OWNER (2026-11-11), R1181aj AJ2: removed, and checked.
-    for (const n of names) {
-      rmSync(join('/dev/mqueue', n.slice(1)), { force: true });
-      assert.equal(existsSync(join('/dev/mqueue', n.slice(1))), false, `queue ${n} removed`);
-    }
+    if (!/made/.test(made.stdout)) skipped = `mq_open unavailable: ${made.stdout}${made.stderr}`.slice(0, 200);
+    else assert.ok(posixMqueues()! >= before + 3, `counted after its maker exited: ${before} -> ${posixMqueues()}`);
+  } catch (e) {
+    failed = e;
   }
+  // OWNER (2026-11-11), R1181aj AJ2: removed, and checked; every queue first, then one check (R1181ak D2's shape).
+  for (const n of names) rmSync(join('/dev/mqueue', n.slice(1)), { force: true });
+  if (failed) throw failed;
+  assert.deepEqual(names.filter((n) => existsSync(join('/dev/mqueue', n.slice(1)))), [], 'every queue removed');
+  if (skipped) return t.skip(skipped);
 });
 
 test("soak driver (Linux, R1181ab D4): a key its maker added to the user keyring is counted", linuxOnly, async (t) => {
@@ -2352,18 +2448,27 @@ test('soak driver (Linux, R1181ae D4): the walked files on a tmpfs are in no ino
 
 /**
  * Whether the cleanup probe passed in a run's output (R1181aj AJ1: a bare `ok N - …` match also found `not ok N - …`):
- * a line that starts with `ok N -` or `✔`, and no line that starts with `not ok N -` or `✖`, for the probe.
+ * a line that starts with `ok N -` (not marked `# SKIP` or `# TODO`: R1181am D2, a skipped probe read as a pass) or
+ * `✔`, and no line that starts with `not ok N -` or `✖`, for the probe; and the child skipped no test.
  */
-const probePassed = (out: string) => /^\s*(?:ok \d+ - |✔ )soak cleanup probe/m.test(out) && !/^\s*(?:not ok \d+ - |✖ )soak cleanup probe/m.test(out);
+const probePassed = (out: string) =>
+  /^\s*(?:ok \d+ - soak cleanup probe(?![^\n]*# (?:SKIP|TODO))|✔ soak cleanup probe)/m.test(out) &&
+  !/^\s*(?:not ok \d+ - |✖ )soak cleanup probe/m.test(out) &&
+  /^\s*(?:# |ℹ )skipped 0\s*$/m.test(out);
 
 /** The soak driver run as its own test process (the smoke, with `env`), and the folder it recorded. */
 function runSoakDriver(env: Record<string, string>): { status: number | null; out: string; base: string | null } {
   const rec = join(mkdtempSync(join(tmpdir(), 'soak-run-')), 'base');
-  const childEnv: Record<string, string | undefined> = { ...process.env, SOAK_BASE_RECORD: rec, SOAK_CLEANUP_PROBE: '1', ...env };
+  // R1181ak D4: none of this run's soak settings (its report folder, hours, floor) pass to the child: only the test's.
+  const childEnv: Record<string, string | undefined> = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('SOAK_')));
+  Object.assign(childEnv, { SOAK_BASE_RECORD: rec, SOAK_CLEANUP_PROBE: '1', ...env });
   // Without this the child `node --test` runs nothing and exits 0 (as docs/soak.md says of the workflow).
   delete childEnv.NODE_TEST_CONTEXT;
   const r = spawnSync(process.execPath, ['--import', join(repoRoot, 'dist', 'test', 'isolate.js'), '--test', '--test-name-pattern=^soak: the real coordinator|^soak cleanup probe', join(repoRoot, 'dist', 'test', 'soak.test.js')], { cwd: repoRoot, encoding: 'utf8', env: childEnv, timeout: 300_000 });
-  return { status: r.status, out: `${r.stdout}${r.stderr}`, base: existsSync(rec) ? readFileSync(rec, 'utf8') : null };
+  const base = existsSync(rec) ? readFileSync(rec, 'utf8') : null;
+  // R1181ak L3: its own record folder too.
+  rmSync(dirname(rec), { recursive: true, force: true });
+  return { status: r.status, out: `${r.stdout}${r.stderr}`, base };
 }
 
 test('soak driver: the soak removes its own folder (state, repo, worktrees, temp files) after each run, pass or fail; a free-space floor refuses to start (OWNER 2026-11-11)', { skip, timeout: 900_000 }, () => {
@@ -2374,14 +2479,34 @@ test('soak driver: the soak removes its own folder (state, repo, worktrees, temp
   assert.ok(failed.base, 'it recorded its folder');
   assert.ok(probePassed(failed.out), `the probe, in the same process before it exits, found the folder gone: ${failed.out.slice(-600)}`);
   assert.equal(existsSync(failed.base!), false, `a failed run's folder is gone: ${failed.base}`);
-  // A run to its end, whatever its verdict: its folder is gone too.
-  const ran = runSoakDriver({ SOAK_TICKS: '4' });
+  // A run to its end, whatever its verdict: its folder is gone too. R1181ak D4: with this process's own report folder
+  // set, the child writes nothing into it.
+  const parentReport = mkdtempSync(join(tmpdir(), 'soak-parent-report-'));
+  const hadReport = process.env.SOAK_REPORT_DIR;
+  process.env.SOAK_REPORT_DIR = parentReport;
+  let ran: ReturnType<typeof runSoakDriver>;
+  try {
+    ran = runSoakDriver({ SOAK_TICKS: '4' });
+  } finally {
+    if (hadReport === undefined) delete process.env.SOAK_REPORT_DIR;
+    else process.env.SOAK_REPORT_DIR = hadReport;
+  }
+  const leaked = readdirSync(parentReport);
+  rmSync(parentReport, { recursive: true, force: true });
+  assert.deepEqual(leaked, [], "the child wrote nothing in the parent's report folder");
   assert.ok(ran.base, 'it recorded its folder');
   assert.ok(probePassed(ran.out), 'the probe found the folder gone before exit');
   assert.equal(existsSync(ran.base!), false, `a finished run's folder is gone: ${ran.base}`);
   // The floor: refused before anything is made.
   const floor = runSoakDriver({ SOAK_TICKS: '4', SOAK_MIN_FREE_GB: '1000000000' });
   assert.notEqual(floor.status, 0);
-  assert.match(floor.out, /soak refused to start: [\d.]+ GB free under .*, below SOAK_MIN_FREE_GB=1000000000/);
+  assert.match(floor.out, /soak refused to start: [\d.]+ GB free under \/, below SOAK_MIN_FREE_GB=1000000000/, 'the floor reads / first');
   assert.equal(floor.base, null, 'no folder made');
+  // R1181ak D3a: a value with a unit refuses to start; it doesn't turn the floor off.
+  for (const v of ['65G', '65 GB', 'x']) {
+    const typo = runSoakDriver({ SOAK_TICKS: '4', SOAK_MIN_FREE_GB: v });
+    assert.notEqual(typo.status, 0, `${v}: refused`);
+    assert.match(typo.out, /soak refused to start: SOAK_MIN_FREE_GB=.* is not a number of GB/, v);
+    assert.equal(typo.base, null, `${v}: no folder made`);
+  }
 });

@@ -104,6 +104,14 @@ export interface SoakSample {
   /** This user's keys and their bytes (/proc/key-users qnkeys, qnbytes; a real soak on Linux): R1181ab D4. */
   userKeys?: number | null;
   userKeyBytes?: number | null;
+  /**
+   * Claim refs on the remote that no open task holds (R1181ak D6): a released claim leaves none, so any at stop is a
+   * leak, and so is growth. The engine leaves one after a lease renewal (#1275), which the stand-ins' runs are too
+   * short to reach (docs/soak.md).
+   */
+  claimRefs?: number | null;
+  /** Timers alive in this process (Timeouts, counted by async_hooks): a per-task poller left running (R1181ak D7). */
+  timers?: number;
 }
 
 export interface SoakLimits {
@@ -401,6 +409,8 @@ export function soakVerdict(input: readonly SoakSample[], limits: SoakLimits = S
     ['mqueues', 'POSIX message queues', limits.childGrowth, (n: number) => `by ${Math.round(n * 10) / 10}`],
     ['userKeys', "keys in this user's keyrings", limits.childGrowth, (n: number) => `by ${Math.round(n * 10) / 10}`],
     ['userKeyBytes', "bytes of this user's keys", USER_KEY_BYTES, (n: number) => `by ${Math.round(n)} bytes`],
+    ['claimRefs', 'claim refs on the remote that no open task holds', limits.childGrowth, (n: number) => `by ${Math.round(n * 10) / 10}`],
+    ['timers', 'live timers', limits.fdGrowth, (n: number) => `by ${Math.round(n * 10) / 10}`],
   ] as const) {
     if (!use.some((s) => typeof s[k] === 'number')) continue;
     const counted = use.filter((s) => typeof s[k] === 'number');
@@ -453,6 +463,8 @@ export function soakVerdict(input: readonly SoakSample[], limits: SoakLimits = S
     // owns fails (two left by the shutdown fail, the open task's own passes); without them, the first quarter's median.
     const byTask = typeof stop.worktreeStrays === 'number';
     if (byTask && stop.worktreeStrays! > 0) failures.push(`left at stop: ${stop.worktreeStrays} worktree(s) or worktree folder entr(ies) that no open task owns after stop() and idle()`);
+    // R1181ak D6: a claim no open task holds is a leak at stop, whatever the run's samples read (#1275).
+    if (typeof stop.claimRefs === 'number' && stop.claimRefs > 0) failures.push(`left at stop: ${stop.claimRefs} claim ref(s) on the remote that no open task holds (#1275)`);
     for (const [k, what] of [['children', 'child process(es)'], ['cgroupProcs', "process(es) in the job's cgroup"], ['sysvIpc', 'SysV IPC object(s)'], ['mqueues', 'POSIX message queue(s)'], ['userKeys', "key(s) in this user's keyrings"], ['worktrees', 'worktree(s)'], ['worktreeDirs', "entr(ies) in the worktree folder"]] as const) {
       if (byTask && (k === 'worktrees' || k === 'worktreeDirs')) continue;
       const n = at(k);
@@ -460,6 +472,7 @@ export function soakVerdict(input: readonly SoakSample[], limits: SoakLimits = S
     }
     for (const [k, what, limit, fmt] of [
       ['fds', 'open file handles', limits.fdGrowth, String],
+      ['timers', 'live timers', limits.fdGrowth, String],
       ['childFds', "the child processes' open file handles", limits.fdGrowth, String],
       ['watches', 'inotify watches', limits.fdGrowth, String],
       ['childRss', "the child processes' RSS", limits.rssGrowthBytes, MB],

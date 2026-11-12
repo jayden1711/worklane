@@ -100,11 +100,18 @@ verdict's `not_judged`, not passed in silence. Runs are grouped per branch, so a
 replaces main's pending scheduled run.
 
 - **It cleans up after itself, pass or fail.** The soak's folder (its state dir, repo and remote, worktrees and temp
-  files) is removed when its test ends, whatever it threw (OWNER, 2026-11-11). The soak itself makes no key, POSIX queue
+  files) is removed when its test ends, whatever it threw (OWNER, 2026-11-11), but not when the process is killed
+  or interrupted (a timeout's SIGINT, Ctrl-C, a kill): then the folder stays (R1181am D3a); nor
+  when the fixture throws before the cleanup is registered (below). The soak itself makes no key, POSIX queue
   or SysV object; the tests that make one to check the readers remove it, and check that they did.
-- **A free-space floor** (`SOAK_MIN_FREE_GB`, off unless set): below it under the temp folder, the soak refuses to
+- **A free-space floor** (`SOAK_MIN_FREE_GB`, a plain number of GB such as `65`; off unless set; anything else, `65G`
+  included, refuses to start): below it on `/`, the temp folder or `/var/tmp`, the soak refuses to
   start. A reviewer's machine sets it (65 GB, the owner's floor); a GitHub runner has far less free, so the workflow
   doesn't.
+
+- **Claim refs and timers are read** (R1181ak D6, D7): the claim refs on the scratch remote that no open task holds,
+  and this process's live timers (counted with `async_hooks`), each failing on growth, and claim refs on any left at
+  stop.
 
 ## When it runs
 
@@ -195,5 +202,10 @@ replaces main's pending scheduled run.
   groups it was seen in (a plain double fork from a clean environment, or a new session) isn't counted, nor are the
   filesystems' levels read. A real soak counts both: it runs on a CI runner with the machine to itself, where a new
   session of the same user during the soak (on a desktop, a new terminal) would be counted as the soak's.
+- **It never reaches a lease renewal.** The engine renews a task's claim every 20 minutes (a fixed interval) and the
+  stand-in agents finish in seconds, so the claim ref the engine leaves after a renewal (#1275) is read when there but
+  never caused by the soak.
+- **A folder made by a fixture that throws** before the soak registers its cleanup (`coord-*`) is left for the test
+  process's own exit cleanup (R1181ak L3).
 - **It is a heuristic over a sampled series.** Each review round found shapes it misjudged; issue #1231 proposes a
   written attack spec as its acceptance bar. A tick that grows with the log (issue #1234) is expected to fail it today.
