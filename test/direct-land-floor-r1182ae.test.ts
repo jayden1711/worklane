@@ -231,7 +231,7 @@ test('AE1 (dashboard): the plan revise text names the id, and the question names
   const f = unit();
   const plan = await askPlan(f);
   const body = (await f.backlog.comments(1)).find((c) => c.body.includes(plan.id))!.body;
-  assert.ok(body.includes(`start a comment with \`/worklane revise ${plan.id} <note>\`; a comment of that one line`), body); // changed by the allowlist (#1182, the owner, 2026-11-11: a reply is the comment's one line)
+  assert.ok(body.includes(`comment the one line \`/worklane revise ${plan.id} <note>\` and nothing else`), body); // changed by the allowlist (#1182, the owner, 2026-11-11: a reply is the comment's one line)
   assert.ok(plan.receipts.some((r) => r.includes(`revise ${plan.id} <note>`)), 'the recorded receipt (the dashboard) too');
 });
 

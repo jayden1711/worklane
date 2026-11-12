@@ -16,7 +16,10 @@ test('the one line: the option, the id right after it, and a note in its own cas
   assert.deepEqual(cmd(`${c} approve ${ID}`), { option: 'approve', id: ID, note: '' });
   assert.deepEqual(cmd(`${c} revise ${ID} Keep it smaller, and drop the v1 tables: 2 of them.`), { option: 'revise', id: ID, note: 'Keep it smaller, and drop the v1 tables: 2 of them.' });
   assert.deepEqual(cmd(`${c.toUpperCase()} APPROVE ${ID.toUpperCase()}`), { option: 'approve', id: ID, note: '' }, 'upper case');
-  assert.deepEqual(cmd(`${c}  approve   ${ID}  \n\n`), { option: 'approve', id: ID, note: '' }, 'extra spaces, trailing blank lines');
+  assert.deepEqual(cmd(`${c}  approve   ${ID}  \n`), { option: 'approve', id: ID, note: '' }, 'extra spaces, one final line end');
+  // R1182aw D1 (was an answer): a blank line after the line is a second line.
+  assert.equal(cmd(`${c}  approve   ${ID}  \n\n`), null, 'a trailing blank line voids');
+  assert.equal(readReply(`${c} approve ${ID}\r\n\r\n`).refused?.kind, 'reply_not_one_line');
   assert.deepEqual(cmd(`${c} revise ${ID} keep v1 ${u('2014')} the old one`), { option: 'revise', id: ID, note: 'keep v1 - the old one' }, 'a phone dash is a hyphen');
 });
 

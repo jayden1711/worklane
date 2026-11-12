@@ -71,7 +71,9 @@ const mapTyped = (s: string) => s.replace(/[\u2018\u2019\u201C\u201D\u2013\u2014
  * or a second command; an emoji GitHub draws from `:tada:` in the note doesn't void a reply.
  */
 export function readReply(typed: string, rendered?: string | null): Reply {
-  const body = mapTyped(typed).replace(/[ \t\r\n]+$/, '');
+  // One final line end is allowed (a comment sent from a file or a script ends in one); any other line break, even a
+  // blank line after the line, voids it (R1182aw D1). Trailing spaces and tabs on the line are dropped.
+  const body = mapTyped(typed).replace(/(?:\r\n|\r|\n)$/, '').replace(/[ \t]+$/, '');
   const shown = typeof rendered === 'string' ? mapTyped(rendered).toLowerCase() : null;
   const mentions = { command: body.toLowerCase().includes(`/${BRAND.cli.toLowerCase()}`), ids: idsIn(body) };
   const refuse = (r: Refusal): Reply => ({ command: null, refused: r, mentions, noteIds: [], rendered: shown });

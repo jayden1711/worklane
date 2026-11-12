@@ -235,7 +235,7 @@ export function planDecision(reasons: string[], acceptance: string[] = []) {
       ...reasons.map((r) => `holds because ${r}`),
       ...acceptance.map((a) => `${ACCEPTANCE_RECEIPT}${a}`),
       'approve: the build starts with this plan',
-      `revise: the plan is written again with your note (start a comment with \`/${BRAND.cli} revise ${DECISION_ID} <note>\`; a comment of that one line, the note in letters, digits, spaces and . , : ; - only)`,
+      `revise: the plan is written again with your note (comment the one line \`/${BRAND.cli} revise ${DECISION_ID} <note>\` and nothing else, the note in letters, digits, spaces and . , : ; - only)`,
       'reject: the task stops; nothing is built',
     ],
   };

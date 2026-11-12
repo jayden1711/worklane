@@ -368,7 +368,7 @@ test('Q1 (end to end): the backlog refuses every comment: the land result is sti
   // R1182x: and it says how to answer without the comment (a reply naming the id, the dashboard, or decide).
   const np = f.log.read(0, ['coordinator.error']).map((e) => e.payload as { kind: string; message: string }).find((e) => e.kind === 'question_not_posted');
   // changed by (b) (the owner, 2026-11-10: only a comment's first line is read, in plain text; a second command voids it): the wording (was "a reply naming the id").
-  assert.ok(np && np.message.includes(asked(f).at(-1)!.id) && np.message.includes('a comment whose first line is'), JSON.stringify(np));
+  assert.ok(np && np.message.includes(asked(f).at(-1)!.id) && np.message.includes('a comment of one line, `/worklane <option> '), JSON.stringify(np)); // R1182aw D2: the allowlist's wording (was 'a comment whose first line is')
   f.log.append('decision.answered', { id: asked(f).at(-1)!.id, by: 'example-owner', answer: 'approve' }, 'example-owner', 'human');
   for (let i = 0; i < 3 && !onMain(f).includes('d/CLAUDE.md'); i++) await cycle(f);
   assert.ok(onMain(f).includes('d/CLAUDE.md'), `never landed: ${JSON.stringify(results(f).map((r) => r.outcome))}, questions ${asked(f).length}`);

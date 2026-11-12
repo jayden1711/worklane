@@ -113,7 +113,7 @@ test('K1/AL control: two plain ASCII commands void (reply_more_than_one); the ap
 });
 
 // ======== R1182ak K2 and K3 ========
-test('K2: a heart with U+FE0F and a ZWJ emoji void (reply_not_ascii); a tab on line 1 now answers (changed by the ASCII rule; was refused)', async () => {
+test('K2: a heart with U+FE0F and a ZWJ emoji void; a tab in the line voids too (the allowlist, 2026-11-11)', async () => {
   for (const b of [(id: string) => `/worklane approve ${id} thanks ${u('2764')}${u('FE0F')}`, (id: string) => `/worklane approve ${id} ${u('1F468')}${u('200D')}${u('1F469')}`]) {
     const { f } = await land(b);
     assert.deepEqual([answered(f).length, kinds(f)], [0, ['reply_note']]);
@@ -264,7 +264,7 @@ test('HELD: an edit after the answer changes nothing; an edit before the poll is
 });
 
 // ======== The owner's phone characters, end to end ========
-test("a phone-typed reply answers: a plain line 1, curly quotes and an en or em dash below it", async () => {
+test("a phone-typed reply: an en or em dash in the one line answers (read as a hyphen); a curly apostrophe, or the text on a second line, voids", async () => {
   // changed by the allowlist (#1182, the owner, 2026-11-11: a reply is the comment's one line): the phone text on a second line now voids; on the one line, a phone dash is a hyphen, a curly quote is a quote.
   const two = await land((id) => `/worklane approve ${id}\nI${u('2019')}ve read it ${u('2014')} the ${u('201C')}CI${u('201D')} part looks fine ${u('2013')} thanks`);
   assert.equal(answered(two.f).length, 0);

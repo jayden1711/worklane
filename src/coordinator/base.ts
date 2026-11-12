@@ -640,7 +640,7 @@ export abstract class CoordinatorBase {
     } catch (e) {
       // R1182x: without the question's comment the owner can't see the id to reply with. Say so where health and the
       // dashboard show it, with the id and the ways to answer.
-      this.emit('coordinator.error', { instance: this.d.instance, where: 'decision question', kind: 'question_not_posted', message: `#${issue}: decision ${id} is recorded, but its comment could not be posted (${(e as Error).message.slice(0, 300)}); answer it on the dashboard, with \`${BRAND.cli} decide ${id} <option>\`, or by a comment whose first line is \`/${BRAND.cli} <option> ${id}\`` });
+      this.emit('coordinator.error', { instance: this.d.instance, where: 'decision question', kind: 'question_not_posted', message: `#${issue}: decision ${id} is recorded, but its comment could not be posted (${(e as Error).message.slice(0, 300)}); answer it on the dashboard, with \`${BRAND.cli} decide ${id} <option>\`, or by a comment of one line, \`/${BRAND.cli} <option> ${id}\` (an optional note after the id in letters, digits, spaces and . , : ; - only)` });
       throw e;
     }
     return id;

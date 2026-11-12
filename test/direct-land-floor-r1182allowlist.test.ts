@@ -93,7 +93,7 @@ const landWith = async (body: (id: string) => string, text?: (id: string) => str
 
 // ======== The allowlist (the owner, 2026-11-11: "1182 allowlist: yes (no apostrophe)") ========
 test('a reply is the one line `/worklane <option> <id> [note]`, the note in letters, digits, spaces and . , : ; -', async () => {
-  for (const b of [(id: string) => `/worklane approve ${id}`, (id: string) => `/worklane approve ${id}, ok: 2 of 2 checks green - fine.`, (id: string) => `/WORKLANE APPROVE ${id.toUpperCase()}\n\n`]) {
+  for (const b of [(id: string) => `/worklane approve ${id}`, (id: string) => `/worklane approve ${id}, ok: 2 of 2 checks green - fine.`, (id: string) => `/WORKLANE APPROVE ${id.toUpperCase()}\n`]) {
     const { f } = await landWith(b);
     assert.deepEqual([answered(f)[0]?.answer, queued(f), kinds(f)], ['approve', 1, []], b('ID'));
   }
@@ -151,4 +151,64 @@ test('"1182 fv: b": body_text showing a second command, or an open id again, voi
   }
   const plain = await landWith((id) => `/worklane approve ${id} ok`, (id) => `/worklane approve ${id} ok`);
   assert.equal(answered(plain.f)[0]?.answer, 'approve', 'control: the same line answers');
+});
+
+// ======== R1182aw D1: one final line end is allowed; any other line break voids, a blank line too ========
+test('one final line end (LF, CRLF or CR) and trailing spaces answer; a blank or whitespace line after the line voids', async () => {
+  for (const tail of ['\n', '\r\n', '\r', '  ', ' \n']) {
+    const { f } = await landWith((id) => `/worklane approve ${id}${tail}`);
+    assert.deepEqual([answered(f)[0]?.answer, kinds(f)], ['approve', []], JSON.stringify(tail));
+  }
+  for (const tail of ['\n\n', '\r\n\r\n', '\n \n', '\n\t\n', '\n ']) {
+    const { f } = await landWith((id) => `/worklane approve ${id}${tail}`);
+    assert.deepEqual([answered(f).length, queued(f), kinds(f)], [0, 0, ['reply_not_one_line']], JSON.stringify(tail));
+  }
+});
+
+// ======== R1182ax AX1: a voided comment is void for good, for every decision it names ========
+const twoOpen = async () => {
+  const f = fixture();
+  const a = await ask(f, 'plan', PLAN, 'Approve the plan for #1?');
+  const b = await QL3(f);
+  return { f, a, b };
+};
+const answeredIds = (f: Fixture) => f.log.read(0, ['decision.answered']).map((e) => (e.payload as { id: string }).id);
+test('AX1: a comment naming two open decisions answers neither, and still neither after the other is answered by comment', async () => {
+  const { f, a, b } = await twoOpen();
+  f.backlog.humanComment(1, OWNER, `/worklane approve ${b.id}, not ${a.id} yet`);
+  await handle(f);
+  assert.deepEqual([answeredIds(f), kinds(f)], [[], ['reply_several_ids']]);
+  f.backlog.humanComment(1, OWNER, `/worklane reject ${a.id}`);
+  await handle(f);
+  await handle(f);
+  assert.deepEqual(answeredIds(f), [a.id], 'B is not answered by the voided comment');
+  assert.deepEqual(kinds(f), ['reply_several_ids'], 'one note, not a second');
+});
+test('AX1b: the same after the other decision is answered off GitHub (the dashboard)', async () => {
+  const { f, a, b } = await twoOpen();
+  f.backlog.humanComment(1, OWNER, `/worklane approve ${b.id}, not ${a.id} yet`);
+  await handle(f);
+  f.log.append('decision.answered', { id: a.id, by: OWNER, answer: 'reject', role: 'owner' }, OWNER, 'human');
+  await handle(f);
+  await handle(f);
+  assert.deepEqual(answeredIds(f), [a.id]);
+});
+test('AX1c: both commands in one pass (the void comment first): only the plain reply answers', async () => {
+  const { f, a, b } = await twoOpen();
+  f.backlog.humanComment(1, OWNER, `/worklane approve ${b.id}, not ${a.id} yet`);
+  f.backlog.humanComment(1, OWNER, `/worklane reject ${a.id}`);
+  await handle(f);
+  await handle(f);
+  assert.deepEqual(answeredIds(f), [a.id]);
+});
+test('AX1 controls: answering A alone answers only A; a later plain reply to B answers B', async () => {
+  const { f, a, b } = await twoOpen();
+  f.backlog.humanComment(1, OWNER, `/worklane approve ${b.id}, not ${a.id} yet`);
+  await handle(f);
+  f.backlog.humanComment(1, OWNER, `/worklane reject ${a.id}`);
+  await handle(f);
+  f.backlog.humanComment(1, OWNER, `/worklane approve ${b.id}`);
+  await handle(f);
+  assert.deepEqual(answeredIds(f).sort(), [a.id, b.id].sort());
+  assert.equal(answered(f).find((x) => x.id === b.id)?.answer, 'approve');
 });

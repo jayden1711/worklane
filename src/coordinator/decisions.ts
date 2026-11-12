@@ -261,7 +261,10 @@ export abstract class Decisions extends Recovery {
     const open = asked.filter((p) => !answered.has(p.id)).map((p) => p.id);
     const replies = comments.filter((c) => writers.has(c.author.toLowerCase()) && !c.body.trimStart().startsWith(`[${BRAND.cli}]`));
     const parsed = replies.map((c) => ({ c, r: readReply(c.body, c.text) })); // c.text: the tracker's rendering (GitHub body_text), or null
-    // At most one note per comment, keyed by the comment; the notes already written are read once.
+    // At most one note per comment, keyed by the comment; the notes already written are read once. A comment with a
+    // note is void for good, for every decision (R1182ax AX1): with "1182 dword: b" a second id voids only while its
+    // decision is open, so without this a comment voided for naming an open decision answered once that one closed.
+    const keyOf = (c: (typeof replies)[number]) => `#${n}: reply ${c.id ?? createHash('sha256').update(`${c.author}\n${c.at ?? ''}\n${c.body}`).digest('hex').slice(0, 12)}`;
     const said = new Set<string>();
     for (const e of this.d.log.read(0, ['coordinator.error'])) {
       const m = /^(#\d+: reply \S+):/.exec((e.payload as { message: string }).message);
@@ -279,7 +282,7 @@ export abstract class Decisions extends Recovery {
       const second = secondLook(r, live);
       const kind = r.refused ? (looks ? r.refused.kind : null) : unknown ? 'reply_unknown_id' : badOption ? 'reply_unknown_option' : second;
       if (!kind) continue;
-      const key = `#${n}: reply ${c.id ?? createHash('sha256').update(`${c.author}\n${c.at ?? ''}\n${c.body}`).digest('hex').slice(0, 12)}`;
+      const key = keyOf(c);
       if (said.has(key)) continue;
       said.add(key);
       const why = {
@@ -296,7 +299,7 @@ export abstract class Decisions extends Recovery {
     }
     const id = q.id.toLowerCase();
     const picks = parsed
-      .map(({ c, r }) => ({ c, line: r.command && secondLook(r, live) === null && r.command.id === id && q.options.includes(r.command.option) ? r.command : undefined }))
+      .map(({ c, r }) => ({ c, line: r.command && !said.has(keyOf(c)) && secondLook(r, live) === null && r.command.id === id && q.options.includes(r.command.option) ? r.command : undefined }))
       .filter((x) => x.line !== undefined);
     for (const r of picks.reverse()) {
       const role = await this.commenterRole(r.c.author);
