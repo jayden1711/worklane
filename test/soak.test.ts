@@ -2307,7 +2307,11 @@ print('made')`, ...names], { encoding: 'utf8' });
     if (!/made/.test(made.stdout)) return t.skip(`mq_open unavailable: ${made.stdout}${made.stderr}`.slice(0, 200));
     assert.ok(posixMqueues()! >= before + 3, `counted after its maker exited: ${before} -> ${posixMqueues()}`);
   } finally {
-    for (const n of names) rmSync(join('/dev/mqueue', n.slice(1)), { force: true });
+    // OWNER (2026-11-11), R1181aj AJ2: removed, and checked.
+    for (const n of names) {
+      rmSync(join('/dev/mqueue', n.slice(1)), { force: true });
+      assert.equal(existsSync(join('/dev/mqueue', n.slice(1))), false, `queue ${n} removed`);
+    }
   }
 });
 
@@ -2346,6 +2350,12 @@ test('soak driver (Linux, R1181ae D4): the walked files on a tmpfs are in no ino
   }
 });
 
+/**
+ * Whether the cleanup probe passed in a run's output (R1181aj AJ1: a bare `ok N - …` match also found `not ok N - …`):
+ * a line that starts with `ok N -` or `✔`, and no line that starts with `not ok N -` or `✖`, for the probe.
+ */
+const probePassed = (out: string) => /^\s*(?:ok \d+ - |✔ )soak cleanup probe/m.test(out) && !/^\s*(?:not ok \d+ - |✖ )soak cleanup probe/m.test(out);
+
 /** The soak driver run as its own test process (the smoke, with `env`), and the folder it recorded. */
 function runSoakDriver(env: Record<string, string>): { status: number | null; out: string; base: string | null } {
   const rec = join(mkdtempSync(join(tmpdir(), 'soak-run-')), 'base');
@@ -2362,12 +2372,12 @@ test('soak driver: the soak removes its own folder (state, repo, worktrees, temp
   assert.notEqual(failed.status, 0, 'the run failed');
   assert.match(failed.out, /SOAK_TEST_THROW_AT_TICK: a fault for the cleanup test/);
   assert.ok(failed.base, 'it recorded its folder');
-  assert.match(failed.out, /(?:ok \d+ -|✔) soak cleanup probe/, `the probe, in the same process before it exits, found the folder gone: ${failed.out.slice(-600)}`);
+  assert.ok(probePassed(failed.out), `the probe, in the same process before it exits, found the folder gone: ${failed.out.slice(-600)}`);
   assert.equal(existsSync(failed.base!), false, `a failed run's folder is gone: ${failed.base}`);
   // A run to its end, whatever its verdict: its folder is gone too.
   const ran = runSoakDriver({ SOAK_TICKS: '4' });
   assert.ok(ran.base, 'it recorded its folder');
-  assert.match(ran.out, /(?:ok \d+ -|✔) soak cleanup probe/, 'the probe found the folder gone before exit');
+  assert.ok(probePassed(ran.out), 'the probe found the folder gone before exit');
   assert.equal(existsSync(ran.base!), false, `a finished run's folder is gone: ${ran.base}`);
   // The floor: refused before anything is made.
   const floor = runSoakDriver({ SOAK_TICKS: '4', SOAK_MIN_FREE_GB: '1000000000' });
