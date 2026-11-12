@@ -239,7 +239,8 @@ function loadPins(text: string): { pins: string[]; problems: string[] } {
   return { pins: [...reachable].map(([name, s]) => `${digest(s.getText(sf))} ${name}`), problems };
 }
 
-/** Property names that reach a built-in's prototype or redefine a property; none is named in src/events/redact.ts. */
+/** Property names that reach a built-in's prototype or redefine a property; none is named in src/events/redact.ts. A refusal list: registered never-shrink (the weakening backstop, #869). */
+// check-table: never-shrink
 const BANNED_PROPERTIES = new Set(['prototype', '__proto__', 'defineProperty', 'defineProperties', 'setPrototypeOf', 'getPrototypeOf']);
 
 /**
