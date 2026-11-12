@@ -33,18 +33,46 @@ import { SYSTEMD_MARKERS, SYSTEM_ROOT_VAR, TEST_MACHINE_VAR, TEST_MARK_FILE, TES
  * table of RegExps or typed arrays is held only by the line reader. The src/ and scripts/ tables are data
  * (src/check-tables.ts), which has neither gap.
  */
-export function freezeTestTable(v: unknown, where = 'a test table'): void {
-  const seen = new Set<object>();
+// R1184al D1: the built-ins the freeze uses, taken here, when this preload runs and before any test module (a helper
+// imported ahead of a table module could otherwise replace Object.freeze, Reflect.ownKeys or WeakSet's methods).
+const [freeze, isFrozen, defineProperty, ownKeys, apply, isView] = [Object.freeze, Object.isFrozen, Object.defineProperty, Reflect.ownKeys, Reflect.apply, ArrayBuffer.isView];
+const [weakHas, weakAdd] = [WeakSet.prototype.has, WeakSet.prototype.add];
+const [RegExpC, SetC, MapC, WeakSetC, TypeErrorC] = [RegExp, Set, Map, WeakSet, TypeError];
+
+/** Each object `v` reaches (not through a RegExp or a typed array), once, with the captured built-ins. */
+function eachObject(v: unknown, f: (x: object) => void, where: string): void {
+  const seen = new WeakSetC<object>();
   const walk = (x: unknown) => {
-    if (typeof x !== 'object' || x === null || x instanceof RegExp || ArrayBuffer.isView(x) || seen.has(x)) return;
-    if (x instanceof Set || x instanceof Map) throw new TypeError(`${where} is a ${x instanceof Set ? 'Set' : 'Map'}: a registered test table can't be one (#941): use frozenSet from src/check-tables.ts, or a list`);
-    seen.add(x);
-    for (const k of Reflect.ownKeys(x)) walk((x as Record<PropertyKey, unknown>)[k]);
-    Object.freeze(x);
+    if (typeof x !== 'object' || x === null || x instanceof RegExpC || isView(x) || apply(weakHas, seen, [x])) return;
+    if (x instanceof SetC || x instanceof MapC) throw new TypeErrorC(`${where} is a ${x instanceof SetC ? 'Set' : 'Map'}: a registered test table can't be one (#941): use frozenSet from src/check-tables.ts, or a list`);
+    apply(weakAdd, seen, [x]);
+    for (const k of ownKeys(x)) walk((x as Record<PropertyKey, unknown>)[k]);
+    f(x);
   };
   walk(v);
 }
-(globalThis as Record<symbol, unknown>)[Symbol.for('worklane.test.freezeTable')] = freezeTestTable;
+
+export function freezeTestTable(v: unknown, where = 'a test table'): void {
+  eachObject(v, (x) => freeze(x), where);
+  // Checked with the captured isFrozen: a freeze that didn't take throws at the table's load.
+  eachObject(v, (x) => {
+    if (!isFrozen(x)) throw new TypeErrorC(`${where} isn't frozen after its freeze (#941, R1184al D1)`);
+  }, where);
+}
+
+/** Whether every object `v` reaches is frozen, read with the built-ins this preload captured (R1184al D1). */
+export function deepFrozen(v: unknown): boolean {
+  let all = true;
+  eachObject(v, (x) => {
+    if (!isFrozen(x)) all = false;
+  }, 'a test table');
+  return all;
+}
+
+// Set once, not writable and not configurable: no later code can replace the freeze the loader's calls go through, or
+// the check the lock test reads (R1184al D1: an unlocked helper replaced the writable global before a table loaded).
+defineProperty(globalThis, Symbol.for('worklane.test.freezeTable'), { value: freezeTestTable, writable: false, configurable: false, enumerable: false });
+defineProperty(globalThis, Symbol.for('worklane.test.deepFrozen'), { value: deepFrozen, writable: false, configurable: false, enumerable: false });
 // Every test module that registers a table gets it frozen right after its declaration (test/table-freeze.ts).
 register('./table-freeze.js', import.meta.url);
 

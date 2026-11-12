@@ -61,3 +61,47 @@ test('freezeTestTable refuses a Set or a Map anywhere in a table, leaves a RegEx
   assert.throws(() => t.list.push(3), TypeError);
   assert.throws(() => t.deep.k.push(3), TypeError);
 });
+
+/** The preload's deep frozen-check, read from its non-writable global (R1184al D1: never through a helper's global). */
+const deepFrozen = (globalThis as Record<symbol, (v: unknown) => boolean>)[Symbol.for('worklane.test.deepFrozen')]!;
+
+test("every table a test helper registers is deep-frozen, read with the preload's own built-ins (#941, R1184al D1)", async () => {
+  const { readFileSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const { registrationsOf } = await import('../src/merge-policy-weakening.js');
+  const { repoRoot } = await import('./helpers.js');
+  assert.equal(typeof deepFrozen, 'function', 'the preload set its check');
+  const desc = Object.getOwnPropertyDescriptor(globalThis, Symbol.for('worklane.test.freezeTable'))!;
+  assert.deepEqual([desc.writable, desc.configurable], [false, false], 'the freeze global is neither writable nor configurable');
+  for (const m of ['raw-check-reads', 'token-standins', 'host-tools']) {
+    const names = registrationsOf(readFileSync(join(repoRoot, 'test', `${m}.ts`), 'utf8')).tables.map((t) => t.table);
+    assert.ok(names.length > 0, `${m} registers tables`);
+    const mod = (await import(`./${m}.js`)) as Record<string, unknown>;
+    for (const n of names.filter((x) => x in mod)) assert.ok(deepFrozen(mod[n]), `${m} ${n} deep-frozen`);
+  }
+});
+
+test('a helper imported before a table module can neither replace the freeze nor undo it by replacing Object.freeze (#941, R1184al D1)', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const { rmSync, writeFileSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const { randomBytes } = await import('node:crypto');
+  const { pathToFileURL } = await import('node:url');
+  const { repoRoot } = await import('./helpers.js');
+  // Under dist/test, so the loader's hook treats them as test modules; removed after.
+  const dir = join(repoRoot, 'dist', 'test');
+  const tag = randomBytes(4).toString('hex');
+  const [helper, main] = [join(dir, `zz-al-helper-${tag}.js`), join(dir, `zz-al-main-${tag}.js`)];
+  try {
+    // AL2a: the freeze global replaced; AL2f: Object.freeze replaced (each as a helper would, before the table loads).
+    writeFileSync(helper, "export let wrote = 'no';\ntry { globalThis[Symbol.for('worklane.test.freezeTable')] = () => {}; wrote = 'yes'; } catch { wrote = 'refused'; }\nObject.freeze = (x) => x;\n");
+    writeFileSync(main, `import { wrote } from './zz-al-helper-${tag}.js';\nimport { RAW_READS_ALLOWED } from './raw-check-reads.js';\nconst check = globalThis[Symbol.for('worklane.test.deepFrozen')];\nlet grew = 'no';\ntry { RAW_READS_ALLOWED['src/x.ts'] = 'x'; grew = String('src/x.ts' in RAW_READS_ALLOWED); } catch { grew = 'refused'; }\nconsole.log(JSON.stringify({ wrote, frozen: check(RAW_READS_ALLOWED), grew }));\n`);
+    const r = spawnSync(process.execPath, ['--import', pathToFileURL(join(dir, 'isolate.js')).href, main], { encoding: 'utf8', env: process.env, timeout: 60_000 });
+    assert.equal(r.status, 0, r.stderr);
+    const out = JSON.parse(r.stdout.trim().split('\n').at(-1)!) as { wrote: string; frozen: boolean; grew: string };
+    assert.deepEqual(out, { wrote: 'refused', frozen: true, grew: 'refused' });
+  } finally {
+    rmSync(helper, { force: true });
+    rmSync(main, { force: true });
+  }
+});
