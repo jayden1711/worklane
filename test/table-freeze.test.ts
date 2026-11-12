@@ -76,8 +76,12 @@ test("every table a test helper registers is deep-frozen, read with the preload'
   for (const m of ['raw-check-reads', 'token-standins', 'host-tools']) {
     const names = registrationsOf(readFileSync(join(repoRoot, 'test', `${m}.ts`), 'utf8')).tables.map((t) => t.table);
     assert.ok(names.length > 0, `${m} registers tables`);
-    const mod = (await import(`./${m}.js`)) as Record<string, unknown>;
-    for (const n of names.filter((x) => x in mod)) assert.ok(deepFrozen(mod[n]), `${m} ${n} deep-frozen`);
+    // As imported, and as a second copy by a query or a hash (R1184aq D1): each is frozen, read here with the preload's
+    // own check.
+    for (const spec of [`./${m}.js`, `./${m}.js?lock`, `./${m}.js#lock`]) {
+      const mod = (await import(spec)) as Record<string, unknown>;
+      for (const n of names.filter((x) => x in mod)) assert.ok(deepFrozen(mod[n]), `${spec} ${n} deep-frozen`);
+    }
   }
 });
 
@@ -89,7 +93,7 @@ test('a helper imported before a table module can neither replace the freeze, un
   const { pathToFileURL } = await import('node:url');
   const { repoRoot } = await import('./helpers.js');
   // Each helper runs before test/raw-check-reads.js loads, as one imported first would.
-  const helpers: [string, string][] = [
+  const helpers: [string, string, string?][] = [
     ['control', ''],
     ['AL2a the freeze global replaced', "try { globalThis.__worklaneTestFreezeTable = () => {}; } catch {}\ntry { Object.defineProperty(globalThis, '__worklaneTestFreezeTable', { value: () => {} }); } catch {}\n"],
     ['AL2f Object.freeze replaced', 'Object.freeze = (x) => x;\n'],
@@ -97,16 +101,29 @@ test('a helper imported before a table module can neither replace the freeze, un
     ['AO2 the Array iterator yields nothing for a table\'s key list', "const real = Array.prototype[Symbol.iterator];\nArray.prototype[Symbol.iterator] = function () { return this.length === 1 && this[0] === 'PinnedChecks' ? [][Symbol.iterator]() : real.call(this); };\n"],
     ['AO3 Symbol.for answers another symbol', "const realFor = Symbol.for;\nconst other = Symbol('x');\nglobalThis[other] = () => {};\nSymbol.for = (k) => (k.startsWith('worklane.test') ? other : realFor(k));\n"],
     ['globalThis redefined', "try { Object.defineProperty(globalThis, 'globalThis', { value: { __worklaneTestFreezeTable: () => {}, __worklaneTestDeepFrozen: () => true } }); } catch {}\n"],
+    // R1184aq D1: another module hook that loads the table module itself, or takes the freeze calls out; and a second
+    // copy of the module, loaded by a query or a hash.
+    ['AQ1a register(), short-circuit', "import { register } from 'node:module';\nregister('data:text/javascript,' + encodeURIComponent(\"import { readFileSync } from 'node:fs'; export async function load(url, context, next) { if (url.includes('/raw-check-reads.js')) return { format: 'module', source: readFileSync(new URL(url), 'utf8'), shortCircuit: true }; return next(url, context); }\"));\n"],
+    ['AQ1b registerHooks, short-circuit', "import { registerHooks } from 'node:module';\nimport { readFileSync } from 'node:fs';\nregisterHooks({ load(url, context, next) { if (url.includes('/raw-check-reads.js')) return { format: 'module', source: readFileSync(new URL(url), 'utf8'), shortCircuit: true }; return next(url, context); } });\n"],
+    ['AQ1c registerHooks, the freeze calls taken out', "import { registerHooks } from 'node:module';\nregisterHooks({ load(url, context, next) { const r = next(url, context); return url.includes('/raw-check-reads.js') ? { ...r, source: String(r.source).replace(/__worklaneTestFreezeTable\\(/g, 'void (') } : r; } });\n"],
+    ['AQ2a a query string', '', './raw-check-reads.js?fresh'],
+    ['AQ2b a hash', '', './raw-check-reads.js#fresh'],
   ];
   // Under dist/test, so the loader's hook treats them as test modules; removed after.
   const dir = join(repoRoot, 'dist', 'test');
-  for (const [label, body] of helpers) {
+  for (const [label, body, spec = './raw-check-reads.js'] of helpers) {
     const tag = randomBytes(4).toString('hex');
     const [helper, main] = [join(dir, `zz-ao-helper-${tag}.js`), join(dir, `zz-ao-main-${tag}.js`)];
     try {
       writeFileSync(helper, `${body}export {};\n`);
-      writeFileSync(main, `import './zz-ao-helper-${tag}.js';\nimport { MAKERS_ALLOWED, RAW_READS_ALLOWED } from './raw-check-reads.js';\nconst check = __worklaneTestDeepFrozen;\nconst refused = (f) => { try { f(); return 'grew'; } catch { return 'refused'; } };\nconst inner = Object.values(MAKERS_ALLOWED)[0];\nconsole.log(JSON.stringify({ frozen: [check(RAW_READS_ALLOWED), check(MAKERS_ALLOWED)], writes: [refused(() => { RAW_READS_ALLOWED['src/x.ts'] = 'x'; }), refused(() => { inner.push('x'); })] }));\n`);
+      writeFileSync(main, `import './zz-ao-helper-${tag}.js';\nconst { MAKERS_ALLOWED, RAW_READS_ALLOWED } = await import(${JSON.stringify(spec)});\nconst check = __worklaneTestDeepFrozen;\nconst refused = (f) => { try { f(); return 'grew'; } catch { return 'refused'; } };\nconst inner = Object.values(MAKERS_ALLOWED)[0];\nconsole.log(JSON.stringify({ frozen: [check(RAW_READS_ALLOWED), check(MAKERS_ALLOWED)], writes: [refused(() => { RAW_READS_ALLOWED['src/x.ts'] = 'x'; }), refused(() => { inner.push('x'); })] }));\n`);
       const r = spawnSync(process.execPath, ['--import', pathToFileURL(join(dir, 'isolate.js')).href, main], { encoding: 'utf8', env: process.env, timeout: 60_000 });
+      // Either the helper's hook registration is refused (the process stops there), or the tables are frozen.
+      if (/^AQ1/.test(label)) {
+        assert.notEqual(r.status, 0, `${label}: the hook was registered: ${r.stdout}`);
+        assert.match(r.stderr, /module\.register(Hooks)? after the test preload/, label);
+        continue;
+      }
       assert.equal(r.status, 0, `${label}: ${r.stderr}`);
       const out = JSON.parse(r.stdout.trim().split('\n').at(-1)!) as unknown;
       assert.deepEqual(out, { frozen: [true, true], writes: ['refused', 'refused'] }, label);

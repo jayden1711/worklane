@@ -16,7 +16,7 @@ import childProcess from 'node:child_process';
 import type * as Cp from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { accessSync, chmodSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { register, syncBuiltinESMExports } from 'node:module';
+import nodeModule, { register, syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -88,6 +88,14 @@ defineProperty(globalThis, FREEZE_GLOBAL, { value: freezeTestTable, writable: fa
 defineProperty(globalThis, DEEP_FROZEN_GLOBAL, { value: deepFrozen, writable: false, configurable: false, enumerable: false });
 // Every test module that registers a table gets it frozen right after its declaration (test/table-freeze.ts).
 register('./table-freeze.js', import.meta.url);
+// Then no other module hook (R1184aq D1: a hook registered later runs first, and could load a table module itself, or
+// take the freeze calls back out of its source). Each registration call throws from here on, in this process; the
+// named imports of node:module follow (syncBuiltinESMExports). A test that needs a hook runs it in a child it starts
+// without this preload, as the guard's own tests do.
+for (const k of ['register', 'registerHooks'] as const) {
+  if (k in nodeModule) defineProperty(nodeModule, k, { value: () => { throw new TypeErrorC(`module.${k} after the test preload (test/isolate.ts): a module hook could skip the test tables' freeze (#941, R1184aq)`); }, writable: false, configurable: false, enumerable: true });
+}
+syncBuiltinESMExports();
 
 /** Engine settings that only tune speed, kept from the shell (a slow CI runner scales the browser's timeouts). */
 const KEEP = new Set([`${BRAND.envPrefix}_BROWSER_TIMEOUT_SCALE`]);

@@ -49,7 +49,8 @@ type Load = (url: string, context: { format?: string | null | undefined }, next:
 /** The module hook: a compiled test module that declares registered tables gets each one frozen after its statement. */
 export const load: Load = async (url, context, next) => {
   const out = await next(url, context);
-  if (!/\/dist\/test\/.*\.js$/.test(url) || out.source == null || (out.format !== 'module' && out.format !== 'commonjs')) return out;
+  // By the URL's path (R1184aq D1: `./tables.js?fresh` or `#fresh` loads a second copy, which must be frozen too).
+  if (!/\/dist\/test\/.*\.js$/.test(new URL(url).pathname) || out.source == null || (out.format !== 'module' && out.format !== 'commonjs')) return out;
   const source = typeof out.source === 'string' ? out.source : Buffer.from(out.source as Uint8Array).toString('utf8');
   const frozen = withFreezes(source, url);
   return frozen === null ? out : { ...out, source: frozen };
