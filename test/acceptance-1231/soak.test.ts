@@ -32,12 +32,13 @@ const series = (n: number, f: (m: number) => Record<string, unknown> = () => ({}
 type Opts = Parameters<typeof soakVerdict>[2];
 const RUN = { expectedMs: 5.5 * 3600_000 - 60_000, sampleMs: 60_000, issueEveryMs: 60_000 } as unknown as Opts;
 const failures = (x: SoakSample[], o: Opts = RUN) => soakVerdict(x, SOAK_LIMITS, o).failures;
-const mustFail = (name: string, x: SoakSample[], want: RegExp, o: Opts = RUN) =>
+const mustFail = (name: string, x: SoakSample[], want: RegExp, o: Opts = RUN) => {
   test(`must fail: ${name}`, () => {
     const f = failures(x, o);
     assert.notDeepEqual(f, [], `passed a bad run: ${JSON.stringify(soakVerdict(x, SOAK_LIMITS, o).measured)}`);
     assert.ok(f.some((m) => want.test(m)), `failed, but not for ${want}: ${f.join(' | ')}`);
   });
+};
 const LEAK_HEAP = /^leak: the heap/;
 const LEAK_RSS = /^leak: RSS/;
 const LEAK_FDS = /^leak: open file handles|^open file handles not counted/;
@@ -47,7 +48,9 @@ const LOG = /^log growth/;
 const HANG = /^hang/;
 const DRIFT = /^drift/;
 const SHORT = /^too short/;
-const mustPass = (name: string, x: SoakSample[], o: Opts = RUN) => test(`must pass: ${name}`, () => assert.deepEqual(failures(x, o), []));
+const mustPass = (name: string, x: SoakSample[], o: Opts = RUN) => {
+  test(`must pass: ${name}`, () => assert.deepEqual(failures(x, o), []));
+};
 const ramp = (m: number, from: number, size: number) => (m < 90 ? 0 : ((m - 90) / (N - 91)) * size) + from;
 const saw = (m: number) => m % 10 >= 3 && m % 10 < 7;
 
