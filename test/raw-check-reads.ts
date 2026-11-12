@@ -247,3 +247,10 @@ export function testImports(files: Record<string, string>, root = repoRoot): { f
   }
   return out;
 }
+
+// #941, R1184ap: each table freezes here too, at the module's end, whatever loaded the module: require() (whose first
+// load the loader's hook doesn't see), a worker, or a process without the preload, where the bare name is undefined and
+// the load throws. The hook's freeze, right after each declaration, stays the first layer.
+__worklaneTestFreezeTable(RAW_READS_ALLOWED, `${import.meta.url}#RAW_READS_ALLOWED`);
+__worklaneTestFreezeTable(JUDGED_CASTS_ALLOWED, `${import.meta.url}#JUDGED_CASTS_ALLOWED`);
+__worklaneTestFreezeTable(MAKERS_ALLOWED, `${import.meta.url}#MAKERS_ALLOWED`);

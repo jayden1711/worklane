@@ -133,3 +133,44 @@ test('a helper imported before a table module can neither replace the freeze, un
     }
   }
 });
+
+test("a test helper that registers tables freezes each one itself at its end, so require(), a worker or a process without the preload can't load it unfrozen (#941, R1184ap)", async () => {
+  const { execFileSync, spawnSync } = await import('node:child_process');
+  const { readFileSync, rmSync, writeFileSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const { randomBytes } = await import('node:crypto');
+  const { pathToFileURL } = await import('node:url');
+  const { registrationsOf } = await import('../src/merge-policy-weakening.js');
+  const { repoRoot } = await import('./helpers.js');
+  // Each module under test/ that registers a table and isn't a test file (other tests import it) calls the freeze by its
+  // bare name for each table, at top level. A test file's own tables guard its own run, under the preload.
+  const files = execFileSync('git', ['grep', '-l', '// check-table: ', '--', 'test'], { cwd: repoRoot, encoding: 'utf8' }).trim().split('\n');
+  const helpers = files.filter((f) => !/\.test\.ts$/.test(f) && f !== 'test/isolate.ts');
+  assert.ok(helpers.length >= 3, `the helpers found: ${helpers.join(', ')}`);
+  for (const f of helpers) {
+    const text = readFileSync(join(repoRoot, f), 'utf8');
+    for (const { table } of registrationsOf(text).tables) assert.ok(text.split('\n').some((l) => l.startsWith(`__worklaneTestFreezeTable(${table}, `)), `${f}: ${table} freezes itself`);
+  }
+  // Loaded each way the loader's hook may not see.
+  const dir = join(repoRoot, 'dist', 'test');
+  const main = join(dir, `zz-ap-main-${randomBytes(4).toString('hex')}.js`);
+  try {
+    writeFileSync(main, `import { createRequire } from 'node:module';
+import { Worker } from 'node:worker_threads';
+const write = (m) => { try { m.RAW_READS_ALLOWED['src/x.ts'] = 'x'; return 'grew'; } catch { return 'refused'; } };
+const r = createRequire(import.meta.url)('./raw-check-reads.js');
+const viaRequire = { frozen: __worklaneTestDeepFrozen(r.RAW_READS_ALLOWED), write: write(r) };
+const viaWorker = await new Promise((res, rej) => { const w = new Worker("import { parentPort } from 'node:worker_threads'; const m = await import(" + JSON.stringify(new URL('./raw-check-reads.js?worker', import.meta.url).href) + "); let wr = 'grew'; try { m.RAW_READS_ALLOWED['src/x.ts'] = 'x'; } catch { wr = 'refused'; } parentPort.postMessage({ frozen: Object.isFrozen(m.RAW_READS_ALLOWED), write: wr });", { eval: true, type: 'module' }); w.on('message', res); w.on('error', rej); });
+console.log(JSON.stringify({ viaRequire, viaWorker }));
+`);
+    const r = spawnSync(process.execPath, ['--import', pathToFileURL(join(dir, 'isolate.js')).href, main], { encoding: 'utf8', env: process.env, timeout: 60_000 });
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(JSON.parse(r.stdout.trim().split('\n').at(-1)!), { viaRequire: { frozen: true, write: 'refused' }, viaWorker: { frozen: true, write: 'refused' } });
+  } finally {
+    rmSync(main, { force: true });
+  }
+  // A process without the preload can't load it at all: the freeze's name is undefined there.
+  const bare = spawnSync(process.execPath, ['--input-type=module', '-e', `await import(${JSON.stringify(pathToFileURL(join(dir, 'raw-check-reads.js')).href)});`], { encoding: 'utf8', timeout: 60_000 });
+  assert.notEqual(bare.status, 0, 'loaded without the preload');
+  assert.match(bare.stderr, /__worklaneTestFreezeTable is not defined/);
+});
