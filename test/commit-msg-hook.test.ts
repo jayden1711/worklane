@@ -353,7 +353,8 @@ test('the hook fails closed on a comment setting or an encoding it would have to
     r.git('config', 'core.commentChar', v);
     const got = judge('subj\n\nbody\n');
     assert.equal(got.status, 1, `refused: ${JSON.stringify(v)}`);
-    assert.match(got.stderr, /commit refused: core\.commentChar or core\.commentString is .*, which the commit-msg hook won't model/);
+    // A newline breaks git's own config reading: refused with git's error (R1260s D2), the others with the hook's note.
+    assert.match(got.stderr, v.includes('\n') ? /commit refused: git could not read/ : /commit refused: core\.commentChar or core\.commentString is .*, which the commit-msg hook won't model/);
   }
   for (const v of ['#', ';', '//', 'Auto']) {
     r.git('config', 'core.commentChar', v);
@@ -389,7 +390,7 @@ test('the hook fails closed on a comment setting or an encoding it would have to
   for (const [what, env] of [['author name', { GIT_AUTHOR_NAME: 'Ada\rEve' }], ['committer name', { GIT_COMMITTER_NAME: 'Ada\rEve' }]] as const) {
     const got = withEnv(env);
     assert.equal(got.status, 1, `refused: ${what}`);
-    assert.match(got.stderr, /identity git would write holds a CR, a NUL or bytes that aren't valid UTF-8/, what);
+    assert.match(got.stderr, /identity git would write holds a CR or a NUL/, what);
   }
   assert.equal(withEnv({ GIT_AUTHOR_NAME: 'Jos\u00e9 Ni\u00f1o' }).status, 0, 'a UTF-8 name: kept');
   r.git('config', 'user.name', 'Ada\rEve');
@@ -397,9 +398,8 @@ test('the hook fails closed on a comment setting or an encoding it would have to
   // Invalid UTF-8 can't pass through the environment (node writes it as UTF-8): written into the config as bytes.
   r.git('config', '--unset', 'user.name');
   appendFileSync(join(r.dir, '.git', 'config'), Buffer.concat([Buffer.from('[user]\n\tname = A'), Buffer.from([0xe9]), Buffer.from('\n')]));
-  const latin1 = withEnv({});
-  assert.equal(latin1.status, 1, 'user.name in Latin-1: refused');
-  assert.match(latin1.stderr, /identity git would write holds a CR, a NUL or bytes that aren't valid UTF-8/);
+  // R1260s N1: git rewrites an identity that isn't UTF-8 itself (verify_utf8), so the gate never sees it: kept.
+  assert.equal(withEnv({}).status, 0, 'user.name in Latin-1: kept (git rewrites it)');
   r.git('config', 'user.name', 'Ada');
   const bad = judge(Buffer.from([0x73, 0x75, 0x62, 0x6a, 0xff, 0x0a]));
   assert.equal(bad.status, 1);
@@ -479,15 +479,15 @@ test("the gate reads a commit's header block strictly, as git splits it: a CR-hi
   // UTF-7 for `Co`: git log shows `Co-Authored-By: …` under `encoding UTF-7`; the raw bytes match no attribution pattern.
   const utf7 = 'Add a thing\n\n+AEMAbw--Authored-By: Someone <noreply@example.com>\n';
   for (const [what, headers, msg, why, literally] of [
-    ['decoy-attr: an extra header hiding `encoding utf8` behind a CR', ['x-note a\rencoding utf8', 'encoding UTF-7'], utf7, /header has a CR or a NUL/, false],
-    ['decoy-gpgsig-cont: the decoy in a signature continuation', ['gpgsig -----BEGIN PGP SIGNATURE-----', ' \rencoding utf8', ' -----END PGP SIGNATURE-----', 'encoding UTF-7'], utf7, /header has a CR or a NUL/, false],
-    ['the real one first, then the decoy', ['encoding UTF-7', 'x-note a\rencoding utf8'], utf7, /header has a CR or a NUL/, false],
+    ['decoy-attr: an extra header hiding `encoding utf8` behind a CR', ['x-note a\rencoding utf8', 'encoding UTF-7'], utf7, /declares its message encoding as "UTF-7"/, false],
+    ['decoy-gpgsig-cont: the decoy in a signature continuation', ['gpgsig -----BEGIN PGP SIGNATURE-----', ' \rencoding utf8', ' -----END PGP SIGNATURE-----', 'encoding UTF-7'], utf7, /declares its message encoding as "UTF-7"/, false],
+    ['the real one first, then the decoy', ['encoding UTF-7', 'x-note a\rencoding utf8'], utf7, /declares its message encoding as "UTF-7"/, false],
     ['two encoding headers', ['encoding UTF-8', 'encoding UTF-8'], 'Add a thing\n', /has 2 encoding headers/, false],
     ['encoding utf8 (not exactly UTF-8)', ['encoding utf8'], 'Add a thing\n', /declares its message encoding as "utf8"/, false],
     ['an extra space', ['encoding  UTF-8'], 'Add a thing\n', /declares its message encoding as " UTF-8"/, false],
     ['an empty value', ['encoding '], 'Add a thing\n', /declares its message encoding as ""/, false],
     ['a NUL in a header', ['x-note a\0b'], 'Add a thing\n', /header has a CR or a NUL/, true],
-    ['a byte that is not valid UTF-8 in a header (a Latin-1 é)', ['x-note café'], 'Add a thing\n', /header has bytes that aren't valid UTF-8/, false],
+
     ['an encoding header in UTF-8 but not ASCII', [`encoding ${Buffer.from('UTF\u20118', 'utf8').toString('latin1')}`], 'Add a thing\n', /declares its message encoding as/, false],
   ] as const) {
     const got = gateOn(craft([...headers], msg, literally));
@@ -499,12 +499,64 @@ test("the gate reads a commit's header block strictly, as git splits it: a CR-hi
     const got = gateOn(craft(headers, 'Subject\nnot blank\n'));
     assert.match(got.stderr, /line 2 is not blank/, `judged: ${headers.join() || 'no header'}`);
   }
+  // R1260t D1: a CR or Latin-1 bytes in a line git reads no meaning from (a merged signed tag's `mergetag`
+  // continuation, an extra header `--amend` carries) is kept, as on main; in an author line it is refused.
+  for (const headers of [['mergetag object 0000000000000000000000000000000000000000', ' type commit', ' tag v1', ' tagger Ada <ada@example.com> 1700000000 -0100', ' ', ' Release 1\rnotes'], ['x-tool a\rb'], ['x-note caf\u00e9']]) {
+    const got = gateOn(craft(headers, 'Subject\nnot blank\n'));
+    assert.doesNotMatch(got.stderr, /header has/, `kept: ${JSON.stringify(headers)}`);
+    assert.match(got.stderr, /line 2 is not blank/, `judged: ${JSON.stringify(headers)}`);
+  }
+  assert.match(gateOn(craft([], 'Add a thing\n', false, 'Ada\rEve')).stderr, /header has a CR or a NUL/, 'a CR in the author line: refused');
+  assert.match(gateOn(craft([], 'Add a thing\n', false, 'caf\u00e9')).stderr, /header has bytes that aren't valid UTF-8/, 'Latin-1 bytes in the author line: refused');
   // A non-ASCII author and committer name in UTF-8 is read, and the message judged as any other.
   for (const name of ['Jos\u00e9 Ni\u00f1o', '\u5f20\u4f1f']) {
     const got = gateOn(craft([], 'Subject\nnot blank\n', false, Buffer.from(name, 'utf8').toString('latin1')));
     assert.doesNotMatch(got.stderr, /header has/, `read: ${name}`);
     assert.match(got.stderr, /line 2 is not blank/, `judged: ${name}`);
   }
+});
+
+test("the hook reads git's config as git commit does, and a git call that fails refuses; a merged signed tag's message with a CR passes hook and gate (#1260 R1260s D1, D2, R1260t D1, D2)", { skip: !hasGitleaks && 'gitleaks not installed' }, (t) => {
+  const r = repo();
+  const judge = (env: Record<string, string>) => {
+    const f = join(r.dir, '.git', 'COMMIT_EDITMSG');
+    writeFileSync(f, 'Add a thing\n');
+    return spawnSync(process.execPath, [installedGate, '--commit-msg', f], { cwd: r.dir, encoding: 'utf8', env: { ...process.env, PUSH_GATE_COMMIT_MSG: f, GIT_EDITOR: 'true', GIT_DIR: join(r.dir, '.git'), ...env } });
+  };
+  // s D1: GIT_CONFIG is `git config`'s alone; the hook still reads the repo's config, as git commit does.
+  r.git('config', 'i18n.commitEncoding', 'ISO-8859-1');
+  const hidden = judge({ GIT_CONFIG: '/dev/null' });
+  assert.equal(hidden.status, 1, 'GIT_CONFIG set: the repo config is still read');
+  assert.match(hidden.stderr, /i18n\.commitEncoding is ISO-8859-1/);
+  r.git('config', '--unset', 'i18n.commitEncoding');
+  // s D2 = t D2: a GIT_CONFIG_COUNT git accepts but the runner refuses ('', '01', '+1'): refused, naming git's failure.
+  for (const count of ['', '01', '+1']) {
+    const got = judge({ GIT_CONFIG_COUNT: count });
+    assert.equal(got.status, 1, `GIT_CONFIG_COUNT=${JSON.stringify(count)}: refused`);
+    assert.match(got.stderr, /git could not read its config/);
+  }
+  // A missing identity is git commit's own refusal: the hook lets it through to git.
+  const noIdent = spawnSync(process.execPath, [installedGate, '--commit-msg', join(r.dir, '.git', 'COMMIT_EDITMSG')], { cwd: r.dir, encoding: 'utf8', env: { ...process.env, PUSH_GATE_COMMIT_MSG: join(r.dir, '.git', 'COMMIT_EDITMSG'), GIT_EDITOR: 'true', GIT_DIR: join(r.dir, '.git'), GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', HOME: join(r.dir, '..'), EMAIL: '', GIT_AUTHOR_NAME: '', GIT_AUTHOR_EMAIL: '', GIT_COMMITTER_NAME: '', GIT_COMMITTER_EMAIL: '' } });
+  assert.doesNotMatch(noIdent.stderr, /git could not read the (author|committer) identity/, `no identity: left to git: ${noIdent.stderr}`);
+  // t D1: a signed tag whose message holds a CR, merged with --no-ff through the installed hook: hook and gate pass.
+  if (spawnSync('ssh-keygen', ['-?'], { stdio: 'ignore' }).error) return t.diagnostic('no ssh-keygen: the signed-tag merge not run');
+  const g = repo();
+  assert.equal(spawnSync(process.execPath, [installer], { cwd: g.dir, encoding: 'utf8' }).status, 0);
+  const key = join(g.dir, '..', 'k');
+  spawnSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', key]);
+  for (const [k, v] of [['gpg.format', 'ssh'], ['user.signingkey', key]] as const) g.git('config', k, v);
+  const base = g.git('rev-parse', 'HEAD');
+  g.git('checkout', '-q', '-b', 'side');
+  g.git('commit', '-q', '--allow-empty', '-m', 'Side change');
+  g.git('tag', '-s', 'v1', '-m', 'Release 1\rnotes');
+  g.git('checkout', '-q', 'main');
+  g.git('commit', '-q', '--allow-empty', '-m', 'Main change');
+  const merged = spawnSync('git', ['merge', '-q', '--no-ff', '--no-edit', 'v1'], { cwd: g.dir, encoding: 'utf8' });
+  assert.equal(merged.status, 0, `the hook let the merge through: ${merged.stderr}`);
+  assert.match(g.git('cat-file', 'commit', 'HEAD'), /^mergetag /m, 'the merge carries the signed tag');
+  assert.match(g.git('cat-file', 'commit', 'HEAD'), / Release 1\rnotes/, "its message's CR is in the merge's header");
+  const gated = spawnSync(process.execPath, [gate, '--range', `${base}..HEAD`], { cwd: repoRoot, encoding: 'utf8', env: { ...process.env, GIT_DIR: join(g.dir, '.git') } });
+  assert.equal(gated.status, 0, `the gate passes it, as main's did: ${gated.stderr}`);
 });
 
 test('a remote named --commit-msg is judged as a push, never as a message (#1260 R1260a D2)', () => {

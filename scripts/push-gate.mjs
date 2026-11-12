@@ -46,6 +46,9 @@ const graphOff = (e) => {
   return { ...e, [`GIT_CONFIG_KEY_${n}`]: 'core.commitGraph', [`GIT_CONFIG_VALUE_${n}`]: 'false', GIT_CONFIG_COUNT: String(n + 1), ...last };
 };
 const GIT_ENV = graphOff({ ...process.env, GIT_NO_REPLACE_OBJECTS: '1', GIT_GRAFT_FILE: join(devNull, 'no-grafts') });
+// R1260s D1: GIT_CONFIG names a file for `git config` alone ("no effect on other Git commands"): with it, the hook's
+// config reads saw none of what `git commit` reads. No other git the gate runs reads it.
+delete GIT_ENV.GIT_CONFIG;
 const runGit = (args, opts) => execFileSync('git', [...GIT_FIXED_ARGS, ...args], { ...opts, env: GIT_ENV });
 const git = (...a) => runGit(a, { encoding: 'utf8', maxBuffer: READ_MAX });
 
@@ -194,9 +197,15 @@ function commitMessage(sha) {
   // UTF-8 (a non-ASCII author or committer name in UTF-8 is read); more than one `encoding` header; any `encoding`
   // value but exactly UTF-8 (in any case).
   const lines = head.split('\n');
-  const odd = lines.find((l) => /[\r\0]/.test(l));
+  // R1260t D1: a NUL is refused in any header line; a CR or bytes that aren't valid UTF-8 only in the lines git reads a
+  // meaning from (tree, parent, author, committer, encoding). A signed tag's message, copied into a merge's `mergetag`
+  // header (or an extra header `--amend` carries over), may hold a CR; main's gate passed those merges. The R1260p decoy
+  // stays closed: the lines are split on LF only, so `x-note a\rencoding utf8` is never read as an encoding header.
+  const meaningful = (l) => /^(?:tree|parent|author|committer|encoding)(?: |$)/.test(l);
+  const odd = lines.find((l) => /\0/.test(l) || (meaningful(l) && /\r/.test(l)));
   if (odd !== undefined) throw new Error(`commit ${sha.slice(0, 8)}'s header has a CR or a NUL (${JSON.stringify(odd.slice(0, 60))}): the gate reads headers split on LF only, as git does`);
   const notUtf8 = lines.find((l) => {
+    if (!meaningful(l)) return false;
     try {
       new TextDecoder('utf-8', { fatal: true }).decode(Buffer.from(l, 'latin1'));
       return false;
@@ -222,10 +231,20 @@ function messageShape(sha) {
 
 /** A git config value in the repo the hook runs in, or null when it isn't set. */
 function gitConfig(key) {
+  return configRead(['--get', key])?.toString('utf8').replace(/\n$/, '') || null;
+}
+
+/**
+ * A `git config` read for the commit-msg hook: its output, or null when git says the key is unset (exit 1). Any other
+ * failure refuses (R1260s D2, R1260t D2): a git that can't read the config (a GIT_CONFIG_COUNT git accepts and the
+ * runner refuses, a broken config file) must not be read as "unset".
+ */
+function configRead(args) {
   try {
-    return runGit(['config', '--get', key], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).replace(/\n$/, '') || null;
-  } catch {
-    return null;
+    return runGit(['config', ...args], { stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: READ_MAX });
+  } catch (e) {
+    if (e.status === 1) return null;
+    throw new Refusal(`git could not read its config (git config ${args.join(' ')}: exit ${e.status}${e.stderr ? `: ${String(e.stderr).trim().slice(0, 200)}` : ''}): fix the git config or environment (GIT_CONFIG_COUNT?)`);
   }
 }
 
@@ -254,21 +273,16 @@ function commentSetting() {
   } catch {
     // no git: the default below
   }
-  let set = [];
-  try {
-    // -z (R1260k D1, D2): a value may hold a newline, and its bytes are read as they are, not as text.
-    const out = runGit(['config', '-z', '--get-regexp', '^core\\.comment(char|string)$'], { stdio: ['ignore', 'pipe', 'ignore'] });
-    set = out
-      .toString('latin1')
-      .split('\0')
-      .filter(Boolean)
-      .map((entry) => {
-        const nl = entry.indexOf('\n');
-        return [(nl === -1 ? entry : entry.slice(0, nl)).toLowerCase(), nl === -1 ? '' : Buffer.from(entry.slice(nl + 1), 'latin1')];
-      });
-  } catch {
-    // none set
-  }
+  // -z (R1260k D1, D2): a value may hold a newline, and its bytes are read as they are, not as text.
+  const out = configRead(['-z', '--get-regexp', '^core\\.comment(char|string)$']);
+  const set = (out ?? Buffer.alloc(0))
+    .toString('latin1')
+    .split('\0')
+    .filter(Boolean)
+    .map((entry) => {
+      const nl = entry.indexOf('\n');
+      return [(nl === -1 ? entry : entry.slice(0, nl)).toLowerCase(), nl === -1 ? '' : Buffer.from(entry.slice(nl + 1), 'latin1')];
+    });
   const value = set.filter(([k]) => newer || k === 'core.commentchar').at(-1)?.[1];
   if (value === undefined) return '#';
   // Fail closed (R1260k D1, D2): `auto` in any case, or printable ASCII with no whitespace; anything else (a newline,
@@ -411,29 +425,21 @@ if (process.argv[2] === '--commit-msg' && installedCopy && process.argv.length =
     // Fail closed on encodings (R1260k D3, R1260l D1): git stores the bytes as typed and names i18n.commitEncoding in
     // the commit, and rewrites bytes that aren't UTF-8, so the hook judges only a UTF-8 message under UTF-8.
     // R1260r D1: set but empty (or blank), git writes an `encoding ` header the gate refuses, so it is refused here too.
-    let encSet = null;
-    try {
-      encSet = runGit(['config', '--get', 'i18n.commitEncoding'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).replace(/\n$/, '');
-    } catch {
-      // unset
-    }
+    const encSet = configRead(['--get', 'i18n.commitEncoding'])?.toString('utf8').replace(/\n$/, '') ?? null;
     if (encSet !== null && !/^utf-?8$/i.test(encSet)) throw new Refusal(`i18n.commitEncoding is ${/^\S+$/.test(encSet) ? encSet : JSON.stringify(encSet)}: set i18n.commitEncoding to UTF-8 or unset it (the hook judges a UTF-8 message only)`);
-    // R1260r D2: the identity git will write in the author and committer headers, which the gate refuses with a CR, a
-    // NUL or bytes that aren't valid UTF-8 (user.name, user.email, GIT_AUTHOR_*, GIT_COMMITTER_*).
+    // R1260r D2: the identity git will write in the author and committer headers, which the gate refuses with a CR or a
+    // NUL (user.name, user.email, GIT_AUTHOR_*, GIT_COMMITTER_*). Bytes that aren't UTF-8 there git rewrites itself
+    // (verify_utf8), so the gate never sees them: not refused here (R1260s N1).
     for (const who of ['GIT_AUTHOR_IDENT', 'GIT_COMMITTER_IDENT']) {
       let ident;
       try {
-        ident = runGit(['var', who], { stdio: ['ignore', 'pipe', 'ignore'] });
-      } catch {
-        continue; // no identity: git refuses the commit itself
+        ident = runGit(['var', who], { stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: READ_MAX });
+      } catch (e) {
+        // R1260s D2: only a missing identity (exit 128), which `git commit` refuses itself, is skipped.
+        if (e.status === 128 && /identity unknown|empty ident|unable to auto-detect/i.test(String(e.stderr ?? ''))) continue;
+        throw new Refusal(`git could not read the ${who === 'GIT_AUTHOR_IDENT' ? 'author' : 'committer'} identity (git var ${who}: exit ${e.status}${e.stderr ? `: ${String(e.stderr).trim().slice(0, 200)}` : ''})`);
       }
-      let ok = !/[\r\0]/.test(ident.toString('latin1').replace(/\n$/, ''));
-      try {
-        new TextDecoder('utf-8', { fatal: true }).decode(ident);
-      } catch {
-        ok = false;
-      }
-      if (!ok) throw new Refusal(`the ${who === 'GIT_AUTHOR_IDENT' ? 'author' : 'committer'} identity git would write holds a CR, a NUL or bytes that aren't valid UTF-8, which the push gate refuses in a commit's header: fix user.name and user.email (or GIT_AUTHOR_* / GIT_COMMITTER_*)`);
+      if (/[\r\0]/.test(ident.toString('latin1').replace(/\n$/, ''))) throw new Refusal(`the ${who === 'GIT_AUTHOR_IDENT' ? 'author' : 'committer'} identity git would write holds a CR or a NUL, which the push gate refuses in a commit's header: fix user.name and user.email (or GIT_AUTHOR_* / GIT_COMMITTER_*)`);
     }
     let text;
     try {
