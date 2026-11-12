@@ -1,0 +1,6 @@
+// as src/new-module.ts
+import { exec, execSync, spawn, spawnSync } from 'node:child_process';
+declare const args: string[], lane: string, env: NodeJS.ProcessEnv, repo: string, exportPath: string;
+// R1185aq D1 Q6 claude edit-sandbox-settings
+const C = 'claude edit-sandbox-settings';
+execSync(C, { stdio: 'inherit' });

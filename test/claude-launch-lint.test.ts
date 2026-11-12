@@ -65,11 +65,13 @@ const SHELL_TOKEN = /^(?:.*[\/\\])?claude(?:\.exe|\.cmd|\.ps1)?$/i;
  * isn't one, and split at redirects and separators too (`claude>>"$LOG"`, `claude</dev/null`, `a;claude`).
  */
 /**
- * The CLI's own subcommands, from `claude --help` on the pinned 2.1.296 (and `config`, `migrate-installer` from earlier
- * versions): `claude doctor`, `claude mcp …` start the CLI as surely as a flag does (R1185an/ao).
+ * The CLI's own top-level commands: `claude doctor`, `claude mcp …` start the CLI as surely as a flag does (R1185an/ao).
+ * From the pinned 2.1.296's own command registry, the ones `--help` hides included (R1185aq D1), and `config`,
+ * `migrate-installer` from earlier versions. scripts/ci/setting-sources-probe.mjs reads this line and fails when the
+ * pinned binary dispatches a command it lacks (scripts/ci/claude-registry.mjs).
  */
 // check-table: never-shrink
-const SUBCOMMANDS = ['agents', 'attach', 'auth', 'auto-mode', 'config', 'doctor', 'gateway', 'import', 'install', 'kill', 'logs', 'mcp', 'migrate-installer', 'plugin', 'plugins', 'purge', 'respawn', 'rm', 'setup-token', 'stop', 'ultrareview', 'update', 'upgrade'];
+const SUBCOMMANDS = ['agents', 'attach', 'auth', 'auto-mode', 'config', 'design-login', 'doctor', 'drop-worktree-registrations', 'edit-chrome-settings', 'edit-hook', 'edit-memory-settings', 'edit-permission-rules', 'edit-sandbox-settings', 'edit-skill-overrides', 'gateway', 'import', 'import-conversations', 'install', 'kill', 'logs', 'mcp', 'migrate-installer', 'plugin', 'plugins', 'project', 'purge', 'rc', 'remote-control', 'respawn', 'rm', 'sandbox', 'setup-token', 'stop', 'ultrareview', 'update', 'upgrade'];
 /** The binary's token, lower case (a capital `Claude` is the product's name in prose): a path to it, `.exe`/`.cmd`/`.ps1`, a `${X:-claude}`, `${X-claude}`, `${X=claude}` default, or an assignment's value. */
 const CLAUDE_AT = /(?:^|[\s;&|<>(`'"{]|\$\{\w+:?[-=]|=)(?:[^\s;&|<>()`'"{}]*[\/\\])?claude(?:\.exe|\.cmd|\.ps1)?(?![\w.-])/g;
 /**
@@ -86,7 +88,7 @@ function startsClaude(t: string): boolean {
   for (const m of t.matchAll(CLAUDE_AT)) {
     const rest = t.slice((m.index ?? 0) + m[0].length);
     if (/^\s*$/.test(rest) || /^(?:["`$)}<>;&|%@\\]|'(?![a-z]))/.test(rest)) return true;
-    if (/^\s+(?:["'`$<>;&|%@\\)*~/-]|\.{1,2}\/|\d+[<>]|X(?![\w])|[A-Za-z_]\w*=)/.test(rest)) return true;
+    if (/^\s+(?:["'`$<>;&|%@\\)*~/{:-]|\.{1,2}\/|\d+[<>]|X(?![\w])|[A-Za-z_]\w*=)/.test(rest)) return true;
     const word = /^\s+([a-z][\w-]*)(?:\s+([a-z][\w-]*))?/.exec(rest);
     if (word && SUBCOMMANDS.includes(word[1]!) && !(word[1] === 'auth' && ['status', 'login'].includes(word[2] ?? ''))) return true;
   }
@@ -310,6 +312,22 @@ test('#958: every way of naming claude outside the launch function is refused (f
     'signin-session',
     'src-helper',
     'subcommand-doctor',
+    'subcommand-hidden-remote-control',
+    'subcommand-hidden-rc',
+    'subcommand-hidden-sandbox',
+    'subcommand-hidden-edit-permission-rules',
+    'subcommand-hidden-edit-hook',
+    'subcommand-hidden-edit-sandbox-settings',
+    'subcommand-hidden-edit-memory-settings',
+    'subcommand-hidden-edit-skill-overrides',
+    'subcommand-hidden-edit-chrome-settings',
+    'subcommand-hidden-import-conversations',
+    'subcommand-hidden-drop-worktree-registrations',
+    'subcommand-hidden-design-login',
+    'subcommand-hidden-project',
+    'tail-brace-find',
+    'tail-brace-xargs',
+    'tail-colon-parallel',
     'subcommand-mcp-template',
     'sudo-wrapper',
     'template-args',

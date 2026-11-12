@@ -127,7 +127,12 @@ test("#958 (R1185s S1): the probe loads src/ only through dist(), only what LOAD
   const ts = createRequire(join(repoRoot, 'package.json'))('typescript') as { createSourceFile: (f: string, t: string, v: number, p: boolean) => { statements: { moduleSpecifier?: { text: string } }[] }; ScriptTarget: { Latest: number } };
   const specs = ts.createSourceFile(probe, text, ts.ScriptTarget.Latest, true).statements.flatMap((st) => (st.moduleSpecifier ? [st.moduleSpecifier.text] : []));
   assert.ok(specs.length > 0, 'its static imports are read');
-  for (const m of specs) assert.ok(/^node:/.test(m) || m === '../lib/git.cjs', `a static import or re-export of ${m}: only node:* and ../lib/git.cjs (anything else, a dist/ module above all, is outside the closure)`);
+  for (const m of specs) assert.ok(/^node:/.test(m) || m === '../lib/git.cjs' || m === './claude-registry.mjs', `a static import or re-export of ${m}: only node:*, ../lib/git.cjs and ./claude-registry.mjs (anything else, a dist/ module above all, is outside the closure)`);
+  // R1185aq D1: the registry reader it imports loads node's own modules only.
+  const registry = join(repoRoot, 'scripts', 'ci', 'claude-registry.mjs');
+  const rspecs = ts.createSourceFile(registry, readFileSync(registry, 'utf8'), ts.ScriptTarget.Latest, true).statements.flatMap((st) => (st.moduleSpecifier ? [st.moduleSpecifier.text] : []));
+  for (const m of rspecs) assert.ok(/^node:/.test(m), `claude-registry.mjs imports ${m}: node:* only`);
+  assert.doesNotMatch(readFileSync(registry, 'utf8'), /\bimport\s*\(|\brequire\s*\(/, 'claude-registry.mjs: no dynamic import or require');
   // Outside shim(), whose text is the source of the child it writes: no require() or createRequire beside it.
   const shimAt = code.indexOf('function shim(');
   const outside = shimAt < 0 ? code : code.slice(0, shimAt) + code.slice(code.indexOf('\n}\n', shimAt));

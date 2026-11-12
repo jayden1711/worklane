@@ -54,6 +54,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { gitExecFileSync } from '../lib/git.cjs';
+import { claudeCommands, listedCommands } from './claude-registry.mjs';
 
 const repoRoot = join(import.meta.dirname, '..', '..');
 /**
@@ -87,7 +88,7 @@ function closure() {
       todo.push(parts.join('/').replace(/\.js$/, '.ts'));
     }
   }
-  return [...seen, 'scripts/ci/setting-sources-probe.mjs', 'scripts/lib/git.cjs'].sort();
+  return [...seen, 'scripts/ci/setting-sources-probe.mjs', 'scripts/lib/git.cjs', 'scripts/ci/claude-registry.mjs', 'test/claude-launch-lint.test.ts'].sort();
 }
 if (process.argv[2] === '--files') {
   console.log(closure().join('\n'));
@@ -699,6 +700,13 @@ for (const field of ['allowedTools', 'disallowedTools', 'pluginDirs']) {
   say(`${what} (--setting-sources=user,project,local before the guards)`, r);
   if (!r.model.length) problems.push(`${what}: no model call reached the stand-in, so nothing is measured`);
   leaks(what, r, true, true);
+}
+
+// R1185aq D1: every top-level command this claude dispatches, hidden ones included, is in the launch lint's list.
+{
+  const listed = listedCommands(readFileSync(join(repoRoot, 'test', 'claude-launch-lint.test.ts'), 'utf8'));
+  const missing = claudeCommands(bin).filter((w) => !listed.includes(w));
+  if (missing.length) problems.push(`test/claude-launch-lint.test.ts SUBCOMMANDS (the launch lint's commands) lacks ${missing.join(', ')}, which this claude dispatches: add them`);
 }
 
 if (problems.length) {
