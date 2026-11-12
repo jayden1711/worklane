@@ -29,8 +29,12 @@ export interface Backlog {
   removeLabel(n: number, label: string): Promise<void>;
   setAssignees(n: number, logins: string[]): Promise<void>;
   comment(n: number, body: string): Promise<void>;
-  /** An issue's or PR's comments, oldest first; `at`: when it was made (ISO), when the tracker says. */
-  comments(n: number): Promise<{ author: string; body: string; at?: string }[]>;
+  /** An issue's or PR's comments, oldest first; `at`: when it was made (ISO), when the tracker says; `id`: the tracker's id for it. */
+  /**
+   * An issue's comments. `text`: the comment as the tracker shows it, rendered (GitHub's `body_text`), when the tracker
+   * gives it; missing or null when it doesn't, and then a reader judges on `body` alone (src/decision-reply.ts).
+   */
+  comments(n: number): Promise<{ id?: string; author: string; body: string; at?: string; text?: string | null }[]>;
   close(n: number): Promise<void>;
   createIssue(title: string, body: string, labels: string[]): Promise<number>;
   /** WHY (#468): the open issues (not PRs), at most 100, in ONE read: the Issues page's "not picked up" list. Absent: this tracker can't. */

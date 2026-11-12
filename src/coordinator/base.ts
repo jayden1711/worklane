@@ -9,6 +9,7 @@ import type { Config } from '../config/load.js';
 import { claim, release } from '../claims.js';
 import { settleRecommendation } from '../decision-ask.js';
 import type { EventLog } from '../events/log.js';
+import { redactString, TRACKER } from '../events/redact.js';
 import type { EventPayload, StoredEvent } from '../events/types.js';
 import { agentReadableDir, cpuCount, diskFree, groupOnlyDir, machineLoad, writeAgentReadable, writeGroupOnly } from '../os/index.js';
 import { currentCoreShare, envWithCores, withCores } from '../cores.js';
@@ -41,6 +42,7 @@ import { cappedModel } from './model-routing.js';
 import { resolveProvider } from './providers.js';
 import { providerCost, providerOf } from '../providers.js';
 import { gitRemote } from '../git-remote.js';
+import { DECISION_ID } from '../decision-reply.js';
 
 export abstract class CoordinatorBase {
   /** Defined in a later part (or in Coordinator); declared here for the calls in this one. */
@@ -619,15 +621,28 @@ export abstract class CoordinatorBase {
   protected async ask(kind: 'land' | 'question' | 'domain' | 'plan' | 'intake' | 'delegation' | 'automation', issue: number | null, owner: string, question: string, options: string[], recommended: string, detail: string[], context?: DecisionContext): Promise<string> {
     const id = `d-${issue ?? kind}-${randomBytes(3).toString('hex')}`;
     // The recommendation is one of the options or nothing: prose (an agent's reasoning) moves into the detail.
-    const { recommendation, receipts } = settleRecommendation(options, recommended, detail);
+    const settled = settleRecommendation(options, recommended, detail);
+    const { recommendation } = settled;
+    // A receipt's reply instruction names this decision's id (plan-mode.ts DECISION_ID; R1182ae).
+    const receipts = settled.receipts.map((r) => r.split(DECISION_ID).join(id));
     // What it rests on (src/decision-context.ts), for the dashboard's detail view: never a viewer's (src/viewer-events.ts).
     this.emit('decision.asked', { id, kind, issue, owner, question, options, recommendation, receipts, ...(context ? { context } : {}) });
     if (issue === null) return id; // not tied to an issue: answered from the dashboard or CLI
-    await this.d.backlog.addLabels(issue, ['needs:decision']);
-    await this.d.backlog.comment(
-      issue,
-      `[${BRAND.cli}] @${owner} decision needed: **${question}**\n\nOptions: ${options.join(' / ')}.${recommendation ? ` Recommendation: **${recommendation}**.` : ''}\n\n${receipts.map((r) => `- ${r}`).join('\n')}\n\nReply \`/${BRAND.cli} ${options.join('` or `/' + BRAND.cli + ' ')}\` (owner or a writer), or run \`${BRAND.cli} decide ${id} <option>\`.`,
-    );
+    try {
+      await this.d.backlog.addLabels(issue, ['needs:decision']);
+      // R1182v: each line redacted on its own, as the tracker redacts (the backlog redacts the body again): a redaction that
+      // runs to an end marker (a private key's) can't cross from one line into the next and hide the lines between.
+      // The owner's decision (2026-11-09): a reply answers a decision only by naming its id (decisions.ts commentAnswer).
+      await this.d.backlog.comment(
+        issue,
+        `[${BRAND.cli}] @${owner} decision needed: **${question}**\n\nOptions: ${options.join(' / ')}.${recommendation ? ` Recommendation: **${recommendation}**.` : ''}\n\n${receipts.map((r) => `- ${redactString(r, TRACKER)}`).join('\n')}\n\nReply with a comment of one line, \`${options.map((o) => `/${BRAND.cli} ${o} ${id}`).join('` or `')}\` (owner or a writer), with an optional note after the id in letters, digits, spaces and . , : ; - only. Anything else in the comment (another line, a quote or apostrophe, a link, code, HTML, an emoji, #123) makes it answer nothing, with a note saying why. Or run \`${BRAND.cli} decide ${id} <option>\`.`,
+      );
+    } catch (e) {
+      // R1182x: without the question's comment the owner can't see the id to reply with. Say so where health and the
+      // dashboard show it, with the id and the ways to answer.
+      this.emit('coordinator.error', { instance: this.d.instance, where: 'decision question', kind: 'question_not_posted', message: `#${issue}: decision ${id} is recorded, but its comment could not be posted (${(e as Error).message.slice(0, 300)}); answer it on the dashboard, with \`${BRAND.cli} decide ${id} <option>\`, or by a comment of one line, \`/${BRAND.cli} <option> ${id}\` (an optional note after the id in letters, digits, spaces and . , : ; - only)` });
+      throw e;
+    }
     return id;
   }
 

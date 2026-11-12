@@ -232,6 +232,21 @@ export function riskAndDesignReasons(o: { level: LevelResult; waitCategories: st
 }
 
 /**
+ * The categories riskAndDesignReasons' path reasons come from, each with the paths the level recorded for it: every
+ * category it waits on that the change touches, and `dependency` (the same categories, read the same way). A recorded
+ * path isn't always a file: `app-non-money-large` records `*` (the whole app change). Its other reasons (a design
+ * flag, a new top-level module) have no category here.
+ */
+export function riskAndDesignCategories(o: { level: LevelResult; waitCategories: string[] }): Record<string, string[]> {
+  const out: Record<string, string[]> = {};
+  for (const c of [...waitingOn(o.waitCategories), 'dependency']) {
+    const hit = o.level.categories[c];
+    if (hit?.length) out[c] = hit;
+  }
+  return out;
+}
+
+/**
  * A planned task's PR: the high-risk and design-level paths it changes that its approved plan didn't list.
  * The same matchers as riskAndDesignReasons (the change's own categories), with the planned files taken out.
  */
