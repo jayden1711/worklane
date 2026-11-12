@@ -702,11 +702,23 @@ for (const field of ['allowedTools', 'disallowedTools', 'pluginDirs']) {
   leaks(what, r, true, true);
 }
 
-// R1185aq D1: every top-level command this claude dispatches, hidden ones included, is in the launch lint's list.
+// R1185aq D1, R1185as D1: the launch lint's SUBCOMMANDS is exactly what this claude dispatches, as probing every
+// word in its bytes finds it (hidden commands, argv fast paths, names held in a variable), but for EARLIER_COMMANDS
+// (words earlier versions dispatched, kept so a script for one is still caught).
 {
-  const listed = listedCommands(readFileSync(join(repoRoot, 'test', 'claude-launch-lint.test.ts'), 'utf8'));
-  const missing = claudeCommands(bin).filter((w) => !listed.includes(w));
-  if (missing.length) problems.push(`test/claude-launch-lint.test.ts SUBCOMMANDS (the launch lint's commands) lacks ${missing.join(', ')}, which this claude dispatches: add them`);
+  const lint = readFileSync(join(repoRoot, 'test', 'claude-launch-lint.test.ts'), 'utf8');
+  const listed = listedCommands(lint);
+  const earlier = listedCommands(lint, 'EARLIER_COMMANDS');
+  // A binary whose command set can't be read is a problem like any other, not a crash that hides the rest.
+  const { commands, unread } = await claudeCommands(bin).catch((e) => {
+    problems.push(`the command set can't be read from this claude: ${String(e?.message ?? e).split('\n')[0]}`);
+    return { commands: listed, unread: [] };
+  });
+  const missing = commands.filter((w) => !listed.includes(w));
+  const extra = listed.filter((w) => !commands.includes(w) && !earlier.includes(w));
+  if (missing.length) problems.push(`test/claude-launch-lint.test.ts SUBCOMMANDS lacks ${missing.join(', ')}, which this claude dispatches: add them`);
+  if (extra.length) problems.push(`test/claude-launch-lint.test.ts SUBCOMMANDS holds ${extra.join(', ')}, which this claude doesn't dispatch: move them to EARLIER_COMMANDS if an earlier version did`);
+  if (unread.length) problems.push(`claude <word> --help gave no answer for ${unread.join(', ')}: the command set can't be read`);
 }
 
 if (problems.length) {

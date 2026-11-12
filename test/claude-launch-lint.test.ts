@@ -68,12 +68,16 @@ const SHELL_TOKEN = /^(?:.*[\/\\])?claude(?:\.exe|\.cmd|\.ps1)?$/i;
  * The CLI's own top-level commands: `claude doctor`, `claude mcp …` start the CLI as surely as a flag does (R1185an/ao).
  * From the pinned 2.1.296's own command registry, the ones `--help` hides included (R1185aq D1), and `config`,
  * `migrate-installer` from earlier versions. scripts/ci/setting-sources-probe.mjs reads this line and fails when the
- * pinned binary dispatches a command it lacks (scripts/ci/claude-registry.mjs).
+ * pinned binary dispatches a command it lacks, or holds one it doesn't (scripts/ci/claude-registry.mjs, R1185as: by
+ * probing every word in the binary's bytes, not parsing them), EARLIER_COMMANDS aside.
  */
 // check-table: never-shrink
-const SUBCOMMANDS = ['agents', 'attach', 'auth', 'auto-mode', 'config', 'design-login', 'doctor', 'drop-worktree-registrations', 'edit-chrome-settings', 'edit-hook', 'edit-memory-settings', 'edit-permission-rules', 'edit-sandbox-settings', 'edit-skill-overrides', 'gateway', 'import', 'import-conversations', 'install', 'kill', 'logs', 'mcp', 'migrate-installer', 'plugin', 'plugins', 'project', 'purge', 'rc', 'remote-control', 'respawn', 'rm', 'sandbox', 'setup-token', 'stop', 'ultrareview', 'update', 'upgrade'];
+const EARLIER_COMMANDS = ['config', 'migrate-installer'];
+// check-table: never-shrink
+const SUBCOMMANDS = ['agents', 'apply-project-settings', 'attach', 'auth', 'auto-mode', 'bridge', 'config', 'daemon', 'design-login', 'doctor', 'drop-worktree-registrations', 'edit-chrome-settings', 'edit-hook', 'edit-memory-settings', 'edit-permission-rules', 'edit-sandbox-settings', 'edit-skill-overrides', 'gateway', 'import', 'import-conversations', 'install', 'kill', 'logs', 'mcp', 'migrate-installer', 'plugin', 'plugins', 'project', 'purge', 'rc', 'remote', 'remote-control', 'respawn', 'rm', 'sandbox', 'self-hosted-runner', 'setup-token', 'stop', 'sync', 'ultrareview', 'update', 'upgrade'];
 /** The binary's token, lower case (a capital `Claude` is the product's name in prose): a path to it, `.exe`/`.cmd`/`.ps1`, a `${X:-claude}`, `${X-claude}`, `${X=claude}` default, or an assignment's value. */
-const CLAUDE_AT = /(?:^|[\s;&|<>(`'"{]|\$\{\w+:?[-=]|=)(?:[^\s;&|<>()`'"{}]*[\/\\])?claude(?:\.exe|\.cmd|\.ps1)?(?![\w.-])/g;
+// R1185as D2: the path may hold whole `${…}` and `$(…)` segments (`${HOME}/.local/bin/claude`, `$(npm prefix -g)/bin/claude`).
+const CLAUDE_AT = /(?:^|[\s;&|<>(`'"{]|\$\{\w+:?[-=]|=)(?:(?:\$\{[^}\s]*\}|\$\([^)]*\)|[^\s;&|<>()`'"{}])*[\/\\])?claude(?:\.exe|\.cmd|\.ps1)?(?![\w.-])/g;
 /**
  * Whether `t` starts claude somewhere (R1185an/ao, the organizer's option (d)): its token followed by the end, a quote,
  * `$`, `%`, `@`, a redirect (`2>&1` too), a separator, a newline or a ` #` comment (R1185ap), a flag, a substitution,
@@ -317,6 +321,16 @@ test('#958: every way of naming claude outside the launch function is refused (f
     'signin-session',
     'src-helper',
     'subcommand-doctor',
+    'subcommand-probed-daemon',
+    'subcommand-fastpath-remote',
+    'subcommand-fastpath-sync',
+    'subcommand-fastpath-bridge',
+    'subcommand-fastpath-self-hosted-runner',
+    'subcommand-apply-project-settings',
+    'path-brace-variable',
+    'path-substitution',
+    'path-brace-prefix',
+    'path-substitution-redirect',
     'newline-if-fi',
     'newline-echo',
     'newline-wait',
