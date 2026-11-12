@@ -750,6 +750,25 @@ test('R1169ax D1: a case repeated in its table, or in two, is refused: JSON.pars
     // A file named twice in one case.
     writeFileSync(join(d, 'r1169zz.json'), '{ "cases": { "r1169zz-a": { "exit": 2, "reason": "r", "files": { "x.test.ts.txt": ["a"], "x.test.ts.txt": ["b"] } } } }\n');
     assert.throws(() => loadCases(d), /cases\.r1169zz-a\.files: x\.test\.ts\.txt/);
+    // R1169ay D1: two keys that write one path, a key that writes a harness file, a key that isn't a plain path.
+    const keyed = (files: Record<string, string>) =>
+      writeFileSync(join(d, 'r1169zz.json'), `{ "cases": { "r1169zz-a": { "exit": 2, "reason": "r", "files": ${JSON.stringify(Object.fromEntries(Object.entries(files).map(([k, v]) => [k, [v]])))} } } }\n`);
+    for (const [files, why] of [
+      [{ 'x.test.ts.txt': 'a', 'test/x.test.ts.root': 'b' }, /both write test\/x\.test\.ts/],
+      [{ 'x.test.ts.txt': 'a', 'dist/test/x.test.js.root': 'b' }, /both write dist\/test\/x\.test\.js/],
+      [{ 'x.test.ts.txt': 'a', 'X.test.ts.txt': 'b' }, /both write/],
+      [{ 'x.test.ts.txt': 'a', 'scripts/ci/systemd-acceptance.mjs.root': 'b' }, /one of the harness's own files/],
+      [{ 'x.test.ts.txt': 'a', 'node_modules/typescript/lib/typescript.js.root': 'b' }, /one of the harness's own files/],
+      [{ './x.test.ts.txt': 'a' }, /a plain relative path/],
+      [{ 'a/../x.test.ts.txt': 'a' }, /a plain relative path/],
+      [{ '/etc/x.root': 'a' }, /a plain relative path/],
+      [{ 'x.test.ts': 'a' }, /a plain relative path/],
+    ] as const) {
+      keyed(files);
+      assert.throws(() => loadCases(d), why, JSON.stringify(files));
+    }
+    keyed({ 'x.test.ts.txt': 'a', 'helpers/runner.ts.txt': 'b', 'src/flags.ts.root': 'c' });
+    assert.equal(loadCases(d).size, 1, 'distinct plain keys load');
     // The same name in two tables.
     writeFileSync(join(d, 'r1169zz.json'), `{ "cases": { "r1169zz-a": ${entry(2)} } }\n`);
     writeFileSync(join(d, 'r1169zy.json'), `{ "cases": { "r1169zz-a": ${entry(0)} } }\n`);
@@ -761,8 +780,9 @@ test('R1169ax D1: a case repeated in its table, or in two, is refused: JSON.pars
 
 test("every review's attack on this script, kept as a fixture, still exits as it must: 2 refused statically, 1 at run time (R1169g, R1169h; the owner's decision)", { timeout: 600_000 }, async () => {
   // The cases, from their round tables (the owner, 2026-11-12: one table per round, not one folder per case).
-  const { loadCases } = (await import(pathToFileURL(join(repoRoot, 'scripts', 'ci', 'fixture-tables.mjs')).href)) as {
+  const { loadCases, writtenPaths } = (await import(pathToFileURL(join(repoRoot, 'scripts', 'ci', 'fixture-tables.mjs')).href)) as {
     loadCases: (d: string) => Map<string, { exit: number; reason: string; listed?: string; files: Map<string, string> }>;
+    writtenPaths: (key: string) => string[];
   };
   const cases = loadCases(join(repoRoot, 'test', 'fixtures', 'systemd-acceptance'));
   assert.deepEqual([...cases.keys()].sort(), [...FIXTURE_NAMES].sort(), 'every case is in FIXTURE_NAMES, and every name a case');
@@ -775,17 +795,19 @@ test("every review's attack on this script, kept as a fixture, still exits as it
     writeFileSync(join(r, 'package.json'), '{"type":"module"}\n');
     modules(r);
     writeFileSync(join(r, 'dist', 'test', 'isolate.js'), '');
-    for (const [f, text] of [...files].filter(([x]) => x.endsWith('.txt'))) {
-      mkdirSync(join(r, 'test', f, '..'), { recursive: true });
-      mkdirSync(join(r, 'dist', 'test', f, '..'), { recursive: true });
-      writeFileSync(join(r, 'test', f.replace(/\.txt$/, '')), text);
-      writeFileSync(join(r, 'dist', 'test', f.replace(/\.ts\.txt$/, '.js')), text);
-    }
+    // Each file where the loader says it goes (writtenPaths): `.txt` to test/ and, as .js, dist/test/; `.root` from
+    // the root. The loader refuses two keys that write one path, or a harness file (R1169ay D1).
+    for (const [f, text] of [...files].filter(([x]) => x.endsWith('.txt')))
+      for (const out of writtenPaths(f)) {
+        mkdirSync(join(r, out, '..'), { recursive: true });
+        writeFileSync(join(r, out), text);
+      }
     // A file outside test/ (src/, a root's own file): `<path>.root`, at <path> from the root.
-    for (const [f, text] of [...files].filter(([x]) => x.endsWith('.root'))) {
-      mkdirSync(join(r, f, '..'), { recursive: true });
-      writeFileSync(join(r, f.replace(/\.root$/, '')), text);
-    }
+    for (const [f, text] of [...files].filter(([x]) => x.endsWith('.root')))
+      for (const out of writtenPaths(f)) {
+        mkdirSync(join(r, out, '..'), { recursive: true });
+        writeFileSync(join(r, out), text);
+      }
     const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'NODE_TEST_CONTEXT' && k !== 'NODE_OPTIONS'));
     const p = spawnSync(process.execPath, ['scripts/ci/systemd-acceptance.mjs'], { cwd: r, encoding: 'utf8', env, timeout: 60_000 });
     const what = `${name}: exit ${p.status}\nstderr:\n${p.stderr}\nstdout (tail):\n${(p.stdout ?? '').split('\n').slice(-15).join('\n')}`;

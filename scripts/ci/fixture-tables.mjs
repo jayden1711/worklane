@@ -37,6 +37,18 @@ export function duplicateKeys(text) {
   return out;
 }
 
+/** The files the fixture test writes itself, which no case's file may write (lower case). */
+const HARNESS = ['scripts/ci/systemd-acceptance.mjs', 'scripts/ci/systemd-acceptance-reporter.mjs', 'package.json', 'dist/test/isolate.js'];
+
+/**
+ * The paths, from a case's scratch root, that the fixture test writes for one of its file keys (test/systemd-acceptance
+ * .test.ts does the same): `<p>.txt` as test/<p> and dist/test/<p with .ts.txt as .js>, `<p>.root` as <p>.
+ */
+export function writtenPaths(key) {
+  if (key.endsWith('.root')) return [key.slice(0, -'.root'.length)];
+  return [`test/${key.slice(0, -'.txt'.length)}`, `dist/test/${key.replace(/\.ts\.txt$/, '.js')}`];
+}
+
 /**
  * Every case, by name: { exit, reason, listed?, files } where files maps each folder-relative path (`x.test.ts.txt`,
  * `src/flags.ts.root`) to its exact text. Throws on a name in two tables or twice in one (any repeated key), a
@@ -56,6 +68,20 @@ export function loadCases(dir) {
       if (cases.has(name)) throw new Error(`${t}: case ${name} is in another table too`);
       if (typeof c.exit !== 'number' || typeof c.reason !== 'string' || !c.files || (c.listed !== undefined && typeof c.listed !== 'string')) throw new Error(`${t}: case ${name} is malformed`);
       const files = new Map();
+      // R1169ay D1: two keys that write one path (`test/x.test.ts.root` beside `x.test.ts.txt`, `./x`, a case-folded
+      // twin) would let a pure addition replace a case's text, or the script under test; so would a key that writes
+      // one of the harness's own files. Each key is a plain relative path, and each path it writes is written once.
+      const writes = new Map();
+      for (const p of Object.keys(c.files)) {
+        if (!/\.(?:txt|root)$/.test(p) || p.startsWith('/') || p.includes('\\') || p.split('/').some((seg) => seg === '' || seg === '.' || seg === '..'))
+          throw new Error(`${t}: ${name}/${p}: a file key is a plain relative path ending in .txt or .root`);
+        for (const out of writtenPaths(p)) {
+          const k = out.toLowerCase();
+          if (HARNESS.includes(k) || k.startsWith('node_modules/')) throw new Error(`${t}: ${name}/${p} writes ${out}, one of the harness's own files`);
+          if (writes.has(k)) throw new Error(`${t}: ${name}/${p} and ${writes.get(k)} both write ${out}`);
+          writes.set(k, p);
+        }
+      }
       for (const [p, v] of Object.entries(c.files)) {
         const lines = typeof v === 'string' ? bases[v.replace(/^@/, '')] : v;
         if (!Array.isArray(lines) || !lines.every((l) => typeof l === 'string')) throw new Error(`${t}: ${name}/${p} is neither lines nor a known base`);
