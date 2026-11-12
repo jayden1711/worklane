@@ -1,0 +1,1991 @@
+{
+ "modes": [
+  {},
+  {
+   "broad": true
+  },
+  {
+   "identifiers": true
+  },
+  {
+   "keepLines": true
+  },
+  {
+   "identifiers": true,
+   "keepLines": true
+  },
+  {
+   "broad": true,
+   "mask": ""
+  },
+  {
+   "broad": true,
+   "mask": "[hidden]"
+  }
+ ],
+ "rows": [
+  {
+   "s": "",
+   "modes": [
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "kinds": [],
+   "window": [
+    "",
+    "",
+    "",
+    ""
+   ],
+   "clip": {
+    "text": "",
+    "more": 0
+   },
+   "cut": "",
+   "records": [
+    "",
+    "",
+    ""
+   ],
+   "key": false
+  },
+  {
+   "s": " ",
+   "modes": [
+    " ",
+    " ",
+    " ",
+    " ",
+    " ",
+    " ",
+    " "
+   ],
+   "kinds": [],
+   "window": [
+    "",
+    " ",
+    " ",
+    " "
+   ],
+   "clip": {
+    "text": " ",
+    "more": 0
+   },
+   "cut": " ",
+   "records": [
+    " ",
+    "",
+    " "
+   ],
+   "key": false
+  },
+  {
+   "s": "\n",
+   "modes": [
+    "\n",
+    "\n",
+    "\n",
+    "\n",
+    "\n",
+    "\n",
+    "\n"
+   ],
+   "kinds": [],
+   "window": [
+    "",
+    "\n",
+    "\n",
+    "\n"
+   ],
+   "clip": {
+    "text": "\n",
+    "more": 0
+   },
+   "cut": "\n",
+   "records": [
+    "\n",
+    "",
+    "\n"
+   ],
+   "key": false
+  },
+  {
+   "s": "$",
+   "modes": [
+    "$",
+    "$",
+    "$",
+    "$",
+    "$",
+    "$",
+    "$"
+   ],
+   "kinds": [],
+   "window": [
+    "",
+    "$",
+    "$",
+    "$"
+   ],
+   "clip": {
+    "text": "$",
+    "more": 0
+   },
+   "cut": "$",
+   "records": [
+    "$",
+    "",
+    "$"
+   ],
+   "key": false
+  },
+  {
+   "s": "$$",
+   "modes": [
+    "$$",
+    "$$",
+    "$$",
+    "$$",
+    "$$",
+    "$$",
+    "$$"
+   ],
+   "kinds": [],
+   "window": [
+    "",
+    "",
+    "$$",
+    "$$"
+   ],
+   "clip": {
+    "text": "$$",
+    "more": 0
+   },
+   "cut": "$$",
+   "records": [
+    "$$",
+    "",
+    "$$"
+   ],
+   "key": false
+  },
+  {
+   "s": "$1",
+   "modes": [
+    "$1",
+    "$1",
+    "$1",
+    "$1",
+    "$1",
+    "$1",
+    "$1"
+   ],
+   "kinds": [],
+   "window": [
+    "",
+    "",
+    "$1",
+    "$1"
+   ],
+   "clip": {
+    "text": "$1",
+    "more": 0
+   },
+   "cut": "$1",
+   "records": [
+    "$1",
+    "",
+    "$1"
+   ],
+   "key": false
+  },
+  {
+   "s": "$&",
+   "modes": [
+    "$&",
+    "$&",
+    "$&",
+    "$&",
+    "$&",
+    "$&",
+    "$&"
+   ],
+   "kinds": [],
+   "window": [
+    "",
+    "",
+    "$&",
+    "$&"
+   ],
+   "clip": {
+    "text": "$&",
+    "more": 0
+   },
+   "cut": "$&",
+   "records": [
+    "$&",
+    "",
+    "$&"
+   ],
+   "key": false
+  },
+  {
+   "s": "x$",
+   "modes": [
+    "x$",
+    "x$",
+    "x$",
+    "x$",
+    "x$",
+    "x$",
+    "x$"
+   ],
+   "kinds": [],
+   "window": [
+    "",
+    "",
+    "x$",
+    "x$"
+   ],
+   "clip": {
+    "text": "x$",
+    "more": 0
+   },
+   "cut": "x$",
+   "records": [
+    "x$",
+    "",
+    "x$"
+   ],
+   "key": false
+  },
+  {
+   "s": "",
+   "modes": [
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "kinds": [],
+   "window": [
+    "",
+    "",
+    "",
+    ""
+   ],
+   "clip": {
+    "text": "",
+    "more": 0
+   },
+   "cut": "",
+   "records": [
+    "",
+    "",
+    ""
+   ],
+   "key": false
+  },
+  {
+   "s": "",
+   "modes": [
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "kinds": [],
+   "window": [
+    "",
+    "",
+    "",
+    ""
+   ],
+   "clip": {
+    "text": "",
+    "more": 0
+   },
+   "cut": "",
+   "records": [
+    "",
+    "",
+    ""
+   ],
+   "key": false
+  },
+  {
+   "s": "a",
+   "modes": [
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a"
+   ],
+   "kinds": [],
+   "window": [
+    "",
+    "a",
+    "a",
+    "a"
+   ],
+   "clip": {
+    "text": "a",
+    "more": 0
+   },
+   "cut": "a",
+   "records": [
+    "a",
+    "",
+    "a"
+   ],
+   "key": false
+  },
+  {
+   "s": "AB",
+   "modes": [
+    "AB",
+    "AB",
+    "AB",
+    "AB",
+    "AB",
+    "AB",
+    "AB"
+   ],
+   "kinds": [],
+   "window": [
+    "",
+    "",
+    "AB",
+    "AB"
+   ],
+   "clip": {
+    "text": "AB",
+    "more": 0
+   },
+   "cut": "AB",
+   "records": [
+    "AB",
+    "",
+    "AB"
+   ],
+   "key": false
+  },
+  {
+   "s": "KEY",
+   "modes": [
+    "KEY",
+    "KEY",
+    "KEY",
+    "KEY",
+    "KEY",
+    "KEY",
+    "KEY"
+   ],
+   "kinds": [],
+   "window": [
+    "",
+    "",
+    "KEY",
+    "KEY"
+   ],
+   "clip": {
+    "text": "KEY",
+    "more": 0
+   },
+   "cut": "KEY",
+   "records": [
+    "KEY",
+    "",
+    "KEY"
+   ],
+   "key": false
+  },
+  {
+   "s": "API_KEY",
+   "modes": [
+    "API_KEY",
+    "API_KEY",
+    "API_KEY",
+    "API_KEY",
+    "API_KEY",
+    "API_KEY",
+    "API_KEY"
+   ],
+   "kinds": [],
+   "window": [
+    "",
+    "",
+    "",
+    "API_KEY"
+   ],
+   "clip": {
+    "text": "API",
+    "more": 4
+   },
+   "cut": "API",
+   "records": [
+    "API_KEY",
+    "",
+    "API_KEY"
+   ],
+   "key": false
+  },
+  {
+   "s": "API_KEY=",
+   "modes": [
+    "API_KEY=",
+    "API_KEY=",
+    "API_KEY=",
+    "API_KEY=",
+    "API_KEY=",
+    "API_KEY=",
+    "API_KEY="
+   ],
+   "kinds": [],
+   "window": [
+    "",
+    "",
+    "",
+    "API_KEY="
+   ],
+   "clip": {
+    "text": "API",
+    "more": 5
+   },
+   "cut": "API",
+   "records": [
+    "API_KEY=",
+    "",
+    "API_KEY="
+   ],
+   "key": false
+  },
+  {
+   "s": "{\"GITHUB_TOKEN\": \"«V»\"}",
+   "modes": [
+    "{\"GITHUB_TOKEN\": \"[REDACTED]\"}",
+    "{\"GITHUB_TOKEN\": \"[REDACTED]\"}",
+    "{\"GITHUB_TOKEN\": \"[REDACTED]\"}",
+    "{\"GITHUB_TOKEN\": \"[REDACTED]\"}",
+    "{\"GITHUB_TOKEN\": \"[REDACTED]\"}",
+    "{\"GITHUB_TOKEN\": \"\"}",
+    "{\"GITHUB_TOKEN\": \"[hidden]\"}"
+   ],
+   "kinds": [
+    "secret under a JSON key"
+   ],
+   "window": [
+    "",
+    "",
+    "",
+    "{\"GITHUB_TOKEN\": \"«V»\"}"
+   ],
+   "clip": {
+    "text": "{\"G",
+    "more": 27
+   },
+   "cut": "{\"G",
+   "records": [
+    "{\"GITHUB_TOKEN\": \"[REDACTED]\"}",
+    "",
+    "{\"GITHUB_TOKEN\": \"[REDACTED]\"}"
+   ],
+   "key": false
+  },
+  {
+   "s": "{\"API_KEY\": \"«V»\"}",
+   "modes": [
+    "{\"API_KEY\": \"[REDACTED]\"}",
+    "{\"API_KEY\": \"[REDACTED]\"}",
+    "{\"API_KEY\": \"[REDACTED]\"}",
+    "{\"API_KEY\": \"[REDACTED]\"}",
+    "{\"API_KEY\": \"[REDACTED]\"}",
+    "{\"API_KEY\": \"\"}",
+    "{\"API_KEY\": \"[hidden]\"}"
+   ],
+   "kinds": [
+    "secret under a JSON key"
+   ],
+   "window": [
+    "",
+    "",
+    "",
+    "{\"API_KEY\": \"«V»\"}"
+   ],
+   "clip": {
+    "text": "{\"A",
+    "more": 22
+   },
+   "cut": "{\"A",
+   "records": [
+    "{\"API_KEY\": \"[REDACTED]\"}",
+    "",
+    "{\"API_KEY\": \"[REDACTED]\"}"
+   ],
+   "key": false
+  },
+  {
+   "s": "{\"token\": \"\"}",
+   "modes": [
+    "{\"token\": \"\"}",
+    "{\"token\": \"\"}",
+    "{\"token\": \"\"}",
+    "{\"token\": \"\"}",
+    "{\"token\": \"\"}",
+    "{\"token\": \"\"}",
+    "{\"token\": \"\"}"
+   ],
+   "kinds": [],
+   "window": [
+    "",
+    "",
+    "",
+    "{\"token\": \"\"}"
+   ],
+   "clip": {
+    "text": "{\"t",
+    "more": 10
+   },
+   "cut": "{\"t",
+   "records": [
+    "{\"token\": \"\"}",
+    "",
+    "{\"token\": \"\"}"
+   ],
+   "key": false
+  },
+  {
+   "s": "{\"\": \"«V»\"}",
+   "modes": [
+    "{\"\": \"«V»\"}",
+    "{\"\": \"«V»\"}",
+    "{\"\": \"«V»\"}",
+    "{\"\": \"«V»\"}",
+    "{\"\": \"«V»\"}",
+    "{\"\": \"«V»\"}",
+    "{\"\": \"«V»\"}"
+   ],
+   "kinds": [],
+   "window": [
+    "",
+    "",
+    "",
+    "{\"\": \"«V»\"}"
+   ],
+   "clip": {
+    "text": "{\"\"",
+    "more": 25
+   },
+   "cut": "{\"\"",
+   "records": [
+    "{\"\": \"«V»\"}",
+    "",
+    "{\"\": \"«V»\"}"
+   ],
+   "key": false
+  },
+  {
+   "s": "{\"apiKey\": \"«V»\"}",
+   "modes": [
+    "{\"apiKey\": \"[REDACTED]\"}",
+    "{\"apiKey\": \"[REDACTED]\"}",
+    "{\"apiKey\": \"[REDACTED]\"}",
+    "{\"apiKey\": \"[REDACTED]\"}",
+    "{\"apiKey\": \"[REDACTED]\"}",
+    "{\"apiKey\": \"\"}",
+    "{\"apiKey\": \"[hidden]\"}"
+   ],
+   "kinds": [
+    "secret under a JSON key"
+   ],
+   "window": [
+    "",
+    "",
+    "",
+    "{\"apiKey\": \"«V»\"}"
+   ],
+   "clip": {
+    "text": "{\"a",
+    "more": 21
+   },
+   "cut": "{\"a",
+   "records": [
+    "{\"apiKey\": \"[REDACTED]\"}",
+    "",
+    "{\"apiKey\": \"[REDACTED]\"}"
+   ],
+   "key": false
+  },
+  {
+   "s": "signingKey: '«V»'",
+   "modes": [
+    "signingKey: '«V»'",
+    "signingKey: '«V»'",
+    "signingKey: '«V»'",
+    "signingKey: '«V»'",
+    "signingKey: '«V»'",
+    "signingKey: '«V»'",
+    "signingKey: '«V»'"
+   ],
+   "kinds": [],
+   "window": [
+    "",
+    "",
+    "",
+    "signingKey: '«V»'"
+   ],
+   "clip": {
+    "text": "sig",
+    "more": 31
+   },
+   "cut": "sig",
+   "records": [
+    "signingKey: '«V»'",
+    "",
+    "signingKey: '«V»'"
+   ],
+   "key": false
+  },
+  {
+   "s": "{\"DBPassword\": \"«V»\"}",
+   "modes": [
+    "{\"DBPassword\": \"[REDACTED]\"}",
+    "{\"DBPassword\": \"[REDACTED]\"}",
+    "{\"DBPassword\": \"[REDACTED]\"}",
+    "{\"DBPassword\": \"[REDACTED]\"}",
+    "{\"DBPassword\": \"[REDACTED]\"}",
+    "{\"DBPassword\": \"\"}",
+    "{\"DBPassword\": \"[hidden]\"}"
+   ],
+   "kinds": [
+    "secret under a JSON key"
+   ],
+   "window": [
+    "",
+    "",
+    "",
+    "{\"DBPassword\": \"«V»\"}"
+   ],
+   "clip": {
+    "text": "{\"D",
+    "more": 25
+   },
+   "cut": "{\"D",
+   "records": [
+    "{\"DBPassword\": \"[REDACTED]\"}",
+    "",
+    "{\"DBPassword\": \"[REDACTED]\"}"
+   ],
+   "key": false
+  },
+  {
+   "s": "{\"cacheKey\": \"«V»\"}",
+   "modes": [
+    "{\"cacheKey\": \"«V»\"}",
+    "{\"cacheKey\": \"«V»\"}",
+    "{\"cacheKey\": \"«V»\"}",
+    "{\"cacheKey\": \"«V»\"}",
+    "{\"cacheKey\": \"«V»\"}",
+    "{\"cacheKey\": \"«V»\"}",
+    "{\"cacheKey\": \"«V»\"}"
+   ],
+   "kinds": [],
+   "window": [
+    "",
+    "",
+    "",
+    "{\"cacheKey\": \"«V»\"}"
+   ],
+   "clip": {
+    "text": "{\"c",
+    "more": 33
+   },
+   "cut": "{\"c",
+   "records": [
+    "{\"cacheKey\": \"«V»\"}",
+    "",
+    "{\"cacheKey\": \"«V»\"}"
+   ],
+   "key": false
+  },
+  {
+   "s": "export K=«KEY»",
+   "modes": [
+    "export K=sk_[REDACTED]",
+    "export K=sk_[REDACTED]",
+    "export K=sk_[REDACTED]",
+    "export K=sk_[REDACTED]",
+    "export K=sk_[REDACTED]",
+    "export K=sk_",
+    "export K=sk_[hidden]"
+   ],
+   "kinds": [
+    "Stripe key"
+   ],
+   "window": [
+    "",
+    "",
+    "",
+    "export K=«KEY»"
+   ],
+   "clip": {
+    "text": "exp",
+    "more": 19
+   },
+   "cut": "exp",
+   "records": [
+    "export K=sk_[REDACTED]",
+    "",
+    "export K=sk_[REDACTED]"
+   ],
+   "key": false
+  },
+  {
+   "s": "\u001b[1m«KEY» end",
+   "modes": [
+    "\u001b[1msk_[REDACTED] end",
+    "\u001b[1msk_[REDACTED] end",
+    "\u001b[1msk_[REDACTED] end",
+    "\u001b[1msk_[REDACTED] end",
+    "\u001b[1msk_[REDACTED] end",
+    "\u001b[1msk_ end",
+    "\u001b[1msk_[hidden] end"
+   ],
+   "kinds": [
+    "Stripe key"
+   ],
+   "window": [
+    "",
+    "",
+    "",
+    "\u001b[1m«KEY» end"
+   ],
+   "clip": {
+    "text": "\u001b[1",
+    "more": 18
+   },
+   "cut": "\u001b[1",
+   "records": [
+    "\u001b[1msk_[REDACTED] end",
+    "",
+    "\u001b[1msk_[REDACTED] end"
+   ],
+   "key": false
+  },
+  {
+   "s": "Authorization: Basic «BASIC»",
+   "modes": [
+    "Authorization: Basic [REDACTED]",
+    "Authorization: Basic [REDACTED]",
+    "Authorization: Basic [REDACTED]",
+    "Authorization: Basic [REDACTED]",
+    "Authorization: Basic [REDACTED]",
+    "Authorization: Basic ",
+    "Authorization: Basic [hidden]"
+   ],
+   "kinds": [
+    "Basic credential"
+   ],
+   "window": [
+    "",
+    "",
+    "",
+    "Authorization: Basic «BASIC»"
+   ],
+   "clip": {
+    "text": "Aut",
+    "more": 28
+   },
+   "cut": "Aut",
+   "records": [
+    "Authorization: Basic [REDACTED]",
+    "",
+    "Authorization: Basic [REDACTED]"
+   ],
+   "key": false
+  },
+  {
+   "s": "Basic =",
+   "modes": [
+    "Basic =",
+    "Basic =",
+    "Basic =",
+    "Basic =",
+    "Basic =",
+    "Basic =",
+    "Basic ="
+   ],
+   "kinds": [],
+   "window": [
+    "",
+    "",
+    "",
+    "Basic ="
+   ],
+   "clip": {
+    "text": "Bas",
+    "more": 4
+   },
+   "cut": "Bas",
+   "records": [
+    "Basic =",
+    "",
+    "Basic ="
+   ],
+   "key": false
+  },
+  {
+   "s": "Basic ====",
+   "modes": [
+    "Basic ====",
+    "Basic ====",
+    "Basic ====",
+    "Basic ====",
+    "Basic ====",
+    "Basic ====",
+    "Basic ===="
+   ],
+   "kinds": [],
+   "window": [
+    "",
+    "",
+    "",
+    "Basic ===="
+   ],
+   "clip": {
+    "text": "Bas",
+    "more": 7
+   },
+   "cut": "Bas",
+   "records": [
+    "Basic ====",
+    "",
+    "Basic ===="
+   ],
+   "key": false
+  },
+  {
+   "s": "Basic QUJD",
+   "modes": [
+    "Basic QUJD",
+    "Basic QUJD",
+    "Basic QUJD",
+    "Basic QUJD",
+    "Basic QUJD",
+    "Basic QUJD",
+    "Basic QUJD"
+   ],
+   "kinds": [],
+   "window": [
+    "",
+    "",
+    "",
+    "Basic QUJD"
+   ],
+   "clip": {
+    "text": "Bas",
+    "more": 7
+   },
+   "cut": "Bas",
+   "records": [
+    "Basic QUJD",
+    "",
+    "Basic QUJD"
+   ],
+   "key": false
+  },
+  {
+   "s": "```done_when",
+   "modes": [
+    "```done_when",
+    "```done_when",
+    "```done_when",
+    "```done_when",
+    "```done_when",
+    "```done_when",
+    "```done_when"
+   ],
+   "kinds": [],
+   "window": [
+    "",
+    "",
+    "",
+    "```done_when"
+   ],
+   "clip": {
+    "text": "```",
+    "more": 9
+   },
+   "cut": "```",
+   "records": [
+    "```done_when",
+    "",
+    "```done_when"
+   ],
+   "key": false
+  },
+  {
+   "s": "```done_when\n",
+   "modes": [
+    "```done_when\n",
+    "```done_when\n",
+    "```done_when\n",
+    "```done_when\n",
+    "```done_when\n",
+    "```done_when\n",
+    "```done_when\n"
+   ],
+   "kinds": [],
+   "window": [
+    "",
+    "",
+    "",
+    "```done_when\n"
+   ],
+   "clip": {
+    "text": "```",
+    "more": 10
+   },
+   "cut": "```",
+   "records": [
+    "```done_when\n",
+    "",
+    "```done_when\n"
+   ],
+   "key": false
+  },
+  {
+   "s": "see the ```done_when block. host db1.internal is down\n```",
+   "modes": [
+    "see the ```done_when block. host db1.internal is down\n```",
+    "see the ```done_when block. host db1.internal is down\n```",
+    "see the ```done_when block. host [internal-host] is down\n```",
+    "see the ```done_when block. host db1.internal is down\n```",
+    "see the ```done_when block. host [internal-host] is down\n```",
+    "see the ```done_when block. host db1.internal is down\n```",
+    "see the ```done_when block. host db1.internal is down\n```"
+   ],
+   "kinds": [],
+   "window": [
+    "",
+    "",
+    "",
+    "see the ```done_when block. host db1.internal is down\n```"
+   ],
+   "clip": {
+    "text": "see",
+    "more": 54
+   },
+   "cut": "see",
+   "records": [
+    "see the ```done_when block. host [internal-host] is down\n```",
+    "",
+    "see the ```done_when block. host [internal-host] is down\n```"
+   ],
+   "key": false
+  },
+  {
+   "s": "```research \r\nhost db1.internal\n```",
+   "modes": [
+    "```research \r\nhost db1.internal\n```",
+    "```research \r\nhost db1.internal\n```",
+    "```research \r\nhost db1.internal\n```",
+    "```research \r\nhost db1.internal\n```",
+    "```research \r\nhost db1.internal\n```",
+    "```research \r\nhost db1.internal\n```",
+    "```research \r\nhost db1.internal\n```"
+   ],
+   "kinds": [],
+   "window": [
+    "",
+    "",
+    "",
+    "```research \r\nhost db1.internal\n```"
+   ],
+   "clip": {
+    "text": "```",
+    "more": 32
+   },
+   "cut": "```",
+   "records": [
+    "```research \r\nhost db1.internal\n```",
+    "",
+    "```research \r\nhost db1.internal\n```"
+   ],
+   "key": false
+  },
+  {
+   "s": "```done_when \nhost db1.internal\n```",
+   "modes": [
+    "```done_when \nhost db1.internal\n```",
+    "```done_when \nhost db1.internal\n```",
+    "```done_when \nhost db1.internal\n```",
+    "```done_when \nhost db1.internal\n```",
+    "```done_when \nhost db1.internal\n```",
+    "```done_when \nhost db1.internal\n```",
+    "```done_when \nhost db1.internal\n```"
+   ],
+   "kinds": [],
+   "window": [
+    "",
+    "",
+    "",
+    "```done_when \nhost db1.internal\n```"
+   ],
+   "clip": {
+    "text": "```",
+    "more": 32
+   },
+   "cut": "```",
+   "records": [
+    "```done_when \nhost db1.internal\n```",
+    "",
+    "```done_when \nhost db1.internal\n```"
+   ],
+   "key": false
+  },
+  {
+   "s": "ssh to vault.internal now",
+   "modes": [
+    "ssh to vault.internal now",
+    "ssh to vault.internal now",
+    "ssh to [internal-host] now",
+    "ssh to vault.internal now",
+    "ssh to [internal-host] now",
+    "ssh to vault.internal now",
+    "ssh to vault.internal now"
+   ],
+   "kinds": [],
+   "window": [
+    "",
+    "",
+    "",
+    "ssh to vault.internal now"
+   ],
+   "clip": {
+    "text": "ssh",
+    "more": 22
+   },
+   "cut": "ssh",
+   "records": [
+    "ssh to [internal-host] now",
+    "",
+    "ssh to [internal-host] now"
+   ],
+   "key": false
+  },
+  {
+   "s": "ssh a.b.c.home.arpa and nas.ts.net",
+   "modes": [
+    "ssh a.b.c.home.arpa and nas.ts.net",
+    "ssh a.b.c.home.arpa and nas.ts.net",
+    "ssh [internal-host] and [internal-host]",
+    "ssh a.b.c.home.arpa and nas.ts.net",
+    "ssh [internal-host] and [internal-host]",
+    "ssh a.b.c.home.arpa and nas.ts.net",
+    "ssh a.b.c.home.arpa and nas.ts.net"
+   ],
+   "kinds": [],
+   "window": [
+    "",
+    "",
+    "",
+    "ssh a.b.c.home.arpa and nas.ts.net"
+   ],
+   "clip": {
+    "text": "ssh",
+    "more": 31
+   },
+   "cut": "ssh",
+   "records": [
+    "ssh [internal-host] and [internal-host]",
+    "",
+    "ssh [internal-host] and [internal-host]"
+   ],
+   "key": false
+  },
+  {
+   "s": "x.Internal",
+   "modes": [
+    "x.Internal",
+    "x.Internal",
+    "x.Internal",
+    "x.Internal",
+    "x.Internal",
+    "x.Internal",
+    "x.Internal"
+   ],
+   "kinds": [],
+   "window": [
+    "",
+    "",
+    "",
+    "x.Internal"
+   ],
+   "clip": {
+    "text": "x.I",
+    "more": 7
+   },
+   "cut": "x.I",
+   "records": [
+    "x.Internal",
+    "",
+    "x.Internal"
+   ],
+   "key": false
+  },
+  {
+   "s": "this.internal",
+   "modes": [
+    "this.internal",
+    "this.internal",
+    "this.internal",
+    "this.internal",
+    "this.internal",
+    "this.internal",
+    "this.internal"
+   ],
+   "kinds": [],
+   "window": [
+    "",
+    "",
+    "",
+    "this.internal"
+   ],
+   "clip": {
+    "text": "thi",
+    "more": 10
+   },
+   "cut": "thi",
+   "records": [
+    "this.internal",
+    "",
+    "this.internal"
+   ],
+   "key": false
+  },
+  {
+   "s": "someObj.lan",
+   "modes": [
+    "someObj.lan",
+    "someObj.lan",
+    "someObj.lan",
+    "someObj.lan",
+    "someObj.lan",
+    "someObj.lan",
+    "someObj.lan"
+   ],
+   "kinds": [],
+   "window": [
+    "",
+    "",
+    "",
+    "someObj.lan"
+   ],
+   "clip": {
+    "text": "som",
+    "more": 8
+   },
+   "cut": "som",
+   "records": [
+    "someObj.lan",
+    "",
+    "someObj.lan"
+   ],
+   "key": false
+  },
+  {
+   "s": "mail alice.person@example.com now",
+   "modes": [
+    "mail alice.person@example.com now",
+    "mail alice.person@example.com now",
+    "mail [email] now",
+    "mail alice.person@example.com now",
+    "mail [email] now",
+    "mail alice.person@example.com now",
+    "mail alice.person@example.com now"
+   ],
+   "kinds": [],
+   "window": [
+    "",
+    "",
+    "",
+    "mail alice.person@example.com now"
+   ],
+   "clip": {
+    "text": "mai",
+    "more": 30
+   },
+   "cut": "mai",
+   "records": [
+    "mail [email] now",
+    "",
+    "mail [email] now"
+   ],
+   "key": false
+  },
+  {
+   "s": "/home/you/proj/a.ts:42",
+   "modes": [
+    "/home/you/proj/a.ts:42",
+    "/home/you/proj/a.ts:42",
+    "~/proj/a.ts:42",
+    "/home/you/proj/a.ts:42",
+    "~/proj/a.ts:42",
+    "/home/you/proj/a.ts:42",
+    "/home/you/proj/a.ts:42"
+   ],
+   "kinds": [],
+   "window": [
+    "",
+    "",
+    "",
+    "/home/you/proj/a.ts:42"
+   ],
+   "clip": {
+    "text": "/ho",
+    "more": 19
+   },
+   "cut": "/ho",
+   "records": [
+    "~/proj/a.ts:42",
+    "",
+    "~/proj/a.ts:42"
+   ],
+   "key": false
+  },
+  {
+   "s": "no .worklane/ in /home/runner/work/_temp/alpha",
+   "modes": [
+    "no .worklane/ in /home/runner/work/_temp/alpha",
+    "no .worklane/ in /home/runner/work/_temp/alpha",
+    "no .worklane/ in /home/runner/work/_temp/alpha",
+    "no .worklane/ in /home/runner/work/_temp/alpha",
+    "no .worklane/ in /home/runner/work/_temp/alpha",
+    "no .worklane/ in /home/runner/work/_temp/alpha",
+    "no .worklane/ in /home/runner/work/_temp/alpha"
+   ],
+   "kinds": [],
+   "window": [
+    "",
+    "",
+    "no ",
+    "no .worklane/ in /home/runner/work/_temp/alpha"
+   ],
+   "clip": {
+    "text": "no ",
+    "more": 43
+   },
+   "cut": "no ",
+   "records": [
+    "no .worklane/ in /home/runner/work/_temp/alpha",
+    "",
+    "no .worklane/ in /home/runner/work/_temp/alpha"
+   ],
+   "key": false
+  },
+  {
+   "s": "origin is github.com/example/alpha",
+   "modes": [
+    "origin is github.com/example/alpha",
+    "origin is github.com/example/alpha",
+    "origin is github.com/example/alpha",
+    "origin is github.com/example/alpha",
+    "origin is github.com/example/alpha",
+    "origin is github.com/example/alpha",
+    "origin is github.com/example/alpha"
+   ],
+   "kinds": [],
+   "window": [
+    "",
+    "",
+    "",
+    "origin is github.com/example/alpha"
+   ],
+   "clip": {
+    "text": "ori",
+    "more": 31
+   },
+   "cut": "ori",
+   "records": [
+    "origin is github.com/example/alpha",
+    "",
+    "origin is github.com/example/alpha"
+   ],
+   "key": false
+  },
+  {
+   "s": "gh signed in; you can push to example/alpha",
+   "modes": [
+    "gh signed in; you can push to example/alpha",
+    "gh signed in; you can push to example/alpha",
+    "gh signed in; you can push to example/alpha",
+    "gh signed in; you can push to example/alpha",
+    "gh signed in; you can push to example/alpha",
+    "gh signed in; you can push to example/alpha",
+    "gh signed in; you can push to example/alpha"
+   ],
+   "kinds": [],
+   "window": [
+    "",
+    "",
+    "gh ",
+    "gh signed in; you can push to example/alpha"
+   ],
+   "clip": {
+    "text": "gh ",
+    "more": 40
+   },
+   "cut": "gh ",
+   "records": [
+    "gh signed in; you can push to example/alpha",
+    "",
+    "gh signed in; you can push to example/alpha"
+   ],
+   "key": false
+  },
+  {
+   "s": "Account: owner@example.com (cached by Claude Code; it may predate a later token change)",
+   "modes": [
+    "Account: owner@example.com (cached by Claude Code; it may predate a later token change)",
+    "Account: owner@example.com (cached by Claude Code; it may predate a later token change)",
+    "Account: [email] (cached by Claude Code; it may predate a later token change)",
+    "Account: owner@example.com (cached by Claude Code; it may predate a later token change)",
+    "Account: [email] (cached by Claude Code; it may predate a later token change)",
+    "Account: owner@example.com (cached by Claude Code; it may predate a later token change)",
+    "Account: owner@example.com (cached by Claude Code; it may predate a later token change)"
+   ],
+   "kinds": [],
+   "window": [
+    "",
+    "",
+    "",
+    "Account: owner@example.com (cached by Claude Code; it may predate a later token change)"
+   ],
+   "clip": {
+    "text": "Acc",
+    "more": 84
+   },
+   "cut": "Acc",
+   "records": [
+    "Account: [email] (cached by Claude Code; it may predate a later token change)",
+    "",
+    "Account: [email] (cached by Claude Code; it may predate a later token change)"
+   ],
+   "key": false
+  },
+  {
+   "s": "signed in (claude.ai), per `claude auth status`; a minimal real call was answered",
+   "modes": [
+    "signed in (claude.ai), per `claude auth status`; a minimal real call was answered",
+    "signed in (claude.ai), per `claude auth status`; a minimal real call was answered",
+    "signed in (claude.ai), per `claude auth status`; a minimal real call was answered",
+    "signed in (claude.ai), per `claude auth status`; a minimal real call was answered",
+    "signed in (claude.ai), per `claude auth status`; a minimal real call was answered",
+    "signed in (claude.ai), per `claude auth status`; a minimal real call was answered",
+    "signed in (claude.ai), per `claude auth status`; a minimal real call was answered"
+   ],
+   "kinds": [],
+   "window": [
+    "",
+    "",
+    "",
+    "signed in (claude.ai), per `claude auth status`; a minimal real call was answered"
+   ],
+   "clip": {
+    "text": "sig",
+    "more": 78
+   },
+   "cut": "sig",
+   "records": [
+    "signed in (claude.ai), per `claude auth status`; a minimal real call was answered",
+    "",
+    "signed in (claude.ai), per `claude auth status`; a minimal real call was answered"
+   ],
+   "key": false
+  },
+  {
+   "s": "engine 0.5.3 installed (this dashboard runs it)",
+   "modes": [
+    "engine 0.5.3 installed (this dashboard runs it)",
+    "engine 0.5.3 installed (this dashboard runs it)",
+    "engine 0.5.3 installed (this dashboard runs it)",
+    "engine 0.5.3 installed (this dashboard runs it)",
+    "engine 0.5.3 installed (this dashboard runs it)",
+    "engine 0.5.3 installed (this dashboard runs it)",
+    "engine 0.5.3 installed (this dashboard runs it)"
+   ],
+   "kinds": [],
+   "window": [
+    "",
+    "",
+    "",
+    "engine 0.5.3 installed (this dashboard runs it)"
+   ],
+   "clip": {
+    "text": "eng",
+    "more": 44
+   },
+   "cut": "eng",
+   "records": [
+    "engine 0.5.3 installed (this dashboard runs it)",
+    "",
+    "engine 0.5.3 installed (this dashboard runs it)"
+   ],
+   "key": false
+  },
+  {
+   "s": "node 24.22.2, git, gitleaks, claude, gh; docker",
+   "modes": [
+    "node 24.22.2, git, gitleaks, claude, gh; docker",
+    "node 24.22.2, git, gitleaks, claude, gh; docker",
+    "node 24.22.2, git, gitleaks, claude, gh; docker",
+    "node 24.22.2, git, gitleaks, claude, gh; docker",
+    "node 24.22.2, git, gitleaks, claude, gh; docker",
+    "node 24.22.2, git, gitleaks, claude, gh; docker",
+    "node 24.22.2, git, gitleaks, claude, gh; docker"
+   ],
+   "kinds": [],
+   "window": [
+    "",
+    "",
+    "",
+    "node 24.22.2, git, gitleaks, claude, gh; docker"
+   ],
+   "clip": {
+    "text": "nod",
+    "more": 44
+   },
+   "cut": "nod",
+   "records": [
+    "node 24.22.2, git, gitleaks, claude, gh; docker",
+    "",
+    "node 24.22.2, git, gitleaks, claude, gh; docker"
+   ],
+   "key": false
+  },
+  {
+   "s": "! First copy your one-time code: WZRD-2E2E",
+   "modes": [
+    "! First copy your one-time code: WZRD-2E2E",
+    "! First copy your one-time code: WZRD-2E2E",
+    "! First copy your one-time code: WZRD-2E2E",
+    "! First copy your one-time code: WZRD-2E2E",
+    "! First copy your one-time code: WZRD-2E2E",
+    "! First copy your one-time code: WZRD-2E2E",
+    "! First copy your one-time code: WZRD-2E2E"
+   ],
+   "kinds": [],
+   "window": [
+    "",
+    "",
+    "! ",
+    "! First copy your one-time code: WZRD-2E2E"
+   ],
+   "clip": {
+    "text": "! F",
+    "more": 39
+   },
+   "cut": "! F",
+   "records": [
+    "! First copy your one-time code: WZRD-2E2E",
+    "",
+    "! First copy your one-time code: WZRD-2E2E"
+   ],
+   "key": false
+  },
+  {
+   "s": "✓ Logged in to github.com account example-owner (keyring)",
+   "modes": [
+    "✓ Logged in to github.com account example-owner (keyring)",
+    "✓ Logged in to github.com account example-owner (keyring)",
+    "✓ Logged in to github.com account example-owner (keyring)",
+    "✓ Logged in to github.com account example-owner (keyring)",
+    "✓ Logged in to github.com account example-owner (keyring)",
+    "✓ Logged in to github.com account example-owner (keyring)",
+    "✓ Logged in to github.com account example-owner (keyring)"
+   ],
+   "kinds": [],
+   "window": [
+    "",
+    "",
+    "✓ ",
+    "✓ Logged in to github.com account example-owner (keyring)"
+   ],
+   "clip": {
+    "text": "✓ L",
+    "more": 54
+   },
+   "cut": "✓ L",
+   "records": [
+    "✓ Logged in to github.com account example-owner (keyring)",
+    "",
+    "✓ Logged in to github.com account example-owner (keyring)"
+   ],
+   "key": false
+  },
+  {
+   "s": "  - Token: «GHO»",
+   "modes": [
+    "  - Token: «GHO»",
+    "  - Token: [REDACTED]",
+    "  - Token: «GHO»",
+    "  - Token: «GHO»",
+    "  - Token: «GHO»",
+    "  - Token: ",
+    "  - Token: [hidden]"
+   ],
+   "kinds": [],
+   "window": [
+    "",
+    " ",
+    "  ",
+    "  - Token: «GHO»"
+   ],
+   "clip": {
+    "text": "  -",
+    "more": 48
+   },
+   "cut": "  -",
+   "records": [
+    "  - Token: «GHO»",
+    "",
+    "  - Token: «GHO»"
+   ],
+   "key": false
+  },
+  {
+   "s": "To https://github.com/example/alpha.git\n * [new branch]      HEAD -> worklane/push-check",
+   "modes": [
+    "To https://github.com/example/alpha.git\n * [new branch]      HEAD -> worklane/push-check",
+    "To https://github.com/example/alpha.git\n * [new branch]      HEAD -> worklane/push-check",
+    "To https://github.com/example/alpha.git\n * [new branch]      HEAD -> worklane/push-check",
+    "To https://github.com/example/alpha.git\n * [new branch]      HEAD -> worklane/push-check",
+    "To https://github.com/example/alpha.git\n * [new branch]      HEAD -> worklane/push-check",
+    "To https://github.com/example/alpha.git\n * [new branch]      HEAD -> worklane/push-check",
+    "To https://github.com/example/alpha.git\n * [new branch]      HEAD -> worklane/push-check"
+   ],
+   "kinds": [],
+   "window": [
+    "",
+    "",
+    "To ",
+    "To https://github.com/example/alpha.git\n * [new branch]      HEAD -> worklane/push-check"
+   ],
+   "clip": {
+    "text": "To ",
+    "more": 85
+   },
+   "cut": "To ",
+   "records": [
+    "To https://github.com/example/alpha.git\n * [new branch]      HEAD -> worklane/push-check",
+    "",
+    "To https://github.com/example/alpha.git\n * [new branch]      HEAD -> worklane/push-check"
+   ],
+   "key": false
+  },
+  {
+   "s": "wld_x",
+   "modes": [
+    "wld_x",
+    "wld_x",
+    "wld_x",
+    "wld_x",
+    "wld_x",
+    "wld_x",
+    "wld_x"
+   ],
+   "kinds": [],
+   "window": [
+    "",
+    "",
+    "",
+    "wld_x"
+   ],
+   "clip": {
+    "text": "wld",
+    "more": 2
+   },
+   "cut": "wld",
+   "records": [
+    "wld_x",
+    "",
+    "wld_x"
+   ],
+   "key": false
+  },
+  {
+   "s": "«WLD»",
+   "modes": [
+    "wld_[REDACTED]",
+    "wld_[REDACTED]",
+    "wld_[REDACTED]",
+    "wld_[REDACTED]",
+    "wld_[REDACTED]",
+    "wld_",
+    "wld_[hidden]"
+   ],
+   "kinds": [
+    "dashboard key"
+   ],
+   "window": [
+    "",
+    "",
+    "",
+    "«WLD»"
+   ],
+   "clip": {
+    "text": "wld",
+    "more": 11
+   },
+   "cut": "wld",
+   "records": [
+    "wld_[REDACTED]",
+    "",
+    "wld_[REDACTED]"
+   ],
+   "key": true
+  },
+  {
+   "s": "key «WLD» here",
+   "modes": [
+    "key wld_[REDACTED] here",
+    "key wld_[REDACTED] here",
+    "key wld_[REDACTED] here",
+    "key wld_[REDACTED] here",
+    "key wld_[REDACTED] here",
+    "key wld_ here",
+    "key wld_[hidden] here"
+   ],
+   "kinds": [
+    "dashboard key"
+   ],
+   "window": [
+    "",
+    "",
+    "",
+    "key «WLD» here"
+   ],
+   "clip": {
+    "text": "key",
+    "more": 20
+   },
+   "cut": "key",
+   "records": [
+    "key wld_[REDACTED] here",
+    "",
+    "key wld_[REDACTED] here"
+   ],
+   "key": false
+  },
+  {
+   "s": "Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3",
+   "modes": [
+    "Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3",
+    "Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3",
+    "Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3",
+    "Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3",
+    "Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3",
+    "Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3",
+    "Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3"
+   ],
+   "kinds": [],
+   "window": [
+    "",
+    "",
+    "",
+    "Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3"
+   ],
+   "clip": {
+    "text": "Ab3",
+    "more": 39
+   },
+   "cut": "Ab3",
+   "records": [
+    "Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3",
+    "",
+    "Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3Ab3"
+   ],
+   "key": false
+  },
+  {
+   "s": "«PEM»\nMIIE\n«PEMEND»",
+   "modes": [
+    "[REDACTED PRIVATE KEY]",
+    "[REDACTED]",
+    "[REDACTED PRIVATE KEY]",
+    "[REDACTED PRIVATE KEY]\n\n",
+    "[REDACTED PRIVATE KEY]\n\n",
+    "",
+    "[hidden]"
+   ],
+   "kinds": [
+    "private key"
+   ],
+   "window": [
+    "",
+    "",
+    "",
+    "«PEM»\nMIIE\n«PEMEND»"
+   ],
+   "clip": {
+    "text": "[RE",
+    "more": 19
+   },
+   "cut": "[RE",
+   "records": [
+    "[REDACTED PRIVATE KEY]\n\n",
+    "",
+    "[REDACTED PRIVATE KEY]\n\n"
+   ],
+   "key": false
+  },
+  {
+   "s": "«PEMEND»",
+   "modes": [
+    "[REDACTED PRIVATE KEY]",
+    "[REDACTED]",
+    "[REDACTED PRIVATE KEY]",
+    "[REDACTED PRIVATE KEY]",
+    "[REDACTED PRIVATE KEY]",
+    "",
+    "[hidden]"
+   ],
+   "kinds": [
+    "private key"
+   ],
+   "window": [
+    "",
+    "",
+    "",
+    "«PEMEND»"
+   ],
+   "clip": {
+    "text": "[RE",
+    "more": 19
+   },
+   "cut": "[RE",
+   "records": [
+    "[REDACTED PRIVATE KEY]",
+    "",
+    ""
+   ],
+   "key": false
+  },
+  {
+   "s": "BEGIN",
+   "modes": [
+    "BEGIN",
+    "BEGIN",
+    "BEGIN",
+    "BEGIN",
+    "BEGIN",
+    "BEGIN",
+    "BEGIN"
+   ],
+   "kinds": [],
+   "window": [
+    "",
+    "",
+    "",
+    "BEGIN"
+   ],
+   "clip": {
+    "text": "BEG",
+    "more": 2
+   },
+   "cut": "BEG",
+   "records": [
+    "BEGIN",
+    "",
+    "BEGIN"
+   ],
+   "key": false
+  }
+ ],
+ "odd": [
+  [
+   null,
+   null
+  ],
+  [
+   null,
+   null
+  ],
+  [
+   0,
+   0
+  ],
+  [
+   1.5,
+   1.5
+  ],
+  [
+   true,
+   true
+  ],
+  [
+   [],
+   []
+  ],
+  [
+   {},
+   {}
+  ],
+  [
+   [
+    ""
+   ],
+   [
+    ""
+   ]
+  ],
+  [
+   {
+    "": ""
+   },
+   {
+    "": ""
+   }
+  ],
+  [
+   {
+    "API_KEY": "«V»"
+   },
+   {
+    "API_KEY": "«V»"
+   }
+  ],
+  [
+   {
+    "a": [
+     null,
+     1,
+     {
+      "token": "«V»",
+      "n": 2
+     }
+    ]
+   },
+   {
+    "a": [
+     null,
+     1,
+     {
+      "token": "«V»",
+      "n": 2
+     }
+    ]
+   }
+  ],
+  [
+   [
+    "$",
+    "$$",
+    "$&"
+   ],
+   [
+    "$",
+    "$$",
+    "$&"
+   ]
+  ]
+ ],
+ "nonStrings": [
+  {
+   "redactString": "123",
+   "secretKinds": "[]",
+   "readWindow": "\"\"",
+   "redactClip": "{\"text\":\"123\",\"more\":null}",
+   "redactRecords": "[\"123\"]",
+   "isDashboardKey": "false",
+   "redact": "123"
+  },
+  {
+   "redactString": "0",
+   "secretKinds": "[]",
+   "readWindow": "\"\"",
+   "redactClip": "{\"text\":\"0\",\"more\":null}",
+   "redactRecords": "[\"0\"]",
+   "isDashboardKey": "false",
+   "redact": "0"
+  },
+  {
+   "redactString": "THROW TypeError",
+   "secretKinds": "THROW TypeError",
+   "readWindow": "THROW TypeError",
+   "redactClip": "THROW TypeError",
+   "redactRecords": "THROW TypeError",
+   "isDashboardKey": "THROW TypeError",
+   "redact": "null"
+  },
+  {
+   "redactString": "THROW TypeError",
+   "secretKinds": "THROW TypeError",
+   "readWindow": "THROW TypeError",
+   "redactClip": "THROW TypeError",
+   "redactRecords": "THROW TypeError",
+   "isDashboardKey": "THROW TypeError",
+   "redact": "undefined"
+  },
+  {
+   "redactString": "true",
+   "secretKinds": "[]",
+   "readWindow": "\"\"",
+   "redactClip": "{\"text\":\"tru\",\"more\":null}",
+   "redactRecords": "[\"true\"]",
+   "isDashboardKey": "false",
+   "redact": "true"
+  },
+  {
+   "redactString": "{}",
+   "secretKinds": "[]",
+   "readWindow": "\"\"",
+   "redactClip": "{\"text\":\"[ob\",\"more\":null}",
+   "redactRecords": "[\"[object Object]\"]",
+   "isDashboardKey": "false",
+   "redact": "{}"
+  },
+  {
+   "redactString": "[]",
+   "secretKinds": "[]",
+   "readWindow": "[]",
+   "redactClip": "{\"text\":[],\"more\":0}",
+   "redactRecords": "[\"\"]",
+   "isDashboardKey": "false",
+   "redact": "[]"
+  },
+  {
+   "redactString": "[\"a\"]",
+   "secretKinds": "[]",
+   "readWindow": "[\"a\"]",
+   "redactClip": "{\"text\":[\"a\"],\"more\":0}",
+   "redactRecords": "[\"a\"]",
+   "isDashboardKey": "false",
+   "redact": "[\"a\"]"
+  },
+  {
+   "redactString": "{\"length\":3}",
+   "secretKinds": "[]",
+   "readWindow": "\"\"",
+   "redactClip": "{\"text\":{\"length\":3},\"more\":0}",
+   "redactRecords": "[\"[object Object]\"]",
+   "isDashboardKey": "false",
+   "redact": "{\"length\":3}"
+  }
+ ]
+}
