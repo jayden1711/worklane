@@ -185,27 +185,69 @@ test('the evaluator reads these expressions as Actions does', () => {
 // R1271b D1 (#1266): a called workflow's GITHUB_TOKEN gets at most what its caller grants, and a called job that asks
 // for more fails the whole called run at startup. ci-slow.yml's test-run sandbox job asks for actions: read (its step
 // timings), so the full-ci caller must grant it. Every local `uses:` caller is checked against every job it calls.
-test('every job a workflow calls asks for no permission its caller does not grant (a called run would fail at startup)', () => {
-  type Perms = Record<string, string> | string | undefined;
-  type Wf = { permissions?: Perms; jobs: Record<string, { uses?: string; permissions?: Perms }> };
-  const all = Object.fromEntries(readdirSync(dir).filter((f) => /\.ya?ml$/.test(f)).map((f) => [f, parse(readFileSync(join(dir, f), 'utf8')) as Wf]));
+type Perms = Record<string, string> | string | undefined;
+type PermWf = { permissions?: Perms; jobs: Record<string, { uses?: string; permissions?: Perms }> };
+/** Every way a called job (or called workflow) asks for more than its caller grants, as messages; and how many calls were checked. */
+function permissionOverreach(all: Record<string, PermWf>): { calls: number; problems: string[] } {
   const rank = (v: string | undefined) => ({ none: 0, read: 1, write: 2 })[v ?? 'none'] ?? 0;
   const level = (p: Perms, scope: string) => (typeof p === 'string' ? (p === 'write-all' ? 'write' : p === 'read-all' ? 'read' : 'none') : p?.[scope]);
+  const problems: string[] = [];
   let calls = 0;
   for (const [f, w] of Object.entries(all)) {
     for (const [id, job] of Object.entries(w.jobs ?? {})) {
-      const m = /^\.\/\.github\/workflows\/(.+)$/.exec(job.uses ?? '');
-      if (!m) continue;
+      // A local call, or this repo's own workflow in owner/repo form (R1271d D3); another repo's workflow isn't here.
+      const m = /^(?:\.\/|[^/@]+\/[^/@]+\/)\.github\/workflows\/([^@]+)(?:@.*)?$/.exec(job.uses ?? '');
+      if (!m || !(m[1]! in all)) continue;
       calls++;
       const grant = job.permissions ?? w.permissions;
-      assert.ok(grant !== undefined, `${f} ${id}: a caller states the permissions it passes on`);
+      if (grant === undefined) { problems.push(`${f} ${id}: a caller states the permissions it passes on`); continue; }
       const called = all[m[1]!]!;
       for (const [cid, cj] of [['(workflow)', { permissions: called.permissions }], ...Object.entries(called.jobs)] as [string, { permissions?: Perms }][]) {
         if (cj.permissions === undefined) continue;
-        const scopes = typeof cj.permissions === 'string' ? ['actions', 'contents', 'issues', 'pull-requests', 'checks', 'statuses', 'id-token'] : Object.keys(cj.permissions);
-        for (const s of scopes) assert.ok(rank(level(cj.permissions, s)) <= rank(level(grant, s)), `${m[1]} ${cid} asks for ${s}: ${level(cj.permissions, s)}, but ${f} ${id} grants ${level(grant, s) ?? 'none'}`);
+        // read-all or write-all asks for every scope, the ones not listed too (R1271d D3): only an equal or broader
+        // string grant covers it.
+        if (typeof cj.permissions === 'string') {
+          if (!(typeof grant === 'string' && rank(level(cj.permissions, 'x')) <= rank(level(grant, 'x')))) problems.push(`${m[1]} ${cid} asks for ${cj.permissions}, but ${f} ${id} grants ${JSON.stringify(grant)}`);
+          continue;
+        }
+        for (const s of Object.keys(cj.permissions)) if (rank(level(cj.permissions, s)) > rank(level(grant, s))) problems.push(`${m[1]} ${cid} asks for ${s}: ${level(cj.permissions, s)}, but ${f} ${id} grants ${level(grant, s) ?? 'none'}`);
       }
     }
   }
+  return { calls, problems };
+}
+
+test('every job a workflow calls asks for no permission its caller does not grant (a called run would fail at startup)', () => {
+  const all = Object.fromEntries(readdirSync(dir).filter((f) => /\.ya?ml$/.test(f)).map((f) => [f, parse(readFileSync(join(dir, f), 'utf8')) as PermWf]));
+  const { calls, problems } = permissionOverreach(all);
+  assert.deepEqual(problems, []);
   assert.ok(calls >= 1, 'the full-ci caller is checked');
+});
+
+test('the permission check itself: an over-ask, write over read, read-all against a scope list, and an owner/repo call are caught', () => {
+  const called = (permissions: Perms): PermWf => ({ jobs: { t: { permissions } } });
+  const caller = (permissions: Perms, uses = './.github/workflows/b.yml'): PermWf => ({ permissions, jobs: { c: { uses } } });
+  const check = (a: PermWf, b: PermWf) => permissionOverreach({ 'a.yml': a, 'b.yml': b });
+  assert.deepEqual(check(caller({ contents: 'read', actions: 'read' }), called({ actions: 'read' })), { calls: 1, problems: [] }, 'control: granted');
+  assert.equal(check(caller({ contents: 'read' }), called({ actions: 'read' })).problems.length, 1, 'an over-ask');
+  assert.equal(check(caller({ contents: 'read' }), called({ contents: 'write' })).problems.length, 1, 'write over read');
+  const listed = { actions: 'read', contents: 'read', issues: 'read', 'pull-requests': 'read', checks: 'read', statuses: 'read', 'id-token': 'read' };
+  assert.equal(check(caller(listed), called('read-all')).problems.length, 1, 'read-all needs more than seven listed scopes (R1271d B2)');
+  assert.deepEqual(check(caller('read-all'), called('read-all')).problems, [], 'control: read-all covers read-all');
+  const own = check(caller({ contents: 'read' }, 'example-org/example-repo/.github/workflows/b.yml@main'), called({ actions: 'read' }));
+  assert.deepEqual([own.calls, own.problems.length], [1, 1], 'an owner/repo call to a workflow here is checked (R1271d D)');
+  assert.equal(check(caller({ contents: 'read' }, 'other-org/other/.github/workflows/x.yml@v1'), called({ actions: 'read' })).calls, 0, 'another repo\'s workflow is not here');
+});
+
+// R1271d D2 (#1266): the step summary's settings name the job and step they describe. Renamed, or with its limit
+// changed, the summary would silently stop labelling that step's timeout (or label the wrong limit).
+test('the step summary names its own job, one step whose limit it labels, and that step\'s limit in seconds', () => {
+  type Step = { name?: string; 'timeout-minutes'?: number; env?: Record<string, string> };
+  const job = (parse(readFileSync(join(dir, 'ci-slow.yml'), 'utf8')) as { jobs: Record<string, { name: string; steps: Step[] }> }).jobs['testrun-real-systemd']!;
+  const summary = job.steps.find((x) => x.env?.LIMITED_STEP !== undefined);
+  assert.ok(summary, 'the summary step');
+  assert.equal(summary.env!.JOB_NAME, job.name);
+  const limited = job.steps.filter((x) => x.name?.startsWith(summary.env!.LIMITED_STEP!));
+  assert.equal(limited.length, 1, `exactly one step starts with ${summary.env!.LIMITED_STEP}`);
+  assert.equal(Number(summary.env!.LIMITED_SECONDS), 60 * limited[0]!['timeout-minutes']!, 'LIMITED_SECONDS is that step\'s timeout-minutes x 60');
 });
