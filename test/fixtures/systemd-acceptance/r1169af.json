@@ -1,0 +1,50 @@
+{
+  "//": "Review round r1169af of #1169: each case is one attack on scripts/ci/systemd-acceptance.mjs (README.md).",
+  "cases": {
+    "r1169af-f1-throw-before-sign": {
+      "exit": 2,
+      "reason": "test/y\\.test\\.ts: the watchdog reads the installed unit from the real service manager: line \\d+ holds systemd's sign in a try whose catch",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "import { readFileSync } from 'node:fs';",
+          "test('the watchdog reads the installed unit from the real service manager', (t) => {",
+          "  try {",
+          "    const unit = readFileSync('/nonexistent/worklane/unit-name', 'utf8').trim();",
+          "    const r = spawnSync('systemctl', ['is-active', unit], { encoding: 'utf8' });",
+          "    assert.fail(`the systemd assertions ran (${r.status})`);",
+          "  } catch (e) {",
+          "    if (e instanceof assert.AssertionError) throw e;",
+          "    t.diagnostic(`no installed unit here: ${e.message}`);",
+          "  }",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169af-f11-optional-chain": {
+      "exit": 2,
+      "reason": "test/y\\.test\\.ts: the watchdog reads unit states from the real service manager: line \\d+ holds systemd's sign in an optional call's arguments",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "const machineUnits = () => (process.env.FIXTURE_NEVER ? { expectActive: (r) => assert.fail(`ran (${r.status})`) } : undefined);",
+          "test('the watchdog reads unit states from the real service manager', (t) => {",
+          "  const units = machineUnits();",
+          "  units?.expectActive(",
+          "    spawnSync('systemctl', ['is-active', 'nonexistent-unit.service'], { encoding: 'utf8' }),",
+          "  );",
+          "  t.diagnostic('asked the service manager');",
+          "});",
+          ""
+        ]
+      }
+    }
+  }
+}

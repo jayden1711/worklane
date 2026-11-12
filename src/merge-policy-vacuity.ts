@@ -42,10 +42,10 @@
 // Each of these has a todo test (merge-vacuity-r8, -r9-limits; B1 in -r6). And two where an untested change merges
 // (round 13): code moved in a way git doesn't pair (a file renamed and re-indented or edited, a function moved into
 // another file or within its file, moved code re-wrapped) reads as added code, so a test that runs it merges the PR
-// (measured: todo tests R1, R3, R4 in merge-vacuity-r12; M3, M4b, M5b, R3s in -r13); and deleting an app file, or
-// renaming one out of app code (to a data file, a test path, or out of app_paths), leaves no app code to measure, so
-// it merges with no test and no run (measured for a deletion, a file renamed to .json and one renamed to a test path;
-// inferred for a move out of app_paths, which the same app-code filter drops).
+// (measured: todo tests R1, R3, R4 in merge-vacuity-r12; M3, M4b, M5b, R3s in -r13). Deleting an app file, or
+// renaming one out of app code (to a data file, a test path, or out of app_paths), with no app code left to measure,
+// holds (#1015; it used to merge with no test and no run). Taking app code away beside a measured change is judged by
+// that change, as the gate measures per PR (#1015's second item, by design).
 //
 // What counts as changed app code: a file the PR changes, under vacuity.app_paths, not matched by a test glob, still
 // there at the head, and not one with no runtime code for a test to run (NO_RUNTIME_CODE: types only, config, data,
@@ -108,19 +108,26 @@ const list = (p: string[]) => `${p.slice(0, 3).map(shownPath).join(', ')}${p.len
 
 /**
  * No vacuity section (the owner's decision: it waits too). Nothing says what is app code, so every changed file the
- * tamper guard's own test globs don't match, that has runtime code and is still there at the head, counts; any one
- * holds the PR, saying how to add the section. A head it can't read holds as well.
+ * tamper guard's own test globs don't match and that has runtime code counts; any one holds the PR, saying how to add
+ * the section. One still at the head is code it changes. One the head no longer has (deleted, or renamed to a data
+ * name, a test path or a `.d.ts`; `changed` holds a rename's old path too) is code it takes away, and holds the same
+ * way (R1179d, as #1015 for the section's case): nothing measured what that breaks. A head it can't read holds as well.
  */
 function noSection(changed: string[], atHead: (path: string) => string | null): VacuityCheck {
   const testRes = FALLBACK_TEST_GLOBS.map((g) => globToRegExp(g));
   let code: string[];
+  let gone: string[];
   try {
-    code = changed.filter((p) => !testRes.some((re) => re.test(p)) && !NO_RUNTIME_CODE.test(p) && atHead(p) !== null);
+    const runtime = changed.filter((p) => !testRes.some((re) => re.test(p)) && !NO_RUNTIME_CODE.test(p));
+    const there = new Map(runtime.map((p) => [p, atHead(p) !== null]));
+    code = runtime.filter((p) => there.get(p));
+    gone = runtime.filter((p) => !there.get(p));
   } catch (e) {
     return { reasons: [`design: vacuity: could not be checked: ${(e as Error).message.split('\n')[0]!.slice(0, 300)}`] };
   }
-  if (!code.length) return { reasons: [] };
-  return { reasons: [`design: vacuity: tests.yaml has no vacuity section, so nothing shows its tests run the code it changes (${list(code)}); \`${BRAND.cli} doctor\` shows the section to add`] };
+  if (code.length) return { reasons: [`design: vacuity: tests.yaml has no vacuity section, so nothing shows its tests run the code it changes (${list(code)}); \`${BRAND.cli} doctor\` shows the section to add`] };
+  if (gone.length) return { reasons: [`design: vacuity: tests.yaml has no vacuity section, and it takes away code (${list(gone)}: deleted, or renamed out of code), so nothing measured what that breaks; \`${BRAND.cli} doctor\` shows the section to add`] };
+  return { reasons: [] };
 }
 
 /** The tests.yaml lines that turn the coverage run on: a paste-ready snippet (doctor and the drafted tests.yaml say it). */
@@ -226,8 +233,13 @@ export function vacuityCheck(o: {
     // Fail closed: a head it can't read is never taken for one with nothing to check.
     return { reasons: [`design: vacuity: could not be checked: ${(e as Error).message.split('\n')[0]!.slice(0, 300)}`] };
   }
-  const app = o.changed.filter((p) => appRes.some((re) => re.test(p)) && !isTest(p) && !NO_RUNTIME_CODE.test(p) && text.get(p) !== null);
-  if (!app.length) return { reasons: [] };
+  const appCode = (p: string) => appRes.some((re) => re.test(p)) && !isTest(p) && !NO_RUNTIME_CODE.test(p);
+  const app = o.changed.filter((p) => appCode(p) && text.get(p) !== null);
+  // #1015: app code the PR takes away, an app file deleted or renamed out of app code (to a data name, a test path, or
+  // out of app_paths; `changed` holds a rename's old path too). With no app code left to measure, nothing measures
+  // what the removal breaks, so it holds (fail closed) rather than merging with no test and no run.
+  const gone = o.changed.filter((p) => appCode(p) && text.get(p) === null);
+  if (!app.length) return gone.length ? { reasons: [`design: vacuity: it takes away app code (${list(gone)}: deleted, or renamed out of app code) and leaves no app code its tests could run, so nothing measured what that breaks`] } : { reasons: [] };
   // #784 round 6: a merge the gate can't place on the default branch (fail closed: what it brought in might be counted
   // as the PR's own change, with the tests that came with it).
   if (o.foreignMerge) return { reasons: ["design: vacuity: a merge in it brings in commits the default branch here doesn't have (a fetch of that branch that is behind, or another branch), so its own change can't be told from what it merged in"] };

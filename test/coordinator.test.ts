@@ -19,6 +19,9 @@ import { askChat, chatAnswer } from '../src/chat.js';
 import { ATTACHMENT_DEFAULT_CAPS } from '../src/chat-attachments.js';
 import { askInConversation, conversationTurns, createConversation } from '../src/chat-conversations.js';
 import { EventLog } from '../src/events/log.js';
+
+/** The id of the latest decision asked on issue `n`: a reply names it (the owner's decision, 2026-11-09). */
+const decisionOn = (log: EventLog, n: number) => log.read(0, ['decision.asked']).map((e) => e.payload as { id: string; issue: number | null }).filter((p) => p.issue === n).at(-1)!.id;
 import { asks } from '../src/console/asks.js';
 import type { EventPayload, StoredEvent } from '../src/events/types.js';
 import { boardView } from '../src/board.js';
@@ -204,10 +207,10 @@ test('a high-risk change waits for the owner; a writer\'s /approve comment relea
   assert.deepEqual([ctx.verdict?.patch_correct, ctx.verdict?.confidence], [verdict.patch_correct, verdict.confidence]);
   const checks = f.log.read(0, ['check.result']).at(-1)!.payload as { checks: { check: string; status: string }[] };
   assert.deepEqual(ctx.checks?.map((c) => [c.check, c.status]), checks.checks.map((c) => [c.check, c.status]));
-  f.backlog.humanComment(n, 'stranger', '/worklane approve');
+  f.backlog.humanComment(n, 'stranger', `/worklane approve ${decisionOn(f.log, n)}`);
   await c.tick();
   assert.equal(f.log.read(0, ['land.result']).length, 0, 'a non-writer cannot approve');
-  f.backlog.humanComment(n, 'example-owner', 'looks right\n/worklane approve');
+  f.backlog.humanComment(n, 'example-owner', `/worklane approve ${decisionOn(f.log, n)} looks right`); // changed by the allowlist (#1182, the owner, 2026-11-11): a reply is one line (was a second line)
   await c.tick(); // records the answer and queues landing
   await c.tick(); // lands
   assert.equal((f.log.read(0, ['land.result']).at(-1)!.payload as { outcome: string }).outcome, 'landed');
@@ -494,7 +497,7 @@ function plannedTask(planOf: (req: RunRequest) => object, worker?: (req: RunRequ
     await c.idle();
   };
   const answer = async (text: string) => {
-    f.backlog.humanComment(n, 'example-owner', text);
+    f.backlog.humanComment(n, 'example-owner', text.replace(/^(\/\S+[ \t]+\S+)/m, `$1 ${decisionOn(f.log, n)}`));
     await c.tick(); // the decision
     await run(); // the task again, if it was put back to ready
   };
@@ -756,7 +759,7 @@ function refusedTask() {
     await c.idle();
   };
   const answer = async (a: string) => {
-    f.backlog.humanComment(n, 'example-owner', `/${BRAND.cli} ${a}`);
+    f.backlog.humanComment(n, 'example-owner', `/${BRAND.cli} ${a} ${decisionOn(f.log, n)}`);
     await c.tick();
   };
   return { f, n, c, workers, rerun, answer };
@@ -963,7 +966,7 @@ test('an investigation posts findings with evidence, lands nothing, and asks the
     findings: [{ claim: 'no qty guard', evidence: 'src/price.js:3 sum + cents * qty', file: 'src/price.js', line: 3 }],
     confidence: 'high',
   });
-  f.backlog.humanComment(n, 'example-owner', '/worklane approve-fix');
+  f.backlog.humanComment(n, 'example-owner', `/worklane approve-fix ${decisionOn(f.log, n)}`);
   await c.tick();
   const after = (await f.backlog.comments(n)).map((x) => x.body).join('\n');
   assert.match(after, /approved a fix\. Give the fix its own done_when contract/);
@@ -1689,7 +1692,7 @@ async function openPr(over: Partial<Record<string, (r: RunRequest) => object>> =
   await c.tick();
   if (opts.approveLanding) {
     // An L3 change asks the owner before its PR opens: the owner approves it there.
-    f.backlog.humanComment(n, 'example-owner', `/${BRAND.cli} approve`);
+    f.backlog.humanComment(n, 'example-owner', `/${BRAND.cli} approve ${decisionOn(f.log, n)}`);
     await c.tick(); // records the answer and queues landing
     await c.tick(); // opens the PR
   }
@@ -2739,7 +2742,7 @@ async function instructionsPr(o: { base: string | null; head: string; cases?: bo
   if (file.startsWith(BRAND.configDir)) {
     assert.equal((lastOf(f.log, 'review.level_set') as { level: string }).level, 'L3', 'the config folder is always L3');
     assert.equal(f.log.read(0, ['pr.opened']).length, 0, 'no PR before the owner approves');
-    f.backlog.humanComment(n, 'example-owner', `/${BRAND.cli} approve`);
+    f.backlog.humanComment(n, 'example-owner', `/${BRAND.cli} approve ${decisionOn(f.log, n)}`);
     await c.tick(); // records the answer and queues landing
     await c.tick(); // opens the PR
   }
@@ -3666,7 +3669,16 @@ test("review rules: a docs-only PR is ready and merges on the light checks; GitH
   const red = await openPr({ worker: docsWorker, 'evaluator-verdict': approve() }, { autoMerge: () => true, edit: light, body });
   red.f.backlog.setChecks(red.opened.head, [check('lint', 'success', 1), check('ci', 'failure', 2)]);
   red.f.backlog.setPr(red.opened.number, { mergeableState: 'blocked' });
+  // R1176e: the ruleset hold judges the PR's head as a PR head (its head ref), never as a main commit.
+  const rc = red.c as unknown as { headChecksOf(...a: unknown[]): Promise<unknown> };
+  const readHead = rc.headChecksOf.bind(rc);
+  const asked: unknown[] = [];
+  rc.headChecksOf = async (...a) => {
+    if (a[0] === red.opened.head) asked.push(a[1]);
+    return readHead(...a);
+  };
   await red.c.tick();
+  assert.deepEqual([...new Set(asked.map((x) => JSON.stringify(x)))], [JSON.stringify({ pr: { headRef: red.pr().head } })], 'judged as a PR head');
   assert.equal(reasonsOf(red).auto, false);
   assert.ok(reasonsOf(red).reasons.some((r) => /docs-only fast path: the ruleset's required check\(s\) ci \(fail\) did not pass on GitHub/.test(r)), reasonsOf(red).reasons.join('; '));
   assert.ok(!red.pr().merged);

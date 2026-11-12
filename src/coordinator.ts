@@ -6,8 +6,10 @@
 import { spawn } from './os/child-process.js';
 import { gitExecFileSync, gitSpawnSync } from './os/git.js';
 import { createHash, randomBytes } from 'node:crypto';
+import { types } from 'node:util';
 import { cpSync, mkdirSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { FlagState, adoptFlags } from './flags.js';
 import { CHECKPOINT_EVERY_MS, chainFileFor, checkpoint } from './audit-chain.js';
 import { BRAND } from './brand.js';
 import { RECOMMENDATION_PREFIX } from './decision-ask.js';
@@ -46,7 +48,7 @@ import { readRun, runsForIssue } from './run-record.js';
 import { claimsOf, unbackedClaims, type CheckRecord } from './receipts.js';
 import { calibrated, claimDoubt, compromisedDoubts, protectedBrief, verdictRefusal } from './verdict-confidence.js';
 import { handoffDoubt, handoffs, readClaims } from './claim-labels.js';
-import { waitCategoriesOf, whyHighRisk } from './merge-policy.js';
+import { riskAndDesignReasons, waitCategoriesOf, whyHighRisk } from './merge-policy.js';
 import { crossDisagreement, crossFamilyModel, crossFamilySkip, type SideVerdict } from './cross-eval.js';
 import { route as routingValue } from './routing.js';
 import type { ReviewConfig } from './config/schema.js';
@@ -97,10 +99,23 @@ export { logTail } from './coordinator/shared.js';
 /** What one worker build ends in: stop the task, or go on to inspect its change. */
 type BuildOut = { stop: true } | { stop: false; stuck?: string; raise?: Level; noChange?: string; provider?: string };
 
+const isProxy = types.isProxy;
+
 /** A failed worker run shorter than this that committed nothing never got to work. */
 export const STARTUP_FAILURE_SECS = 90;
 
 export class Coordinator extends AutomationRuns {
+  /** This coordinator's feature flags (src/flags.ts): its own, never another Coordinator's in the process (R1173af AF1). */
+  readonly flags = new FlagState({ log: this.d.log, repo: this.d.repo });
+
+  constructor(...a: ConstructorParameters<typeof AutomationRuns>) {
+    super(...a);
+    // R1173aj AJ1: a parent swapped at run time can return a Proxy that redirects the lock below to another's state.
+    if (isProxy(this)) throw new Error('a Coordinator is never a Proxy');
+    // R1173ah AH2b: `readonly` is compile-time only; never another Coordinator's state at run time either.
+    Object.defineProperty(this, 'flags', { writable: false, configurable: false });
+  }
+
   // ---------------------------------------------------------------- tick
 
   /** One deterministic pass: reconcile, handle approvals, land, dispatch. */
@@ -123,7 +138,30 @@ export class Coordinator extends AutomationRuns {
     this.checkConsole();
     void this.checkChat();
     // The config as the default branch has it now, before anything below reads it (src/config/live.ts).
-    await step('config', () => this.refreshConfig(), undefined);
+    await step('config', () => {
+      // Feature flags (src/flags.ts): origin's default branch's head, when it is this instance's configured default
+      // branch and its config is here and valid (by this instance's checks too); otherwise every flag is off. Adopted
+      // here only, even when refreshing the config threw (R1173m: a failed config.applied write skipped it, and a flag
+      // main turned off stayed on). Every flip is audited against the last state the log recorded (#1173 reviews).
+      // R1173ae AE1: both failures are recorded. A held flag throws at every tick of a lasting fault, and a throw from
+      // a `finally` replaced the refresh's own error, so a failing refresh left no coordinator.error.
+      let refreshFailed: { e: unknown } | null = null;
+      try {
+        this.refreshConfig();
+      } catch (e) {
+        refreshFailed = { e };
+      }
+      try {
+        adoptFlags({ flags: this.flags, log: this.d.log, repo: this.d.repo, actor: this.d.instance, branch: this.branch, check: this.d.liveConfig?.check ?? (() => []) });
+      } catch (e) {
+        if (refreshFailed) {
+          const r = refreshFailed.e as { kind?: string; message?: string };
+          this.emit('coordinator.error', { instance: this.d.instance, where: 'config', kind: r?.kind ?? 'error', message: String(r?.message ?? r).slice(0, 500) });
+        }
+        throw e;
+      }
+      if (refreshFailed) throw refreshFailed.e;
+    }, undefined);
     await step('settings', () => this.refreshSettings(), undefined);
     // The audit chain's checkpoint (src/audit-chain.ts, docs/audit-log.md): at most every 10 minutes. WHY early: a step
     // added after dispatch would yield before the tick returns, which changes when a dispatched run's end is seen.
@@ -1066,6 +1104,25 @@ export class Coordinator extends AutomationRuns {
         if (this.d.cfg.project.land_mode === 'direct' && !verdict.patch_correct) {
           lvl.level = 'L3';
           lvl.reasons.push('the evaluator rejected the patch: held for the owner (safety floor)');
+        }
+        // #716: the merge policy's wait-category floor in direct mode too. In PR mode mergeDecision holds every change in
+        // a wait category (L3's, ci-config, the locked agent-instructions and self-modification, the odd paths, the
+        // repo's merge.wait_categories); direct land skips mergeDecision, so the same function (riskAndDesignReasons)
+        // raises such a change, and one that changes a dependency manifest, to L3 here. It does NOT bring the rest of
+        // mergeDecision to direct mode: the evaluator's binding design flag, a new top-level module, the worker's
+        // protected claim, the weakening and vacuity holds (#783, #784), the size limits and its other doubt reasons
+        // still don't apply to a direct land (#716 stays open for them); nor do its switches (policy.yaml auto_merge,
+        // review.yaml merge.auto, the auto-merge stop): direct land checks only the emergency stop and the branch's
+        // protection. #808 (PR #1183) brings the stop and the policy switch; whichever lands second corrects this.
+        // This is the worker's diff under the config at level time; landBatch checks the same floor again on the land
+        // commit itself, pre-land steps' output included, under the config and land mode at landing (R1182f).
+        if (this.d.cfg.project.land_mode === 'direct' && lvl.level !== 'L3') {
+          const review = this.d.cfg.review ?? DEFAULT_REVIEW;
+          const held = riskAndDesignReasons({ level: lvl, waitCategories: waitCategoriesOf(review), newTopLevel: [] });
+          if (held.length) {
+            lvl.level = 'L3';
+            lvl.reasons.push(...held.map((r) => `${r}: held for the owner (direct land's merge-policy floor)`));
+          }
         }
         if (plan && (await this.planObjected(n, owner, planComments))) return;
         this.emit('review.level_set', { issue: n, head, level: lvl.level, reasons: [...lvl.reasons, ...(verdict.unread.length ? [`evaluator did not read: ${shownPaths(verdict.unread.slice(0, 10))}${verdict.unread.length > 10 ? ` and ${verdict.unread.length - 10} more` : ''}`] : []), ...change.tampered.map((t) => `tamper guard: ${t}`), ...(repro?.unavailable ? [`no reproduction: ${repro.unavailable}`] : [])] });

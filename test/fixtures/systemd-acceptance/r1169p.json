@@ -1,0 +1,406 @@
+{
+  "//": "Review round r1169p of #1169: each case is one attack on scripts/ci/systemd-acceptance.mjs (README.md).",
+  "cases": {
+    "r1169p-p1-helper-registers": {
+      "exit": 2,
+      "reason": "test/helpers/unit-cases\\.ts: \\d+ use\\(s\\) of systemd's sign outside",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "helpers/unit-cases.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { spawnSync } from 'node:child_process';",
+          "// passwordless sudo: in the self-hosted container (and on this Mac) there is none; on the VM there is.",
+          "const canSudo = process.platform === 'linux' && spawnSync('sudo', ['-n', 'true']).status === 0;",
+          "export function unitCases() {",
+          "  test('acceptance: the engine unit restarts after a crash', { skip: !canSudo && 'needs passwordless sudo' }, () => {",
+          "    const r = spawnSync('sudo', ['-n', 'systemctl', 'restart', 'worklane.service'], { encoding: 'utf8' });",
+          "    if (r.status !== 0) throw new Error(r.stderr);",
+          "  });",
+          "}",
+          ""
+        ],
+        "y.test.ts.txt": [
+          "import { unitCases } from './helpers/unit-cases.js';",
+          "unitCases();",
+          ""
+        ]
+      }
+    },
+    "r1169p-p1c-control-in-test-file": {
+      "exit": 2,
+      "reason": "'s throw leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { spawnSync } from 'node:child_process';",
+          "const canSudo = process.platform === 'linux' && spawnSync('sudo', ['-n', 'true']).status === 0;",
+          "test('acceptance: the engine unit restarts after a crash', { skip: !canSudo && 'needs passwordless sudo' }, () => {",
+          "  const r = spawnSync('sudo', ['-n', 'systemctl', 'restart', 'worklane.service'], { encoding: 'utf8' });",
+          "  if (r.status !== 0) throw new Error(r.stderr);",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169p-p2-src-holder-body-skip": {
+      "exit": 2,
+      "reason": "'s return leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "scripts/ci/systemd-acceptance-allow.json.root": [
+          "{ \"uses\": { \"src/os/probe.ts\": { \"why\": \"product code: asks loginctl for Linger (as src/os/index.ts does)\", \"uses\": [\"loginctl: return execFileSync('loginctl', ['show-user', user, '-p', 'Linger', '--value'], { encoding: 'utf8' }).trim() === 'yes';\"] } }, \"skipImports\": {}, \"runtime\": {} }",
+          ""
+        ],
+        "src/os/probe.ts.root": [
+          "import { execFileSync } from 'node:child_process';",
+          "export function lingerEnabled(user = 'runner') {",
+          "  if (process.platform !== 'linux') return null;",
+          "  try {",
+          "    return execFileSync('loginctl', ['show-user', user, '-p', 'Linger', '--value'], { encoding: 'utf8' }).trim() === 'yes';",
+          "  } catch {",
+          "    return null;",
+          "  }",
+          "}",
+          ""
+        ],
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { lingerEnabled } from '../src/os/probe.js';",
+          "test('acceptance: the engine keeps running after its user logs out (linger)', (t) => {",
+          "  const linger = lingerEnabled();",
+          "  if (linger === null) {",
+          "    t.skip('no login manager here');",
+          "    return;",
+          "  }",
+          "  assert.equal(linger, true);",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169p-p2b-src-holder-early-return": {
+      "exit": 2,
+      "reason": "'s return leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "scripts/ci/systemd-acceptance-allow.json.root": [
+          "{ \"uses\": { \"src/os/probe.ts\": { \"why\": \"product code: asks loginctl for Linger (as src/os/index.ts does)\", \"uses\": [\"loginctl: return execFileSync('loginctl', ['show-user', user, '-p', 'Linger', '--value'], { encoding: 'utf8' }).trim() === 'yes';\"] } }, \"skipImports\": {}, \"runtime\": {} }",
+          ""
+        ],
+        "src/os/probe.ts.root": [
+          "import { execFileSync } from 'node:child_process';",
+          "export function lingerEnabled(user = 'runner') {",
+          "  if (process.platform !== 'linux') return null;",
+          "  try {",
+          "    return execFileSync('loginctl', ['show-user', user, '-p', 'Linger', '--value'], { encoding: 'utf8' }).trim() === 'yes';",
+          "  } catch {",
+          "    return null;",
+          "  }",
+          "}",
+          ""
+        ],
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { lingerEnabled } from '../src/os/probe.js';",
+          "test('acceptance: the engine keeps running after its user logs out (linger)', () => {",
+          "  const linger = lingerEnabled();",
+          "  if (linger === null) return; // no login manager here (a container)",
+          "  assert.equal(linger, true);",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169p-p2c-control-options-skip": {
+      "exit": 2,
+      "reason": "a skip reads src/os/probe\\.ts: lingerEnabled, which carries",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "scripts/ci/systemd-acceptance-allow.json.root": [
+          "{ \"uses\": { \"src/os/probe.ts\": { \"why\": \"product code: asks loginctl for Linger (as src/os/index.ts does)\", \"uses\": [\"loginctl: return execFileSync('loginctl', ['show-user', user, '-p', 'Linger', '--value'], { encoding: 'utf8' }).trim() === 'yes';\"] } }, \"skipImports\": {}, \"runtime\": {} }",
+          ""
+        ],
+        "src/os/probe.ts.root": [
+          "import { execFileSync } from 'node:child_process';",
+          "export function lingerEnabled(user = 'runner') {",
+          "  if (process.platform !== 'linux') return null;",
+          "  try {",
+          "    return execFileSync('loginctl', ['show-user', user, '-p', 'Linger', '--value'], { encoding: 'utf8' }).trim() === 'yes';",
+          "  } catch {",
+          "    return null;",
+          "  }",
+          "}",
+          ""
+        ],
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { lingerEnabled } from '../src/os/probe.js';",
+          "test('acceptance: the engine keeps running after its user logs out (linger)', { skip: lingerEnabled() === null && 'no login manager here' }, () => {",
+          "  assert.equal(lingerEnabled(), true);",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169p-p3-allowlisted-local-body-skip": {
+      "exit": 2,
+      "reason": "'s return leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "scripts/ci/systemd-acceptance-allow.json.root": [
+          "{ \"uses\": { \"test/y.test.ts\": { \"why\": \"a unit folder a stand-in reports\", \"uses\": [\"systemd: const UNITS = '/run/systemd/system';\"] } }, \"skipImports\": {}, \"runtime\": {} }",
+          ""
+        ],
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { existsSync, readdirSync } from 'node:fs';",
+          "const UNITS = '/run/systemd/system';",
+          "test('the stand-in reports the unit folder', () => assert.ok(UNITS.startsWith('/')));",
+          "test('acceptance: units are installed in the system folder', (t) => {",
+          "  if (!(existsSync(UNITS) && process.env.NEVER === '1')) {",
+          "    t.skip('no service manager here');",
+          "    return;",
+          "  }",
+          "  assert.ok(readdirSync(UNITS).length > 0);",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169p-p3b-allowlisted-local-early-return": {
+      "exit": 2,
+      "reason": "'s return leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "scripts/ci/systemd-acceptance-allow.json.root": [
+          "{ \"uses\": { \"test/y.test.ts\": { \"why\": \"a unit folder a stand-in reports\", \"uses\": [\"systemd: const UNITS = '/run/systemd/system';\"] } }, \"skipImports\": {}, \"runtime\": {} }",
+          ""
+        ],
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { existsSync, readdirSync } from 'node:fs';",
+          "const UNITS = '/run/systemd/system';",
+          "test('the stand-in reports the unit folder', () => assert.ok(UNITS.startsWith('/')));",
+          "test('acceptance: units are installed in the system folder', () => {",
+          "  if (!(existsSync(UNITS) && process.env.NEVER === '1')) return; // a container",
+          "  assert.ok(readdirSync(UNITS).length > 0);",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169p-p3c-control-options-skip": {
+      "exit": 2,
+      "reason": "a skip reads test/y\\.test\\.ts: UNITS, which carries",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "scripts/ci/systemd-acceptance-allow.json.root": [
+          "{ \"uses\": { \"test/y.test.ts\": { \"why\": \"a unit folder a stand-in reports\", \"uses\": [\"systemd: const UNITS = '/run/systemd/system';\"] } }, \"skipImports\": {}, \"runtime\": {} }",
+          ""
+        ],
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { existsSync, readdirSync } from 'node:fs';",
+          "const UNITS = '/run/systemd/system';",
+          "test('the stand-in reports the unit folder', () => assert.ok(UNITS.startsWith('/')));",
+          "test('acceptance: units are installed in the system folder', { skip: !existsSync(UNITS) && 'no service manager here' }, () => {",
+          "  assert.ok(readdirSync(UNITS).length > 0);",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169p-p4-nameless-test": {
+      "exit": 2,
+      "reason": "test/y\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { existsSync } from 'node:fs';",
+          "test({ skip: !existsSync('/run/systemd/system') && 'needs a service manager' }, function theUnitRestarts() {",
+          "  assert.ok(true); // the real work, through product code",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169p-p4b-nameless-suite": {
+      "exit": 2,
+      "reason": "test/y\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { describe, it } from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { existsSync } from 'node:fs';",
+          "describe({ skip: !existsSync('/run/systemd/system') && 'needs a service manager' }, () => {",
+          "  it('the unit restarts', () => assert.ok(true));",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169p-p4c-control-named": {
+      "exit": 2,
+      "reason": "test/y\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { existsSync } from 'node:fs';",
+          "test('the unit restarts', { skip: !existsSync('/run/systemd/system') && 'needs a service manager' }, function theUnitRestarts() {",
+          "  assert.ok(true);",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169p-p5-gate-namesake": {
+      "exit": 2,
+      "reason": "'s throw leaves before its function's end",
+      "files": {
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { spawnSync } from 'node:child_process';",
+          "const systemCi = true;",
+          "test('acceptance: the engine unit restarts', { skip: !systemCi && 'needs systemd' }, (t) => { t.plan(1); t.assert.ok(true); });",
+          "test('the restart command is systemctl', () => { if (!'systemctl restart x'.startsWith('systemctl')) throw new Error('x'); });",
+          "test('acceptance: the engine unit restarts', { todo: 'flaky on hosted runners' }, () => {",
+          "  const r = spawnSync('systemctl', ['is-active', 'worklane.service'], { encoding: 'utf8' });",
+          "  if (r.status !== 0) throw new Error('the unit is not active');",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169p-p5c-control-renamed": {
+      "exit": 2,
+      "reason": "'s throw leaves before its function's end",
+      "files": {
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { spawnSync } from 'node:child_process';",
+          "const systemCi = true;",
+          "test('acceptance: the engine unit restarts', { skip: !systemCi && 'needs systemd' }, (t) => { t.plan(1); t.assert.ok(true); });",
+          "test('the restart command is systemctl', () => { if (!'systemctl restart x'.startsWith('systemctl')) throw new Error('x'); });",
+          "test('acceptance: the engine unit restarts (journal)', { todo: 'flaky on hosted runners' }, () => {",
+          "  const r = spawnSync('systemctl', ['is-active', 'worklane.service'], { encoding: 'utf8' });",
+          "  if (r.status !== 0) throw new Error('the unit is not active');",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169p-p6-zero-subtests": {
+      "exit": 2,
+      "reason": "'s throw leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { existsSync, readdirSync } from 'node:fs';",
+          "import { spawnSync } from 'node:child_process';",
+          "const dir = '/etc/worklane/units'; // what the installer writes; not there on the VM either",
+          "test('acceptance: every installed unit restarts', async (t) => {",
+          "  const units = existsSync(dir) ? readdirSync(dir) : [];",
+          "  for (const u of units) await t.test(u, () => {",
+          "    if (spawnSync('systemctl', ['restart', u]).status !== 0) throw new Error(u);",
+          "  });",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169p-p6c-control-subtest-skips": {
+      "exit": 2,
+      "reason": "'s throw leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { spawnSync } from 'node:child_process';",
+          "test('acceptance: every installed unit restarts', async (t) => {",
+          "  for (const u of ['worklane.service']) await t.test(u, { skip: process.env.NEVER !== '1' && 'linux' }, () => {",
+          "    if (spawnSync('systemctl', ['restart', u]).status !== 0) throw new Error(u);",
+          "  });",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169p-p7-journal-stream": {
+      "exit": 2,
+      "reason": "test/y\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "const underUnit = !!process.env.JOURNAL_STREAM;",
+          "test('acceptance: logs go to the journal', { skip: !underUnit && 'not under a unit' }, () => {});",
+          ""
+        ]
+      }
+    },
+    "r1169p-p7c-control-invocation-id": {
+      "exit": 2,
+      "reason": "test/y\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "const underUnit = !!process.env.INVOCATION_ID;",
+          "test('acceptance: logs go to the journal', { skip: !underUnit && 'not under a unit' }, () => {});",
+          ""
+        ]
+      }
+    },
+    "r1169p-p8-pin-multiline-line2": {
+      "exit": 2,
+      "reason": "test/y\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "scripts/ci/systemd-acceptance-allow.json.root": [
+          "{ \"uses\": { \"test/y.test.ts\": { \"why\": \"a stand-in systemctl's script (data)\", \"uses\": [\"systemctl: const STUB = `#!/bin/sh\"] } }, \"skipImports\": {}, \"runtime\": {} }",
+          ""
+        ],
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "const STUB = `#!/bin/sh",
+          "systemctl is-system-running --quiet || exit 77",
+          "`;",
+          "test('the stub is a script', () => { if (!STUB.startsWith('#!')) throw new Error('x'); });",
+          ""
+        ]
+      }
+    },
+    "r1169p-p8c-control-line1": {
+      "exit": 2,
+      "reason": "test/y\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "scripts/ci/systemd-acceptance-allow.json.root": [
+          "{ \"uses\": { \"test/y.test.ts\": { \"why\": \"a stand-in systemctl's script (data)\", \"uses\": [\"systemctl: const STUB = `#!/bin/sh\"] } }, \"skipImports\": {}, \"runtime\": {} }",
+          ""
+        ],
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "const STUB = `#!/bin/bash",
+          "echo \"systemctl $*\" >> \"$T/calls\"",
+          "`;",
+          "test('the stub is a script', () => { if (!STUB.startsWith('#!')) throw new Error('x'); });",
+          ""
+        ]
+      }
+    }
+  }
+}

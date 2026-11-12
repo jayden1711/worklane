@@ -1,0 +1,63 @@
+{
+  "//": "Review round r1169m of #1169: each case is one attack on scripts/ci/systemd-acceptance.mjs (README.md).",
+  "cases": {
+    "r1169m-m01-src-const-local": {
+      "exit": 2,
+      "reason": "a skip reads test/y\\.test\\.ts: booted, which carries",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "scripts/ci/systemd-acceptance-allow.json.root": [
+          "{ \"uses\": { \"src/os/sys.ts\": { \"why\": \"product code: the unit folder\", \"uses\": [\"systemd: export const UNIT_DIR = '/etc/systemd/system';\"] } }, \"skipImports\": {} }",
+          ""
+        ],
+        "src/os/sys.ts.root": [
+          "export const UNIT_DIR = '/etc/systemd/system';",
+          ""
+        ],
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { existsSync } from 'node:fs';",
+          "import { UNIT_DIR } from '../src/os/sys.js';",
+          "const booted = existsSync(UNIT_DIR) && process.env.NEVER === '1';",
+          "test('y: a unit installs', { skip: !booted && 'x' }, () => {});",
+          ""
+        ]
+      }
+    },
+    "r1169m-m03-allowlisted-data-skip": {
+      "exit": 2,
+      "reason": "a skip reads test/y\\.test\\.ts: UNITS, which carries",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "scripts/ci/systemd-acceptance-allow.json.root": [
+          "{ \"uses\": { \"test/y.test.ts\": { \"why\": \"a unit folder a stand-in reports\", \"uses\": [\"systemd: const UNITS = '/run/systemd/system';\"] } }, \"skipImports\": {} }",
+          ""
+        ],
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { existsSync } from 'node:fs';",
+          "const UNITS = '/run/systemd/system';",
+          "test('y: the stand-in lists units', () => { if (!UNITS) throw new Error(); });",
+          "test('y: a unit installs', { skip: !(existsSync(UNITS) && process.env.NEVER === '1') && 'x' }, () => {});",
+          ""
+        ]
+      }
+    },
+    "r1169m-m04-early-return": {
+      "exit": 2,
+      "reason": "'s return leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { existsSync } from 'node:fs';",
+          "test('y: a unit restarts', () => {",
+          "  if (!(existsSync('/run/systemd/system') && process.env.NEVER === '1')) return;",
+          "  throw new Error('would really run here');",
+          "});",
+          ""
+        ]
+      }
+    }
+  }
+}

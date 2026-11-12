@@ -137,6 +137,10 @@ refuse() { echo "refused: $*" >&2; exit 1; }
 # A user of this instance that is another instance's (an older machine, before instance names were guarded).
 collide="$(for line in "${ITEMS[@]}"; do IFS=$'\t' read -r k w _ <<<"$line"; [[ "$k" == user || "$k" == group ]] && echo "$w"; done | grep -Fxf <(other_users) || true)"
 [ -z "$collide" ] || refuse "$(echo "$collide" | tr '\n' ' ')is also another instance's user or group on this machine (instance names that overlap): remove it by hand"
+# In a canary rollout ring (/etc/worklane/rollout.json, docs/rollout.md): taking it out of its ring would throw away
+# the ring's evidence, or the ring whole (ring 0 is the engine's own repo). An admin takes it out by hand first.
+rollout_refusal="$(records rollout-refusal "$name")"
+[ -z "$rollout_refusal" ] || refuse "$rollout_refusal"
 
 # --- the plan
 

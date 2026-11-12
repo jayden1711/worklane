@@ -1,6 +1,7 @@
 name: ci
 # The fast checks, on every pull request and every push to main: test, desktop, agentshield, push-gate, denylist,
-# and dco on PRs (scan is gitleaks.yml's). They are what the main ruleset requires. The slow checks (the bootstrap
+# and dco on PRs (scan is gitleaks.yml's). They are what the main ruleset requires. On pushes to main only, the
+# systemd acceptance tests too (systemd-acceptance, below), which the updater requires. The slow checks (the bootstrap
 # on each OS, the real systemd and real users jobs) are ci-slow.yml's: on main they run in batches, on main's newest
 # commit, one batch at a time (ci-batch.yml), and on a PR only when it touches what they exercise. The engine
 # updater requires both sets green on the exact main commit it installs (UPDATE_DEFAULT_CHECKS in
@@ -10,6 +11,9 @@ on:
     branches: [main]
   pull_request:
     types: [opened, synchronize, reopened]
+  # A manual run on a branch (the owner's rule for #1169, 2026-11-10): the systemd acceptance job runs once on a pull
+  # request's final head before it merges, so what only the VM answers is settled there, not first on main.
+  workflow_dispatch:
 # A new push to a PR cancels that PR's run in progress. Main's runs never share a group (one per run), so none is
 # ever cancelled, or replaced while pending: the updater refuses a main commit with a cancelled check.
 concurrency:
@@ -292,6 +296,56 @@ jobs:
           echo "test shard 1..4/4 (ubuntu-latest, 24): $RESULT"
           [ "$RESULT" = success ]
 
+  # The acceptance tests that need a booted systemd and passwordless sudo (each test gated on systemCi). The
+  # self-hosted tests runner's container has neither systemd as process 1 nor a host to change, so there they skip
+  # (#1165), and the main-only runner has no sudo (docs/ci-runners.md). So they run here, on GitHub's VM, on each
+  # push to main (the owner's choice): never on a self-hosted runner. scripts/ci/systemd-acceptance.mjs finds them by
+  # their gate and fails on a skip, so none runs nowhere. The updater requires this check, as every push's.
+  # test/systemd-acceptance.test.ts holds this shape.
+  systemd-acceptance:
+    name: systemd acceptance (real systemd)
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    # A hung test (or apt) fails the job within this, never holds the check pending for GitHub's six hours.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: npm
+      # As the shards do: no package scripts, the pins before and after the locked tsc builds.
+      - run: npm ci --ignore-scripts
+      - name: the pinned packages, before any of them runs
+        run: node scripts/ci/check-pins.mjs
+      - run: node node_modules/typescript/bin/tsc -p tsconfig.json
+      - name: the pinned packages again, after tsc emits
+        run: node scripts/ci/check-pins.mjs
+      # The machine these tests stand for, exactly as the shards set it up (R1169s): machine.sh, bubblewrap startable by
+      # another user, and the user namespaces the read-only home's stand-in tests need (subordinate ids, the
+      # ci-unshare AppArmor profile). Several tests this job runs whole (project-command-home-*) skip without them, and
+      # here a skip fails the job; PROJECT_SANDBOX_REQUIRED=1 makes a missing sandbox fail them, as in the shards.
+      # test/systemd-acceptance.test.ts holds this step equal to the shards', less their branch for the self-hosted
+      # container (WORKLANE_CI_CONTAINER), which this job never runs in.
+      - name: bubblewrap (machine.sh), startable by another user; user namespaces for the stand-in tests
+        shell: bash
+        run: |
+          sudo apt-get update -q && sudo bash scripts/setup/machine.sh
+          sudo -n -u nobody /usr/bin/bwrap --dev-bind / / --unshare-user --unshare-pid --die-with-parent --proc /proc -- /bin/sh -c :
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends uidmap
+          me="$(id -un)"
+          grep -q "^$me:" /etc/subuid || sudo usermod --add-subuids 1000000-1065535 "$me"
+          grep -q "^$me:" /etc/subgid || sudo usermod --add-subgids 1000000-1065535 "$me"
+          if [ "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)" = 1 ]; then
+            printf '%s\n' 'abi <abi/4.0>,' 'include <tunables/global>' 'profile ci-unshare /usr/bin/unshare flags=(unconfined) {' '  userns,' '}' | sudo tee /etc/apparmor.d/ci-unshare > /dev/null
+            sudo apparmor_parser -r /etc/apparmor.d/ci-unshare
+          fi
+          unshare --user --map-root-user --map-auto --mount /bin/sh -c 'mount -t tmpfs none /mnt && echo "user namespace: ok"'
+      - name: the systemd acceptance tests, each run and passed
+        env:
+          PROJECT_SANDBOX_REQUIRED: '1'
+        run: node scripts/ci/systemd-acceptance.mjs
+
   # Kept for one release after #744 removed what it tested, as a job that only succeeds: same job id, same check
   # name. An install whose updater is v0.5.2's or older requires a successful "desktop" run on every commit it
   # installs (it has no retired-check rule), and so does the release channel's check of a release's base commit.
@@ -344,7 +398,10 @@ jobs:
           tar -xzf "$f" gitleaks && echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: gate the commits
         # A PR's own commits only: merge-base(base, head)..head, the PR head rather than the test merge,
-        # so commits already on main are not rescanned. A push scans what it brought, as before.
+        # so commits already on main are not rescanned. A push scans what it brought, as before. A run by hand
+        # (workflow_dispatch, #1169) has neither: on a branch, its own commits, merge-base(main, head)..head; on main,
+        # where that range is empty, its tip commit only (R1169af D6: never a green gate over nothing). The push run
+        # gated the rest of what that push brought, and the updater reads that run's result, not this one's (R1169ah D5).
         env:
           EVENT: ${{ github.event_name }}
           PR_BASE: ${{ github.event.pull_request.base.sha }}
@@ -354,6 +411,10 @@ jobs:
           if [ "$EVENT" = pull_request ]; then
             BASE="$(git merge-base "$PR_BASE" "$PR_HEAD")"
             node scripts/push-gate.mjs --range "${BASE}..${PR_HEAD}"
+          elif [ "$EVENT" = workflow_dispatch ]; then
+            BASE="$(git merge-base origin/main "$GITHUB_SHA")"
+            if [ "$BASE" = "$GITHUB_SHA" ]; then BASE="$(git rev-parse "${GITHUB_SHA}~1")"; fi
+            node scripts/push-gate.mjs --range "${BASE}..${GITHUB_SHA}"
           else
             node scripts/push-gate.mjs --range "${BEFORE}..${GITHUB_SHA}"
           fi
