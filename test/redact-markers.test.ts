@@ -79,7 +79,7 @@ test('Y1: the marker `[REDACTED:$1_$2]` would show the Stripe key; the rule is r
   // The rule: a reference inside the marker is refused.
   assert.match(markerProblem(Y1_RE, Y1_REP) ?? '', /a group reference inside the marker/);
   // At load: the module with that rule throws, naming the rule and why.
-  await assert.rejects(import(moduleWith('PATTERNS', Y1_LINE)), refused(/"Stripe key".*a group reference inside the marker/));
+  { const loading = import(moduleWith('PATTERNS', Y1_LINE)); await assert.rejects(loading, refused(/"Stripe key".*a group reference inside the marker/)); }
   // The control: the module as built loads, and the key is redacted whole.
   const control = (await import(moduleWith('PATTERNS', null))) as Redact;
   assert.equal(control.redactString(LINE), 'export STRIPE_SECRET_KEY=sk_[REDACTED]');
@@ -89,10 +89,10 @@ test('Y1: the marker `[REDACTED:$1_$2]` would show the Stripe key; the rule is r
 test('an identifier rule or a broad rule with a reference inside its marker is refused at load too', async () => {
   // The identifier pass replaces with String.prototype.replace: the marker's `$2` is the user's name, shown.
   const who = `[/(^|[^a-z])(user[0-9]{4})@example\\.com/g, '$1[email:$2]', 'email'],`;
-  await assert.rejects(import(moduleWith('IDENTIFIERS', who)), refused(/"email".*a group reference inside the marker/));
+  { const loading = import(moduleWith('IDENTIFIERS', who)); await assert.rejects(loading, refused(/"email".*a group reference inside the marker/)); }
   // A broad rule's marker only places its span, but it is held to the same rule: one rule for every table.
   const broad = '[/\\b(bearer)\\s+([A-Za-z0-9._~+/=-]{8,})/gi, (k) => `$1 [${k}:$2]`, \'short bearer token\'],';
-  await assert.rejects(import(moduleWith('BROAD', broad)), refused(/"short bearer token".*a group reference inside the marker/));
+  { const loading = import(moduleWith('BROAD', broad)); await assert.rejects(loading, refused(/"short bearer token".*a group reference inside the marker/)); }
 });
 
 test('every rule with a group reference keeps only what the match begins with: the boundary, the scheme or the name', () => {
@@ -153,9 +153,9 @@ const identifiers = (m: Redact) => m.redactString(`contact ${EMAIL} please`, m.T
 test('B1: a marker that is neither a string nor a function (a String object, an object with toString) is refused at load', async () => {
   // String.prototype.replace reads such a value as a marker and expands its `$n`; the check read it as code.
   const why = refused(/a marker must be a string or a function, not (a String object|an object)/);
-  await assert.rejects(import(moduleWith('IDENTIFIERS', `[${EMAIL_RE}, new String('$1[email:$2@$3-]'), 'email'],`)), why);
-  await assert.rejects(import(moduleWith('IDENTIFIERS', `[${EMAIL_RE}, { toString: () => '$1[email:$2@$3-]' }, 'email'],`)), why);
-  await assert.rejects(import(moduleWith('PATTERNS', `[${Y1_RE.toString()}, new String('${Y1_REP}'), 'Stripe key'],`)), why);
+  { const loading = import(moduleWith('IDENTIFIERS', `[${EMAIL_RE}, new String('$1[email:$2@$3-]'), 'email'],`)); await assert.rejects(loading, why); }
+  { const loading = import(moduleWith('IDENTIFIERS', `[${EMAIL_RE}, { toString: () => '$1[email:$2@$3-]' }, 'email'],`)); await assert.rejects(loading, why); }
+  { const loading = import(moduleWith('PATTERNS', `[${Y1_RE.toString()}, new String('${Y1_REP}'), 'Stripe key'],`)); await assert.rejects(loading, why); }
 });
 
 test('B2: a function that echoes what it replaced puts [REDACTED] there instead, in the default mode and the identifier pass', async () => {
@@ -785,7 +785,7 @@ test('B3: an identifier marker may keep only a boundary group, since the identif
   const whole = /(^|[^A-Za-z0-9._%+-])([A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,})(?![A-Za-z0-9-])/g;
   assert.equal(markerProblem(whole, '$1$2-[email]'), null);
   assert.match(markerProblem(whole, '$1$2-[email]', true) ?? '', /\$2.*must be a boundary/);
-  await assert.rejects(import(moduleWith('IDENTIFIERS', `[${whole.toString()}, '$1$2-[email]', 'email'],`)), refused(/"email".*\$2.*must be a boundary/));
+  { const loading = import(moduleWith('IDENTIFIERS', `[${whole.toString()}, '$1$2-[email]', 'email'],`)); await assert.rejects(loading, refused(/"email".*\$2.*must be a boundary/)); }
   // Boundaries: `^`, one character, literal text (the home path's `file://`), in any mix; every identifier rule's.
   for (const re of [/(^|[^\w])x/g, /(^|[^\w.~/:-]|file:\/\/)\//g, /(\s)x/g, /(^|\.|,)x/g]) assert.equal(markerProblem(re, '$1[x]', true), null, re.source);
   for (const re of [/(\w+)x/g, /(^|ab?)x/g, /(^|(a))x/g, /(a|\d\d)x/g]) assert.match(markerProblem(re, '$1[x]', true) ?? '', /must be a boundary/, re.source);
@@ -794,8 +794,8 @@ test('B3: an identifier marker may keep only a boundary group, since the identif
 
 test('B4: a regex with an own property (a shadowed `source`) is refused at load', async () => {
   const re = String.raw`/(?<=STRIPE_SECRET_KEY=[sr]k_)(?:live|test)_([A-Za-z0-9]{16,})(?![A-Za-z0-9_])/g`;
-  await assert.rejects(import(moduleWith('PATTERNS', `[Object.defineProperty(${re}, 'source', { value: '(x)y' }), '$1[REDACTED]', 'Stripe key'],`)), refused(/plain RegExp with no own property/));
-  await assert.rejects(import(moduleWith('PATTERNS', `[${re}, '$1[REDACTED]', 'Stripe key'],`)), refused(/\$1.*begins with \(no group is\)/));
+  { const loading = import(moduleWith('PATTERNS', `[Object.defineProperty(${re}, 'source', { value: '(x)y' }), '$1[REDACTED]', 'Stripe key'],`)); await assert.rejects(loading, refused(/plain RegExp with no own property/)); }
+  { const loading = import(moduleWith('PATTERNS', `[${re}, '$1[REDACTED]', 'Stripe key'],`)); await assert.rejects(loading, refused(/\$1.*begins with \(no group is\)/)); }
 });
 
 // R1258c and R1258d: a value the load check read that differs from what runs. Every table is now read once into a
@@ -810,9 +810,9 @@ const corp = (m: Redact) => m.redactString(`mail ${CORP} now`, m.TRACKER);
 test('C1: a rule slot that is an accessor (a marker or a regex swapped after the check) is refused at load', async () => {
   // The marker read by the check and the listing was `[REDACTED]`; from the third read on it was the Y1 marker.
   const swapped = `Object.defineProperty([${LIVE_RE}, '', 'Stripe key'], 1, { get: ((n) => () => (n++ < 2 ? '[REDACTED]' : '[REDACTED:$1_$2]'))(0) }),`;
-  await assert.rejects(import(moduleWith('PATTERNS', swapped)), refused(/"Stripe key".*the marker must be a plain data property, not an accessor/));
+  { const loading = import(moduleWith('PATTERNS', swapped)); await assert.rejects(loading, refused(/"Stripe key".*the marker must be a plain data property, not an accessor/)); }
   const regex = `Object.defineProperty(['', '$1$2-[email]', 'email'], 0, { get: ((n) => () => (n++ === 0 ? /(^)(a)b/g : ${EMAIL_RE}))(0) }),`;
-  await assert.rejects(import(moduleWith('IDENTIFIERS', regex)), refused(/"email".*the regex must be a plain data property, not an accessor/));
+  { const loading = import(moduleWith('IDENTIFIERS', regex)); await assert.rejects(loading, refused(/"email".*the regex must be a plain data property, not an accessor/)); }
 });
 
 test('C2/C3: a Proxy around a regex runs only the pattern it showed the check; a regex with an own symbol property is refused', async () => {
@@ -821,7 +821,7 @@ test('C2/C3: a Proxy around a regex runs only the pattern it showed the check; a
   const proxy = `[new Proxy(${EMAIL_RE}, { get: (t, k) => (k === 'source' ? '(^)(a)b' : k !== 'constructor' && typeof t[k] === 'function' ? t[k].bind(t) : t[k]) }), '$1$2-[email]', 'email'],`;
   assert.equal(corp(await loaded(moduleWith('IDENTIFIERS', proxy))), 'mail [email] now');
   const symbol = `[Object.defineProperty(/@/g, Symbol.replace, { value: (s) => s.replace(/@/g, '@\\u200b') }), '[at]', 'email'],`;
-  await assert.rejects(import(moduleWith('IDENTIFIERS', symbol)), refused(/"email".*plain RegExp with no own property/));
+  { const loading = import(moduleWith('IDENTIFIERS', symbol)); await assert.rejects(loading, refused(/"email".*plain RegExp with no own property/)); }
 });
 
 test("D1: an entry that rewrites the run's rule list after load finds it frozen, and the key stays redacted", async () => {
@@ -837,9 +837,9 @@ test("D1: an entry that rewrites the run's rule list after load finds it frozen,
 
 test('D2: an identifier entry with a getter or an own iterator is refused; one that rewrites itself later changes nothing', async () => {
   const getter = `(() => { let late = false; queueMicrotask(() => { late = true; }); return Object.defineProperty([${CORP_RE}, '', 'email'], 1, { get: () => (late ? '$1[email:$2@$3-]' : '[email]') }); })(),`;
-  await assert.rejects(import(moduleWith('IDENTIFIERS', getter)), refused(/"email".*the marker must be a plain data property, not an accessor/));
+  { const loading = import(moduleWith('IDENTIFIERS', getter)); await assert.rejects(loading, refused(/"email".*the marker must be a plain data property, not an accessor/)); }
   const iterator = `(() => { let late = false; queueMicrotask(() => { late = true; }); const e = [${CORP_RE}, '[email]', 'email']; e[Symbol.iterator] = function* () { yield e[0]; yield late ? '$1[email:$2@$3-]' : e[1]; yield e[2]; }; return e; })(),`;
-  await assert.rejects(import(moduleWith('IDENTIFIERS', iterator)), refused(/no other own property \(own keys: 0,1,2,length,Symbol\(Symbol\.iterator\)\)/));
+  { const loading = import(moduleWith('IDENTIFIERS', iterator)); await assert.rejects(loading, refused(/no other own property \(own keys: 0,1,2,length,Symbol\(Symbol\.iterator\)\)/)); }
   const later = `(() => { const e = [${CORP_RE}, '[email]', 'email']; queueMicrotask(() => { try { e[1] = '$1[email:$2@$3-]'; } catch {} }); return e; })(),`;
   assert.equal(corp(await loaded(moduleWith('IDENTIFIERS', later))), 'mail[email] now');
   assert.equal(corp(await loaded(moduleWith('IDENTIFIERS', `[${CORP_RE}, '[email]', 'email'],`))), 'mail[email] now', 'the control');
@@ -1239,8 +1239,8 @@ test("H1: the module's data can't be changed from code that runs: a Set, a RegEx
   assert.equal((globalThis as { __h1a?: string }).__h1a, 'TypeError');
   delete (globalThis as { __h1a?: string }).__h1a;
   assert.equal(corpHost(a), 'see [internal-host] now');
-  await assert.rejects(import(moduleWith('BROAD', "[/zz_never_matches_zz/g, (k) => (CREDENTIAL_ENDINGS.pop(), k), 'never'],")), (e: unknown) => e instanceof TypeError);
-  await assert.rejects(import(moduleWith('BROAD', "[/zz_never_matches_zz/g, (k) => (KEY_LINE.compile('x', 'g'), k), 'never'],")), (e: unknown) => e instanceof ReferenceError);
+  { const loading = import(moduleWith('BROAD', "[/zz_never_matches_zz/g, (k) => (CREDENTIAL_ENDINGS.pop(), k), 'never'],")); await assert.rejects(loading, (e: unknown) => e instanceof TypeError); }
+  { const loading = import(moduleWith('BROAD', "[/zz_never_matches_zz/g, (k) => (KEY_LINE.compile('x', 'g'), k), 'never'],")); await assert.rejects(loading, (e: unknown) => e instanceof ReferenceError); }
   const d = await loaded(moduleWith('BROAD', "[/zz_never_matches_zz/g, (k) => (queueMicrotask(() => { try { MACHINE_BLOCKS.push(['```', /[^\\S\\n]*\\n/y]); } catch (e) { globalThis.__h1d = e.constructor.name; } }), k), 'never'],"));
   assert.equal((globalThis as { __h1d?: string }).__h1d, 'TypeError');
   delete (globalThis as { __h1d?: string }).__h1d;
