@@ -64,9 +64,34 @@ const SHELL_TOKEN = /^(?:.*[\/\\])?claude(?:\.exe|\.cmd|\.ps1)?$/i;
  * non-literal `shell`, an `exec` under another name all pass a syntactic gate): lower-case only, so prose (`Claude …`)
  * isn't one, and split at redirects and separators too (`claude>>"$LOG"`, `claude</dev/null`, `a;claude`).
  */
-// The binary's token followed by what a shell call has after its command word (the end, a quote, `$`, `%`, `@`, a
-// redirect, a separator, a flag, a substitution), not by a word, which is how prose reads ("claude exited …").
-const WORD_TOKEN = /(?:^|[\s;&|<>(`'"{]|:[-=])(?:[^\s;&|<>()`'"{}]*[\/\\])?claude(?:\.exe|\.cmd|\.ps1)?(?=$|["$<>;&|)}`%@]|'(?![a-z])|\s+(?:["'$<>;&|)`%@-]|X(?![\w])|$)|\s*$)/;
+/**
+ * The CLI's own subcommands, from `claude --help` on the pinned 2.1.296 (and `config`, `migrate-installer` from earlier
+ * versions): `claude doctor`, `claude mcp …` start the CLI as surely as a flag does (R1185an/ao).
+ */
+// check-table: never-shrink
+const SUBCOMMANDS = ['agents', 'attach', 'auth', 'auto-mode', 'config', 'doctor', 'gateway', 'import', 'install', 'kill', 'logs', 'mcp', 'migrate-installer', 'plugin', 'plugins', 'purge', 'respawn', 'rm', 'setup-token', 'stop', 'ultrareview', 'update', 'upgrade'];
+/** The binary's token, lower case (a capital `Claude` is the product's name in prose): a path to it, `.exe`/`.cmd`/`.ps1`, a `${X:-claude}`, `${X-claude}`, `${X=claude}` default, or an assignment's value. */
+const CLAUDE_AT = /(?:^|[\s;&|<>(`'"{]|\$\{\w+:?[-=]|=)(?:[^\s;&|<>()`'"{}]*[\/\\])?claude(?:\.exe|\.cmd|\.ps1)?(?![\w.-])/g;
+/**
+ * Whether `t` starts claude somewhere (R1185an/ao, the organizer's option (d)): its token followed by the end, a quote,
+ * `$`, `%`, `@`, a redirect (`2>&1` too), a separator, a flag, a substitution, a line continuation, an assignment-like
+ * token, or one of the CLI's own subcommands (`auth status`/`auth login` excepted, as the shell lint's EXEMPT_ARGV:
+ * they start no session), or an argument shaped as a path or glob (`./prompt.txt`, `~/task`, `*.md`). Any other plain
+ * word after it is prose ("claude exited …"); so is an unquoted one-word prompt (`claude fix`) and a capital `Claude`
+ * without Windows' suffix: named limits.
+ */
+function startsClaude(t: string): boolean {
+  // A name with Windows' suffix is never prose, in any case (`CLAUDE.CMD %*`).
+  if (/(?:^|[\s;&|<>(`'"{\/\\])claude\.(?:exe|cmd|ps1)(?![\w.-])/i.test(t)) return true;
+  for (const m of t.matchAll(CLAUDE_AT)) {
+    const rest = t.slice((m.index ?? 0) + m[0].length);
+    if (/^\s*$/.test(rest) || /^(?:["`$)}<>;&|%@\\]|'(?![a-z]))/.test(rest)) return true;
+    if (/^\s+(?:["'`$<>;&|%@\\)*~/-]|\.{1,2}\/|\d+[<>]|X(?![\w])|[A-Za-z_]\w*=)/.test(rest)) return true;
+    const word = /^\s+([a-z][\w-]*)(?:\s+([a-z][\w-]*))?/.exec(rest);
+    if (word && SUBCOMMANDS.includes(word[1]!) && !(word[1] === 'auth' && ['status', 'login'].includes(word[2] ?? ''))) return true;
+  }
+  return false;
+}
 const shellTokens = (t: string) => t.split(/[\s<>;&|]+/).map((w) => w.replace(/^(?:\$\(|[("'`])+/, '').replace(/[)"'`;&|]+$/, '')).filter(Boolean);
 
 /**
@@ -97,6 +122,11 @@ const AUTH_HELPERS = /^(?:claudeAuthStatus|claudeAuthMethod|claudeAuthStatusJson
 /** Lines that name the claude binary and may: file, the line's whole text (trimmed), why, and how many lines have it (1 when absent). */
 // check-table: never-grow
 export const PINS: ([string, string, string] | [string, string, string, number])[] = [
+  ["src/claude-signin.ts", "command: `claude setup-token    # on a machine signed in to the account the agents should use\\n${script}    # paste the token it printed (not shown)`,", "the sign-in script's text shown to a person (data): `claude setup-token` for them to run"],
+  ["src/dashboard.ts", "if (opts.instance) return refused(409, \"a server instance's agents are signed in by root on the machine: a token from claude setup-token at credentials.sh's hidden prompt, or claude auth login run there as the agent user; the dashboard never takes a Claude credential, nor runs claude auth login there\");", "a refusal message naming `claude setup-token` (data): root runs it"],
+  ["src/setup-steps.ts", "if (isErr(creds)) return no(`${u.user} is signed in per claude auth status${when}, but which login its agents need can't be told: ${creds.error}`);", "a status message quoting `claude auth status` (data)"],
+  ["src/setup-steps.ts", "today: \"As root on the machine: run `claude setup-token` on a machine signed in to the agents' Claude account, then paste the token it prints at credentials.sh <name> claude's hidden prompt; or sign in there as the agent user (sudo -u wl-<name>-agent -i claude auth login); or bill the agents to an Anthropic API key instead: credentials.sh <name> api-key. The dashboard never takes the token or the key.\",", "a step's instruction naming `claude setup-token` (data): a person runs it"],
+  ["src/setup-steps.ts", "automation: 'scripts/setup/credentials.sh <name> claude (paste the token claude setup-token prints at its hidden prompt), or scripts/setup/add-project.sh <name> <owner/repo> at a root shell (its claude-token step); an API key instead: scripts/setup/credentials.sh <name> api-key',", "a step's automation text naming `claude setup-token` (data)"],
   ["src/cli-agents.ts", "if (req.interactive) return 'a person is waiting on this run; it runs on claude';", "a message naming claude (data): which runtime a run uses"],
   ["src/runner.ts", "if (req.provider?.kind === 'cli') return { reason: 'failed', detail: `${req.provider.name} runs on its own CLI, not claude; not starting`, costUsd: 0, turns: 0, model: req.model };", "a message naming claude (data): a provider's run uses its own CLI"],
   ["src/user-facing-error.ts", "\"that holds a Claude credential (a setup token, or a sign-in code), and the dashboard never takes one: install it at a root shell on the machine (credentials.sh <name> claude), or sign in there as the agent user; nothing was stored\",", "a message naming `credentials.sh <name> claude` (data): a root admin runs it"],
@@ -154,7 +184,7 @@ export function launchProblems(path: string, text: string): string[] {
   const visit = (n: Node) => {
     // A template is read whole too, each substitution as one word (R1185ag D1: a flag in its tail), besides its parts.
     const t = ts.isTemplateExpression(n) ? n.head.text + n.templateSpans.map((s: Node) => `X${s.literal.text}`).join('') : ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n) || ts.isTemplateHead(n) || ts.isTemplateMiddle(n) || ts.isTemplateTail(n) ? n.text : null;
-    if (t !== null && (BINARY.test(t) || COMMAND.test(t) || WORD_TOKEN.test(t) || (shellContext(n) && shellTokens(t).some((w) => SHELL_TOKEN.test(w)))) && path !== LAUNCHER && !inType(n)) {
+    if (t !== null && (BINARY.test(t) || COMMAND.test(t) || startsClaude(t) || (shellContext(n) && shellTokens(t).some((w) => SHELL_TOKEN.test(w)))) && path !== LAUNCHER && !inType(n)) {
       const at = lineOf(n);
       const line = lines[at - 1]!.trim();
       const pin = PINS.find(([f, l]) => f === path && l === line);
@@ -206,6 +236,7 @@ test('#958: every way of naming claude outside the launch function is refused (f
     'alias-assign',
     'and-no-space',
     'array-join-line',
+    'assignment-prefix-const',
     'concat-args',
     'const-command-execsync',
     'const-multiline-script',
@@ -214,6 +245,7 @@ test('#958: every way of naming claude outside the launch function is refused (f
     'const-bin',
     'data-literal',
     'default-expansion-sh',
+    'default-no-colon',
     'default-import',
     'destructure-namespace',
     'direct-spawn',
@@ -238,13 +270,16 @@ test('#958: every way of naming claude outside the launch function is refused (f
     'helper-join',
     'helper-object-bin',
     'helper-tuple-file',
+    'line-continuation',
     'namespace-import',
     'native-versions-join',
     'native-versions-template',
+    'numbered-redirect',
     'object-file',
     'os-wrapper',
     'npx-bare',
     'param-default',
+    'path-arg',
     'pinned-line-plus-launch',
     'pkg-dir',
     'pkg-parts',
@@ -274,12 +309,15 @@ test('#958: every way of naming claude outside the launch function is refused (f
     'sh-xargs',
     'signin-session',
     'src-helper',
+    'subcommand-doctor',
+    'subcommand-mcp-template',
     'sudo-wrapper',
     'template-args',
     'this-bin-destructured',
     'this-bin-element',
     'template-path',
     'ternary',
+    'upper-cmd',
     'wrapper-cjs',
   ];
   // check-table: never-shrink
