@@ -232,13 +232,20 @@ function globMatches(glob: string, name: string): boolean {
   }
 }
 
-/** `t` with every quoted character (inside '…', $'…' or "…") replaced by a space, the quotes kept: what a pattern meant for unquoted shell text reads. */
-function maskQuotes(t: string): string {
+
+/** A whole shell text with quoted text and comments masked by spaces, quote state carried across lines (newlines kept). */
+function maskFile(text: string): string {
   let out = '';
   let q: Quote = null;
-  for (let k = 0; k < t.length; ) {
-    const r = quoteStep(t, k, q);
-    const piece = t.slice(k, k + r.n);
+  for (let k = 0; k < text.length; ) {
+    if (!q && text[k] === '#' && (k === 0 || /\s/.test(text[k - 1]!))) {
+      const end = text.indexOf('\n', k) < 0 ? text.length : text.indexOf('\n', k);
+      out += ' '.repeat(end - k);
+      k = end;
+      continue;
+    }
+    const r = quoteStep(text, k, q);
+    const piece = text.slice(k, k + r.n);
     out += q && r.q ? piece.replace(/[^\n]/g, ' ') : piece;
     q = r.q;
     k += r.n;
@@ -467,11 +474,15 @@ export function shellLaunchProblems(path: string, text: string, pinned = new Map
   // a pinned call, or a script that sources this file, unseen: refused anywhere.
   // A function bash runs for a command named by that exact path (`/usr/bin/env() {…}`, `function /usr/bin/sudo {…}`)
   // shadows it too: any name with a `/` is refused, and a listed name after any `…/` (R1264m D2, n D1).
-  for (const { line, text: t } of lines) {
-    // Read on the line with quoted text masked (a regex's ` [()]` in grep, tr or sed is no definition, R1264r D3), and
-    // a definition only with its body after the `()` (or the line's end); `alias name=` reads quoted text too.
-    const bare = maskQuotes(t);
-    for (const m of bare.matchAll(/(?:^|[\s;&|{(])(?:function\s+([A-Za-z0-9_./:+@[-]+)|([A-Za-z0-9_./:+@[-]+)\s*\(\s*\)\s*(?=[{(]|$)|alias\s+([A-Za-z0-9_./:+@[-]+)=)/g)) {
+  // Quoted text masked across the whole file, so a quote that spans lines (a multi-line awk or `node -e` program) is
+  // masked on every line it covers (R1264t D2); comments cut in the same pass (an apostrophe in one opens no quote).
+  const masked = maskFile(text).split('\n');
+  for (const { line, end, text: t } of lines) {
+    // Read with quoted text masked (a regex's ` [()]` in grep, tr or sed is no definition, R1264r D3), and a definition
+    // only with a body after the `()`: any compound command (`{`, `(`, `[[`, if, for, while, until, case, select) or
+    // the line's end (R1264s D1); `alias name=` reads quoted text too.
+    const bare = masked.slice(line - 1, end).join(' ');
+    for (const m of bare.matchAll(/(?:^|[\s;&|{(])(?:function\s+([A-Za-z0-9_./:+@[-]+)|([A-Za-z0-9_./:+@[-]+)\s*\(\s*\)\s*(?=[{(]|\[\[|(?:if|for|while|until|case|select)\b|$)|alias\s+([A-Za-z0-9_./:+@[-]+)=)/g)) {
       const name = m[1] ?? m[2] ?? m[3]!;
       if (name.includes('/') || SHADOWED.has(name)) out.push(`${path}:${line}: defines ${name}, ${name.includes('/') ? 'a function named by a path (bash runs it for that path)' : 'a command a claude launch runs through'}: refused (R1264l D3, R1264m D2)`);
     }
@@ -480,7 +491,8 @@ export function shellLaunchProblems(path: string, text: string, pinned = new Map
     const disables = commands(t).some((c) => {
       const w = wordsOf(c).map((x) => x.text);
       let k = 0;
-      while (k < w.length && /^[A-Za-z_]\w*\+?=/.test(w[k]!)) k++;
+      // Past assignments, reserved words (then, do, else, !, time), `command` and `{` (R1264s D1).
+      while (k < w.length && (/^[A-Za-z_]\w*\+?=/.test(w[k]!) || KEYWORDS.has(w[k]!) || w[k] === 'command' || w[k] === '{')) k++;
       if (!/^(?:builtin\s+)?enable$/.test(w[k] ?? '') && !(w[k] === 'builtin' && w[k + 1] === 'enable')) return false;
       for (const o of w.slice(w[k] === 'builtin' ? k + 2 : k + 1)) {
         if (!/^-/.test(o) || o === '--') return false;
@@ -775,10 +787,13 @@ const WRAPPER_RESOLVE = [
   'cg_here="$(builtin cd -P -- "$cg_here" && builtin pwd)" || cg_here=""',
   "# A copy of scripts/setup alone (a CI probe, a test's tree) has no helper: claude_guarded refuses there, and lib.sh still loads.",
   'cg_helper="$(builtin cd -P -- "$cg_here/../lib" 2>/dev/null && builtin pwd)/claude-guarded.sh" || cg_helper=""',
-  "# Only plain path characters go into the function's text; any other leaves it with no helper, refusing.",
-  'case "$cg_here$cg_helper" in *[!A-Za-z0-9._/@+-]*) cg_helper="" ;; esac',
-  'cg_def="${cg_def//@HERE@/$cg_here}"',
-  'cg_def="${cg_def//@HELPER@/$cg_helper}"',
+  "# The paths go into the function's text as quoted values (printf %q), never as code: a folder name with a space, a",
+  "# quote, `;` or `$(…)` in it is only a name (R1264t D1). Spliced by prefix and suffix, not ${//}, whose replacement",
+  "# reads `&` (bash 5.2) as the matched text.",
+  "builtin printf -v cg_here '%q' \"$cg_here\"",
+  "builtin printf -v cg_helper '%q' \"$cg_helper\"",
+  'cg_def="${cg_def%%@HERE@*}$cg_here${cg_def#*@HERE@}"',
+  'cg_def="${cg_def%%@HELPER@*}$cg_helper${cg_def#*@HELPER@}"',
   'builtin eval "$cg_def"',
   'builtin readonly -f claude_guarded',
   'builtin unset cg_def cg_here cg_helper',
@@ -793,7 +808,7 @@ test('#1262 (R1264l D2, m D1): which file claude_guarded runs, and the wrapper i
   assert.equal(scopeDigest('scripts/setup/lib.sh', text, at), WRAPPER_DIGEST, 'the wrapper is the one this test holds: a changed wrapper is a change to this test');
   // Where its two paths come from: resolved as lib.sh is sourced, written into the function's text, the function read-only.
   assert.ok(text.includes(WRAPPER_RESOLVE), 'lib.sh resolves its own folder and the helper as it is sourced, writes them into claude_guarded, and makes it read-only');
-  assert.equal(text.match(/@HELPER@/g)?.length, 2, 'the helper path goes into the template in one place');
+  assert.equal(text.match(/@HELPER@/g)?.length, 3, 'the helper path goes into the template in one place (its placeholder, and the splice around it)');
   // A copy of the helper, widened and named otherwise, with the template pointed at it: the digest or the resolution moves.
   const widened = text.replace('cg_helper="$(builtin cd -P -- "$cg_here/../lib" 2>/dev/null && builtin pwd)/claude-guarded.sh"', 'cg_helper="$(builtin cd -P -- "$cg_here/../lib" 2>/dev/null && builtin pwd)/claude-guarded.inc"');
   assert.notEqual(widened, text);
@@ -835,6 +850,16 @@ test('#1262: every way a script can start claude other than through claude_guard
   // check-table: never-shrink
   const MUST_FAIL = [
     'after-and',
+    'enable-n-after-bang-time',
+    'enable-n-after-command',
+    'enable-n-after-else',
+    'enable-n-after-then',
+    'enable-n-in-for',
+    'shadow-enable-for-body',
+    'shadow-local-if-body',
+    'shadow-read-while-body',
+    'shadow-test-case-body',
+    'shadow-test-dbracket-body',
     'js-test-path-marker',
     'shadow-enable',
     'shadow-read-alias',
@@ -957,7 +982,7 @@ test('#1262: every way a script can start claude other than through claude_guard
     'xargs',
   ];
   // check-table: never-shrink
-  const CONTROLS = ['ok-api-key-helper', 'ok-auth-status', 'ok-case-label', 'ok-comment', 'ok-continued-guards', 'ok-for-list', 'ok-grep-regex', 'ok-guarded', 'ok-guarded-array', 'ok-install-path', 'ok-js-auth-status', 'ok-js-guarded', 'ok-other-tool', 'ok-prose', 'ok-spike-pin', 'ok-version', 'ok-workflow-block-guarded', 'ok-brackets-and-enable'];
+  const CONTROLS = ['ok-api-key-helper', 'ok-auth-status', 'ok-case-label', 'ok-comment', 'ok-continued-guards', 'ok-for-list', 'ok-grep-regex', 'ok-guarded', 'ok-guarded-array', 'ok-install-path', 'ok-js-auth-status', 'ok-js-guarded', 'ok-other-tool', 'ok-prose', 'ok-spike-pin', 'ok-version', 'ok-workflow-block-guarded', 'ok-brackets-and-enable', 'ok-multiline-awk-node'];
   assert.deepEqual(all.map(nameOf).sort(), [...MUST_FAIL, ...CONTROLS].sort(), 'every fixture, by name');
   for (const f of all) {
     const n = nameOf(f);

@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# R1264s D1: a form fd42a209 refused and dcf0d521 lost.
+! enable -n read
+time enable -n read

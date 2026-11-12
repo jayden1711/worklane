@@ -1239,10 +1239,13 @@ case "${BASH_SOURCE[0]}" in */*) cg_here="${BASH_SOURCE[0]%/*}" ;; *) cg_here=. 
 cg_here="$(builtin cd -P -- "$cg_here" && builtin pwd)" || cg_here=""
 # A copy of scripts/setup alone (a CI probe, a test's tree) has no helper: claude_guarded refuses there, and lib.sh still loads.
 cg_helper="$(builtin cd -P -- "$cg_here/../lib" 2>/dev/null && builtin pwd)/claude-guarded.sh" || cg_helper=""
-# Only plain path characters go into the function's text; any other leaves it with no helper, refusing.
-case "$cg_here$cg_helper" in *[!A-Za-z0-9._/@+-]*) cg_helper="" ;; esac
-cg_def="${cg_def//@HERE@/$cg_here}"
-cg_def="${cg_def//@HELPER@/$cg_helper}"
+# The paths go into the function's text as quoted values (printf %q), never as code: a folder name with a space, a
+# quote, `;` or `$(…)` in it is only a name (R1264t D1). Spliced by prefix and suffix, not ${//}, whose replacement
+# reads `&` (bash 5.2) as the matched text.
+builtin printf -v cg_here '%q' "$cg_here"
+builtin printf -v cg_helper '%q' "$cg_helper"
+cg_def="${cg_def%%@HERE@*}$cg_here${cg_def#*@HERE@}"
+cg_def="${cg_def%%@HELPER@*}$cg_helper${cg_def#*@HELPER@}"
 builtin eval "$cg_def"
 builtin readonly -f claude_guarded
 builtin unset cg_def cg_here cg_helper

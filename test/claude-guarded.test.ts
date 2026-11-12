@@ -426,3 +426,20 @@ test('R1264r D1: claude_guarded runs from a checkout whose path holds an @ (a Je
     rmSync(t, { recursive: true, force: true });
   }
 });
+
+test('R1264t D1: a checkout folder named with a space, $(…), ;, a quote or & is only a name: claude_guarded runs from it, and nothing in the name runs', { skip: !posix }, () => {
+  for (const name of ['with space', 'dollar$(touch PWNED)', 'semi;colon', "quo'te", 'amp&er']) {
+    const t = mkdtempSync(join(tmpdir(), 'claude-guarded-'));
+    try {
+      const bin = join(t, 'bin');
+      recorder(bin, join(t, 'got.json'));
+      const lib = guardedTree(join(t, name), `${bin}:/usr/bin:/bin`);
+      const r = spawnSync('bash', ['-c', 'source "$1"; claude_guarded -- "{}" -p hi', '_', lib], { cwd: t, encoding: 'utf8', env: { PATH: `${bin}:/usr/bin:/bin`, HOME: t } });
+      assert.equal(r.status, 0, `${name}: ${r.stderr}`);
+      assert.equal(existsSync(join(t, 'PWNED')), false, `${name}: nothing in the folder's name ran`);
+      assert.deepEqual((JSON.parse(readFileSync(join(t, 'got.json'), 'utf8')) as { argv: string[] }).argv, ['-p', 'hi', '--settings', '{}', ...GUARDS], name);
+    } finally {
+      rmSync(t, { recursive: true, force: true });
+    }
+  }
+});
