@@ -118,8 +118,9 @@
 // or yields after it is refused (R1169ar D1; a concise test function's body counts as one statement, R1169as D2).
 // Named limits of that check, each measured on real block coverage (R1169ac-ap; the r1169ah-block-* fixtures):
 // - any expression that throws (a call, a member read or write, a destructuring, a spread, an operator), or an
-//   implicit call that does (a `using` or `await using` disposal at a block's end: R1169av D2), before the
-//   systemd work runs (before the sign, or after it in the sign's own statement, as an argument of the call that holds
+//   implicit call that does (a `using` or `await using` disposal at a block's end: R1169av D2, e.g.
+//   `assert.throws(() => { { using lease = { [Symbol.dispose]() { throw … } }; } <sign> }, …)`, no zero range at all;
+//   not a fixture, since Node 22 can't parse `using`), before the systemd work runs (before the sign, or after it in the sign's own statement, as an argument of the call that holds
 //   it: R1169ap D4, R1169ar D2), when something other than a `try` around the sign takes the throw without a jump of
 //   its own (a caller's try, assert.throws/rejects, a promise's catch, Promise.allSettled, an unawaited Promise): V8
 //   starts no new count after it, so the rest of its block reads as run;

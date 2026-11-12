@@ -1661,9 +1661,5 @@
   "r1169av-v09-unawaited-helper-finally": [
     1,
     "holding systemd's sign, never ran"
-  ],
-  "r1169av-v06-using-dispose-throws": [
-    0,
-    "^$"
   ]
 }
