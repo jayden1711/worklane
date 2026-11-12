@@ -1,10 +1,11 @@
 ### Guardrail changes: what each one does
 
-- **`npm run setup:hooks` installs into its own repository's hooks only from a checkout at origin's default branch
-  (#1283).** Every worktree of a repository shares one hooks dir, so a branch's copy installed there runs for every
-  worktree and every push. Into its own repository (the same `git rev-parse --git-common-dir`), it now refuses unless
-  the checkout's HEAD is the fetched `origin/<default>` commit and the files it copies (`scripts/setup-hooks.mjs`,
-  `scripts/push-gate-hook.mjs`, `scripts/lib/git.cjs`) are unedited, and it refuses when there is no fetched
-  `origin/<default>` to compare with. A refusal changes nothing and prints what it would have installed, where, and
-  why. A worktree detached at `origin/<default>` installs. Installing into another repository (a scratch or test
-  repo, which has hooks of its own) is not limited.
+- **`npm run setup:hooks` installs into a repository's shared hooks only origin's default branch's files (#1283).**
+  Every worktree of a repository shares one hooks dir, so a branch's copy installed there runs for every worktree and
+  every push. In the repository it installs into, when `origin/<default>` as last fetched (`refs/remotes/origin/HEAD`,
+  else `main`) holds the gate, every file it would copy (`scripts/setup-hooks.mjs`, `scripts/push-gate-hook.mjs`,
+  `scripts/lib/git.cjs`) must be that commit's, byte for byte (`git hash-object --no-filters`), wherever the
+  installer runs from: a branch's worktree, another clone or a copy outside git. Otherwise it refuses before changing
+  anything and prints what it would have installed, where, and why. A checkout or worktree at `origin/<default>`
+  installs, and so does a branch whose copied files are unchanged. A repository without the gate on its default
+  branch (a scratch or test repo) is not limited.
