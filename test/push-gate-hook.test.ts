@@ -473,12 +473,64 @@ test("setup-hooks installs into a repository's shared hooks only origin's defaul
     const main = installFrom(work.dir);
     assert.equal(main.status, 0, main.stderr);
     assert.match(readFileSync(join(hooks, 'pre-push'), 'utf8'), /managed by setup-hooks: push gate/);
-    // A repository with no origin/main (no gate to compare with: a scratch repo's) is unlimited.
+    // R1283c, R1283d: fail closed. A repository that holds the gate but where origin's default can't be found with it
+    // is refused, even from its main checkout; only a repository with no gate anywhere is unlimited.
+    const cantFind = /refused: this repository holds the gate, but origin's default branch can't be found with it/;
+    const noInstall = (r: ReturnType<typeof installFrom>, dir: string, what: string) => {
+      assert.equal(r.status, 1, `${what}: ${r.stdout}${r.stderr}`);
+      assert.equal(existsSync(join(dir, 'pre-push')), false, `${what}: nothing installed`);
+    };
+    // No remote at all.
     const lone = join(base, 'lone');
     execFileSync('git', ['clone', '-q', join(base, 'seed'), lone], { stdio: 'ignore' });
     execFileSync('git', ['-C', lone, 'remote', 'remove', 'origin']);
     const unfetched = installFrom(wt.dir, lone);
-    assert.equal(unfetched.status, 0, unfetched.stdout + unfetched.stderr);
+    noInstall(unfetched, join(lone, '.git', 'hooks'), 'no remote');
+    assert.match(unfetched.stderr, cantFind);
+    // R1283d D3: a remote by another name (clone -o upstream): refused from a branch worktree and from main.
+    // The branch onto origin through the seed clone, which has no hook installed (work's runs the gate this test installed).
+    seed.git('fetch', '-q', work.dir, 'feature:feature');
+    seed.git('push', '-q', 'origin', 'feature');
+    const up = join(base, 'up');
+    execFileSync('git', ['clone', '-q', '-o', 'upstream', origin, up], { stdio: 'ignore' });
+    execFileSync('git', ['-C', up, 'worktree', 'add', '-q', '-b', 'feature', join(base, 'up-feat'), 'upstream/feature']);
+    for (const [what, from] of [['a branch worktree', join(base, 'up-feat')], ['the main checkout', up]] as const) {
+      const r = installFrom(from);
+      noInstall(r, join(up, '.git', 'hooks'), `remote upstream, ${what}`);
+      assert.match(r.stderr, cantFind);
+    }
+    // R1283d D1: a dangling origin/HEAD, and one naming a branch without the gate: origin/main still decides.
+    rmSync(join(hooks, 'pre-push'), { force: true });
+    rmSync(join(hooks, 'push-gate-hook.mjs'), { force: true });
+    const gateless = work.git('commit-tree', work.git('hash-object', '-t', 'tree', '/dev/null'), '-m', 'no gate');
+    work.git('update-ref', 'refs/remotes/origin/old', gateless);
+    for (const target of ['refs/remotes/origin/master', 'refs/remotes/origin/old']) {
+      work.git('symbolic-ref', 'refs/remotes/origin/HEAD', target);
+      const r = installFrom(wt.dir);
+      noInstall(r, hooks, `origin/HEAD -> ${target}`);
+      assert.match(r.stderr, refusedFiles, target);
+    }
+    work.git('symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main');
+    // R1283c D1: a bare clone with worktrees: its branch worktree refused, its main worktree installs.
+    const bareRepo = join(base, 'bare.git');
+    execFileSync('git', ['clone', '-q', '--bare', origin, bareRepo], { stdio: 'ignore' });
+    execFileSync('git', ['-C', bareRepo, 'worktree', 'add', '-q', join(base, 'bwt-feat'), 'feature']);
+    noInstall(installFrom(join(base, 'bwt-feat')), join(bareRepo, 'hooks'), 'a bare clone, its branch worktree');
+    execFileSync('git', ['-C', bareRepo, 'worktree', 'add', '-q', join(base, 'bwt-main'), 'main']);
+    const bareMain = installFrom(join(base, 'bwt-main'));
+    assert.equal(bareMain.status, 0, bareMain.stderr);
+    assert.ok(existsSync(join(bareRepo, 'hooks', 'pre-push')), "a bare clone's main worktree installs into its hooks");
+    // R1283c D2, R1283d D2: a blobless clone at the branch, origin unreachable: still refused (tree lookups only).
+    const partial = join(base, 'partial');
+    // A file:// origin ignores --filter unless it allows filters: allowed, and the clone checked to be partial.
+    execFileSync('git', ['-C', origin, 'config', 'uploadpack.allowFilter', 'true']);
+    execFileSync('git', ['clone', '-q', '--filter=blob:none', '--no-checkout', `file://${origin}`, partial], { stdio: 'ignore' });
+    assert.equal(execFileSync('git', ['-C', partial, 'config', '--get', 'remote.origin.promisor'], { encoding: 'utf8' }).trim(), 'true', 'a partial clone');
+    execFileSync('git', ['-C', partial, 'checkout', '-q', '-b', 'feature', 'origin/feature']);
+    execFileSync('git', ['-C', partial, 'remote', 'set-url', 'origin', join(base, 'gone.git')]);
+    const offline = installFrom(partial);
+    noInstall(offline, join(partial, '.git', 'hooks'), 'a blobless clone, origin unreachable');
+    assert.match(offline.stderr, refusedFiles);
   } finally {
     rmSync(base, { recursive: true, force: true });
   }
