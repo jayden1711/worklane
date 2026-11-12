@@ -1194,13 +1194,13 @@ agent_key_file_ok() { run_as_bounded "$1" "$AGENT_CHECK_SECONDS" /dev/null "$AGE
 # (src/runner.ts: `cat -- <agent_api_key>`), read from the user's own settings (credentials.sh writes it) and only in
 # that exact form; else its settings are `{}`.
 #   claude_api_check <user> [<claude config dir>]
-# The one way a script starts claude (#1262, R1264g/h/i/j): claude-guarded.sh beside this file says what it allows. It
+# The one way a script starts claude (#1262, R1264g/h/i/j): scripts/lib/claude-guarded.sh says what it allows. It
 # runs in a clean bash, by absolute paths, so no shell function or environment of the caller's reaches it (R1264i D1).
 #   claude_guarded [--as <user>]... [--timeout <seconds>] [--env <NAME>=<value>]... -- <settings> -p|--print [<word>...]
 claude_guarded() {
   local cg_dir
   case "${BASH_SOURCE[0]}" in */*) cg_dir="${BASH_SOURCE[0]%/*}" ;; *) cg_dir=. ;; esac
-  /usr/bin/env -i "PATH=$PATH" "HOME=$HOME" /bin/bash --norc --noprofile "$cg_dir/claude-guarded.sh" "$@"
+  /usr/bin/env -i "PATH=$PATH" "HOME=$HOME" /bin/bash --norc --noprofile "$cg_dir/../lib/claude-guarded.sh" "$@"
 }
 # The key file a user's Claude settings name as apiKeyHelper (`cat -- <path>`), read as that user under a timeout, as
 # the proof itself runs (the file opened without following a link or blocking, a regular file of at most 64 KiB);

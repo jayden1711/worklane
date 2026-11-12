@@ -1,7 +1,7 @@
 // lint-test
 // #1262 (the owner's decision, 2026-11-10): the one-launch rule (#958; src/'s is held by its own AST lint) reaches
 // the repo's scripts. A script starts a claude session only through scripts/setup/lib.sh's claude_guarded (R1264g-j),
-// which runs scripts/setup/claude-guarded.sh in a clean bash (no caller's shell function reaches it) and so claude in
+// which runs scripts/lib/claude-guarded.sh in a clean bash (no caller's shell function reaches it) and so claude in
 // an empty environment (no CLAUDE_CODE_PLUGIN_DIRS, NODE_OPTIONS or BUN_*); its words start with -p (no subcommand),
 // every flag is allowlisted (no --plugin-dir, --agents, --add-dir, --mcp-config, no abbreviation of one, no prompt read
 // as a flag), a value-taking flag has its value, --input-format is text only (stream-json's control requests load
@@ -126,7 +126,7 @@ export const SHELL_EXCEPTIONS: Pin[] = [
     '1c80be8764dd95ae19a1d3d918ebe6bf367abed22b2cf74f3506babf9ea417c8',
   ],
   [
-    'scripts/setup/claude-guarded.sh',
+    'scripts/lib/claude-guarded.sh',
     'command ${cg_sudo[@]+"${cg_sudo[@]}"} ${cg_timeout[@]+"${cg_timeout[@]}"} /usr/bin/env -i "HOME=$cg_home" PATH=/usr/local/bin:/usr/bin:/bin CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 ${cg_env[@]+"${cg_env[@]}"} "$cg_bin" "$@" --settings "$cg_settings" --setting-sources \'\' --strict-mcp-config',
     "claude_guarded, the one launch a script may use (R1264g-j): run by lib.sh's claude_guarded in a clean bash; an empty environment but for HOME, USER, a fixed PATH and allowlisted names; -p first, only allowlisted flags, each value-taking one with its value, --permission-mode dontAsk and --input-format text only; settings only {} or a plain-path apiKeyHelper; the guards last. Held with its whole file by digest",
     '61ec4a215465691ffefc5afaf4f9de98e0f4e7c141c2f8a43da39edef48dc9c0',
