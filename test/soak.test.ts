@@ -1996,7 +1996,8 @@ test("soak driver (Linux, R1181t D1, D4): the job's cgroup is read: a process st
       const pids = new Set<number>();
       const levels = cgroupLevels('/sys/fs/cgroup', pids);
       seen = pids.has(pid);
-      assert.equal(levels.procs, pids.size, 'the count is the pids read');
+      // R1181an F4: at least the pids read, not equal: a process moving between sub-cgroups mid-walk is listed twice.
+      assert.ok(levels.procs! >= pids.size, `the count covers the pids read: ${levels.procs} >= ${pids.size}`);
       if (!seen) await new Promise((r) => setTimeout(r, 100));
     }
     assert.ok(seen, `a new session in our cgroup is counted: pid ${pid}`);
