@@ -281,7 +281,7 @@ test("the commit-msg hook and the push gate agree on what git commits, by git's 
   assert.deepEqual(seen, [], "every row agrees with the gate, but auto's and a commit encoding's, which may only refuse more");
 });
 
-test("every ASCII byte and the non-ASCII spaces: the hook and the gate give the same verdict on what git commits, in each spot where git's whitespace rule decides (#1260 R1260x D1)", { skip: !hasGitleaks && 'gitleaks not installed', timeout: 900_000 }, () => {
+test("every ASCII byte and the non-ASCII spaces: the hook and the gate give the same verdict on what git commits, in each spot where git's whitespace rule decides, as an editor writes it and as -F gives it (#1260 R1260x D1, R1260y/z D1)", { skip: !hasGitleaks && 'gitleaks not installed', timeout: 900_000 }, () => {
   // R1260x D1: the hook took a form feed and a vertical tab for whitespace; git's isspace doesn't. Rather than a second
   // list, every byte goes through both: real commits with the installed hook (a), the same with --no-verify (b), and
   // the gate once over b's commits.
@@ -292,23 +292,37 @@ test("every ASCII byte and the non-ASCII spaces: the hook and the gate give the 
   const inst = spawnSync(process.execPath, [installer], { cwd: a.dir, encoding: 'utf8' });
   assert.equal(inst.status, 0, inst.stderr);
   const base = b.git('rev-parse', 'HEAD');
-  const chars = [...Array(0x80).keys()].map((n) => String.fromCharCode(n)).concat(['\u00a0', '\ufeff', '\u0085', '\u2028', '\u3000', '\u200b']);
+  // Every ASCII byte, the non-ASCII spaces, and runs of git's own whitespace (R1260y/z D1: space, tab and CR mixed).
+  const chars = [...Array(0x80).keys()].map((n) => String.fromCharCode(n)).concat(['\u00a0', '\ufeff', '\u0085', '\u2028', '\u3000', '\u200b', '  ', '\t\t', ' \t', '\t ', ' \r', '\r\r', '\t\r', ' \t\r', '\r \t', '\f ', ' \v']);
   const spots: [string, (c: string) => string][] = [
     ['a line before the subject', (c) => `${c}\nAdd a thing\n\nBody\n`],
     ["a 180-character subject's end", (c) => `${'S'.repeat(180)}${c}\n\nBody\n`],
     ['line 2', (c) => `Add a thing\n${c}\nBody\n`],
+    ["the body's end", (c) => `Add a thing\n\nBody${c}\n`],
   ];
-  // Edited (git's strip cleanup: -e, the hook sees GIT_EDITOR) and -F (whitespace: git runs the hook with GIT_EDITOR=':').
-  const modes: [string, string[]][] = [['edited', ['-e', '-F']], ['-F', ['-F']]];
+  // R1260y/z D1: with -F (or -m, or -e with an editor that changes nothing) git cleans the message BEFORE the hook
+  // reads it, so the hook's model of git's cleanup only meets unclean text when an editor writes the message. So: an
+  // editor that writes it (no -F), under git's strip cleanup and under commit.cleanup=whitespace; and -F, pre-cleaned
+  // (git runs the hook with GIT_EDITOR=':', the whitespace mode).
   const file = join(a.dir, '..', 'walk.msg');
+  const editor = { GIT_EDITOR: `cp '${file}'` };
+  // Every character under the editor's strip; under the other two, those where whitespace or a comment decides
+  // (controls, space, DEL, `#`, `;`, the non-ASCII spaces and the runs): a letter reads the same in every mode.
+  const decides = (c: string) => [...c].every((x) => x.codePointAt(0)! <= 0x20 || x.codePointAt(0)! >= 0x7f || x === '#' || x === ';');
+  const modes: [string, string[], string[], Record<string, string>, (c: string) => boolean][] = [
+    ['an editor, strip', [], [], editor, () => true],
+    ['an editor, commit.cleanup=whitespace', ['-c', 'commit.cleanup=whitespace'], [], editor, decides],
+    ['-F, pre-cleaned', [], ['-F', file], {}, decides],
+  ];
   const cases: { name: string; hookOk: boolean; sha: string | null }[] = [];
   for (const c of chars) {
     for (const [spot, make] of spots) {
-      for (const [mode, args] of modes) {
+      for (const [mode, pre, args, modeEnv, takes] of modes) {
+        if (!takes(c)) continue;
         writeFileSync(file, make(c));
-        const name = `U+${c.codePointAt(0)!.toString(16).padStart(4, '0')} at ${spot}, ${mode}`;
-        const hookOk = spawnSync('git', ['commit', '-q', '--allow-empty', ...args, file], { cwd: a.dir, env }).status === 0;
-        const made = spawnSync('git', ['commit', '-q', '--allow-empty', '--no-verify', ...args, file], { cwd: b.dir, env, encoding: 'utf8' });
+        const name = `${[...c].map((x) => `U+${x.codePointAt(0)!.toString(16).padStart(4, '0')}`).join('+')} at ${spot}, ${mode}`;
+        const hookOk = spawnSync('git', [...pre, 'commit', '-q', '--allow-empty', ...args], { cwd: a.dir, env: { ...env, ...modeEnv } }).status === 0;
+        const made = spawnSync('git', [...pre, 'commit', '-q', '--allow-empty', '--no-verify', ...args], { cwd: b.dir, env: { ...env, ...modeEnv }, encoding: 'utf8' });
         cases.push({ name, hookOk, sha: made.status === 0 ? b.git('rev-parse', 'HEAD') : null });
       }
     }
@@ -336,7 +350,7 @@ test("every ASCII byte and the non-ASCII spaces: the hook and the gate give the 
     const gateOk = !refused.has(k.sha);
     if (k.hookOk !== gateOk) differ.push(`${k.name}: hook ${k.hookOk ? 'pass' : 'refuse'}, gate ${gateOk ? 'pass' : 'refuse'}`);
   }
-  assert.deepEqual(cases.filter((k) => !k.sha).map((k) => k.name.slice(0, 6)), Array(6).fill('U+0000'), 'git made every commit but the six with a NUL');
+  assert.deepEqual(cases.filter((k) => !k.sha).map((k) => k.name.split(' ')[0]), Array(spots.length * modes.filter((m) => m[4]('\0')).length).fill('U+0000'), 'git made every commit but those with a NUL');
   assert.ok(cases.some((k) => !k.hookOk) && cases.some((k) => k.hookOk), 'both verdicts occur');
   assert.deepEqual(differ, [], 'the same verdict for every byte, spot and mode');
 });
