@@ -115,26 +115,27 @@ const OTHER_FETCH = /\bwget\b|\bgh\s+release\s+download\b|\bInvoke-WebRequest\b|
 /** A run script's lines, with backslash-continued lines joined. */
 // R1228f D2: bash removes a backslash-newline outright (no space), keeping the next line's indentation.
 /**
- * A run's logical lines, as the shell joins them: a backslash at a line's end continues it onto the next, outside single
- * quotes, but not inside a comment, which runs to the newline whatever it ends with (R1228ba D2: `# old: npm ci \`
- * took the next line into the comment). A comment starts at an unquoted `#` that begins a word (after a blank or `;`,
- * `&`, `|`, `(`, `)`); quotes are followed across lines.
+ * A run's logical lines, as the shell joins them: a backslash at a line's end continues it onto the next, but not
+ * inside a comment, which runs to the newline whatever it ends with (R1228ba D2: `# old: npm ci \` took the next line
+ * into the comment). A comment starts at an unquoted `#` that begins a word (after a blank or `;`, `&`, `|`, `(`, `)`).
+ * Quotes are followed within a line only (R1228bb D2, R1228bc D1, D2: an apostrophe in here-document text, or in a value
+ * that isn't shell, held a quote open to the end of the file, so a real continuation wasn't joined and a comment wasn't
+ * seen); a `#` inside a quote that spans lines is read as a comment there (stated in the Limits).
  */
 const logicalLines = (run: string): string[] => {
   const out: string[] = [];
   let cur = '';
-  let q: string | null = null;
   const lines = run.split('\n');
   lines.forEach((line, n) => {
-    let cont = false;
-    for (let i = 0; i < line.length; i++) {
+    let q: string | null = null;
+    let comment = false;
+    for (let i = 0; i < line.length && !comment; i++) {
       const ch = line[i]!;
       if (q === "'") {
         if (ch === "'") q = null;
         continue;
       }
       if (ch === '\\') {
-        if (i === line.length - 1) cont = true;
         i++;
         continue;
       }
@@ -143,9 +144,10 @@ const logicalLines = (run: string): string[] => {
         continue;
       }
       if (ch === "'" || ch === '"' || ch === '`') q = ch;
-      else if (ch === '#' && /(^|[\s;&|()])$/.test(i === 0 ? cur : line.slice(0, i))) break;
+      else if (ch === '#' && /(^|[\s;&|()])$/.test(i === 0 ? cur : line.slice(0, i))) comment = true;
     }
-    if (cont && n < lines.length - 1) cur += line.slice(0, -1);
+    // A trailing backslash continues the line unless a comment ended it first.
+    if (!comment && line.endsWith('\\') && n < lines.length - 1) cur += line.slice(0, -1);
     else {
       out.push(cur + line);
       cur = '';
@@ -800,7 +802,7 @@ export function fileDownloadProblems(rel: string, text: string, probes: string[]
   const make = MAKEFILE.test(n);
   // R1228az/ba D1: a cd as a whole command word only (an option word such as `-cd` or `--build-cd` is none); R1228az D2:
   // after a backslash (`\\cd`, the alias-proof spelling) or a case pattern's `)` (`a)cd`) too.
-  const moves = logicalLines(t).some((l) => !/^\s*#/.test(l) && commands(make ? l.replace(/^(\s*)[@+-]+/, '$1') : l).some((c) => !c.startsWith('#') && /(^|[\s;&|(){`'"!\\])(?:cd|pushd|popd)(?=$|[\s;&|)`'"])/.test(c)));
+  const moves = logicalLines(t).some((l) => !/^\s*#/.test(l) && commands(make ? l.replace(/^(\s*)[@+-]+/, '$1') : l).map((c) => (make ? c.replace(/^[@+-]+/, '') : c)).some((c) => !c.startsWith('#') && /(^|[\s;&|(){`'"!\\])(?:cd|pushd|popd)(?=$|[\s;&|)`'"])/.test(c)));
   if (!DOCKERFILE.test(n)) for (const l0 of logicalLines(t)) {
     if (/^\s*#/.test(l0)) continue;
     const l = make ? l0.replace(/^(\s*)[@+-]+/, '$1') : l0;
@@ -1750,6 +1752,21 @@ test("R1228az, R1228ba: a cd is a whole command word (an option word isn't; `\\c
   assert.ok(sh('bash \\\n  .claude/hooks/get.sh\n').length > 0, 'a continued line, read whole');
   assert.ok(sh('echo "a # b" \\\n && bash .claude/hooks/get.sh\n').length > 0, "a '#' in quotes isn't a comment");
   assert.ok(sh('x=a#b \\\n && bash .claude/hooks/get.sh\n').length > 0, "a '#' inside a word isn't a comment");
+});
+
+test("R1228bb, R1228bc: quotes are followed within a line only (here-document text, a non-shell value), and a make prefix after an inline recipe's ; is read past", () => {
+  const all = (rel: string, text: string) => fileDownloadProblems(rel, text).problems;
+  const unread = (rel: string, text: string) => all(rel, text).filter((p) => /a shell file the download lint doesn't read/.test(p));
+  // bc D1 (P1): an apostrophe in here-document text, then a real continuation: joined, its --retry read (kept).
+  assert.deepEqual(all('scripts/ci/zz-get.sh', "cat > NOTES <<EOF\nDon't edit this file by hand.\nEOF\ncurl -fsSL -o page.html \\\n  --retry 5 --retry-all-errors https://example.com/page.html\n"), [], 'P1: kept');
+  assert.deepEqual(all('scripts/ci/zz-get.sh', "msg=\"$(git log -1 --format=\"%an's commit\")\"\ncurl -fsSL -o p \\\n  --retry 5 https://example.com/p\n"), [], 'Q1f: kept');
+  assert.deepEqual(all('scripts/ci/zz-get.sh', "printf $'don\\'t\\n'\ncurl -fsSL -o p \\\n  --retry 5 https://example.com/p\n"), [], 'Q1g: kept');
+  // bc D2: a lone quote in here-document text no longer hides a later line.
+  assert.ok(unread('scripts/ci/zz-a.sh', 'cat <<EOF\nBuilt for a 12" panel.\nEOF\n# old \\\nbash .claude/hooks/get.sh\n').length > 0, 'Q2a: the .sh after it read');
+  assert.ok(unread('scripts/ci/zz-a.sh', "cat <<EOF\nDon't.\nEOF\nbash \\\n  .claude/hooks/get.sh\n").length > 0, 'Q2e: the continued bash and path read together');
+  assert.match(all('scripts/ci/zz-get.sh', `cat <<EOF\nBuilt for a 12" panel.\nEOF\n# old \\\ncurl -fsSL -o gl.tgz "${REL}"\n`).join(), /a pinned URL outside|a download with no retry/, 'P2: the pinned URL read');
+  // bb D1 = bc D3 (R1228ax X5a): an inline recipe's make prefix.
+  for (const p of ['@', '-', '+', '']) assert.ok(unread('Makefile', `t: ; ${p}cd .claude/hooks && bash get.sh\n`).length > 0, `refused: t: ; ${p}cd`);
 });
 
 // Limits (owner decision (c): stated, not closed; the helper's digest check holds for each download it handles):
