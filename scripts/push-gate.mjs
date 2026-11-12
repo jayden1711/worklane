@@ -299,7 +299,12 @@ class Refusal extends Error {}
 /** The characters git's `core.commentChar=auto` picks from, in order: the first that starts no line of the message. */
 const AUTO_COMMENT = '#;@!$%^&|:';
 const scissors = (c) => `${c} ------------------------ >8 ------------------------`;
-const BLANK = /^[ \t\n\v\f\r]*$/;
+/**
+ * git's whitespace, the one definition the hook models git's cleanup with (R1260x D1): git's isspace (sane_ctype in
+ * ctype.c) is space, tab, LF and CR only. A form feed or vertical tab is not whitespace to git: strbuf_stripspace keeps
+ * a line holding only one, and keeps one at a line's end.
+ */
+const GIT_TRAILING_SPACE = /[ \t\n\r]+$/;
 
 /**
  * The comment prefixes to judge an edited message by. A set prefix, as it is. For `auto` (R1260g D1, R1260h D1-D3),
@@ -328,7 +333,8 @@ const cutReadings = (mode) => (mode === 'scissors' ? ['first'] : mode === 'strip
  * changes nothing; with `cutAt` (scissors mode, or a `-v` commit) it is cut at the first scissors line; strip leaves
  * out comment lines (git's own scissors line among them, when it doesn't cut); all but verbatim then
  * take trailing whitespace off each line, fold runs of blank lines to one, and drop blank lines at the start and the
- * end. Blank and whitespace are ASCII, as git's isspace (a BOM or NBSP line is not blank: R1260b). A null `comment`
+ * end. Blank and whitespace are git's isspace, GIT_TRAILING_SPACE (a BOM, NBSP, form feed or vertical tab line is not
+ * blank: R1260b, R1260x D1). A null `comment`
  * strips and cuts nothing (one of `auto`'s two readings).
  */
 function asCommitted(text, mode = 'strip', comment = '#', cutAt = mode === 'scissors' ? 'first' : 'none') {
@@ -342,7 +348,7 @@ function asCommitted(text, mode = 'strip', comment = '#', cutAt = mode === 'scis
   }
   if (mode === 'strip' && comment !== null) lines = lines.filter((l) => !l.startsWith(comment));
   const out = [];
-  for (const l of lines.map((x) => x.replace(/[ \t\n\v\f\r]+$/, ''))) {
+  for (const l of lines.map((x) => x.replace(GIT_TRAILING_SPACE, ''))) {
     if (l !== '') out.push(l);
     else if (out.length && out.at(-1) !== '') out.push('');
   }

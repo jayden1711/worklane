@@ -281,6 +281,66 @@ test("the commit-msg hook and the push gate agree on what git commits, by git's 
   assert.deepEqual(seen, [], "every row agrees with the gate, but auto's and a commit encoding's, which may only refuse more");
 });
 
+test("every ASCII byte and the non-ASCII spaces: the hook and the gate give the same verdict on what git commits, in each spot where git's whitespace rule decides (#1260 R1260x D1)", { skip: !hasGitleaks && 'gitleaks not installed', timeout: 900_000 }, () => {
+  // R1260x D1: the hook took a form feed and a vertical tab for whitespace; git's isspace doesn't. Rather than a second
+  // list, every byte goes through both: real commits with the installed hook (a), the same with --no-verify (b), and
+  // the gate once over b's commits.
+  const env = { ...process.env, GIT_AUTHOR_NAME: 'Ada', GIT_AUTHOR_EMAIL: 'ada@example.com', GIT_COMMITTER_NAME: 'Ada', GIT_COMMITTER_EMAIL: 'ada@example.com', GIT_EDITOR: 'true' };
+  delete (env as Record<string, string | undefined>).GIT_DIR;
+  const a = repo();
+  const b = repo();
+  const inst = spawnSync(process.execPath, [installer], { cwd: a.dir, encoding: 'utf8' });
+  assert.equal(inst.status, 0, inst.stderr);
+  const base = b.git('rev-parse', 'HEAD');
+  const chars = [...Array(0x80).keys()].map((n) => String.fromCharCode(n)).concat(['\u00a0', '\ufeff', '\u0085', '\u2028', '\u3000', '\u200b']);
+  const spots: [string, (c: string) => string][] = [
+    ['a line before the subject', (c) => `${c}\nAdd a thing\n\nBody\n`],
+    ["a 180-character subject's end", (c) => `${'S'.repeat(180)}${c}\n\nBody\n`],
+    ['line 2', (c) => `Add a thing\n${c}\nBody\n`],
+  ];
+  // Edited (git's strip cleanup: -e, the hook sees GIT_EDITOR) and -F (whitespace: git runs the hook with GIT_EDITOR=':').
+  const modes: [string, string[]][] = [['edited', ['-e', '-F']], ['-F', ['-F']]];
+  const file = join(a.dir, '..', 'walk.msg');
+  const cases: { name: string; hookOk: boolean; sha: string | null }[] = [];
+  for (const c of chars) {
+    for (const [spot, make] of spots) {
+      for (const [mode, args] of modes) {
+        writeFileSync(file, make(c));
+        const name = `U+${c.codePointAt(0)!.toString(16).padStart(4, '0')} at ${spot}, ${mode}`;
+        const hookOk = spawnSync('git', ['commit', '-q', '--allow-empty', ...args, file], { cwd: a.dir, env }).status === 0;
+        const made = spawnSync('git', ['commit', '-q', '--allow-empty', '--no-verify', ...args, file], { cwd: b.dir, env, encoding: 'utf8' });
+        cases.push({ name, hookOk, sha: made.status === 0 ? b.git('rev-parse', 'HEAD') : null });
+      }
+    }
+  }
+  // The gate over b's commits, 40 at a time: one run's list of refused commits can outgrow what it writes before it
+  // exits (measured: one run over the walk's 798 commits named 427;
+  // #1274, stderr lost at process.exit on macOS), so a long list would read as passes.
+  const made = cases.filter((k) => k.sha).map((k) => k.sha!);
+  const refused = new Set<string>();
+  for (let i = 0; i < made.length; i += 40) {
+    const chunk = made.slice(i, i + 40);
+    const from = i === 0 ? base : made[i - 1]!;
+    const g = spawnSync(process.execPath, [gate, '--range', `${from}..${chunk.at(-1)!}`], { cwd: repoRoot, encoding: 'utf8', env: { ...process.env, GIT_DIR: join(b.dir, '.git') } });
+    const named = chunk.filter((x) => g.stderr.includes(x.slice(0, 8)));
+    assert.equal(g.status === 0, named.length === 0, `the gate's status matches the commits it names: ${g.stderr.slice(0, 300)}`);
+    for (const x of named) refused.add(x);
+  }
+  const differ: string[] = [];
+  for (const k of cases) {
+    // git itself won't make it (a NUL): the hook can't have passed it either.
+    if (k.sha === null) {
+      if (k.hookOk) differ.push(`${k.name}: hook pass, git refused the commit`);
+      continue;
+    }
+    const gateOk = !refused.has(k.sha);
+    if (k.hookOk !== gateOk) differ.push(`${k.name}: hook ${k.hookOk ? 'pass' : 'refuse'}, gate ${gateOk ? 'pass' : 'refuse'}`);
+  }
+  assert.deepEqual(cases.filter((k) => !k.sha).map((k) => k.name.slice(0, 6)), Array(6).fill('U+0000'), 'git made every commit but the six with a NUL');
+  assert.ok(cases.some((k) => !k.hookOk) && cases.some((k) => k.hookOk), 'both verdicts occur');
+  assert.deepEqual(differ, [], 'the same verdict for every byte, spot and mode');
+});
+
 test("core.commentChar=auto: the hook can't know git's pick (git takes it from the message before the editor ran), so it judges every reading and refuses when any fails (#1260 R1260g D1, R1260h D1-D3)", () => {
   const r = repo();
   r.git('config', 'core.commentChar', 'auto');
