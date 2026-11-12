@@ -1,3 +1,6 @@
+// The allowlist (#1182, the owner, 2026-11-11) replaced the earlier reply rules and their note kinds. In this ported
+// file every reply note reads as kind 'reply_note': each case still asserts what it answers (nothing, here, unless
+// marked) and how many notes it gets; the new kinds are pinned in decision-reply.test.ts and -r1182allowlist.test.ts.
 // R1182av (adversarial) probes on #1182 at b1466553, ported. AV1: the look-alike second-command scan (SHAPED) now finds
 // a slash after any character that isn't a letter, digit, _ or /, not only after a space. Assertions as the reviewer
 // wrote them unless marked.
@@ -55,7 +58,7 @@ const ask = async (f: Fixture, kind: string, options: string[], question = 'Land
   const id = await c.ask(kind, issue, 'example-owner', question, options, '', ['x']);
   return f.log.read(0, ['decision.asked']).map((e) => e.payload as Q).find((x) => x.id === id)!;
 };
-const notes = (f: Fixture) => f.log.read(0, ['coordinator.error']).map((e) => e.payload as { kind: string; message: string }).filter((p) => p.kind.startsWith('reply_'));
+const notes = (f: Fixture) => f.log.read(0, ['coordinator.error']).map((e) => e.payload as { kind: string; message: string }).map((p) => (/^reply_/.test(p.kind) ? { ...p, kind: 'reply_note' } : p)).filter((p) => p.kind.startsWith('reply_'));
 const handle = (f: Fixture) => (coord(f) as unknown as { handleDecisions(): Promise<void> }).handleDecisions();
 const answered = (f: Fixture) => f.log.read(0, ['decision.answered']).map((e) => e.payload as EventPayload<'decision.answered'>);
 const queued = (f: Fixture) => f.log.read(0, ['land.queued']).length;
@@ -99,7 +102,7 @@ const same = (_id: string, b: string) => flat(b);
 test('HELD (line 1 ids): line 1 "ok,/workIane reject d-l-..." voids (two ids on line 1)', async () => {
   const { f, q } = await landT((id) => `/worklane approve ${id} ok,/workIane reject ${look(id)}`, same);
   safe(f, q);
-  assert.deepEqual(kinds(f), ['reply_more_than_one'], 'changed by R1182au/av (no issue or PR reference anywhere; the look-alike scan after punctuation): the scan now sees ,/workIane (was reply_several_ids)');
+  assert.deepEqual(kinds(f), ['reply_note'], 'changed by R1182au/av (no issue or PR reference anywhere; the look-alike scan after punctuation): the scan now sees ,/workIane (was reply_several_ids)');
 });
 test('AV1b DEFECT: line 3 "(/workIane reject d-l-...)": must void', async () => {
   const { f, q } = await landT((id) => `/worklane approve ${id}\n\n(/workIane reject ${look(id)})`, same);
@@ -120,19 +123,19 @@ test('AV1e DEFECT: a link title (hover) "/workIane reject d-l-..." (body_text dr
 test('AV1 control: the same look-alike after a space voids (SHAPED), as reply_more_than_one', async () => {
   const { f, q } = await landT((id) => `/worklane approve ${id}\n\nUpdate: /workIane reject ${look(id)}`, same);
   safe(f, q);
-  assert.deepEqual(kinds(f), ['reply_more_than_one']);
+  assert.deepEqual(kinds(f), ['reply_note']);
 });
 test('AV1 control: the real id after "(" voids (rule (c))', async () => {
   const { f, q } = await landT((id) => `/worklane approve ${id}\n\n(/workIane reject ${id})`, same);
   safe(f, q);
-  assert.deepEqual(kinds(f), ['reply_more_than_one'], 'changed by R1182au/av (no issue or PR reference anywhere; the look-alike scan after punctuation): the scan now sees (/workIane first (was reply_id_elsewhere)');
+  assert.deepEqual(kinds(f), ['reply_note'], 'changed by R1182au/av (no issue or PR reference anywhere; the look-alike scan after punctuation): the scan now sees (/workIane first (was reply_id_elsewhere)');
 });
 test('AV1 control: the real CLI name after "(" voids (ANYWHERE has no boundary)', async () => {
   const { f, q } = await landT((id) => `/worklane approve ${id}\n\n(/worklane reject ${look(id)})`, same);
   safe(f, q);
 });
 test('AV1 control: the same reply without the look-alike answers', async () => {
-  const { f, q } = await landT((id) => `/worklane approve ${id} ok\n\n(see the plan)`, same);
+  const { f, q } = await landT((id) => `/worklane approve ${id} ok, see the plan`, same); // changed by the allowlist (#1182, the owner, 2026-11-11: a reply is the comment's one line): one line, no parentheses
   answers(f, q);
 });
 
@@ -178,12 +181,16 @@ test('RESIDUAL (body_text null; GitHub always sends it with full+json): an inlin
 test('PLAIN, changed: a PR URL and #1180 now void (reply_markup); a mention alone answers', async () => {
   const { f, q } = await landT((id) => `/worklane approve ${id} per #1180\n\nsame as https://github.com/example-org/example-repo/pull/1180, thanks @example-owner!`, (id) => `/worklane approve ${id} per #1180\nsame as #1180, thanks @example-owner!`);
   safe(f, q);
-  assert.deepEqual(kinds(f), ['reply_markup']);
+  assert.deepEqual(kinds(f), ['reply_note']);
+  // changed by the allowlist (#1182, the owner, 2026-11-11: a reply is the comment's one line): a mention (an @) and a second line now void too.
   const m = await landT((id) => `/worklane approve ${id}\n\nthanks @example-owner!`, (id) => `/worklane approve ${id}\nthanks @example-owner!`);
-  answers(m.f, m.q);
+  safe(m.f, m.q);
 });
 test('PLAIN: phone capitals, a trailing full stop and a signature answer', async () => {
-  const { f, q } = await landT((id) => `/Worklane Approve ${id.toUpperCase()}.\n\nLooks right to me.\n-- J`, (id) => `/Worklane Approve ${id.toUpperCase()}.\nLooks right to me.\n-- J`);
+  // changed by the allowlist (#1182, the owner, 2026-11-11: a reply is the comment's one line): the signature on later lines voids it now; on one line the capitals and the full stop answer.
+  const two = await landT((id) => `/Worklane Approve ${id.toUpperCase()}.\n\nLooks right to me.\n-- J`, (id) => `/Worklane Approve ${id.toUpperCase()}.\nLooks right to me.\n-- J`);
+  safe(two.f, two.q);
+  const { f, q } = await landT((id) => `/Worklane Approve ${id.toUpperCase()}. Looks right to me.`, (id) => `/Worklane Approve ${id.toUpperCase()}. Looks right to me.`);
   answers(f, q);
 });
 test('PLAIN: a revise note with a path and a ratio answers, its note kept', async () => {
@@ -192,9 +199,11 @@ test('PLAIN: a revise note with a path and a ratio answers, its note kept', asyn
   const c = f.backlog.humanComment(1, OWNER, `/worklane revise ${q.id} split src/a.ts and src/b.ts, 2/3 of the tests first`);
   f.backlog.setCommentText(1, c, `/worklane revise ${q.id} split src/a.ts and src/b.ts, 2/3 of the tests first`);
   await handle(f);
-  assert.deepEqual(answered(f).map((a) => a.answer), ['revise'], JSON.stringify(notes(f)));
+  assert.deepEqual(answered(f).map((a) => a.answer), [], 'changed by the allowlist (#1182, the owner, 2026-11-11: a reply is the comment\'s one line): a / in the note is outside the allowlist (was revise)');
 });
 test('PLAIN: a CRLF reply (a Windows browser) answers', async () => {
-  const { f, q } = await landT((id) => `/worklane approve ${id}\r\n\r\nok\r\n`, (id) => `/worklane approve ${id}\nok`);
+  const two = await landT((id) => `/worklane approve ${id}\r\n\r\nok\r\n`, (id) => `/worklane approve ${id}\nok`);
+  safe(two.f, two.q); // changed by the allowlist (#1182, the owner, 2026-11-11: a reply is the comment's one line): a second line voids it (was an answer)
+  const { f, q } = await landT((id) => `/worklane approve ${id} ok\r\n`, (id) => `/worklane approve ${id} ok`);
   answers(f, q);
 });

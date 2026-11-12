@@ -9,7 +9,7 @@ import { type DoneWhenList, type Issue } from '../backlog/types.js';
 import { claim, release } from '../claims.js';
 import type { EventPayload } from '../events/types.js';
 import { mayAnswerKind, type Role } from '../dashboard-auth.js';
-import { idsElsewhere, idsIn, readReply, type CommandLine } from '../decision-reply.js';
+import { readReply, secondLook } from '../decision-reply.js';
 import { defaultRolePrompt, issueBrief } from '../roles.js';
 import { checkedPush } from '../push-check.js';
 import { domainDecision, withAllowedHost, type DomainAnswer, type RefusedRequest } from '../domain-requests.js';
@@ -242,26 +242,22 @@ export abstract class Decisions extends Recovery {
    * `approvals` as the default branch has it. A reply from anyone else answers nothing: a writer's `approve` of a
    * high-risk merge (`land`) or a held plan waits for an owner, as on the dashboard.
    *
-   * The owner's decisions: a reply answers a decision only by naming its id (2026-11-09; #1248), and only on the comment's
-   * first line, in plain text (2026-11-10, option (b) with (b'); src/decision-reply.ts):
-   * - A comment answers only when its first non-blank line is `/<cli> <option> <id> [note]` (at most 3 spaces before it),
-   *   compared in lower case. Its note is the rest of that line.
-   * - The whole comment must be plain ASCII (printable, tabs, line breaks; the owner, 2026-11-10, after R1182ak/al).
-   * - That line answers nothing if it holds any of `` ` < > [ ] ( ) " ' \ & ! ~ $ % ``, if it names no id or two or more, or if
-   *   the comment has another `/<cli> <word>` anywhere (a reply is one command). The latest reply that answers wins.
-   * - Rule (c), the owner, 2026-11-10: an open decision's id anywhere else in the comment (as typed, or as the page shows it:
-   *   entities decoded, tags and emphasis dropped) voids it, so a comment can never show a second answer to a live
-   *   decision. The second-command scan stays as extra defence; this is what holds the guarantee.
+   * The owner's decisions: a reply answers a decision only by naming its id (2026-11-09; #1248), and only as the whole
+   * comment, one line (the allowlist, #1182; src/decision-reply.ts):
+   * - The comment is `/<cli> <option> <id> [note]`, the note in letters, digits, spaces and `. , : ; -`, and nothing else:
+   *   no other line, no other character, judged on the typed text ("1182 fv: b"). The note may not name an open decision
+   *   ("1182 dword: b": a word like `d-day` is fine). GitHub's own rendering (body_text), when given, is read only for an
+   *   open decision's id or a second command it shows and the line doesn't hold (secondLook).
+   * - The id must be a decision here and the option one of its options. The latest reply that answers wins.
    * - A comment starting with `[<cli>]` is the coordinator's own and is never a reply.
-   * A writer's comment that looks like a reply here but answers nothing says why once (one note per comment), with the
-   * open ids to use.
+   * A writer's comment that names the command or an open decision here but answers nothing says why once (one note per
+   * comment), with the open ids to use.
    */
   private async commentAnswer(n: number, q: EventPayload<'decision.asked'>, writers: Set<string>, _cmd: RegExp): Promise<{ by: string; body: string; answer: string; note: string; role: 'owner' | 'writer' } | null> {
     const comments = await this.d.backlog.comments(n);
     const asked = this.d.log.read(0, ['decision.asked']).map((e) => e.payload as EventPayload<'decision.asked'>).filter((p) => p.issue === n);
     const answered = new Set(this.d.log.read(0, ['decision.answered']).map((e) => (e.payload as EventPayload<'decision.answered'>).id));
     const byId = new Map(asked.map((p) => [p.id.toLowerCase(), p]));
-    const optionsHere = new Set(asked.flatMap((p) => p.options));
     const open = asked.filter((p) => !answered.has(p.id)).map((p) => p.id);
     const replies = comments.filter((c) => writers.has(c.author.toLowerCase()) && !c.body.trimStart().startsWith(`[${BRAND.cli}]`));
     const parsed = replies.map((c) => ({ c, r: readReply(c.body, c.text) })); // c.text: the tracker's rendering (GitHub body_text), or null
@@ -271,70 +267,36 @@ export abstract class Decisions extends Recovery {
       const m = /^(#\d+: reply \S+):/.exec((e.payload as { message: string }).message);
       if (m) said.add(m[1]!);
     }
-    // A command is about a decision here when it names an id or its option is one a decision here offers.
+    // The allowlist (#1182): a reply is the comment's one line, `/<cli> <option> <id> [note]`, in letters, digits, spaces
+    // and `. , : ; -` (src/decision-reply.ts). A writer's comment that names the command or an open decision here but
+    // isn't one says why, once; discussion that names neither stays quiet.
     const live = new Set(open.map((x) => x.toLowerCase()));
-    const ours = (l: CommandLine | null): l is CommandLine => l !== null && (l.ids.length > 0 || optionsHere.has(l.option));
     for (const { c, r } of parsed) {
-      const first = ours(r.first) ? r.first : null;
-      const later = r.others.filter(ours);
-      const several = first && first.ids.length > 1 ? first : null;
-      const unknown = first && first.ids.length === 1 && !byId.has(first.ids[0]!) ? first : null;
-      const badOption = first && first.ids.length === 1 && byId.has(first.ids[0]!) && !byId.get(first.ids[0]!)!.options.includes(first.option) ? first : null;
-      // A comment that isn't plain ASCII answers nothing; it says so only when its ASCII text names the command or a
-      // decision here (so discussion in another language stays quiet).
-      const mentions = r.ascii.includes(`/${BRAND.cli.toLowerCase()}`) || idsIn(r.ascii).some((x) => live.has(x)); // R1182an AN5: a live id
-      const kind = r.notAscii
-        ? mentions
-          ? 'reply_not_ascii'
-          : null
-        : !first
-        ? later.length
-          ? 'reply_not_first_line'
-          : null
-        : r.unsafe
-          ? 'reply_unsafe_text'
-          : r.markup
-            ? 'reply_markup'
-          : r.others.length
-            ? 'reply_more_than_one'
-            : several
-              ? 'reply_several_ids'
-              : unknown
-                ? 'reply_unknown_id'
-                : badOption
-                  ? 'reply_unknown_option'
-                  : first.ids.length === 0
-                    ? 'reply_without_id'
-                    : !first.idNext
-                      ? 'reply_id_not_after_option'
-                      : idsElsewhere(r, live).length
-                        ? 'reply_id_elsewhere' // rule (c); a more specific note above wins, the answer is refused either way
-                        : null;
+      const cmd = r.command;
+      const unknown = cmd && !byId.has(cmd.id) ? cmd : null;
+      const badOption = cmd && byId.has(cmd.id) && !byId.get(cmd.id)!.options.includes(cmd.option) ? cmd : null;
+      const looks = r.mentions.command || r.mentions.ids.some((x) => live.has(x));
+      const second = secondLook(r, live);
+      const kind = r.refused ? (looks ? r.refused.kind : null) : unknown ? 'reply_unknown_id' : badOption ? 'reply_unknown_option' : second;
       if (!kind) continue;
       const key = `#${n}: reply ${c.id ?? createHash('sha256').update(`${c.author}\n${c.at ?? ''}\n${c.body}`).digest('hex').slice(0, 12)}`;
       if (said.has(key)) continue;
       said.add(key);
       const why = {
-        reply_not_ascii: r.notAscii?.rendering
-          ? `has a character outside plain ASCII in GitHub's rendering of it (${r.notAscii.code} on line ${r.notAscii.line}${r.notAscii.rendering === 'shortcode' ? ', the line of its first emoji shortcode' : ' of the rendering'}; an emoji shortcode such as :+1: is drawn as an emoji)`
-          : `has a character outside plain ASCII, typed or drawn by an HTML entity or bidi markup (${r.notAscii?.code} on line ${r.notAscii?.line}: an accented letter, an emoji, an invisible character or another symbol; curly quotes and en or em dashes are read as plain ones, though the first line takes no quotes)`,
-        reply_markup: `has ${r.markup?.construct} on line ${r.markup?.line}; a reply holds no backtick, <, >, $, & or ~, no image (![), no task-list item and no issue or PR reference (#123, an issue or PR link) anywhere (each makes GitHub draw code, HTML, a quote, math, an entity, a fence or another issue's title)`,
-        reply_not_first_line: "has its command somewhere other than the start of the comment's first line, where it is not read",
-        reply_unsafe_text: 'has a character a reply can\'t hold on its first line (` < > [ ] ( ) " \' \\ & ! ~ $ %; a curly quote or apostrophe counts as a quote)',
-        reply_id_elsewhere: `names ${idsElsewhere(r, live).slice(0, 3).join(', ')} somewhere other than right after the option on its first line (a reply names an open decision's id once, there: even "approve <id>, as in <id>'s plan" answers nothing)`,
-        reply_id_not_after_option: `names ${first?.ids[0]}, but not right after the option (a reply is \`/${BRAND.cli} <option> <id> [note]\`)`,
-        reply_more_than_one: `has more than one \`/${BRAND.cli}\` command (a reply is one command, on its first line)`,
-        reply_several_ids: `names ${several?.ids.length} decisions (${several?.ids.slice(0, 5).join(', ')})`,
-        reply_unknown_id: `names ${unknown?.ids[0]}, which isn't a decision on this issue`,
-        reply_unknown_option: `answers ${badOption?.ids[0]} with \`${badOption?.option}\`, which isn't one of its options (${badOption ? byId.get(badOption.ids[0]!)!.options.join(', ') : ''})`,
-        reply_without_id: "doesn't name a decision",
+        reply_not_plain: `has a character a reply can't hold (${r.refused?.code} on line ${r.refused?.line}; a reply holds only letters, digits, spaces and . , : ; - after the command, so no quote, apostrophe, link, code, HTML, emoji or other symbol)`,
+        reply_not_one_line: 'has more than one line (a reply is the comment\'s one line and nothing else)',
+        reply_shape: `isn't \`/${BRAND.cli} <option> <id> [note]\` (the option, then the id right after it)`,
+        reply_several_ids: `names an open decision's id in its note (${r.noteIds.join(', ')}; a reply names one decision, once)`,
+        reply_rendering_shows_more: "shows an open decision's id, or a second command, in GitHub's rendering of it that the line doesn't hold",
+        reply_unknown_id: `names ${unknown?.id}, which isn't a decision on this issue`,
+        reply_unknown_option: `answers ${badOption?.id} with \`${badOption?.option}\`, which isn't one of its options (${badOption ? byId.get(badOption.id)!.options.join(', ') : ''})`,
       }[kind];
       const ids = open.length ? `open here: ${open.slice(0, 10).join(', ')}${open.length > 10 ? ` and ${open.length - 10} more` : ''}` : 'none is open here';
-      this.emit('coordinator.error', { instance: this.d.instance, where: 'decision reply', kind, message: `${key}: by ${c.author} ${why}, so it answers nothing; a reply is a comment typed in plain ASCII whose first line is \`/${BRAND.cli} <option> <id>\`, with no other command in it; ${ids}` });
+      this.emit('coordinator.error', { instance: this.d.instance, where: 'decision reply', kind, message: `${key}: by ${c.author} ${why}, so it answers nothing; a reply is a comment of one line, \`/${BRAND.cli} <option> <id>\` and an optional note in letters, digits, spaces and . , : ; -; ${ids}` });
     }
     const id = q.id.toLowerCase();
     const picks = parsed
-      .map(({ c, r }) => ({ c, line: !r.notAscii && !r.markup && r.first && !r.unsafe && idsElsewhere(r, live).length === 0 && r.others.length === 0 && r.first.idNext && r.first.ids.length === 1 && r.first.ids[0] === id && q.options.includes(r.first.option) ? r.first : undefined }))
+      .map(({ c, r }) => ({ c, line: r.command && secondLook(r, live) === null && r.command.id === id && q.options.includes(r.command.option) ? r.command : undefined }))
       .filter((x) => x.line !== undefined);
     for (const r of picks.reverse()) {
       const role = await this.commenterRole(r.c.author);

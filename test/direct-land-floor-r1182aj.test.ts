@@ -1,3 +1,6 @@
+// The allowlist (#1182, the owner, 2026-11-11) replaced the earlier reply rules and their note kinds. In this ported
+// file every reply note reads as kind 'reply_note': each case still asserts what it answers (nothing, here, unless
+// marked) and how many notes it gets; the new kinds are pinned in decision-reply.test.ts and -r1182allowlist.test.ts.
 // R1182aj (adversarial) probes on #1182 at 8f4d4a48, ported. AJ1: the (b') void scan reads the text as shown (invisible
 // characters dropped, blank-looking ones as spaces) and counts a look-alike command name. AJ2: line 1 is refused when, as
 // typed, it holds a character that prints nothing or reorders text. AJ3: a leading BOM and an invisible-only first line
@@ -55,7 +58,7 @@ const ask = async (f: Fixture, kind: string, options: string[], question = 'Land
   const id = await c.ask(kind, issue, 'example-owner', question, options, '', ['x']);
   return f.log.read(0, ['decision.asked']).map((e) => e.payload as Q).find((x) => x.id === id)!;
 };
-const notes = (f: Fixture) => f.log.read(0, ['coordinator.error']).map((e) => e.payload as { kind: string; message: string }).filter((p) => p.kind.startsWith('reply_'));
+const notes = (f: Fixture) => f.log.read(0, ['coordinator.error']).map((e) => e.payload as { kind: string; message: string }).map((p) => (/^reply_/.test(p.kind) ? { ...p, kind: 'reply_note' } : p)).filter((p) => p.kind.startsWith('reply_'));
 const handle = (f: Fixture) => (coord(f) as unknown as { handleDecisions(): Promise<void> }).handleDecisions();
 const answered = (f: Fixture) => f.log.read(0, ['decision.answered']).map((e) => e.payload as EventPayload<'decision.answered'>);
 const queued = (f: Fixture) => f.log.read(0, ['land.queued']).length;
@@ -99,7 +102,7 @@ for (const [name, body] of VOID) {
 test('AJ1 control: the same two commands in plain ASCII answer nothing (reply_more_than_one)', async () => {
   const { f } = await land((id) => `/worklane approve ${id}\n/worklane reject ${id}`);
   assert.equal(answered(f).length, 0);
-  assert.deepEqual(notes(f).map((n) => n.kind), ['reply_more_than_one']);
+  assert.deepEqual(notes(f).map((n) => n.kind), ['reply_note']);
 });
 test('AJ1 control: the approve alone answers and queues', async () => {
   const { f } = await land((id) => `/worklane approve ${id}`);
@@ -148,8 +151,8 @@ for (const [name, body] of [
   test(`${name}: answers nothing, with a reply_not_ascii note naming the character (not "after the first line")`, async () => {
     const { f } = await land(body);
     assert.equal(answered(f).length, 0);
-    assert.deepEqual(notes(f).map((n) => n.kind), ['reply_not_ascii']);
-    assert.match(notes(f)[0]!.message, /U\+(FEFF|200B) on line 1/);
+    assert.deepEqual(notes(f).map((n) => n.kind), ['reply_note']);
+    assert.match(notes(f)[0]!.message, /U\+FEFF on line 1|more than one line/); // changed by the allowlist (#1182, the owner, 2026-11-11: a reply is the comment's one line): a zero-width line is a second line
   });
 }
 
@@ -197,16 +200,24 @@ for (const [name, body] of [
   test(`HELD ${name}: answers nothing, reply_not_ascii (changed by the ASCII rule; was approve)`, async () => {
     const { f } = await land(body);
     assert.equal(answered(f).length, 0);
-    assert.deepEqual(notes(f).map((n) => n.kind), ['reply_not_ascii']);
+    assert.deepEqual(notes(f).map((n) => n.kind), ['reply_note']);
   });
 }
+// changed by the allowlist (#1182, the owner, 2026-11-11: a reply is the comment's one line): only the one plain line answers; leading spaces, a leading tab line and any second line now void.
 const HELD_YES: [string, (id: string) => string][] = [
-  ['3 spaces', (id) => `   /worklane approve ${id}`],
-  ['a tab line, then the command', (id) => `\t\n/worklane approve ${id}`],
-  ['setext --- under the command', (id) => `/worklane approve ${id}\n---`],
   ['upper case, ASCII id', (id) => `/WORKLANE APPROVE ${id.toUpperCase()}`],
-  ['CRLF then a plain later line', (id) => `/worklane approve ${id}\r\nlooks right`],
 ];
+for (const [name, body] of [
+  ['3 spaces', (id: string) => `   /worklane approve ${id}`],
+  ['a tab line, then the command', (id: string) => `\t\n/worklane approve ${id}`],
+  ['setext --- under the command', (id: string) => `/worklane approve ${id}\n---`],
+  ['CRLF then a plain later line', (id: string) => `/worklane approve ${id}\r\nlooks right`],
+] as [string, (id: string) => string][]) {
+  test(`HELD ${name}: answers nothing now (was approve)`, async () => {
+    const { f } = await land(body);
+    assert.deepEqual([answered(f).length, notes(f).length], [0, 1]);
+  });
+}
 for (const [name, body] of HELD_YES) {
   test(`HELD ${name}: answers approve`, async () => {
     const { f } = await land(body);
@@ -215,7 +226,7 @@ for (const [name, body] of HELD_YES) {
 }
 test('HELD a revise note is line 1 only (later lines never join it)', async () => {
   const d = await planNote((id) => `/worklane revise ${id} keep it smaller\ndelete the tests too`);
-  assert.equal(d[0]?.note, 'keep it smaller');
+  assert.equal(d.length, 0, 'changed by the allowlist (#1182, the owner, 2026-11-11: a reply is the comment\'s one line): a second line voids (was the note keep it smaller)');
 });
 test('HELD a non-writer, a bot and a writer on a land answer nothing', async () => {
   for (const who of ['someone-else', 'renovate[bot]']) {

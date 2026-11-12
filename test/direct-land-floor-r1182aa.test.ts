@@ -1,3 +1,6 @@
+// The allowlist (#1182, the owner, 2026-11-11) replaced the earlier reply rules and their note kinds. In this ported
+// file every reply note reads as kind 'reply_note': each case still asserts what it answers (nothing, here, unless
+// marked) and how many notes it gets; the new kinds are pinned in decision-reply.test.ts and -r1182allowlist.test.ts.
 // Since the owner's decision of 2026-11-09 a reply answers a decision only by naming its id: tests that answered with a
 // bare reply name the id now, and tests of bare-reply behaviour expect no answer and one reply_without_id note.
 // R1182aa (final) on #1182: a bare reply never redirected. An edited or deleted question comment is a barrier, never
@@ -85,7 +88,7 @@ const blobOnMain = (f: Fixture, p: string) => {
     return null;
   }
 };
-const errors = (f: Fixture) => f.log.read(0, ['coordinator.error']).map((e) => e.payload as { kind: string; message: string });
+const errors = (f: Fixture) => f.log.read(0, ['coordinator.error']).map((e) => e.payload as { kind: string; message: string }).map((p) => (/^reply_/.test(p.kind) ? { ...p, kind: 'reply_note' } : p));
 /** Edit a comment in place, as GitHub does: same author, same place, same created_at; the body changes, and it reads as edited. */
 async function editComment(f: Fixture, n: number, match: (b: string) => boolean, body: (b: string) => string) {
   const hits = (await f.backlog.comments(n)).filter((c) => match(c.body));
@@ -131,7 +134,7 @@ test('AA1 control: two pending questions; the owner\'s bare approve after questi
   f.backlog.humanComment(1, 'example-owner', '/worklane approve');
   assert.equal(await commentAnswer(f, d1), null);
   assert.equal(await commentAnswer(f, d2), null, 'changed from the review: two questions are open, so a bare reply answers neither');
-  const n = errors(f).filter((e) => e.kind === 'reply_without_id');
+  const n = errors(f).filter((e) => e.kind === 'reply_note');
   assert.ok(n.length >= 1 && n.every((e) => e.message.includes(d1.id) && e.message.includes(d2.id)), JSON.stringify(n));
 });
 
@@ -169,7 +172,7 @@ test('AA3 (held): a question with no decision.posted: a bare reply answers nothi
   nb.humanComment(1, 'example-owner', '/worklane approve');
   assert.equal(await commentAnswer(g, d), null);
   assert.equal(await commentAnswer(g, d), null);
-  assert.equal(errors(g).filter((e) => e.kind === 'reply_without_id').length, 1);
+  assert.equal(errors(g).filter((e) => e.kind === 'reply_note').length, 1);
   nb.humanComment(1, 'example-owner', `/worklane approve ${d.id}`);
   assert.equal((await commentAnswer(g, d))?.answer, 'approve');
 });
@@ -182,7 +185,7 @@ test('AA3b: an older question above a new one: a bare reply answers neither (the
   f.backlog.humanComment(1, 'example-owner', '/worklane approve');
   assert.equal(await commentAnswer(f, old), null);
   assert.equal(await commentAnswer(f, d2), null, 'changed: a bare reply answers nothing (the owner, 2026-11-09)');
-  assert.ok(errors(f).some((e) => e.kind === 'reply_without_id' && e.message.includes(old.id) && e.message.includes(d2.id)));
+  assert.ok(errors(f).some((e) => e.kind === 'reply_note' && e.message.includes(old.id) && e.message.includes(d2.id)));
 });
 
 // ===== AA1e: AA1 through handleDecisions: the land is queued on an approval the owner gave the plan question =====

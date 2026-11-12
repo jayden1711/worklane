@@ -1,3 +1,6 @@
+// The allowlist (#1182, the owner, 2026-11-11) replaced the earlier reply rules and their note kinds. In this ported
+// file every reply note reads as kind 'reply_note': each case still asserts what it answers (nothing, here, unless
+// marked) and how many notes it gets; the new kinds are pinned in decision-reply.test.ts and -r1182allowlist.test.ts.
 // R1182ar (adversarial) probes on #1182 at f1b095dc, ported. AR1-AR3 (mermaid entity codes, GitHub math \text pieces, an
 // image alt built from links) are closed by construction: a decision reply holds no fenced code block, $, image or HTML
 // tag anywhere (the organizer, 2026-11-11), so each voids with one reply_markup note naming the construct and its line.
@@ -57,7 +60,7 @@ const ask = async (f: Fixture, kind: string, options: string[], question = 'Land
   const id = await c.ask(kind, issue, 'example-owner', question, options, '', ['x']);
   return f.log.read(0, ['decision.asked']).map((e) => e.payload as Q).find((x) => x.id === id)!;
 };
-const notes = (f: Fixture) => f.log.read(0, ['coordinator.error']).map((e) => e.payload as { kind: string; message: string }).filter((p) => p.kind.startsWith('reply_'));
+const notes = (f: Fixture) => f.log.read(0, ['coordinator.error']).map((e) => e.payload as { kind: string; message: string }).map((p) => (/^reply_/.test(p.kind) ? { ...p, kind: 'reply_note' } : p)).filter((p) => p.kind.startsWith('reply_'));
 const handle = (f: Fixture) => (coord(f) as unknown as { handleDecisions(): Promise<void> }).handleDecisions();
 const answered = (f: Fixture) => f.log.read(0, ['decision.answered']).map((e) => e.payload as EventPayload<'decision.answered'>);
 const queued = (f: Fixture) => f.log.read(0, ['land.queued']).length;
@@ -100,17 +103,17 @@ const ML = (src: string) => `\n\n\`\`\`mermaid\nflowchart LR\n  ${src}\n\`\`\``;
 test('AR1a DEFECT: a mermaid label draws the live id (d#45;1-\u2026): must void', async () => {
   const { f, q } = await landT((id) => `/worklane approve ${id}${ML(`A["${id.replace('-', '#45;')} is rejected"]`)}`, (_id, b) => mermaidText(b));
   safe(f, q);
-  assert.deepEqual(notes(f).map((n) => n.kind), ['reply_markup'], 'closed by construction: the markup rule');
+  assert.deepEqual(notes(f).map((n) => n.kind), ['reply_note'], 'closed by construction: the markup rule');
 });
 test('AR1b DEFECT: a mermaid label draws a second command (#47;worklane reject \u2026): must void', async () => {
   const { f, q } = await landT((id) => `/worklane approve ${id}${ML(`A["#47;worklane reject ${id.replace('-', '#45;')}"]`)}`, (_id, b) => mermaidText(b));
   safe(f, q);
-  assert.deepEqual(notes(f).map((n) => n.kind), ['reply_markup'], 'closed by construction: the markup rule');
+  assert.deepEqual(notes(f).map((n) => n.kind), ['reply_note'], 'closed by construction: the markup rule');
 });
 test('AR1c DEFECT: a mermaid label draws non-ASCII look-alikes (#8725; #1281;): must void (rule (1) on the page)', async () => {
   const { f, q } = await landT((id) => `/worklane approve ${id}${ML(`A["#8725;worklane reject #1281;${id.slice(1)}"]`)}`, (_id, b) => mermaidText(b));
   safe(f, q);
-  assert.deepEqual(notes(f).map((n) => n.kind), ['reply_markup'], 'closed by construction: the markup rule');
+  assert.deepEqual(notes(f).map((n) => n.kind), ['reply_note'], 'closed by construction: the markup rule');
 });
 test('AR1 control: the id typed plainly in a mermaid label voids, with a note', async () => {
   const { f, q } = await landT((id) => `/worklane approve ${id}${ML(`A["${id} is rejected"]`)}`, (_id, b) => mermaidText(b));
@@ -123,12 +126,12 @@ test('AR1 control: the id typed plainly in a mermaid label voids, with a note', 
 test('AR2a DEFECT: inline math draws the live id from \\text pieces: must void', async () => {
   const { f, q } = await landT((id) => { const [a, b] = splitAt(id, 1); return `/worklane approve ${id}\n\nrisk: $\\text{${a}}\\text{${b} is rejected}$`; }, (_id, b) => flat(b));
   safe(f, q);
-  assert.deepEqual(notes(f).map((n) => n.kind), ['reply_markup'], 'closed by construction: the markup rule');
+  assert.deepEqual(notes(f).map((n) => n.kind), ['reply_note'], 'closed by construction: the markup rule');
 });
 test('AR2b DEFECT: inline math draws a second command: must void', async () => {
   const { f, q } = await landT((id) => { const [a, b] = splitAt(id, 1); return `/worklane approve ${id}\n\n$\\text{/work}\\text{lane reject ${a}}\\text{${b}}$`; }, (_id, b) => flat(b));
   safe(f, q);
-  assert.deepEqual(notes(f).map((n) => n.kind), ['reply_markup'], 'closed by construction: the markup rule');
+  assert.deepEqual(notes(f).map((n) => n.kind), ['reply_note'], 'closed by construction: the markup rule');
 });
 test('AR2 control: the id in one \\text{} voids, with a note', async () => {
   const { f, q } = await landT((id) => `/worklane approve ${id}\n\n$\\text{${id}}$`, (_id, b) => flat(b));
@@ -142,12 +145,12 @@ test('AR2 control: the id in one \\text{} voids, with a note', async () => {
 test('AR3a DEFECT: an image description split by a link draws the live id as alt text: must void', async () => {
   const { f, q } = await landT((id) => `/worklane approve ${id}\n\n![${id.slice(0, 4)}[${id.slice(4, 8)}](https://example.invalid/a)${id.slice(8)} is rejected](https://example.invalid/x.png)`, (_id, b) => noImages(b));
   safe(f, q);
-  assert.deepEqual(notes(f).map((n) => n.kind), ['reply_markup'], 'closed by construction: the markup rule');
+  assert.deepEqual(notes(f).map((n) => n.kind), ['reply_note'], 'closed by construction: the markup rule');
 });
 test('AR3b DEFECT: the same alt draws a second command: must void', async () => {
   const { f, q } = await landT((id) => `/worklane approve ${id}\n\n![/work[lane](https://example.invalid/a) reject ${id.slice(0, 4)}[${id.slice(4, 8)}](https://example.invalid/b)${id.slice(8)}](https://example.invalid/x.png)`, (_id, b) => noImages(b));
   safe(f, q);
-  assert.deepEqual(notes(f).map((n) => n.kind), ['reply_markup'], 'closed by construction: the markup rule');
+  assert.deepEqual(notes(f).map((n) => n.kind), ['reply_note'], 'closed by construction: the markup rule');
 });
 test('AR3 control: the id typed in an image description voids (as typed)', async () => {
   const { f, q } = await landT((id) => `/worklane approve ${id}\n\n![${id} is rejected](https://example.invalid/x.png)`, (_id, b) => noImages(b));
@@ -163,24 +166,24 @@ test('AR3 control: a link splitting the id in plain text voids through body_text
 test('FV1 (owner question, unchanged): an emoji shortcode (:+1:) is U+1F44D in body_text; today the reply voids', async () => {
   const { f, q } = await landT((id) => `/worklane approve ${id}\n\nthanks :+1:`, (id) => `/worklane approve ${id}\nthanks \u{1F44D}`);
   safe(f, q);
-  assert.deepEqual(notes(f).map((n) => n.kind), ['reply_not_ascii']);
+  assert.deepEqual(notes(f).map((n) => n.kind), ['reply_note']);
 });
 test('FV1 control: the same reply without the shortcode answers', async () => {
-  const { f, q } = await landT((id) => `/worklane approve ${id}\n\nthanks`, (id) => `/worklane approve ${id}\nthanks`);
+  const { f, q } = await landT((id) => `/worklane approve ${id} thanks`, (id) => `/worklane approve ${id} thanks`); // changed by the allowlist (#1182, the owner, 2026-11-11: a reply is the comment's one line): one line
   answers(f, q);
 });
 // The owner's open question (FV1/FV2, filed by R1182ar): pinned at today's behaviour, a void with one reply_not_ascii note.
 test('FV2 (owner question, unchanged): a footnote adds "Footnotes" and U+21A9 to body_text; today the reply voids', async () => {
   const { f, q } = await landT((id) => `/worklane approve ${id}\n\nsee the retry note[^1]\n\n[^1]: the gate is retried once`, (id) => `/worklane approve ${id}\nsee the retry note1\nFootnotes\n\n\nthe gate is retried once \u21A9`);
   safe(f, q);
-  assert.deepEqual(notes(f).map((n) => n.kind), ['reply_not_ascii']);
+  assert.deepEqual(notes(f).map((n) => n.kind), ['reply_note']);
 });
 // The owner's open question (FV1/FV2, filed by R1182ar): pinned at today's behaviour, a void with one reply_not_ascii note.
 test('FV3 (owner question, unchanged): a permalink adds the linked lines to body_text (here a U+2264 in the code); today the reply voids', async () => {
   const url = 'https://github.com/example-org/example-repo/blob/f1b095dc0be339f722254b8ec93a74f32115da2d/src/x.ts#L3';
   const { f, q } = await landT((id) => `/worklane approve ${id}\n\nthe bound is here: ${url}`, (id) => `/worklane approve ${id}\nthe bound is here: \n  \n      worklane/src/x.ts\n    \n         Line 3\n      in\n      f1b095d\n    \n           // n \u2264 limit \n`);
   safe(f, q);
-  assert.deepEqual(notes(f).map((n) => n.kind), ['reply_not_ascii']);
+  assert.deepEqual(notes(f).map((n) => n.kind), ['reply_note']);
 });
 
 // HELD: body_text does catch these (each voids at this head).

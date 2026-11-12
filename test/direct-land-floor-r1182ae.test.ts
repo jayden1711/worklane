@@ -1,3 +1,6 @@
+// The allowlist (#1182, the owner, 2026-11-11) replaced the earlier reply rules and their note kinds. In this ported
+// file every reply note reads as kind 'reply_note': each case still asserts what it answers (nothing, here, unless
+// marked) and how many notes it gets; the new kinds are pinned in decision-reply.test.ts and -r1182allowlist.test.ts.
 // R1182ae (final) on #1182 at 386b40e8, ported. AE1: the plan question's revise instruction names the decision's id
 // (src/plan-mode.ts DECISION_ID, put in by ask()), and so does the dashboard's revise text. AE2: a fence closes only on
 // spaces or tabs after it; a fence inside a list item opens and closes there; a <style> block is never read. AE3: an id
@@ -85,7 +88,7 @@ const blobOnMain = (f: Fixture, p: string) => {
     return null;
   }
 };
-const errors = (f: Fixture) => f.log.read(0, ['coordinator.error']).map((e) => e.payload as { kind: string; message: string });
+const errors = (f: Fixture) => f.log.read(0, ['coordinator.error']).map((e) => e.payload as { kind: string; message: string }).map((p) => (/^reply_/.test(p.kind) ? { ...p, kind: 'reply_note' } : p));
 /** Edit a comment in place, as GitHub does: same author, same place, same created_at; the body changes, and it reads as edited. */
 async function editComment(f: Fixture, n: number, match: (b: string) => boolean, body: (b: string) => string) {
   const hits = (await f.backlog.comments(n)).filter((c) => match(c.body));
@@ -145,7 +148,7 @@ test('AE1 (stale instruction): the plan question must not tell the owner to repl
   const body = (await f.backlog.comments(1)).find((c) => c.body.includes(plan.id))!.body;
   f.backlog.humanComment(1, 'example-owner', '/worklane revise split it in two'); // exactly as the receipt line says
   const got = await commentAnswer(f, plan);
-  const notes = errors(f).filter((e) => e.kind === 'reply_without_id').length;
+  const notes = errors(f).filter((e) => e.kind === 'reply_note').length;
   assert.ok(!/reply `\/worklane revise <note>`/.test(body), `STALE INSTRUCTION: the question says "reply \`/worklane revise <note>\`" (no id); following it gives answer=${JSON.stringify(got)} and ${notes} reply_without_id note(s). Question body:\n${body}`);
 });
 
@@ -205,7 +208,7 @@ test('AE6 (held): `[worklane]` after leading whitespace is still skipped; `[Work
   f.backlog.humanComment(1, 'example-owner', `[Worklane] mine\n/worklane reject ${land.id}`);
   // changed by (b) (the owner, 2026-11-10: only a comment's first line is read, in plain text; a second command voids it): the reject is line 2, so it answers nothing (was 'reject'); the comment is still read (its note shows it).
   assert.equal(await commentAnswer(f, land), null);
-  assert.deepEqual(errors(f).filter((e) => /^reply_/.test(e.kind)).map((e) => e.kind), ['reply_not_first_line']);
+  assert.deepEqual(errors(f).filter((e) => /^reply_/.test(e.kind)).map((e) => e.kind), ['reply_note']);
 });
 
 test('AE7 (held): two commands in one comment answer nothing, one note each (changed by (b); was: the last named line wins)', async () => {
@@ -219,7 +222,7 @@ test('AE7 (held): two commands in one comment answer nothing, one note each (cha
   assert.equal(await commentAnswer(f, land), null);
   assert.equal(await commentAnswer(f, other), null);
   const notes = errors(f).filter((e) => /^reply_/.test(e.kind));
-  assert.deepEqual(notes.map((n) => n.kind), ['reply_more_than_one', 'reply_more_than_one'], JSON.stringify(notes));
+  assert.deepEqual(notes.map((n) => n.kind), ['reply_note', 'reply_note'], JSON.stringify(notes));
 });
 
 test('AE1 (dashboard): the plan revise text names the id, and the question names this decision\'s', async () => {
@@ -228,7 +231,7 @@ test('AE1 (dashboard): the plan revise text names the id, and the question names
   const f = unit();
   const plan = await askPlan(f);
   const body = (await f.backlog.comments(1)).find((c) => c.body.includes(plan.id))!.body;
-  assert.ok(body.includes(`start a comment with \`/worklane revise ${plan.id} <note>\`; the note is the rest of that line`), body);
+  assert.ok(body.includes(`start a comment with \`/worklane revise ${plan.id} <note>\`; a comment of that one line`), body); // changed by the allowlist (#1182, the owner, 2026-11-11: a reply is the comment's one line)
   assert.ok(plan.receipts.some((r) => r.includes(`revise ${plan.id} <note>`)), 'the recorded receipt (the dashboard) too');
 });
 
@@ -237,5 +240,5 @@ test('AE3b (liveness): a command in a list item answers nothing, with one note (
   const land = await ask(f);
   f.backlog.humanComment(1, 'example-owner', `- /worklane approve ${land.id}`);
   assert.equal(await commentAnswer(f, land), null);
-  assert.deepEqual(errors(f).filter((e) => /^reply_/.test(e.kind)).map((e) => e.kind), ['reply_not_first_line']);
+  assert.deepEqual(errors(f).filter((e) => /^reply_/.test(e.kind)).map((e) => e.kind), ['reply_note']);
 });

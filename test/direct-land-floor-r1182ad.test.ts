@@ -1,3 +1,6 @@
+// The allowlist (#1182, the owner, 2026-11-11) replaced the earlier reply rules and their note kinds. In this ported
+// file every reply note reads as kind 'reply_note': each case still asserts what it answers (nothing, here, unless
+// marked) and how many notes it gets; the new kinds are pinned in decision-reply.test.ts and -r1182allowlist.test.ts.
 // R1182ad (adversarial) probes on #1182 @04a6f66e, ported. The owner's decision (2026-11-09): a reply answers only by
 // naming the decision's id, so a bare reply answers nothing and records one reply_without_id note; the tests that used a
 // bare reply to answer now name the id, and AD7/AD7b (GraphQL) went with the GraphQL read.
@@ -71,7 +74,7 @@ const ask = async (f: Fixture, kind: string, options: string[], question = 'Land
   return f.log.read(0, ['decision.asked']).map((e) => e.payload as Q).find((x) => x.id === id)!;
 };
 const lastAsked = (f: Fixture) => f.log.read(0, ['decision.asked']).map((e) => e.payload as Q).at(-1)!;
-const notes = (f: Fixture) => f.log.read(0, ['coordinator.error']).map((e) => e.payload as { kind: string; message: string });
+const notes = (f: Fixture) => f.log.read(0, ['coordinator.error']).map((e) => e.payload as { kind: string; message: string }).map((p) => (/^reply_/.test(p.kind) ? { ...p, kind: 'reply_note' } : p));
 const handle = (f: Fixture) => (coord(f) as unknown as { handleDecisions(): Promise<void> }).handleDecisions();
 const answered = (f: Fixture) => f.log.read(0, ['decision.answered']).map((e) => e.payload as EventPayload<'decision.answered'>);
 const queued = (f: Fixture) => f.log.read(0, ['land.queued']).length;
@@ -103,7 +106,7 @@ test('AD1 control 2: the lost-response question alone: a bare reply answers noth
   f.backlog.humanComment(1, 'example-owner', '/worklane approve');
   await handle(f);
   assert.equal(answered(f).length, 0);
-  assert.ok(notes(f).some((n) => n.kind === 'reply_without_id' && n.message.includes(d1.id)));
+  assert.ok(notes(f).some((n) => n.kind === 'reply_note' && n.message.includes(d1.id)));
 });
 
 test('AD1 (race, end to end): the worker question was posted but its POST response was lost; the land question is posted while the owner types; the land must not queue', async () => {
@@ -143,7 +146,7 @@ test('AD2 control: two lines, one id each, answer neither (one note); one commen
   // changed by (b) (the owner, 2026-11-10: only a comment's first line is read, in plain text; a second command voids it).
   assert.equal(await commentAnswer(f, d1), null);
   assert.equal(await commentAnswer(f, d2), null);
-  assert.deepEqual(notes(f).map((n) => n.kind), ['reply_more_than_one']);
+  assert.deepEqual(notes(f).map((n) => n.kind), ['reply_note']);
   f.backlog.humanComment(1, 'example-owner', `/worklane approve ${d1.id}`);
   f.backlog.humanComment(1, 'example-owner', `/worklane approve ${d2.id}`);
   assert.equal((await commentAnswer(f, d1))?.answer, 'approve');
@@ -183,7 +186,7 @@ test('AD3 control: `/worklane approve d-2-…` (a decision of issue 2) on issue 
   const other = await ask(f, 'land', LAND, 'Land #2?', ['x'], 2);
   f.backlog.humanComment(1, 'example-owner', `/worklane approve ${other.id}`);
   assert.equal(await commentAnswer(f, land), null);
-  assert.ok(notes(f).some((n) => n.kind === 'reply_unknown_id'));
+  assert.ok(notes(f).some((n) => n.kind === 'reply_note'));
 });
 
 for (const [name, fmt] of [
@@ -211,7 +214,7 @@ test('AD4 control: a ``` fence around a named approve, then a reject: nothing, o
   f.backlog.humanComment(1, 'example-owner', `The bot suggests\n\n\`\`\`\n/worklane approve ${d1.id}\n\`\`\`\n\n/worklane reject ${d1.id}`);
   // changed by (b) (the owner, 2026-11-10: only a comment's first line is read, in plain text; a second command voids it).
   assert.equal(await commentAnswer(f, d1), null);
-  assert.deepEqual(notes(f).map((n) => n.kind), ['reply_not_first_line']);
+  assert.deepEqual(notes(f).map((n) => n.kind), ['reply_note']);
 });
 
 for (const [name, body] of [
@@ -269,7 +272,7 @@ test('AD6 control: a writer comment with one unknown id: one note', async () => 
   const d1 = await ask(f, 'land', LAND);
   f.backlog.humanComment(1, 'example-collaborator', '/worklane x d-9-000000');
   await commentAnswer(f, d1);
-  assert.equal(notes(f).filter((n) => n.kind === 'reply_unknown_id').length, 1);
+  assert.equal(notes(f).filter((n) => n.kind === 'reply_note').length, 1);
 });
 
 test('AD6 (flood): one writer comment (< 65536 chars) of unknown-id lines: notes stay bounded and a pass stays fast', async () => {
@@ -285,7 +288,7 @@ test('AD6 (flood): one writer comment (< 65536 chars) of unknown-id lines: notes
   const t1 = performance.now();
   await commentAnswer(f, d1);
   const second = Math.round(performance.now() - t1);
-  const n = notes(f).filter((x) => x.kind === 'reply_unknown_id').length;
+  const n = notes(f).filter((x) => x.kind === 'reply_note').length;
   console.log(`# AD6: ${N} lines -> ${n} notes; first pass ${first} ms, second pass ${second} ms`);
   assert.ok(n <= 10, `FLOOD: ${n} reply_unknown_id notes from one writer comment (first pass ${first} ms, second ${second} ms)`);
 });
@@ -300,7 +303,7 @@ test('AD6b (flood hides the notice): a writer comment of 60 unknown-id lines pus
   f.backlog.humanComment(1, 'example-owner', '/worklane approve');
   const shown = () => {
     const p = project(f.log.read(0)) as unknown as { errors: { kind: string; message: string }[]; earlierErrors: { kind: string; message: string }[] };
-    return [...p.errors, ...p.earlierErrors].filter((e) => e.kind === 'reply_without_id').length;
+    return [...p.errors, ...p.earlierErrors].filter((e) => /^reply_/.test(e.kind)).length; // changed by the allowlist (#1182, the owner, 2026-11-11: a reply is the comment's one line)
   };
   // control: with no flood the note is shown
   assert.equal(await commentAnswer(f, d2), null);
@@ -321,7 +324,7 @@ test("IDS1: the decision's own id in capitals answers it; with a Unicode dash or
   // changed by the ASCII rule (the owner, 2026-11-10: a reply is plain ASCII; curly quotes and en or em dashes read as ' " -): both answered before (approve, reject); now neither, one note each naming the character.
   assert.equal(await commentAnswer(f, d1), null, 'capitals and no-break hyphens');
   assert.equal(await commentAnswer(f, d2), null, 'full-width letters and digits');
-  assert.deepEqual(notes(f).filter((n) => n.kind.startsWith('reply_')).map((n) => n.kind), ['reply_not_ascii', 'reply_not_ascii']);
+  assert.deepEqual(notes(f).filter((n) => n.kind.startsWith('reply_')).map((n) => n.kind), ['reply_note', 'reply_note']);
   assert.match(notes(f)[0]!.message, /U\+2011 on line 1/);
   f.backlog.humanComment(1, 'example-owner', `/worklane approve ${d1.id.toUpperCase()}`);
   assert.equal((await commentAnswer(f, d1))?.answer, 'approve', 'capitals alone');
@@ -333,7 +336,7 @@ test("IDS2: a line naming a decision with an option it doesn't offer answers not
   f.backlog.humanComment(1, 'example-owner', `/worklane aprove ${d1.id}`);
   assert.equal(await commentAnswer(f, d1), null);
   assert.equal(await commentAnswer(f, d1), null);
-  const n = notes(f).filter((x) => x.kind === 'reply_unknown_option');
+  const n = notes(f).filter((x) => x.kind === 'reply_note');
   assert.equal(n.length, 1, JSON.stringify(notes(f)));
   assert.match(n[0]!.message, /aprove.*approve, reject/);
 });
@@ -357,5 +360,5 @@ test('IDS4: one note per reply, whatever its lines; a second pass writes none (R
   await commentAnswer(f, d1);
   const n = notes(f).filter((x) => x.kind.startsWith('reply_'));
   assert.equal(n.length, 1, JSON.stringify(n));
-  assert.equal(n[0]!.kind, 'reply_more_than_one', 'the gravest problem is the one named'); // changed by (b) (the owner, 2026-11-10: only a comment's first line is read, in plain text; a second command voids it): four commands (was reply_several_ids)
+  assert.equal(n[0]!.kind, 'reply_note', 'the gravest problem is the one named'); // changed by (b) (the owner, 2026-11-10: only a comment's first line is read, in plain text; a second command voids it): four commands (was reply_several_ids)
 });

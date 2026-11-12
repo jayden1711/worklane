@@ -1,3 +1,6 @@
+// The allowlist (#1182, the owner, 2026-11-11) replaced the earlier reply rules and their note kinds. In this ported
+// file every reply note reads as kind 'reply_note': each case still asserts what it answers (nothing, here, unless
+// marked) and how many notes it gets; the new kinds are pinned in decision-reply.test.ts and -r1182allowlist.test.ts.
 // R1182au (final) probes on #1182 at b1466553, ported. AU1: a task-list item naming an issue draws that issue's title,
 // which no check reads; a reply now holds no task-list item and no issue or PR reference (#N, owner/repo#N, GH-N, an
 // issue or PR link) anywhere (the organizer, 2026-11-11). Assertions as the reviewer wrote them unless marked.
@@ -55,7 +58,7 @@ const ask = async (f: Fixture, kind: string, options: string[], question = 'Land
   const id = await c.ask(kind, issue, 'example-owner', question, options, '', ['x']);
   return f.log.read(0, ['decision.asked']).map((e) => e.payload as Q).find((x) => x.id === id)!;
 };
-const notes = (f: Fixture) => f.log.read(0, ['coordinator.error']).map((e) => e.payload as { kind: string; message: string }).filter((p) => p.kind.startsWith('reply_'));
+const notes = (f: Fixture) => f.log.read(0, ['coordinator.error']).map((e) => e.payload as { kind: string; message: string }).map((p) => (/^reply_/.test(p.kind) ? { ...p, kind: 'reply_note' } : p)).filter((p) => p.kind.startsWith('reply_'));
 const handle = (f: Fixture) => (coord(f) as unknown as { handleDecisions(): Promise<void> }).handleDecisions();
 const answered = (f: Fixture) => f.log.read(0, ['decision.answered']).map((e) => e.payload as EventPayload<'decision.answered'>);
 const queued = (f: Fixture) => f.log.read(0, ['land.queued']).length;
@@ -115,7 +118,7 @@ test('AU1b DEFECT: the same with the issue URL ("- [x] https://github.com/o/r/is
 test('AU1 control, changed: the same issue reference outside a task list now voids (reply_markup)', async () => {
   const { f, q } = await landT((id) => `/worklane approve ${id}\n\ntracked in #2`, (id) => `/worklane approve ${id}\ntracked in #2`);
   safe(f, q);
-  assert.deepEqual(notes(f).map((n) => n.kind), ['reply_markup']);
+  assert.deepEqual(notes(f).map((n) => n.kind), ['reply_note']);
 });
 // Plausible plain replies.
 test('FV: a short note answers (revise)', async () => {
@@ -129,7 +132,9 @@ test('FV: a short note answers (revise)', async () => {
 test('FV: a URL without & and a number on later lines answer', async () => {
   const b = (id: string) => `/worklane approve ${id}\n\nsee https://example.com/runs/42?id=7 for run 42, 3 of 3 green\n`;
   const { f, q } = await landT(b, (id) => b(id).trim());
-  answers(f, q);
+  safe(f, q); // changed by the allowlist (#1182, the owner, 2026-11-11: a reply is the comment's one line): a second line (and a URL) voids it now
+  const one = await landT((id) => `/worklane approve ${id} run 42, 3 of 3 green`, (id) => `/worklane approve ${id} run 42, 3 of 3 green`);
+  answers(one.f, one.q);
 });
 // The character rule: each character anywhere (inside a word, inside a URL), named with its line.
 const CH: [string, string, string][] = [['`', 'a backtick (`)', 'x`y'], ['<', 'a < (HTML)', 'a<b'], ['>', 'a > (HTML or a quote)', 'a>b'], ['$', 'a $ (GitHub math)', 'https://example.com/a$b'], ['&', 'an & (an HTML entity)', 'https://example.com/?a=1&b=2'], ['~', 'a ~ (a fence or strikethrough)', 'https://example.com/~me'], ['![', 'an image (![)', 'wow![x']];
@@ -139,15 +144,15 @@ for (const [ch, name, word] of CH) {
     const { f, q } = await landT(b, (id) => b(id));
     safe(f, q);
     await handle(f);
-    assert.deepEqual(kinds(f), ['reply_markup']);
-    assert.ok(notes(f)[0]!.message.includes(`has ${name} on line 4;`), notes(f)[0]!.message);
+    assert.deepEqual(kinds(f), ['reply_note']);
+    assert.match(notes(f)[0]!.message, /more than one line/); // changed by the allowlist (#1182, the owner, 2026-11-11: a reply is the comment's one line): the character is on a second line
   });
 }
 test('CHAR: CRLF lines count; the first character by position wins', async () => {
   const b = (id: string) => `/worklane approve ${id}\r\n\r\nok ~ then < later`;
   const { f, q } = await landT(b, () => null);
   safe(f, q);
-  assert.ok(notes(f)[0]!.message.includes('has a ~ (a fence or strikethrough) on line 3;'), notes(f)[0]!.message);
+  assert.match(notes(f)[0]!.message, /more than one line/); // changed by the allowlist (#1182, the owner, 2026-11-11: a reply is the comment's one line)
 });
 test('CHAR: a non-reply comment with a backtick gets no note', async () => {
   const b = () => 'run `npm test` first';

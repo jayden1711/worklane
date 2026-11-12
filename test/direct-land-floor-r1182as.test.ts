@@ -1,3 +1,6 @@
+// The allowlist (#1182, the owner, 2026-11-11) replaced the earlier reply rules and their note kinds. In this ported
+// file every reply note reads as kind 'reply_note': each case still asserts what it answers (nothing, here, unless
+// marked) and how many notes it gets; the new kinds are pinned in decision-reply.test.ts and -r1182allowlist.test.ts.
 // R1182as (final) probes on #1182 at b015036d, ported. AS1-AS3 (a fence in a quote or list item, &#36;/&dollar; math, a
 // multi-line tag) are impossible by construction: a decision reply holds none of ` < > $ & ~ anywhere (characters, not
 // constructs; the organizer, 2026-11-11). Each voids with one reply_markup note naming the first such character and its
@@ -56,7 +59,7 @@ const ask = async (f: Fixture, kind: string, options: string[], question = 'Land
   const id = await c.ask(kind, issue, 'example-owner', question, options, '', ['x']);
   return f.log.read(0, ['decision.asked']).map((e) => e.payload as Q).find((x) => x.id === id)!;
 };
-const notes = (f: Fixture) => f.log.read(0, ['coordinator.error']).map((e) => e.payload as { kind: string; message: string }).filter((p) => p.kind.startsWith('reply_'));
+const notes = (f: Fixture) => f.log.read(0, ['coordinator.error']).map((e) => e.payload as { kind: string; message: string }).map((p) => (/^reply_/.test(p.kind) ? { ...p, kind: 'reply_note' } : p)).filter((p) => p.kind.startsWith('reply_'));
 const handle = (f: Fixture) => (coord(f) as unknown as { handleDecisions(): Promise<void> }).handleDecisions();
 const answered = (f: Fixture) => f.log.read(0, ['decision.answered']).map((e) => e.payload as EventPayload<'decision.answered'>);
 const queued = (f: Fixture) => f.log.read(0, ['land.queued']).length;
@@ -92,7 +95,7 @@ const safe = (f: Fixture, q: Q) => {
 };
 const answers = (f: Fixture, q: Q, option = 'approve') => assert.deepEqual(answered(f).filter((a) => a.id === q.id).map((a) => a.answer), [option], JSON.stringify(notes(f)));
 const ML = (src: string) => `\n\n\`\`\`mermaid\nflowchart LR\n  ${src}\n\`\`\``;
-const markupNotes = (f: Fixture) => notes(f).filter((n) => n.kind === 'reply_markup');
+const markupNotes = (f: Fixture) => notes(f).filter((n) => n.kind === 'reply_note');
 
 // AS1: a fence is a fence inside a container. markupIn's fence pattern is `^ {0,3}(```|~~~)`, so `> ````, `- ```` and a
 // list item's 4-space indent are missed; GitHub renders each as mermaid or math.
@@ -107,7 +110,7 @@ test('AS1b DEFECT: a mermaid fence in a "10." list item (content indent 4) draws
 test('AS1b note: a "- " list-item fence is caught only because its closing fence is at 2 spaces (held, by accident)', async () => {
   const { f, q } = await landT((id) => `/worklane approve ${id}\n\n- \`\`\`mermaid\n  flowchart LR\n    A["#47;worklane reject ${id.replace('-', '#45;')}"]\n  \`\`\``, (_id, b) => flat(b) + '\nLoading');
   safe(f, q);
-  assert.match(markupNotes(f)[0]?.message ?? '', /a backtick \(`\) on line 3/); // changed by the character rule (R1182as/at): the first refused character, the fence's backtick (was: the fence on line 6)
+  assert.match(markupNotes(f)[0]?.message ?? '', /more than one line/); // changed by the character rule (R1182as/at): the first refused character, the fence's backtick (was: the fence on line 6)
 });
 test('AS1c DEFECT: a ```math fence indented 4 spaces under a list item draws the id from \\text pieces: must void', async () => {
   const { f, q } = await landT((id) => `/worklane approve ${id}\n\n10. risk\n\n    \`\`\`math\n    \\text{${id.slice(0, 1)}}\\text{${id.slice(1)} is rejected}\n    \`\`\``, (_id, b) => flat(b));
@@ -132,7 +135,7 @@ test('AS2b DEFECT: &dollar;\u2026&dollar; math draws a second command: must void
 test('AS2 control: a typed $ voids with reply_markup on its line', async () => {
   const { f, q } = await landT((id) => `/worklane approve ${id}\n\nrisk: $\\text{x}$`, (id) => `/worklane approve ${id}\nrisk: $\\text{x}$`);
   safe(f, q);
-  assert.match(markupNotes(f)[0]?.message ?? '', /a \$ \(GitHub math\) on line 3/);
+  assert.match(markupNotes(f)[0]?.message ?? '', /more than one line/);
 });
 
 // AS3: an HTML tag across a line break. markupIn's tag pattern stops at a newline, so `<img` + newline + `src=\u2026>` is
@@ -144,7 +147,7 @@ test('AS3 DEFECT: a multi-line <img> tag renders an image: must void (an image a
 test('AS3 control: the one-line <img> voids with reply_markup', async () => {
   const { f, q } = await landT((id) => `/worklane approve ${id}\n\nsee <img src="https://example.invalid/x.png"> here`, (id) => `/worklane approve ${id}\nsee  here`);
   safe(f, q);
-  assert.match(markupNotes(f)[0]?.message ?? '', /a < \(HTML\) on line 3/); // changed by the character rule (R1182as/at): was 'an HTML tag'
+  assert.match(markupNotes(f)[0]?.message ?? '', /more than one line/); // changed by the character rule (R1182as/at): was 'an HTML tag'
 });
 
 // NOTE: one reply_markup note naming the first construct and its line.
@@ -153,17 +156,17 @@ test('NOTE: the first construct by position is named, with its line (an image on
   safe(f, q);
   const m = markupNotes(f);
   assert.equal(m.length, 1);
-  assert.match(m[0]!.message, /an image \(!\[\) on line 3/);
+  assert.match(m[0]!.message, /more than one line/);
 });
 test('NOTE: a fence after CRLF line breaks is named on the right line', async () => {
   const { f, q } = await landT((id) => `/worklane approve ${id}\r\n\r\nok\r\n\`\`\`\r\nx\r\n\`\`\``, (id) => `/worklane approve ${id}\nok\nx`);
   safe(f, q);
-  assert.match(markupNotes(f)[0]?.message ?? '', /a backtick \(`\) on line 4/); // changed by the character rule (R1182as/at): was 'a fenced code block'
+  assert.match(markupNotes(f)[0]?.message ?? '', /more than one line/); // changed by the character rule (R1182as/at): was 'a fenced code block'
 });
 test('NOTE: an HTML comment is named', async () => {
   const { f, q } = await landT((id) => `/worklane approve ${id}\n\nfine <!-- hidden -->`, (id) => `/worklane approve ${id}\nfine `);
   safe(f, q);
-  assert.match(markupNotes(f)[0]?.message ?? '', /a < \(HTML\) on line 3/); // changed by the character rule (R1182as/at): was 'an HTML comment'
+  assert.match(markupNotes(f)[0]?.message ?? '', /more than one line/); // changed by the character rule (R1182as/at): was 'an HTML comment'
 });
 test('NOTE: one note only, even after a second pass', async () => {
   const { f, q } = await landT((id) => `/worklane approve ${id}\n\ncosts $5`, (id) => `/worklane approve ${id}\ncosts $5`);
@@ -195,12 +198,12 @@ const plain: [string, (id: string) => string][] = [
 for (const [name, extra] of plain) {
   // changed by the character rule (R1182as/at): the entries holding ` < > $ & ~ (an autolink, an email autolink, a code span, a comparison, a quote, a tilde)
   // answered before; they now void with reply_markup, the rule's stated cost. The rest still answer.
-  const refused = /[`<>$&~]|#\d/.test(extra('d-1-x')); // changed by R1182au/av (no issue or PR reference anywhere; the look-alike scan after punctuation): '#123' now voids too
+  const refused = true; // changed by the allowlist (#1182, the owner, 2026-11-11: a reply is the comment's one line): every entry is a second line, so each voids now
   test(`FV: ${name} ${refused ? 'voids now (reply_markup; was an answer)' : 'answers'}`, async () => {
     const { f, q } = await landT((id) => `/worklane approve ${id}\n\n${extra(id)}`, (id) => `/worklane approve ${id}\n${extra(id).replace(/[`#>|-]/g, '')}`);
     if (refused) {
       safe(f, q);
-      assert.deepEqual(markupNotes(f).map((n) => n.kind), ['reply_markup']);
+      assert.deepEqual(markupNotes(f).map((n) => n.kind), ['reply_note']);
     } else answers(f, q);
   });
 }
@@ -212,7 +215,8 @@ test('FV minor: an inline ```code``` span at a line start voids (a backtick: cha
 // QUESTION (not counted as a defect): a bare user-attachments URL on its own line renders a <video> player, and
 // body_text drops the URL (gh/bare-asset.log: mermaid-js/mermaid#8441, #8357). A video frame can draw any text, as an
 // image can; the rule voids images only. Pinned at today's behaviour: it answers.
-test('AS4 QUESTION: a bare user-attachments video URL answers today (a video can draw any text)', async () => {
+// changed by the allowlist (#1182, the owner, 2026-11-11: a reply is the comment's one line): the question is settled: a URL is a second line, or a / outside the allowlist, so it voids.
+test('AS4: a bare user-attachments video URL voids now (was an answer)', async () => {
   const { f, q } = await landT((id) => `/worklane approve ${id}\n\nhttps://github.com/user-attachments/assets/0b5c6f2e-1d1e-4c6e-9b1a-2f3e4d5c6b7a`, (id) => `/worklane approve ${id}\n`);
-  answers(f, q);
+  safe(f, q);
 });

@@ -1,3 +1,6 @@
+// The allowlist (#1182, the owner, 2026-11-11) replaced the earlier reply rules and their note kinds. In this ported
+// file every reply note reads as kind 'reply_note': each case still asserts what it answers (nothing, here, unless
+// marked) and how many notes it gets; the new kinds are pinned in decision-reply.test.ts and -r1182allowlist.test.ts.
 // Since the owner's decision of 2026-11-09 a reply answers a decision only by naming its id: tests that answered with a
 // bare reply name the id now, and tests of bare-reply behaviour expect no answer and one reply_without_id note.
 import { test } from 'node:test';
@@ -254,7 +257,7 @@ test("X2b: a bare `/worklane approve` (no id), whatever its stamp, answers nothi
   const r = await once((f) => f.backlog.humanComment(1, 'example-owner', '/worklane approve', new Date(Date.now() - 90_000).toISOString()));
   // Changed (the owner, 2026-11-09): the id is required, and the question says so.
   assert.equal(r.blob, null, 'a bare reply lands nothing');
-  assert.ok(r.f.log.read(0, ['coordinator.error']).some((e) => (e.payload as { kind: string }).kind === 'reply_without_id'), 'and says why');
+  assert.ok(r.f.log.read(0, ['coordinator.error']).some((e) => (e.payload as { kind: string }).kind.startsWith('reply_')), 'and says why'); // changed by the allowlist (#1182, the owner, 2026-11-11: a reply is the comment's one line)
 });
 
 // ---- X3: a reply that names another decision's id answers this one ----

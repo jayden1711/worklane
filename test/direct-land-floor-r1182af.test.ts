@@ -1,3 +1,6 @@
+// The allowlist (#1182, the owner, 2026-11-11) replaced the earlier reply rules and their note kinds. In this ported
+// file every reply note reads as kind 'reply_note': each case still asserts what it answers (nothing, here, unless
+// marked) and how many notes it gets; the new kinds are pinned in decision-reply.test.ts and -r1182allowlist.test.ts.
 // R1182af (adversarial) on #1182 at 386b40e8, ported. AF1-AF3e: a command line CommonMark shows as code, inside a quote,
 // in a link or not at all answers nothing. AF4a-c: three ordinary uses of `<!--` no longer swallow a visible reply. AF5:
 // a `revise` note is the answering line's own (src/decision-reply.ts), never read from elsewhere in the comment.
@@ -61,7 +64,7 @@ const ask = async (f: Fixture, kind: string, options: string[], question = 'Land
   const id = await c.ask(kind, issue, 'example-owner', question, options, '', ['x']);
   return f.log.read(0, ['decision.asked']).map((e) => e.payload as Q).find((x) => x.id === id)!;
 };
-const notes = (f: Fixture) => f.log.read(0, ['coordinator.error']).map((e) => e.payload as { kind: string; message: string }).filter((p) => p.kind.startsWith('reply_'));
+const notes = (f: Fixture) => f.log.read(0, ['coordinator.error']).map((e) => e.payload as { kind: string; message: string }).map((p) => (/^reply_/.test(p.kind) ? { ...p, kind: 'reply_note' } : p)).filter((p) => p.kind.startsWith('reply_'));
 const handle = (f: Fixture) => (coord(f) as unknown as { handleDecisions(): Promise<void> }).handleDecisions();
 const answered = (f: Fixture) => f.log.read(0, ['decision.answered']).map((e) => e.payload as EventPayload<'decision.answered'>);
 const queued = (f: Fixture) => f.log.read(0, ['land.queued']).length;
@@ -75,9 +78,10 @@ test('AF0 control: `/worklane approve <id>` as the first line answers the land a
   // changed by (b) (the owner, 2026-11-10: only a comment's first line is read, in plain text; a second command voids it): was approve with `Looks right.` on the line before it.
   f.backlog.humanComment(1, OWNER, `Looks right.\n/worklane approve ${q.id}`);
   assert.equal(await commentAnswer(f, q), null);
-  assert.deepEqual(notes(f).map((n) => n.kind), ['reply_not_first_line']);
-  f.backlog.humanComment(1, OWNER, `/worklane approve ${q.id}\nLooks right.`);
-  assert.deepEqual(await commentAnswer(f, q), { by: OWNER, body: `/worklane approve ${q.id}\nLooks right.`, answer: 'approve', note: '', role: 'owner' } as unknown as Answer);
+  assert.deepEqual(notes(f).map((n) => n.kind), ['reply_note']);
+  // changed by the allowlist (#1182, the owner, 2026-11-11: a reply is the comment's one line): the note goes on the same line (a second line voids).
+  f.backlog.humanComment(1, OWNER, `/worklane approve ${q.id} Looks right.`);
+  assert.deepEqual(await commentAnswer(f, q), { by: OWNER, body: `/worklane approve ${q.id} Looks right.`, answer: 'approve', note: 'Looks right.', role: 'owner' } as unknown as Answer);
 });
 
 // ================= AF1-AF3: a command line a reader sees as code, as a quote, or not at all =================
@@ -112,7 +116,7 @@ for (const [name, body] of HIDDEN.filter(([n]) => /^AF(1|2|3a|3b) /.test(n))) {
     assert.equal(await commentAnswer(f, q), null);
     await commentAnswer(f, q);
     const k = notes(f).map((n) => n.kind);
-    assert.deepEqual(k, ['reply_not_first_line'], JSON.stringify(notes(f)));
+    assert.deepEqual(k, ['reply_note'], JSON.stringify(notes(f)));
     assert.match(notes(f)[0]!.message, new RegExp(q.id), 'the note lists the open id to use');
   });
 }
@@ -120,7 +124,7 @@ test('note control: the same command as the first line answers, with no note', a
   const f = fixture();
   const q = await ask(f, 'land', LAND);
   // changed by (b) (the owner, 2026-11-10: only a comment's first line is read, in plain text; a second command voids it): was `Do not run this yet.` then a blank line, then the command.
-  f.backlog.humanComment(1, OWNER, `/worklane approve ${q.id}\n\nDo not run this yet.`);
+  f.backlog.humanComment(1, OWNER, `/worklane approve ${q.id} do not run it yet`); // changed by the allowlist (#1182, the owner, 2026-11-11: a reply is the comment's one line): one line
   assert.equal((await commentAnswer(f, q))?.answer, 'approve');
   assert.deepEqual(notes(f), []);
 });
@@ -161,8 +165,8 @@ const NOTE_BODIES: [string, (id: string) => string][] = [
 ];
 /** The note the coordinator gives planAnswer: the reply's first-line note, when that line answers `id` (commentAnswer). */
 const noteFor = (body: string, id: string) => {
-  const r = readReply(body);
-  return r.first && !r.unsafe && r.others.length === 0 && r.first.option === 'revise' && r.first.ids.length === 1 && r.first.ids[0] === id ? r.first.note : '';
+  const r = readReply(body).command; // the allowlist: the comment's one line
+  return r && r.option === 'revise' && r.id === id ? r.note : '';
 };
 test('AF5 control: `/worklane revise <id> keep it smaller` alone gives the note "keep it smaller"', () => {
   assert.deepEqual(planAnswer('revise', noteFor('/worklane revise d-1-abcdef keep it smaller', 'd-1-abcdef')), { act: 'replan', note: 'keep it smaller' });
@@ -182,7 +186,7 @@ test("AF5 (end to end): a hidden HTML comment becomes the owner's instruction to
   const d = f.log.read(0, ['plan.decided']).map((e) => e.payload as EventPayload<'plan.decided'>);
   // changed by (b) (the owner, 2026-11-10: only a comment's first line is read, in plain text; a second command voids it): the comment starts with the hidden comment, so it answers nothing (was decided with 'keep it smaller').
   assert.deepEqual(d, [], `NOTE LEAK (e2e): ${JSON.stringify(d)}`);
-  assert.deepEqual(notes(f).map((n) => n.kind), ['reply_not_first_line']);
+  assert.deepEqual(notes(f).map((n) => n.kind), ['reply_note']);
 });
 test("AF5b (end to end): one comment, two plan-mode lines; the note for <id> comes from the other decision's line", async () => {
   const f = fixture();
@@ -192,7 +196,7 @@ test("AF5b (end to end): one comment, two plan-mode lines; the note for <id> com
   const d = f.log.read(0, ['plan.decided']).map((e) => e.payload as EventPayload<'plan.decided'>);
   // changed by (b) (the owner, 2026-11-10: only a comment's first line is read, in plain text; a second command voids it): two commands, so nothing is decided (was the note 'keep it smaller').
   assert.deepEqual(d, [], `NOTE LEAK (other line): ${JSON.stringify(d)}`);
-  assert.deepEqual(notes(f).map((n) => n.kind), ['reply_more_than_one']);
+  assert.deepEqual(notes(f).map((n) => n.kind), ['reply_note']);
 });
 
 // ================= AF6: edits (#1253, open; not this PR's regression) =================
@@ -255,7 +259,6 @@ const heldNull: [string, (q: Q) => { author?: string; body: string }][] = [
   ['Cyrillic ԁ for d', (q) => ({ body: `/worklane approve ԁ${q.id.slice(1)}` })],
   ['zero-width space inside the id', (q) => ({ body: `/worklane approve ${q.id.slice(0, 5)}​${q.id.slice(5)}` })],
   ['word joiner inside the id', (q) => ({ body: `/worklane approve ${q.id.slice(0, 5)}⁠${q.id.slice(5)}` })],
-  ['two ids on one line', (q) => ({ body: `/worklane approve ${q.id} d-1-ffffff` })],
   ['renovate[bot]', (q) => ({ author: 'renovate[bot]', body: `/worklane approve ${q.id}` })],
   ['non-writer', (q) => ({ author: 'rita-reporter', body: `/worklane approve ${q.id}` })],
   ['writer on a land decision', (q) => ({ author: 'example-collaborator', body: `/worklane approve ${q.id}` })],
@@ -317,4 +320,18 @@ test('HELD (delete): a reply deleted before the tick reads answers nothing', asy
   const c = f.backlog.humanComment(1, OWNER, `/worklane approve ${q.id}`);
   f.backlog.editComment(1, c, ''); // stand-in for a delete: the body is gone
   assert.equal(await commentAnswer(f, q), null);
+});
+
+// changed by the owner's 2026-11-11 decision ("1182 dword: b"): only an open decision's id counts as a second id.
+test('two ids on one line: a second id that is no open decision answers ("1182 dword: b"); an open one voids', async () => {
+  const f = fixture();
+  const q = await ask(f, 'land', LAND);
+  f.backlog.humanComment(1, OWNER, `/worklane approve ${q.id} d-1-ffffff`);
+  assert.equal((await commentAnswer(f, q))?.answer, 'approve');
+  const g = fixture();
+  const a = await ask(g, 'land', LAND);
+  const b = await ask(g, 'land', LAND);
+  g.backlog.humanComment(1, OWNER, `/worklane approve ${a.id} ${b.id}`);
+  assert.equal(await commentAnswer(g, a), null);
+  assert.equal(notes(g).length, 1);
 });

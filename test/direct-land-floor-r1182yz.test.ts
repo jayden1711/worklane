@@ -1,3 +1,6 @@
+// The allowlist (#1182, the owner, 2026-11-11) replaced the earlier reply rules and their note kinds. In this ported
+// file every reply note reads as kind 'reply_note': each case still asserts what it answers (nothing, here, unless
+// marked) and how many notes it gets; the new kinds are pinned in decision-reply.test.ts and -r1182allowlist.test.ts.
 // Since the owner's decision of 2026-11-09 a reply answers a decision only by naming its id: tests that answered with a
 // bare reply name the id now, and tests of bare-reply behaviour expect no answer and one reply_without_id note.
 // R1182y (final) and R1182z (adversarial) on #1182: how a reply is matched to a decision. The anchor is the comment
@@ -88,7 +91,7 @@ const blobOnMain = (f: Fixture, p: string) => {
     return null;
   }
 };
-const errors = (f: Fixture) => f.log.read(0, ['coordinator.error']).map((e) => e.payload as { kind: string; message: string });
+const errors = (f: Fixture) => f.log.read(0, ['coordinator.error']).map((e) => e.payload as { kind: string; message: string }).map((p) => (/^reply_/.test(p.kind) ? { ...p, kind: 'reply_note' } : p));
 /** Edit a comment in place, as GitHub does: same author, same place, same created_at; the body changes, and it reads as edited. */
 async function editComment(f: Fixture, n: number, match: (b: string) => boolean, body: (b: string) => string) {
   const hits = (await f.backlog.comments(n)).filter((c) => match(c.body));
@@ -242,7 +245,7 @@ test('Z2b (liveness): `/worklane reject <id 1>` then `/worklane approve <id 2>` 
   const d2 = await ask(f);
   f.backlog.humanComment(1, 'example-owner', `/worklane reject ${d1.id}\n/worklane approve ${d2.id}`);
   assert.equal(await commentAnswer(f, d1), null, 'changed by (b) (the owner, 2026-11-10; only the first line of a comment is read, and a second command voids it): two commands void the comment (was: question 1 rejected)');
-  assert.deepEqual(errors(f).filter((e) => /^reply_/.test(e.kind)).map((e) => e.kind), ['reply_more_than_one']);
+  assert.deepEqual(errors(f).filter((e) => /^reply_/.test(e.kind)).map((e) => e.kind), ['reply_note']);
   const a = await commentAnswer(f, d2);
   assert.ok(a?.answer === 'approve' || errors(f).some((e) => e.message.includes(d2.id)), `SILENT: question 2's own \`approve ${d2.id}\` line is ignored with no notice (${JSON.stringify(a)})`);
 });
@@ -297,7 +300,7 @@ test('Z6 (held): the question comment deleted, then a bare owner reply: no answe
   f.backlog.humanComment(1, 'example-owner', '/worklane approve');
   assert.equal(await commentAnswer(f, d), null);
   assert.equal(await commentAnswer(f, d), null);
-  assert.equal(errors(f).filter((e) => e.kind === 'reply_without_id' && e.message.includes(d.id)).length, 1);
+  assert.equal(errors(f).filter((e) => e.kind === 'reply_note' && e.message.includes(d.id)).length, 1);
   f.backlog.humanComment(1, 'example-owner', `/worklane approve ${d.id}`);
   assert.equal((await commentAnswer(f, d))?.answer, 'approve');
 });
@@ -307,7 +310,7 @@ test("Z6b (held): a writer edits the question comment to drop `decide <id>`: a l
   await editComment(f, 1, (b) => b.includes(`decide ${d.id} `), (b) => b.split(`decide ${d.id} `).join('decide (gone) '));
   f.backlog.humanComment(1, 'example-owner', '/worklane approve');
   assert.equal(await commentAnswer(f, d), null);
-  assert.equal(errors(f).filter((e) => e.kind === 'reply_without_id').length, 1);
+  assert.equal(errors(f).filter((e) => e.kind === 'reply_note').length, 1);
 });
 test('Z6c (held): a reply posted before the question comment exists (racing ask()) answers nothing', async () => {
   const f = unit();
@@ -362,7 +365,7 @@ test("Z1c (not the review's): the question's own comment, edited, is no anchor: 
   await editComment(f, 1, (b) => b.includes(`decide ${d.id} `), (b) => `${b}\n(edited)`);
   f.backlog.humanComment(1, 'example-owner', '/worklane approve');
   assert.equal(await commentAnswer(f, d), null);
-  assert.equal(errors(f).filter((e) => e.kind === 'reply_without_id' && e.message.includes(d.id)).length, 1);
+  assert.equal(errors(f).filter((e) => e.kind === 'reply_note' && e.message.includes(d.id)).length, 1);
   f.backlog.humanComment(1, 'example-owner', `/worklane approve ${d.id}`);
   assert.equal((await commentAnswer(f, d))?.answer, 'approve');
 });
@@ -386,13 +389,13 @@ test("Z3b (not the review's): a command naming an id no decision on the issue ha
   f.backlog.humanComment(1, 'example-owner', '/worklane approve d-1-0badid');
   assert.equal(await commentAnswer(f, d), null, 'a line naming another id never answers this one');
   assert.equal(await commentAnswer(f, d), null);
-  const notes = errors(f).filter((e) => e.kind === 'reply_unknown_id');
+  const notes = errors(f).filter((e) => e.kind === 'reply_note');
   assert.equal(notes.length, 1, JSON.stringify(notes));
   assert.ok(notes[0]!.message.includes('d-1-0badid'), notes[0]!.message);
   // With trailing punctuation, the real id still answers (Z3's case, unit form).
   f.backlog.humanComment(1, 'example-owner', `/worklane approve ${d.id}.`);
   assert.equal((await commentAnswer(f, d))?.answer, 'approve');
-  assert.equal(errors(f).filter((e) => e.kind === 'reply_unknown_id').length, 1, 'no note for the real id');
+  assert.equal(errors(f).filter((e) => e.kind === 'reply_note').length, 1, 'no note for the real id');
 });
 
 test("Z4b (not the review's): with two pending questions, a bare reply answers neither and says which ids to use (R1182ab); naming an id answers that one", async () => {
@@ -402,7 +405,7 @@ test("Z4b (not the review's): with two pending questions, a bare reply answers n
   f.backlog.humanComment(1, 'example-owner', '/worklane approve');
   assert.equal(await commentAnswer(f, d1), null, 'not the earlier question');
   assert.equal(await commentAnswer(f, d2), null, 'nor the nearest one: two questions are open');
-  const notes = errors(f).filter((e) => e.kind === 'reply_without_id');
+  const notes = errors(f).filter((e) => e.kind === 'reply_note');
   assert.ok(notes.length >= 1 && notes.some((e) => e.message.includes(d1.id) && e.message.includes(d2.id)), JSON.stringify(notes));
   f.backlog.humanComment(1, 'example-owner', `/worklane reject ${d1.id}`);
   assert.equal((await commentAnswer(f, d1))?.answer, 'reject');

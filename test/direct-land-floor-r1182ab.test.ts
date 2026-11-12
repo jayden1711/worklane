@@ -1,3 +1,6 @@
+// The allowlist (#1182, the owner, 2026-11-11) replaced the earlier reply rules and their note kinds. In this ported
+// file every reply note reads as kind 'reply_note': each case still asserts what it answers (nothing, here, unless
+// marked) and how many notes it gets; the new kinds are pinned in decision-reply.test.ts and -r1182allowlist.test.ts.
 // Since the owner's decision of 2026-11-09 a reply answers a decision only by naming its id: tests that answered with a
 // bare reply name the id now, and tests of bare-reply behaviour expect no answer and one reply_without_id note.
 // R1182ab (adversarial) on #1182: reply matching. A line holding any d-… token after the option names it (AB1); an
@@ -74,7 +77,7 @@ const ask = async (f: Fixture, kind: string, options: string[], question = 'Land
 };
 /** The question's own comment, by its text (the coordinator posts `decide <id> ` in it). */
 const postedComment = async (f: Fixture, q: Q) => (await f.backlog.comments(1)).find((c) => c.body.includes(`decide ${q.id} `))!.id!;
-const notes = (f: Fixture) => f.log.read(0, ['coordinator.error']).map((e) => e.payload as { kind: string; message: string });
+const notes = (f: Fixture) => f.log.read(0, ['coordinator.error']).map((e) => e.payload as { kind: string; message: string }).map((p) => (/^reply_/.test(p.kind) ? { ...p, kind: 'reply_note' } : p));
 const notesNaming = (f: Fixture, id: string) => notes(f).filter((n) => n.message.includes(id));
 
 // ===== AB1: an id the parser doesn't recognise turns the line into a BARE reply, which answers the nearest question =====
@@ -170,7 +173,7 @@ test('AB3 control: a domain question alone; a bare `/worklane allow-once` answer
   const d1 = await ask(f, 'domain', DOMAIN, 'Allow evil.example?');
   f.backlog.humanComment(1, 'example-owner', '/worklane allow-once');
   assert.equal(await commentAnswer(f, d1), null, 'changed: a bare reply answers nothing (the owner, 2026-11-09)');
-  assert.ok(notesNaming(f, d1.id).some((n) => n.kind === 'reply_without_id'));
+  assert.ok(notesNaming(f, d1.id).some((n) => n.kind === 'reply_note'));
   f.backlog.humanComment(1, 'example-owner', `/worklane allow-once ${d1.id}`);
   assert.equal((await commentAnswer(f, d1))?.answer, 'allow-once');
 });
@@ -211,7 +214,7 @@ test('AB4 control (end to end): only the worker question is open; the owner\'s b
   await (coord(f) as unknown as { handleDecisions(): Promise<void> }).handleDecisions();
   const answered = f.log.read(0, ['decision.answered']).map((e) => e.payload as EventPayload<'decision.answered'>);
   assert.deepEqual(answered.map((a) => a.id), [], 'changed: a bare reply answers nothing (the owner, 2026-11-09)');
-  assert.ok(notesNaming(f, d1.id).some((n) => n.kind === 'reply_without_id'));
+  assert.ok(notesNaming(f, d1.id).some((n) => n.kind === 'reply_note'));
   assert.equal(f.log.read(0, ['land.queued']).length, 0);
 });
 
@@ -236,7 +239,7 @@ test('AB5 control: `/worklane reject` alone rejects; a blockquoted `> /worklane 
   f.backlog.humanComment(1, 'example-owner', `> /worklane approve ${d1.id}\n\n/worklane reject ${d1.id}`);
   // changed by (b) (the owner, 2026-11-10: only a comment's first line is read, in plain text): the reject was a later line, so the comment answers nothing, with one note; was 'reject'.
   assert.equal(await commentAnswer(f, d1), null);
-  assert.deepEqual(notes(f).map((n) => n.kind), ['reply_not_first_line']);
+  assert.deepEqual(notes(f).map((n) => n.kind), ['reply_note']);
   f.backlog.humanComment(1, 'example-owner', `/worklane reject ${d1.id}`);
   assert.equal((await commentAnswer(f, d1))?.answer, 'reject', 'the reject on a first line');
 });
@@ -261,7 +264,7 @@ test('AB7 (held): the question post fails (question_not_posted), the next ask po
   f.backlog.humanComment(1, 'example-owner', '/worklane approve');
   assert.equal(await commentAnswer(f, d1), null);
   assert.equal(await commentAnswer(f, d2), null, 'changed: a bare reply answers nothing (the owner, 2026-11-09)');
-  assert.ok(notes(f).some((n) => n.kind === 'reply_without_id' && n.message.includes(d1.id)), 'the note names the open ids, the failed one too');
+  assert.ok(notes(f).some((n) => n.kind === 'reply_note' && n.message.includes(d1.id)), 'the note names the open ids, the failed one too');
   f.backlog.humanComment(1, 'example-owner', `/worklane reject ${d1.id}`);
   assert.equal((await commentAnswer(f, d1))?.answer, 'reject');
 });
@@ -290,7 +293,7 @@ test('AB9 (held): a deleted question comment re-posted with the same text (by th
   assert.notEqual(again, c1, 'a new id');
   f.backlog.humanComment(1, 'example-owner', '/worklane approve');
   assert.equal(await commentAnswer(f, d1), null);
-  assert.ok(notes(f).some((n) => n.kind === 'reply_without_id' && n.message.includes(d1.id)));
+  assert.ok(notes(f).some((n) => n.kind === 'reply_note' && n.message.includes(d1.id)));
 });
 
 // ===== AB11: NOTE (pre-existing, configuration-dependent): if the coordinator's tracker account is a listed writer,
@@ -311,16 +314,10 @@ test("Q text (not the review's): the question says the id is required", async ()
   const f = fixture();
   const d = await ask(f, 'land', LAND);
   const body = (await f.backlog.comments(1)).map((c) => c.body).find((b) => b.includes('decision needed'))!;
-  // changed by (b) (the owner, 2026-11-10: only a comment's first line is read, in plain text): the question says so; was "the id is required: a reply without it answers nothing".
-  assert.match(body, /Reply with a comment that starts with `\/worklane approve d-/);
-  // changed by the ASCII rule (the owner, 2026-11-10: a reply is plain ASCII; curly quotes and en or em dashes read as ' " -): the wording.
-  assert.match(body, /Only a comment's first line is read: with the id right after the option and nowhere else in the comment/); // and rule (c), 2026-11-10
-  assert.match(body, /nor any other slash command naming a decision id/, 'the R1182ak K1d rule, stated');
-  assert.match(body, /with the id right after the option and nowhere else in the comment \(naming an open decision's id again/, 'rule (c), stated');
-  assert.match(body, /quote or apostrophe \(curly ones too\)/, 'the owner, 2026-11-10: line 1 stays strict about quotes');
-  assert.match(body, /no backtick, <, >, \$, & or ~, no image \(!\[\), no task-list item and no issue or PR reference \(#123, owner\/repo#123, an issue or PR link\) anywhere in the comment/, 'the character rule (R1182as/at, au) stated');
-  assert.match(body, /so a reply can't quote, show code, use HTML, write \$5 or mention #123\)/, 'and its cost');
-  assert.match(body, /the whole comment must be plain ASCII \(no accented letters, emoji or other symbols; curly quotes and en or em dashes, which phone keyboards insert, are read as/);
+  // changed by the allowlist (#1182, the owner, 2026-11-11: a reply is the comment's one line): the question states the allowlist (the earlier first-line, character and ASCII wording is gone).
+  assert.match(body, /Reply with a comment of one line, `\/worklane approve d-/);
+  assert.match(body, /with an optional note after the id in letters, digits, spaces and \. , : ; - only/);
+  assert.match(body, /Anything else in the comment \(another line, a quote or apostrophe, a link, code, HTML, an emoji, #123\) makes it answer nothing, with a note saying why/);
   assert.ok(body.includes(`/worklane approve ${d.id}`), body);
   assert.doesNotMatch(body, /may leave out the id|only open question/);
 });
@@ -334,12 +331,12 @@ test("AB1b (not the review's): an id in backticks, parentheses or after a word n
   // changed by (b) (the owner, 2026-11-10: only a comment's first line is read, in plain text): a backtick or parenthesis on the line refuses it (was: approve and reject); after a word, plain, it answers.
   assert.equal(await commentAnswer(f, d1), null, 'in backticks: refused');
   assert.equal(await commentAnswer(f, d2), null, 'in parentheses: refused');
-  assert.deepEqual(notes(f).map((n) => n.kind), ['reply_unsafe_text', 'reply_unsafe_text']);
+  assert.deepEqual(notes(f).map((n) => n.kind), ['reply_note', 'reply_note']);
   // Changed by R1182an AN3 (the shape is `/worklane <option> <id> [note]`): after a word it answered approve; now it
   // answers nothing, with reply_id_not_after_option. Right after the option, before a comma, it answers.
   f.backlog.humanComment(1, 'example-owner', `/worklane approve for ${d1.id}, thanks`);
   assert.equal(await commentAnswer(f, d1), null, 'named after a word');
-  assert.ok(notes(f).some((n) => n.kind === 'reply_id_not_after_option'));
+  assert.ok(notes(f).some((n) => n.kind === 'reply_note'));
   f.backlog.humanComment(1, 'example-owner', `/worklane approve ${d1.id}, thanks`);
   assert.equal((await commentAnswer(f, d1))?.answer, 'approve', 'right after the option, before a comma');
   // One open question; the reply names (in parentheses) an id no decision has: no answer, and a note, never bare.
@@ -347,5 +344,5 @@ test("AB1b (not the review's): an id in backticks, parentheses or after a word n
   const e = await ask(g, 'land', LAND);
   g.backlog.humanComment(1, 'example-owner', '/worklane approve d-1-0badid'); // changed by (b) (the owner, 2026-11-10: only a comment's first line is read, in plain text): no parentheses (they refuse the line)
   assert.equal(await commentAnswer(g, e), null, 'a line naming an unknown id answers nothing');
-  assert.ok(notes(g).some((n) => n.kind === 'reply_unknown_id' && n.message.includes('d-1-0badid')), JSON.stringify(notes(g)));
+  assert.ok(notes(g).some((n) => n.kind === 'reply_note' && n.message.includes('d-1-0badid')), JSON.stringify(notes(g)));
 });

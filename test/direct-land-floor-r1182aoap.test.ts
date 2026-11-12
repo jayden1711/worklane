@@ -1,3 +1,6 @@
+// The allowlist (#1182, the owner, 2026-11-11) replaced the earlier reply rules and their note kinds. In this ported
+// file every reply note reads as kind 'reply_note': each case still asserts what it answers (nothing, here, unless
+// marked) and how many notes it gets; the new kinds are pinned in decision-reply.test.ts and -r1182allowlist.test.ts.
 // R1182ao (final) and R1182ap (adversarial) probes on #1182 at e6e53103, ported. pageText's one reading of the page became
 // every reading (pageReadings: decoded with tags kept, tags dropped then decoded, decoded then tags dropped, alt and
 // title text, each reversed), real tags and comments only (HTML5's <!--> included), and rule (1) on the page: an entity
@@ -57,7 +60,7 @@ const ask = async (f: Fixture, kind: string, options: string[], question = 'Land
   const id = await c.ask(kind, issue, 'example-owner', question, options, '', ['x']);
   return f.log.read(0, ['decision.asked']).map((e) => e.payload as Q).find((x) => x.id === id)!;
 };
-const notes = (f: Fixture) => f.log.read(0, ['coordinator.error']).map((e) => e.payload as { kind: string; message: string }).filter((p) => p.kind.startsWith('reply_'));
+const notes = (f: Fixture) => f.log.read(0, ['coordinator.error']).map((e) => e.payload as { kind: string; message: string }).map((p) => (/^reply_/.test(p.kind) ? { ...p, kind: 'reply_note' } : p)).filter((p) => p.kind.startsWith('reply_'));
 const handle = (f: Fixture) => (coord(f) as unknown as { handleDecisions(): Promise<void> }).handleDecisions();
 const answered = (f: Fixture) => f.log.read(0, ['decision.answered']).map((e) => e.payload as EventPayload<'decision.answered'>);
 const queued = (f: Fixture) => f.log.read(0, ['land.queued']).length;
@@ -130,17 +133,17 @@ mustVoid([
 test('AP1 control: the same second command without the < > voids (reply_more_than_one)', async () => {
   const { f } = await land((id) => `/worklane approve ${id}\n&#47;worklane reject ${ent(id)}`);
   assert.equal(answered(f).length, 0);
-  assert.deepEqual(notes(f).map((n) => n.kind), ['reply_markup'], 'changed by the character rule (R1182as/at, the organizer, 2026-11-11: no backtick, <, >, $, & or ~ anywhere): was reply_more_than_one');
+  assert.deepEqual(notes(f).map((n) => n.kind), ['reply_note'], 'changed by the character rule (R1182as/at, the organizer, 2026-11-11: no backtick, <, >, $, & or ~ anywhere): was reply_more_than_one');
 });
 test('AP1 control: a bare entity-spelled id without the < > voids (reply_id_elsewhere)', async () => {
   const { f } = await land((id) => `/worklane approve ${id}\nrisk: ${ent(id)} is rejected`);
   assert.equal(answered(f).length, 0);
-  assert.deepEqual(notes(f).map((n) => n.kind), ['reply_markup'], 'changed by the character rule (R1182as/at, the organizer, 2026-11-11: no backtick, <, >, $, & or ~ anywhere): was reply_id_elsewhere');
+  assert.deepEqual(notes(f).map((n) => n.kind), ['reply_note'], 'changed by the character rule (R1182as/at, the organizer, 2026-11-11: no backtick, <, >, $, & or ~ anywhere): was reply_id_elsewhere');
 });
 test('AP1 control, changed: "a < b > c" with nothing hidden now voids (reply_markup; the cost of the character rule)', async () => {
   const { f } = await land((id) => `/worklane approve ${id}\nok if latency < 5ms and > 1ms`);
-  assert.deepEqual([answered(f).length, notes(f).map((n) => n.kind)], [0, ['reply_markup']], 'changed by the character rule (R1182as/at, the organizer, 2026-11-11: no backtick, <, >, $, & or ~ anywhere): was an answer');
-  const words = await land((id) => `/worklane approve ${id}\nok if latency is under 5ms and over 1ms`);
+  assert.deepEqual([answered(f).length, notes(f).map((n) => n.kind)], [0, ['reply_note']], 'changed by the character rule (R1182as/at, the organizer, 2026-11-11: no backtick, <, >, $, & or ~ anywhere): was an answer');
+  const words = await land((id) => `/worklane approve ${id} ok if latency is under 5ms and over 1ms`); // changed by the allowlist (#1182, the owner, 2026-11-11: a reply is the comment's one line): one line
   assert.equal(answered(words.f).length, 1, 'said in words, it answers');
 });
 
@@ -163,7 +166,7 @@ mustVoid([
 test('AP3 control: the same look-alike typed as Unicode voids (reply_not_ascii)', async () => {
   const { f } = await land((id) => `/worklane approve ${id}\n\u2215worklane reject \u0501${id.slice(1)}`);
   assert.equal(answered(f).length, 0);
-  assert.deepEqual(notes(f).map((n) => n.kind), ['reply_not_ascii']);
+  assert.deepEqual(notes(f).map((n) => n.kind), ['reply_note']);
 });
 
 // ======== HELD: spellings the normalizer produces (each voids at this head) ========
@@ -192,12 +195,14 @@ for (const [name, body] of HELD) {
 // ======== AP4 (minor, false void): a note word shaped like d-<word> counts as a second id ========
 // The owner's question (MORNING.md), not changed here: ID is unchanged, so today this is refused as two ids. When the owner
 // answers, this test changes with the rule.
-test('AP4 (owner question, unchanged): /worklane revise <id> wait until after d-day is refused as two ids (reply_several_ids)', async () => {
+// changed by the owner's 2026-11-11 decision ("1182 dword: b"): only an open decision's id counts as a second id, so `d-day` is a word.
+test('AP4 (the owner decided b): /worklane revise <id> wait until after d-day decides revise, its note kept', async () => {
   const f = fixture();
   const q = await ask(f, 'plan', PLAN, 'Approve the plan for #1?');
   f.backlog.humanComment(1, OWNER, `/worklane revise ${q.id} wait until after d-day`);
   await handle(f);
-  assert.deepEqual(notes(f).map((n) => n.kind), ['reply_several_ids']);
+  assert.deepEqual(notes(f), []);
+  assert.deepEqual(f.log.read(0, ['plan.decided']).map((e) => (e.payload as { note: string }).note), ['wait until after d-day']);
 });
 test('AP4 control: the same note without the d- word decides revise', async () => {
   const decided = await planNote((id) => `/worklane revise ${id} wait until after launch day`);

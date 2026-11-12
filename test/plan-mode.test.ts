@@ -85,9 +85,10 @@ test("a held plan's decision: approve builds, revise plans again with the note, 
   // planAnswer takes the reply's note: the rest of its first line without the id (decision-reply.ts readReply; the owner's
   // decision of 2026-11-10). Main's comment (`Close, but:`, then the revise line, then `and keep old rows`) gave a two-line note; under
   // that decision a command after the first line is not read and a note is one line, so it is asserted both ways below.
-  const noteOf = (body: string) => readReply(body).first?.note ?? '';
-  assert.equal(readReply(`Close, but:\n/${BRAND.cli} revise make the migration reversible\nand keep old rows`).first, null, 'not the first line: no reply (a note on the issue says so)');
-  assert.deepEqual(planAnswer('revise', noteOf(`/${BRAND.cli} revise d-12-a3f9c1 make the migration reversible, and keep old rows\nthanks`)), { act: 'replan', note: 'make the migration reversible, and keep old rows' });
+  // changed by the allowlist (#1182: a reply is the comment's one line): a later line ('thanks') makes the comment no reply, so the note case is one line.
+  const noteOf = (body: string) => readReply(body).command?.note ?? '';
+  assert.equal(readReply(`Close, but:\n/${BRAND.cli} revise make the migration reversible\nand keep old rows`).command, null, 'more than one line: no reply (a note on the issue says so)');
+  assert.deepEqual(planAnswer('revise', noteOf(`/${BRAND.cli} revise d-12-a3f9c1 make the migration reversible, and keep old rows`)), { act: 'replan', note: 'make the migration reversible, and keep old rows' });
   assert.deepEqual(planAnswer('revise', noteOf(`/${BRAND.cli} revise`)), { act: 'replan', note: 'no note given; plan it again with the risks in mind' });
   assert.deepEqual(planAnswer('revise', noteOf(`/${BRAND.cli} revise d-12-a3f9c1 make it reversible`)), { act: 'replan', note: 'make it reversible' }, 'the decision id a reply names is not part of the note');
   assert.deepEqual(planAnswer('revise', noteOf(`/${BRAND.cli} revise d-12-a3f9c1`)), { act: 'replan', note: 'no note given; plan it again with the risks in mind' });

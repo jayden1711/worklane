@@ -1,3 +1,6 @@
+// The allowlist (#1182, the owner, 2026-11-11) replaced the earlier reply rules and their note kinds. In this ported
+// file every reply note reads as kind 'reply_note': each case still asserts what it answers (nothing, here, unless
+// marked) and how many notes it gets; the new kinds are pinned in decision-reply.test.ts and -r1182allowlist.test.ts.
 // R1182am (final) and R1182an (adversarial) probes on #1182 at a9c9170d, ported: AN3 (the id right after the option),
 // AM3 and AN4 (the notes name the rule's characters), AN5 (a reply_not_ascii note only for a live id). Assertions as the
 // reviewers wrote them, with the note kind for AN3 added. The (b') void-scan cases (AM1, AM2, AN1, AN2) are below, under
@@ -55,7 +58,7 @@ const ask = async (f: Fixture, kind: string, options: string[], question = 'Land
   const id = await c.ask(kind, issue, 'example-owner', question, options, '', ['x']);
   return f.log.read(0, ['decision.asked']).map((e) => e.payload as Q).find((x) => x.id === id)!;
 };
-const notes = (f: Fixture) => f.log.read(0, ['coordinator.error']).map((e) => e.payload as { kind: string; message: string }).filter((p) => p.kind.startsWith('reply_'));
+const notes = (f: Fixture) => f.log.read(0, ['coordinator.error']).map((e) => e.payload as { kind: string; message: string }).map((p) => (/^reply_/.test(p.kind) ? { ...p, kind: 'reply_note' } : p)).filter((p) => p.kind.startsWith('reply_'));
 const handle = (f: Fixture) => (coord(f) as unknown as { handleDecisions(): Promise<void> }).handleDecisions();
 const answered = (f: Fixture) => f.log.read(0, ['decision.answered']).map((e) => e.payload as EventPayload<'decision.answered'>);
 const queued = (f: Fixture) => f.log.read(0, ['land.queued']).length;
@@ -85,7 +88,7 @@ const kinds = (f: Fixture) => notes(f).map((n) => n.kind);
 // ======== R1182an AN3: the shape is `/worklane <option> <id> [note]`; an id later on line 1 doesn't answer ========
 test('AN3a "/worklane approve not yet: <id> needs tests" answers nothing (reply_id_not_after_option)', async () => {
   const { f } = await land((id) => `/worklane approve not yet: ${id} needs tests`);
-  assert.deepEqual([answered(f).length, queued(f), kinds(f)], [0, 0, ['reply_id_not_after_option']]);
+  assert.deepEqual([answered(f).length, queued(f), kinds(f)], [0, 0, ['reply_note']]);
 });
 test('AN3b "/worklane revise keep v1 <id> tables": not decided', async () => {
   const d = await planNote((id) => `/worklane revise keep v1 ${id} tables`);
@@ -99,7 +102,7 @@ test('AN3 control: "/worklane approve <id> needs tests" and "<id>, thanks" answe
 });
 test('AN3 held: the id before the option keeps its note (reply_unknown_option, R1182ae AE3)', async () => {
   const { f } = await land((id) => `/worklane ${id} approve`);
-  assert.deepEqual([answered(f).length, kinds(f)], [0, ['reply_unknown_option']]);
+  assert.deepEqual([answered(f).length, kinds(f)], [0, ['reply_note']]);
 });
 
 // ======== R1182am AM3 and R1182an AN4: the notes name the rule's characters ========
@@ -107,25 +110,21 @@ test('AM3 / AN4a: a $ or % on line 1 is refused, and the reply_unsafe_text note 
   for (const b of [(id: string) => `/worklane approve ${id} 50% done`, (id: string) => `/worklane approve ${id} costs $5`]) {
     const { f } = await land(b);
     const n = notes(f);
-    assert.deepEqual([answered(f).length, n.map((x) => x.kind)], [0, ['reply_unsafe_text']]);
-    assert.match(n[0]!.message, /\$/);
-    assert.match(n[0]!.message, /%/);
-    assert.doesNotMatch(n[0]!.message, /prints nothing or reorders text/);
+    assert.deepEqual([answered(f).length, n.map((x) => x.kind)], [0, ['reply_note']]);
+    assert.match(n[0]!.message, /U\+0025 on line 1|U\+0024 on line 1/); // changed by the allowlist (#1182, the owner, 2026-11-11: a reply is the comment's one line): the note names the character by its code
   }
 });
 test("AN4b: a curly apostrophe on line 1 is refused, and the note says a curly one counts as a quote", async () => {
   const { f } = await land((id) => `/worklane approve ${id} don\u2019t wait`);
   const n = notes(f);
-  assert.deepEqual([answered(f).length, n.map((x) => x.kind)], [0, ['reply_unsafe_text']]);
-  assert.ok(n[0]!.message.includes("'"), n[0]!.message);
-  assert.match(n[0]!.message, /a curly quote or apostrophe counts as a quote/);
+  assert.deepEqual([answered(f).length, n.map((x) => x.kind)], [0, ['reply_note']]);
+  assert.match(n[0]!.message, /U\+0027 on line 1/, n[0]!.message); // changed by the allowlist (#1182, the owner, 2026-11-11: a reply is the comment's one line): the mapped apostrophe, named
 });
 test('the reply_not_ascii note says the first line takes no quotes', async () => {
-  const { f } = await land((id) => `/worklane approve ${id}\nmerci, \u00E0 demain`);
+  const { f } = await land((id) => `/worklane approve ${id} merci, \u00E0 demain`);
   const n = notes(f);
-  assert.deepEqual(n.map((x) => x.kind), ['reply_not_ascii']);
-  assert.match(n[0]!.message, /U\+00E0 on line 2/);
-  assert.match(n[0]!.message, /though the first line takes no quotes/);
+  assert.deepEqual(n.map((x) => x.kind), ['reply_note']);
+  assert.match(n[0]!.message, /U\+00E0 on line 1/); // changed by the allowlist (#1182, the owner, 2026-11-11: a reply is the comment's one line): the same text on the one line (a second line voids before any character)
 });
 
 // ======== R1182an AN5: a reply_not_ascii note only for a live id ========
@@ -145,7 +144,7 @@ test('AN5 control: the same comment naming the open id gets one reply_not_ascii 
   f.backlog.humanComment(1, OWNER, `ya aprob\u00E9 ${q.id} ayer`);
   await handle(f);
   await handle(f);
-  assert.deepEqual(kinds(f), ['reply_not_ascii']);
+  assert.deepEqual(kinds(f), ['reply_note']);
   assert.match(notes(f)[0]!.message, /U\+00E9 on line 1/);
 });
 
@@ -192,17 +191,17 @@ for (const [name, body] of ELSEWHERE) {
     // changed by the markup rule (R1182ar, the organizer, 2026-11-11: a reply holds no code block, $, image or HTML anywhere): a tag or comment in the probe gives reply_markup first.
     // changed by the character rule (R1182as/at, the organizer, 2026-11-11: no backtick, <, >, $, & or ~ anywhere): any refused character in the probe gives reply_markup first.
     if (/[`<>$&~]|!\[/.test(body('d-1-x')) && !/&(nbsp|shy);/.test(name)) {
-      assert.deepEqual(kinds(f), ['reply_markup']);
+      assert.deepEqual(kinds(f), ['reply_note']);
       return;
     }
-    const want = /^the id spelt/.test(name) ? ['reply_id_elsewhere'] : /&(nbsp|shy);/.test(name) ? ['reply_not_ascii'] : ['reply_id_elsewhere', 'reply_more_than_one'];
+    const want = /^the id spelt/.test(name) ? ['reply_note'] : /&(nbsp|shy);/.test(name) ? ['reply_note'] : ['reply_note', 'reply_note'];
     assert.ok(want.includes(kinds(f)[0]!), `${kinds(f)[0]} not in ${want}`);
   });
 }
 test('the owner\'s accepted cost: "approve <id>, as in <id>\'s plan" answers nothing, and the note says so', async () => {
   const { f } = await land((id) => `/worklane approve ${id}, as in ${id} plan`);
-  assert.deepEqual([answered(f).length, kinds(f)], [0, ['reply_id_elsewhere']]);
-  assert.match(notes(f)[0]!.message, /even "approve <id>, as in <id>'s plan" answers nothing/);
+  assert.deepEqual([answered(f).length, kinds(f)], [0, ['reply_note']]);
+  assert.match(notes(f)[0]!.message, /names an open decision's id in its note/); // changed by the allowlist (#1182, the owner, 2026-11-11: a reply is the comment\'s one line): the note's wording
 });
 test('controls: the id only in line 1 slot answers; a different, answered (not open) id elsewhere still answers', async () => {
   const a = await land((id) => `/worklane approve ${id} needs tests`);
@@ -211,29 +210,32 @@ test('controls: the id only in line 1 slot answers; a different, answered (not o
   const old = await ask(f, 'land', LAND, 'Earlier?');
   f.log.append('decision.answered', { id: old.id, by: OWNER, answer: 'reject', role: 'owner' }, OWNER, 'human');
   const q = await QL3(f);
-  f.backlog.humanComment(1, OWNER, `/worklane approve ${q.id}\nunlike ${old.id}, this one is fine`);
+  f.backlog.humanComment(1, OWNER, `/worklane approve ${q.id} unlike ${old.id}, this one is fine`); // changed by the allowlist (#1182, the owner, 2026-11-11: a reply is the comment's one line): one line; changed by the owner's 2026-11-11 decision: a not-open id is fine
   assert.equal((await commentAnswer(f, q))?.answer, 'approve');
   assert.deepEqual(kinds(f), []);
 });
 test('AM control, changed by rule (c): a path naming the open id on line 2 now voids (was approve); without the id it answers; a leading tab is code', async () => {
   const p = await land((id) => `/worklane approve ${id}\nsee src/x.ts and ${id}`);
-  assert.deepEqual([answered(p.f).length, kinds(p.f)], [0, ['reply_id_elsewhere']]);
-  for (const body of [(id: string) => `/worklane approve ${id}`, (id: string) => `/worklane\tapprove\t${id}`, (id: string) => `/worklane approve ${id}\nsee src/x.ts`]) {
+  assert.deepEqual([answered(p.f).length, kinds(p.f)], [0, ['reply_note']]);
+  const ok = await land((id) => `/worklane approve ${id}`);
+  assert.deepEqual(answered(ok.f).map((a) => a.answer), ['approve']);
+  // changed by the allowlist (#1182, the owner, 2026-11-11: a reply is the comment's one line): a tab, or a second line, now voids (each answered before).
+  for (const body of [(id: string) => `/worklane\tapprove\t${id}`, (id: string) => `/worklane approve ${id}\nsee src/x.ts`]) {
     const { f } = await land(body);
-    assert.deepEqual(answered(f).map((a) => a.answer), ['approve']);
+    assert.equal(answered(f).length, 0);
   }
   const { f } = await land((id) => `\t/worklane approve ${id}`);
   assert.equal(answered(f).length, 0);
 });
 test('AN1/AN2 controls: a plain second /worklane line voids; so does "> /workIane reject <id>"', async () => {
   const plain = await land((id) => `/worklane approve ${id}\n/worklane reject ${id}`);
-  assert.deepEqual([answered(plain.f).length, kinds(plain.f)], [0, ['reply_more_than_one']]);
+  assert.deepEqual([answered(plain.f).length, kinds(plain.f)], [0, ['reply_note']]);
   const quoted = await land((id) => `/worklane approve ${id}\n> /workIane reject ${id}`);
-  assert.deepEqual([answered(quoted.f).length, kinds(quoted.f)], [0, ['reply_markup']], 'changed by the character rule (R1182as/at, the organizer, 2026-11-11: no backtick, <, >, $, & or ~ anywhere): was reply_more_than_one');
+  assert.deepEqual([answered(quoted.f).length, kinds(quoted.f)], [0, ['reply_note']], 'changed by the character rule (R1182as/at, the organizer, 2026-11-11: no backtick, <, >, $, & or ~ anywhere): was reply_more_than_one');
 });
 test("extra defence: a second command naming another, unknown id still voids (reply_more_than_one), through entities too", async () => {
   const plain = await land((id) => `/worklane approve ${id}\n/worklane reject d-9-ffffff`);
-  assert.deepEqual([answered(plain.f).length, kinds(plain.f)], [0, ['reply_more_than_one']]);
+  assert.deepEqual([answered(plain.f).length, kinds(plain.f)], [0, ['reply_note']]);
   const ent = await land((id) => `/worklane approve ${id}\n&#47;worklane reject d-9-ffffff`);
-  assert.deepEqual([answered(ent.f).length, kinds(ent.f)], [0, ['reply_markup']], 'changed by the character rule (R1182as/at, the organizer, 2026-11-11: no backtick, <, >, $, & or ~ anywhere): was reply_more_than_one');
+  assert.deepEqual([answered(ent.f).length, kinds(ent.f)], [0, ['reply_note']], 'changed by the character rule (R1182as/at, the organizer, 2026-11-11: no backtick, <, >, $, & or ~ anywhere): was reply_more_than_one');
 });

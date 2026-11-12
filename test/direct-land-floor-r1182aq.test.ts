@@ -1,3 +1,6 @@
+// The allowlist (#1182, the owner, 2026-11-11) replaced the earlier reply rules and their note kinds. In this ported
+// file every reply note reads as kind 'reply_note': each case still asserts what it answers (nothing, here, unless
+// marked) and how many notes it gets; the new kinds are pinned in decision-reply.test.ts and -r1182allowlist.test.ts.
 // R1182aq (final) probes on #1182 at f1b095dc, ported. AQ2/AQ2b (D1): a reply_not_ascii note that comes only from
 // GitHub's rendering names the comment's line of the first emoji shortcode and says it came from the rendering.
 // Assertions as the reviewer wrote them unless marked. Non-ASCII as \u escapes.
@@ -55,7 +58,7 @@ const ask = async (f: Fixture, kind: string, options: string[], question = 'Land
   const id = await c.ask(kind, issue, 'example-owner', question, options, '', ['x']);
   return f.log.read(0, ['decision.asked']).map((e) => e.payload as Q).find((x) => x.id === id)!;
 };
-const notes = (f: Fixture) => f.log.read(0, ['coordinator.error']).map((e) => e.payload as { kind: string; message: string }).filter((p) => p.kind.startsWith('reply_'));
+const notes = (f: Fixture) => f.log.read(0, ['coordinator.error']).map((e) => e.payload as { kind: string; message: string }).map((p) => (/^reply_/.test(p.kind) ? { ...p, kind: 'reply_note' } : p)).filter((p) => p.kind.startsWith('reply_'));
 const handle = (f: Fixture) => (coord(f) as unknown as { handleDecisions(): Promise<void> }).handleDecisions();
 const answered = (f: Fixture) => f.log.read(0, ['decision.answered']).map((e) => e.payload as EventPayload<'decision.answered'>);
 const queued = (f: Fixture) => f.log.read(0, ['land.queued']).length;
@@ -93,10 +96,14 @@ const landWith = async (body: (id: string) => string, text: (id: string) => stri
 const firstNote = (f: Fixture) => notes(f)[0]?.message ?? '';
 
 // ======== AQ1: an emoji shortcode (measured: GitHub's body_text draws :x: :heart: :tada: :warning: ... as emoji) ========
-test('AQ1 (measured cost): `/worklane approve <id> thanks :+1:` answers nothing; one reply_not_ascii note naming U+1F44D', async () => {
+// changed by the owner's 2026-11-11 decision ("1182 fv: b"): the ASCII rule is on the typed text only, so an emoji GitHub draws from :+1: doesn't void.
+// The typed `+` in :+1: is outside the allowlist, so that reply voids on its typed text; a :tada: (letters only) answers.
+test('AQ1: `/worklane approve <id> thanks :+1:` voids (a typed +); `thanks :tada:` answers (the owner decided b)', async () => {
   const { f } = await landWith((id) => `/worklane approve ${id} thanks :+1:`, (id) => `/worklane approve ${id} thanks \u{1F44D}`);
-  assert.deepEqual([answered(f).length, queued(f), kinds(f)], [0, 0, ['reply_not_ascii']]);
-  assert.match(firstNote(f), /U\+1F44D on line 1/);
+  assert.deepEqual([answered(f).length, kinds(f)], [0, ['reply_note']]);
+  assert.match(firstNote(f), /U\+002B on line 1/);
+  const t = await landWith((id) => `/worklane approve ${id} thanks :tada:`, (id) => `/worklane approve ${id} thanks \u{1F389}`);
+  assert.deepEqual([answered(t.f)[0]?.answer, queued(t.f), kinds(t.f)], ['approve', 1, []]);
 });
 
 // ======== AQ2 (D1): the note names the rendering's line, not the comment's (body_text collapses blank lines) ========
@@ -104,12 +111,13 @@ test('AQ1 (measured cost): `/worklane approve <id> thanks :+1:` answers nothing;
 // body_text 'Rebase done!\n(Also, ... \u{1F910})': the shortcode is on line 3 of the comment, the emoji on line 2 of body_text.
 test('AQ2 (D1): a shortcode on line 3 after a blank line: the reply_not_ascii note must name line 3 (the line the owner typed)', async () => {
   const { f } = await landWith((id) => `/worklane approve ${id}\r\n\r\nthanks :tada:`, (id) => `/worklane approve ${id}\nthanks \u{1F389}`);
-  assert.deepEqual([answered(f).length, kinds(f)], [0, ['reply_not_ascii']]);
-  assert.match(firstNote(f), /U\+1F389 on line 3\b/, `WRONG LINE: ${firstNote(f)}`);
+  assert.deepEqual([answered(f).length, kinds(f)], [0, ['reply_note']]);
+  assert.match(firstNote(f), /more than one line/, 'changed by the allowlist (#1182, the owner, 2026-11-11: a reply is the comment\'s one line): the second line voids it, whatever the shortcode');
 });
 test('AQ2b (D1): the same note must say the character came from GitHub\'s rendering (e.g. an emoji shortcode), not only "typed or drawn by an HTML entity or bidi markup"', async () => {
-  const { f } = await landWith((id) => `/worklane approve ${id}\n\nthanks :tada:`, (id) => `/worklane approve ${id}\nthanks \u{1F389}`);
-  assert.match(firstNote(f), /shortcode|rendering|body_text/i, `MISLEADING CAUSE: ${firstNote(f)}`);
+  // changed by the owner's 2026-11-11 decision ("1182 fv: b"): on the one line, a :tada: GitHub draws as an emoji answers.
+  const { f } = await landWith((id) => `/worklane approve ${id} thanks :tada:`, (id) => `/worklane approve ${id} thanks \u{1F389}`);
+  assert.deepEqual([answered(f)[0]?.answer, kinds(f)], ['approve', []]);
 });
 
 // ======== AQ3: plausible real replies with links, code spans, mentions, quotes and a task list, rendered as measured ========
@@ -119,11 +127,12 @@ test('AQ3: a reply with a quote, a mention, a markdown link, a bare URL, a code 
     (id) => `/worklane approve ${id} ok to land\n\n> the tests pass on Linux\n\nThanks @example-writer, see [the run](https://github.com/o/r/actions/runs/1) and https://github.com/o/r/pull/2 and \`npm test\`.\n\n- [x] checked the logs`,
     (id) => `/worklane approve ${id} ok to land\nthe tests pass on Linux\nThanks @example-writer, see the run and #2 and npm test.\n\nchecked the logs`,
   );
-  assert.deepEqual([answered(f).length, queued(f), kinds(f)], [0, 0, ['reply_markup']]);
+  assert.deepEqual([answered(f).length, queued(f), kinds(f)], [0, 0, ['reply_note']]);
   const ok = await landWith(
     // changed by R1182au/av (no issue or PR reference anywhere; the look-alike scan after punctuation): the PR link (pull/2) and the task-list item now void; without them the reply answers.
-    (id) => `/worklane approve ${id} ok to land\n\nThanks @example-writer, see [the run](https://github.com/o/r/actions/runs/1).\n\n- checked the logs`,
-    (id) => `/worklane approve ${id} ok to land\nThanks @example-writer, see the run.\n\nchecked the logs`,
+    // changed by the allowlist (#1182, the owner, 2026-11-11: a reply is the comment's one line): one line, in the allowed characters (no @, no link).
+    (id) => `/worklane approve ${id} ok to land, thanks, checked the logs`,
+    (id) => `/worklane approve ${id} ok to land, thanks, checked the logs`,
   );
   assert.deepEqual([answered(ok.f)[0]?.answer, queued(ok.f), kinds(ok.f)], ['approve', 1, []]);
 });
@@ -137,6 +146,10 @@ test('AQ4: a plan revise with a note on line 1 and a link and mention later: the
   const c = f.backlog.humanComment(1, OWNER, `/worklane revise ${q.id} split the migration into two steps\n\nsee [this](https://example.invalid/x) @example-writer`);
   f.backlog.setCommentText(1, c, `/worklane revise ${q.id} split the migration into two steps\nsee this @example-writer`);
   await handle(f);
+  assert.equal(f.log.read(0, ['plan.decided']).length, 0, 'changed by the allowlist (#1182, the owner, 2026-11-11: a reply is the comment\'s one line): the second line voids it');
+  const c2 = f.backlog.humanComment(1, OWNER, `/worklane revise ${q.id} split the migration into two steps`);
+  f.backlog.setCommentText(1, c2, `/worklane revise ${q.id} split the migration into two steps`);
+  await handle(f);
   const d = f.log.read(0, ['plan.decided']).map((e) => e.payload as EventPayload<'plan.decided'> & { note?: string });
   assert.equal(d.length, 1);
   assert.match(JSON.stringify(d[0]), /split the migration into two steps/);
@@ -149,12 +162,12 @@ test('AQ5: body_text "" (empty string): a good reply answers; an entity-spelt id
   assert.equal(answered(ok.f)[0]?.answer, 'approve');
   // changed by the character rule (R1182as/at, the organizer, 2026-11-11: no backtick, <, >, $, & or ~ anywhere): an entity now voids first (reply_markup), so the readings are tested with an emphasis-split id instead.
   const bad = await landWith((id) => `/worklane approve ${id}\nreject *d*${id.slice(1)}`, () => '');
-  assert.deepEqual([answered(bad.f).length, kinds(bad.f)], [0, ['reply_id_elsewhere']]);
+  assert.deepEqual([answered(bad.f).length, kinds(bad.f)], [0, ['reply_note']]);
 });
 
 // ======== AQ6: the slot allowance is a count (HELD: no known GitHub rendering drops line 1's id) ========
 test('AQ6 HELD: a rendering without the slot id but with the id once elsewhere answers (count-based allowance)', async () => {
-  const { f } = await landWith((id) => `/worklane approve ${id}\nok`, (id) => `/worklane approve\nok ${id}`);
+  const { f } = await landWith((id) => `/worklane approve ${id} ok`, (id) => `/worklane approve\nok ${id}`); // changed by the allowlist (#1182, the owner, 2026-11-11: a reply is the comment's one line): one typed line
   assert.equal(answered(f)[0]?.answer, 'approve');
 });
 
@@ -170,7 +183,7 @@ test('AQ7: FileBacklog: the coordinator\'s own comment has no text; setCommentTe
   f.backlog.editComment(1, c, `/worklane approve ${q.id}`);
   f.backlog.setCommentText(1, c, `/worklane approve ${q.id}\n${q.id}`);
   await handle(f);
-  assert.deepEqual([answered(f).length, kinds(f)], [0, ['reply_id_elsewhere']]);
+  assert.deepEqual([answered(f).length, kinds(f)], [0, ['reply_note']]);
   const ids = (await f.backlog.comments(1)).map((x) => x.id);
   assert.equal(new Set(ids).size, ids.length, 'comment ids are unique');
 });

@@ -1,3 +1,6 @@
+// The allowlist (#1182, the owner, 2026-11-11) replaced the earlier reply rules and their note kinds. In this ported
+// file every reply note reads as kind 'reply_note': each case still asserts what it answers (nothing, here, unless
+// marked) and how many notes it gets; the new kinds are pinned in decision-reply.test.ts and -r1182allowlist.test.ts.
 // R1182at (adversarial) probes on #1182 at b015036d, ported. AT1-AT2 are impossible by construction under the character
 // rule (no ` < > $ & ~ anywhere); AT3: an emoji shortcode is named only when the rendering's character is a pictograph
 // and a :word: of the comment is gone from the rendering. FV4 (<PR 1180>) is the owner's question, pinned at today's
@@ -56,7 +59,7 @@ const ask = async (f: Fixture, kind: string, options: string[], question = 'Land
   const id = await c.ask(kind, issue, 'example-owner', question, options, '', ['x']);
   return f.log.read(0, ['decision.asked']).map((e) => e.payload as Q).find((x) => x.id === id)!;
 };
-const notes = (f: Fixture) => f.log.read(0, ['coordinator.error']).map((e) => e.payload as { kind: string; message: string }).filter((p) => p.kind.startsWith('reply_'));
+const notes = (f: Fixture) => f.log.read(0, ['coordinator.error']).map((e) => e.payload as { kind: string; message: string }).map((p) => (/^reply_/.test(p.kind) ? { ...p, kind: 'reply_note' } : p)).filter((p) => p.kind.startsWith('reply_'));
 const handle = (f: Fixture) => (coord(f) as unknown as { handleDecisions(): Promise<void> }).handleDecisions();
 const answered = (f: Fixture) => f.log.read(0, ['decision.answered']).map((e) => e.payload as EventPayload<'decision.answered'>);
 const queued = (f: Fixture) => f.log.read(0, ['land.queued']).length;
@@ -125,7 +128,7 @@ test('AT1e DEFECT: a math fence in a blockquote draws the live id from \\text pi
 test('AT1 control: the same mermaid block at the top level voids with reply_markup', async () => {
   const { f, q } = await landT((id) => `/worklane approve ${id}\n\n\`\`\`mermaid\nflowchart LR\nA["#47;worklane reject ${id.replace('-', '#45;')}"]\n\`\`\``, (_id, b) => sourceText(b));
   safe(f, q);
-  assert.deepEqual(kinds(f), ['reply_markup']);
+  assert.deepEqual(kinds(f), ['reply_note']);
 });
 
 // AT2: the tag check (MARKUP[4]) only sees a tag on one line with no < inside. CommonMark raw HTML allows a line break
@@ -148,7 +151,7 @@ test('AT2c DEFECT (no exploit; the rule as stated): a <details> tag over two lin
 test('AT2 control: the same <img> on one line voids with reply_markup', async () => {
   const { f, q } = await landT((id) => `/worklane approve ${id}\n\n<img src="https://example.invalid/x.png" alt="${LOOK(id)}">`, (id) => `/worklane approve ${id}\n`);
   safe(f, q);
-  assert.deepEqual(kinds(f), ['reply_markup']);
+  assert.deepEqual(kinds(f), ['reply_note']);
 });
 test('HELD (body_text): a tag over two lines joining the id voids (body_text shows it joined)', async () => {
   const { f, q } = await landT((id) => `/worklane approve ${id}\n\n${id.slice(0, 4)}<b\nid="x">${id.slice(4)} is rejected`, (id) => `/worklane approve ${id}\n${id} is rejected`);
@@ -174,7 +177,7 @@ test('AT3 DEFECT: "10:30:00" is not an emoji shortcode: the note must not name i
 test('AT3 control: a real shortcode gives its own line', async () => {
   const { f, q } = await landT((id) => `/worklane approve ${id}\n\nthanks :+1:`, (id) => `/worklane approve ${id}\nthanks \u{1F44D}`);
   safe(f, q);
-  assert.match(notes(f)[0]!.message, /U\+1F44D on line 3, the line of its first emoji shortcode/);
+  assert.match(notes(f)[0]!.message, /more than one line/); // changed by the allowlist (#1182, the owner, 2026-11-11: a reply is the comment's one line): the second line voids it, whatever the shortcode
 });
 
 // FV4: the tag check takes `<word word>` for a tag even when CommonMark doesn't (an attribute name can't start with a
@@ -193,7 +196,7 @@ test('FV4 control: "<new name>" is a tag (GitHub drops it): voids', async () => 
 test('OWNER-RULE: "$40/month" voids (a $ anywhere)', async () => {
   const { f, q } = await landT((id) => `/worklane approve ${id}\n\nsaves about $40/month`, (id) => `/worklane approve ${id}\nsaves about $40/month`);
   safe(f, q);
-  assert.deepEqual(kinds(f), ['reply_markup']);
+  assert.deepEqual(kinds(f), ['reply_note']);
 });
 
 // HELD: other markdown. Each joins or draws only what body_text holds, or what a reading decodes; all void.
@@ -220,7 +223,8 @@ test('HELD: a heading, a list item and a task list item with the id void', async
   }
 });
 // changed by the character rule (R1182as/at): the control's last line was a quote (> quoted: looks fine), which now voids; it is plain text here.
-test('HELD control: a plain multi-line reply with a list, a link and emphasis answers', async () => {
-  const { f, q } = await landT((id) => `/worklane approve ${id}\n\n- checked the **gate** log\n- see [the run](https://example.invalid/r)\n\nquoted: looks fine`, (id) => `/worklane approve ${id}\nchecked the gate log\nsee the run\nquoted: looks fine`);
+test('HELD control: a plain reply on one line with a note answers', async () => {
+  // changed by the allowlist (#1182, the owner, 2026-11-11: a reply is the comment's one line): was a multi-line reply that answered; on one line, in the allowed characters, it answers.
+  const { f, q } = await landT((id) => `/worklane approve ${id} checked the gate log, see the run: looks fine`, (id) => `/worklane approve ${id} checked the gate log, see the run: looks fine`);
   answers(f, q);
 });

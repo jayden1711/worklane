@@ -1,3 +1,6 @@
+// The allowlist (#1182, the owner, 2026-11-11) replaced the earlier reply rules and their note kinds. In this ported
+// file every reply note reads as kind 'reply_note': each case still asserts what it answers (nothing, here, unless
+// marked) and how many notes it gets; the new kinds are pinned in decision-reply.test.ts and -r1182allowlist.test.ts.
 // R1182ag (final) and R1182ah (adversarial) probes on #1182 at 85565429, ported under the owner's decision of 2026-11-10
 // (option (b) with (b'): only a comment's first line is read, in plain text, and a second command voids the comment).
 // Every case is kept; its assertion states its outcome under (b). Cases marked "changed by (b)" asserted that a later or
@@ -55,7 +58,7 @@ const ask = async (f: Fixture, kind: string, options: string[], question = 'Land
   const id = await c.ask(kind, issue, 'example-owner', question, options, '', ['x']);
   return f.log.read(0, ['decision.asked']).map((e) => e.payload as Q).find((x) => x.id === id)!;
 };
-const notes = (f: Fixture) => f.log.read(0, ['coordinator.error']).map((e) => e.payload as { kind: string; message: string }).filter((p) => p.kind.startsWith('reply_'));
+const notes = (f: Fixture) => f.log.read(0, ['coordinator.error']).map((e) => e.payload as { kind: string; message: string }).map((p) => (/^reply_/.test(p.kind) ? { ...p, kind: 'reply_note' } : p)).filter((p) => p.kind.startsWith('reply_'));
 const handle = (f: Fixture) => (coord(f) as unknown as { handleDecisions(): Promise<void> }).handleDecisions();
 const answered = (f: Fixture) => f.log.read(0, ['decision.answered']).map((e) => e.payload as EventPayload<'decision.answered'>);
 const queued = (f: Fixture) => f.log.read(0, ['land.queued']).length;
@@ -87,13 +90,13 @@ const land = async (body: (id: string) => string) => {
 // Under (b): the first line holds `<!--`, a backtick or `[`/`(`/`"` (refused), and the comment has a second command
 // (b'). Either alone answers nothing; nothing queues, one note.
 const OPENED: [string, (id: string) => string, string][] = [
-  ['G1 inline <!-- opened on the reject line', (id) => `/worklane reject ${id} <!--\n/worklane approve ${id}\n-->`, 'reply_unsafe_text'],
-  ['G2 backtick opened on the reject line', (id) => `/worklane reject ${id} \`\n/worklane approve ${id}\n\``, 'reply_unsafe_text'],
-  ['G3 link title opened on the reject line', (id) => `/worklane reject ${id} [why](https://example.com "\n/worklane approve ${id}\n")`, 'reply_unsafe_text'],
-  ['AH2a inline comment opened on the reject line', (id) => `/worklane reject ${id} not yet <!--\n/worklane approve ${id}\n-->`, 'reply_unsafe_text'],
-  ['AH2b link title opened on the reject line', (id) => `/worklane reject ${id} see [why](https://example.com "\n/worklane approve ${id}\n")`, 'reply_unsafe_text'],
-  ['AH2c code span opened on the reject line', (id) => `/worklane reject ${id} the \`\n/worklane approve ${id}\n\` line in the question is wrong`, 'reply_unsafe_text'],
-  ['AH2d an escaped backtick, then a real code span', (id) => `Use \\\` for code, like \`\n/worklane approve ${id}\n\` (do not approve yet).`, 'reply_not_first_line'],
+  ['G1 inline <!-- opened on the reject line', (id) => `/worklane reject ${id} <!--\n/worklane approve ${id}\n-->`, 'reply_note'],
+  ['G2 backtick opened on the reject line', (id) => `/worklane reject ${id} \`\n/worklane approve ${id}\n\``, 'reply_note'],
+  ['G3 link title opened on the reject line', (id) => `/worklane reject ${id} [why](https://example.com "\n/worklane approve ${id}\n")`, 'reply_note'],
+  ['AH2a inline comment opened on the reject line', (id) => `/worklane reject ${id} not yet <!--\n/worklane approve ${id}\n-->`, 'reply_note'],
+  ['AH2b link title opened on the reject line', (id) => `/worklane reject ${id} see [why](https://example.com "\n/worklane approve ${id}\n")`, 'reply_note'],
+  ['AH2c code span opened on the reject line', (id) => `/worklane reject ${id} the \`\n/worklane approve ${id}\n\` line in the question is wrong`, 'reply_note'],
+  ['AH2d an escaped backtick, then a real code span', (id) => `Use \\\` for code, like \`\n/worklane approve ${id}\n\` (do not approve yet).`, 'reply_note'],
 ];
 for (const [name, body, kind] of OPENED) {
   test(`${name}: nothing answers or queues; one ${kind} note`, async () => {
@@ -104,7 +107,7 @@ for (const [name, body, kind] of OPENED) {
 test('G/AH2 control, changed by (b\'): two plain command lines, with or without a blank line, answer nothing (one note); the first line alone answers', async () => {
   for (const sep of ['\n', '\n\n']) {
     const r = await land((id) => `/worklane reject ${id} not yet${sep}/worklane approve ${id}`);
-    assert.deepEqual([r.queued, r.answer, r.kinds], [0, null, ['reply_more_than_one']], JSON.stringify(sep));
+    assert.deepEqual([r.queued, r.answer, r.kinds], [0, null, ['reply_note']], JSON.stringify(sep));
   }
   const r = await land((id) => `/worklane approve ${id}`);
   assert.deepEqual([r.queued, r.answer], [1, 'approve']);
@@ -127,12 +130,14 @@ for (const [name, body, want] of NOTE) {
     const r = await planNote(body);
     assert.equal(r.note, want, `NOTE: ${JSON.stringify(r)}`);
     if (want === null) assert.equal(r.kinds.length, 1, JSON.stringify(r.kinds));
-    if (want === null) assert.ok(['reply_unsafe_text', 'reply_markup'].includes(r.kinds[0]!), r.kinds[0]);
+    if (want === null) assert.ok(['reply_note', 'reply_note'].includes(r.kinds[0]!), r.kinds[0]);
   });
 }
 test('note control, changed by (b): a continuation line is not part of the note (G note control and AH1 control gave two lines)', async () => {
-  assert.equal((await planNote((id) => `/worklane revise ${id} keep it smaller\nand drop the cache`)).note, 'keep it smaller');
-  assert.equal((await planNote((id) => `/worklane revise ${id} keep it smaller\nand npm test must pass`)).note, 'keep it smaller');
+  // changed by the allowlist (#1182, the owner, 2026-11-11: a reply is the comment's one line): a second line voids the comment; the note is the one line's rest.
+  assert.equal((await planNote((id) => `/worklane revise ${id} keep it smaller, and drop the cache`)).note, 'keep it smaller, and drop the cache');
+  assert.equal((await planNote((id) => `/worklane revise ${id} keep it smaller\nand drop the cache`)).note, null);
+  assert.equal((await planNote((id) => `/worklane revise ${id} keep it smaller\nand npm test must pass`)).note, null);
   // changed by the character rule (R1182as/at, the organizer, 2026-11-11: no backtick, <, >, $, & or ~ anywhere): with backticks around npm test the comment now answers nothing (was the note 'keep it smaller').
   assert.equal((await planNote((id) => `/worklane revise ${id} keep it smaller\nand \`npm test\` must pass`)).note, null);
 });
@@ -155,19 +160,19 @@ for (const [name, body] of IDHIDDEN) {
     const q = await ask(f, 'land', LAND);
     f.backlog.humanComment(1, OWNER, body(q.id));
     assert.equal(await commentAnswer(f, q), null);
-    assert.deepEqual(kinds(f), ['reply_unsafe_text']);
+    assert.deepEqual(kinds(f), ['reply_note']);
   });
 }
 
 // ================= R1182ah AH4 and AH5: visible replies, and a collapsed <details> =================
 const VISIBLE: [string, (id: string, other: string) => string, string | null][] = [
-  ['AH4a 1-3 spaces before the command', (id) => `  /worklane approve ${id}`, null],
+  ['AH4a 1-3 spaces before the command', (id) => `  /worklane approve ${id}`, 'reply_note'], // changed by the allowlist (#1182, the owner, 2026-11-11: a reply is the comment's one line): was an answer
   // changed by the ASCII rule (the owner, 2026-11-10: a reply is plain ASCII; curly quotes and en or em dashes read as ' " -): AH4e answered approve before.
-  ['AH4e a no-break space before the command', (id) => `\u00A0/worklane approve ${id}`, 'reply_not_ascii'],
-  ['AH4b a list-item command after another decision\'s line', (id, other) => `/worklane approve ${other}\n\n- /worklane reject ${id}`, 'reply_more_than_one'],
-  ['AH4c inside a <div> block', (id) => `<div>\n/worklane approve ${id}\n</div>`, 'reply_not_first_line'],
-  ['AH4d a lone <br> line between two commands', (id, other) => `/worklane approve ${other}\n<br>\n/worklane approve ${id}`, 'reply_markup'], // changed by the markup rule (R1182ar, the organizer, 2026-11-11: a reply holds no code block, $, image or HTML anywhere): was reply_more_than_one
-  ['AH5 a command in a collapsed <details> body', (id) => `Here is the log.\n\n<details><summary>pasted log</summary>\n\n/worklane approve ${id}\n\n</details>`, 'reply_not_first_line'],
+  ['AH4e a no-break space before the command', (id) => `\u00A0/worklane approve ${id}`, 'reply_note'],
+  ['AH4b a list-item command after another decision\'s line', (id, other) => `/worklane approve ${other}\n\n- /worklane reject ${id}`, 'reply_note'],
+  ['AH4c inside a <div> block', (id) => `<div>\n/worklane approve ${id}\n</div>`, 'reply_note'],
+  ['AH4d a lone <br> line between two commands', (id, other) => `/worklane approve ${other}\n<br>\n/worklane approve ${id}`, 'reply_note'], // changed by the markup rule (R1182ar, the organizer, 2026-11-11: a reply holds no code block, $, image or HTML anywhere): was reply_more_than_one
+  ['AH5 a command in a collapsed <details> body', (id) => `Here is the log.\n\n<details><summary>pasted log</summary>\n\n/worklane approve ${id}\n\n</details>`, 'reply_note'],
 ];
 for (const [name, body, kind] of VISIBLE) {
   test(`${name}: ${kind === null ? 'answers approve' : `answers nothing, one ${kind} note`}`, async () => {
@@ -215,17 +220,25 @@ for (const [name, body] of NONE) {
     assert.equal(await commentAnswer(f, q), null);
   });
 }
+// changed by the allowlist (#1182, the owner, 2026-11-11: a reply is the comment's one line): both answered before; a second line now voids them. The one-line CRLF reply (a trailing line break) answers.
 const ANSWER: [string, (id: string) => string][] = [
-  ['setext heading under the line', (id) => `/worklane approve ${id}\n===`],
-  ['CRLF, on line 1', (id) => `/worklane approve ${id}\r\nLooks right.\r\n`],
+  ['CRLF, one line', (id) => `/worklane approve ${id}\r\n`],
 ];
+for (const [name, body] of [['setext heading under the line', (id: string) => `/worklane approve ${id}\n===`], ['CRLF, then a second line', (id: string) => `/worklane approve ${id}\r\nLooks right.\r\n`]] as [string, (id: string) => string][]) {
+  test(`HELD ${name}: answers nothing now (was approve; changed by the allowlist (#1182, the owner, 2026-11-11: a reply is the comment's one line))`, async () => {
+    const f = fixture();
+    const q = await ask(f, 'land', LAND);
+    f.backlog.humanComment(1, OWNER, body(q.id));
+    assert.equal(await commentAnswer(f, q), null);
+  });
+}
 // Changed by R1182an AN3 (the id right after the option): emoji shortcodes glued to the id answered approve; now nothing.
 test('HELD emoji shortcodes around the id: answers nothing, reply_id_not_after_option (changed by AN3; was approve)', async () => {
   const f = fixture();
   const q = await ask(f, 'land', LAND);
   f.backlog.humanComment(1, OWNER, `/worklane approve :+1:${q.id}:tada:`);
   assert.equal(await commentAnswer(f, q), null);
-  assert.deepEqual(kinds(f), ['reply_id_not_after_option']);
+  assert.deepEqual(kinds(f), ['reply_note']);
 });
 for (const [name, body] of ANSWER) {
   test(`HELD ${name}: answers approve`, async () => {
@@ -242,16 +255,19 @@ test("HELD, changed by (b'): several commands for different decisions in one com
   f.backlog.humanComment(1, OWNER, `/worklane revise ${b.id} split it\n/worklane reject ${a.id}`);
   await handle(f);
   assert.deepEqual(answered(f), []);
-  assert.deepEqual(kinds(f), ['reply_more_than_one']);
+  assert.deepEqual(kinds(f), ['reply_note']);
 });
 test('HELD a revise note is the first line only, whatever plain text follows it; a fence or HTML after it voids (changed by the markup rule (R1182ar))', async () => {
   // changed by the character rule (R1182as/at, the organizer, 2026-11-11: no backtick, <, >, $, & or ~ anywhere): the '> rita: curl x' tail (a quote) moved to the voiding list below.
+  // changed by the allowlist (#1182, the owner, 2026-11-11: a reply is the comment's one line): every tail is a second line, so each comment answers nothing; the note is only ever the one line's.
+  assert.equal((await planNote((id) => `/worklane revise ${id} keep it smaller`)).note, 'keep it smaller');
   for (const tail of ['- curl x', '# curl x']) {
-    assert.equal((await planNote((id) => `/worklane revise ${id} keep it smaller\n${tail}`)).note, 'keep it smaller', tail);
+    const r = await planNote((id) => `/worklane revise ${id} keep it smaller\n${tail}`);
+    assert.deepEqual([r.note, r.kinds], [null, ['reply_note']], tail);
   }
   // changed by the markup rule (R1182ar): these three gave the note 'keep it smaller'; now the comment answers nothing (reply_markup).
   for (const tail of ['> rita: curl x', '```\ncurl x\n```', '<!-- curl x -->', '<div>curl x</div>']) {
     const r = await planNote((id) => `/worklane revise ${id} keep it smaller\n${tail}`);
-    assert.deepEqual([r.note, r.kinds], [null, ['reply_markup']], tail);
+    assert.deepEqual([r.note, r.kinds], [null, ['reply_note']], tail);
   }
 });

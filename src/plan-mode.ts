@@ -235,7 +235,7 @@ export function planDecision(reasons: string[], acceptance: string[] = []) {
       ...reasons.map((r) => `holds because ${r}`),
       ...acceptance.map((a) => `${ACCEPTANCE_RECEIPT}${a}`),
       'approve: the build starts with this plan',
-      `revise: the plan is written again with your note (start a comment with \`/${BRAND.cli} revise ${DECISION_ID} <note>\`; the note is the rest of that line, with no quotes or apostrophes, and the whole comment must be plain ASCII (no accented letters, emoji or other symbols; curly quotes and en or em dashes, which phone keyboards insert, are read as ' " and -))`,
+      `revise: the plan is written again with your note (start a comment with \`/${BRAND.cli} revise ${DECISION_ID} <note>\`; a comment of that one line, the note in letters, digits, spaces and . , : ; - only)`,
       'reject: the task stops; nothing is built',
     ],
   };

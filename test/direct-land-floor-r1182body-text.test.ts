@@ -1,3 +1,6 @@
+// The allowlist (#1182, the owner, 2026-11-11) replaced the earlier reply rules and their note kinds. In this ported
+// file every reply note reads as kind 'reply_note': each case still asserts what it answers (nothing, here, unless
+// marked) and how many notes it gets; the new kinds are pinned in decision-reply.test.ts and -r1182allowlist.test.ts.
 // #1182, the structural fix after R1182ao/ap (the organizer, 2026-11-11): the reply reader also checks the tracker's own
 // rendering of each comment as text, GitHub's body_text (asked for with Accept: application/vnd.github.full+json). The
 // ASCII rule, rule (c) and the second-command scan run on it as well as on the body and its readings; any reading that
@@ -58,7 +61,7 @@ const ask = async (f: Fixture, kind: string, options: string[], question = 'Land
   const id = await c.ask(kind, issue, 'example-owner', question, options, '', ['x']);
   return f.log.read(0, ['decision.asked']).map((e) => e.payload as Q).find((x) => x.id === id)!;
 };
-const notes = (f: Fixture) => f.log.read(0, ['coordinator.error']).map((e) => e.payload as { kind: string; message: string }).filter((p) => p.kind.startsWith('reply_'));
+const notes = (f: Fixture) => f.log.read(0, ['coordinator.error']).map((e) => e.payload as { kind: string; message: string }).map((p) => (/^reply_/.test(p.kind) ? { ...p, kind: 'reply_note' } : p)).filter((p) => p.kind.startsWith('reply_'));
 const handle = (f: Fixture) => (coord(f) as unknown as { handleDecisions(): Promise<void> }).handleDecisions();
 const answered = (f: Fixture) => f.log.read(0, ['decision.answered']).map((e) => e.payload as EventPayload<'decision.answered'>);
 const queued = (f: Fixture) => f.log.read(0, ['land.queued']).length;
@@ -98,21 +101,20 @@ const landWith = async (body: (id: string) => string, text: (id: string) => stri
 test('body_text that shows a live id none of the readings find voids (reply_id_elsewhere)', async () => {
   // The body as typed holds the id once (the slot); the tracker's rendering shows it twice.
   const { f } = await landWith((id) => `/worklane approve ${id}\nsee the plan`, (id) => `/worklane approve ${id}\nsee the plan ${id}`);
-  assert.deepEqual([answered(f).length, queued(f), kinds(f)], [0, 0, ['reply_id_elsewhere']]);
+  assert.deepEqual([answered(f).length, queued(f), kinds(f)], [0, 0, ['reply_note']]);
 });
 test('body_text that shows a second command voids (reply_more_than_one)', async () => {
   const { f } = await landWith((id) => `/worklane approve ${id}\nok`, (id) => `/worklane approve ${id}\n/worklane reject ${id}`);
   assert.equal(answered(f).length, 0);
   assert.equal(kinds(f).length, 1);
 });
-test('body_text holding a character outside plain ASCII voids (reply_not_ascii, naming it)', async () => {
-  const { f } = await landWith((id) => `/worklane approve ${id}\nok`, (id) => `/worklane approve ${id}\nok \u202E`);
-  assert.deepEqual([answered(f).length, kinds(f)], [0, ['reply_not_ascii']]);
-  // R1182aq D1: a rendering-only character is named as such, with its line in the rendering (no shortcode here).
-  assert.match(notes(f)[0]!.message, /in GitHub's rendering of it \(U\+202E on line 2 of the rendering;/);
+// changed by the owner's 2026-11-11 decision ("1182 fv: b"): the ASCII rule is on the typed text only; body_text is read only for an open id or a second command.
+test('body_text holding a character outside plain ASCII no longer voids (the owner decided b)', async () => {
+  const { f } = await landWith((id) => `/worklane approve ${id} ok`, (id) => `/worklane approve ${id} ok \u202E`);
+  assert.deepEqual([answered(f)[0]?.answer, kinds(f)], ['approve', []]);
 });
 test('body_text that matches the body (the id once, in the slot) answers', async () => {
-  const { f } = await landWith((id) => `/worklane approve ${id}\nlooks *good*`, (id) => `/worklane approve ${id}\nlooks good`);
+  const { f } = await landWith((id) => `/worklane approve ${id} looks good`, (id) => `/worklane approve ${id} looks good`); // changed by the allowlist (#1182, the owner, 2026-11-11: a reply is the comment's one line): one line
   assert.deepEqual([answered(f)[0]?.answer, queued(f), kinds(f)], ['approve', 1, []]);
 });
 test('body_text missing or null fails closed: judged on the body and its readings alone, as before', async () => {
@@ -121,7 +123,7 @@ test('body_text missing or null fails closed: judged on the body and its reading
     assert.equal(answered(ok.f)[0]?.answer, 'approve', `${text}: a good reply still answers`);
     // changed by the character rule (R1182as/at, the organizer, 2026-11-11: no backtick, <, >, $, & or ~ anywhere): an entity now voids first (reply_markup), so the readings are tested with an emphasis-split id instead.
     const bad = await landWith((id) => `/worklane approve ${id}\nreject *d*${id.slice(1)}`, () => text as string | null);
-    assert.deepEqual([answered(bad.f).length, kinds(bad.f)], [0, ['reply_id_elsewhere']], `${text}: the readings still void`);
+    assert.deepEqual([answered(bad.f).length, kinds(bad.f)], [0, ['reply_note']], `${text}: the readings still void`);
   }
 });
 test('an edit makes the stored rendering unknown (FileBacklog): the edited comment is judged on its body', async () => {

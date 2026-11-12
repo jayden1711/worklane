@@ -33,7 +33,7 @@ export function optionEffect(kind: DetailKind, option: string, o: { investigatio
   }
   if (kind === 'plan') {
     if (option === 'approve') return { does: 'The plan is built: the task goes on to its workers.', cannot: "It doesn't approve the code: the change is reviewed again at its own level." };
-    if (option === 'revise') return { does: 'The planner plans again, with your note (start a comment on the issue with `/' + cli + ' revise <decision id> <note>`, with the id shown here; the note is the rest of that line, with no quotes or apostrophes, and the whole comment must be plain ASCII (no accented letters, emoji or other symbols; curly quotes and en or em dashes, which phone keyboards insert, are read as plain quotes and hyphens)).', cannot: 'Nothing is built until a plan is approved.' };
+    if (option === 'revise') return { does: 'The planner plans again, with your note (start a comment on the issue with `/' + cli + ' revise <decision id> <note>`, with the id shown here; a comment of that one line, the note in letters, digits, spaces and . , : ; - only).', cannot: 'Nothing is built until a plan is approved.' };
     if (option === 'reject') return { does: 'Stops the task: nothing is built.', cannot: "It doesn't close the issue." };
   }
   if (kind === 'intake') {

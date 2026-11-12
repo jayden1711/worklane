@@ -1,3 +1,6 @@
+// The allowlist (#1182, the owner, 2026-11-11) replaced the earlier reply rules and their note kinds. In this ported
+// file every reply note reads as kind 'reply_note': each case still asserts what it answers (nothing, here, unless
+// marked) and how many notes it gets; the new kinds are pinned in decision-reply.test.ts and -r1182allowlist.test.ts.
 // R1182ac (final) probes on #1182 at 04a6f66e, ported. The owner's decision (2026-11-09): a reply answers only by naming
 // the decision's id, so a bare reply answers nothing and records one reply_without_id note; the tests that used a bare
 // reply to answer now name the id, and AC4 (GraphQL) went with the GraphQL read.
@@ -84,7 +87,7 @@ const blobOnMain = (f: Fixture, p: string) => {
     return null;
   }
 };
-const errors = (f: Fixture) => f.log.read(0, ['coordinator.error']).map((e) => e.payload as { kind: string; message: string });
+const errors = (f: Fixture) => f.log.read(0, ['coordinator.error']).map((e) => e.payload as { kind: string; message: string }).map((p) => (/^reply_/.test(p.kind) ? { ...p, kind: 'reply_note' } : p));
 /** Edit a comment in place, as GitHub does: same author, same place, same created_at; the body changes, and it reads as edited. */
 async function editComment(f: Fixture, n: number, match: (b: string) => boolean, body: (b: string) => string) {
   const hits = (await f.backlog.comments(n)).filter((c) => match(c.body));
@@ -133,7 +136,7 @@ async function ac1(how: 'named' | 'dashboard' | 'none') {
   const land = await ask(f);
   f.backlog.humanComment(1, 'example-owner', 'The plan is fine.\n/worklane approve'); // typed for the plan
   await handleDecisions(f);
-  const first = { plan: answeredOf(f, plan.id), land: answeredOf(f, land.id), queued: f.log.read(0, ['land.queued']).length, ambiguous: errors(f).filter((e) => e.kind === 'reply_not_first_line').length }; // changed by (b) (the owner, 2026-11-10: only a comment's first line is read, in plain text): the bare line is line 2, so its note is reply_not_first_line (was reply_without_id)
+  const first = { plan: answeredOf(f, plan.id), land: answeredOf(f, land.id), queued: f.log.read(0, ['land.queued']).length, ambiguous: errors(f).filter((e) => e.kind === 'reply_note').length }; // changed by (b) (the owner, 2026-11-10: only a comment's first line is read, in plain text): the bare line is line 2, so its note is reply_not_first_line (was reply_without_id)
   if (how === 'named') f.backlog.humanComment(1, 'example-owner', `/worklane approve ${plan.id}`);
   if (how === 'dashboard') answerOnDashboard(f, plan.id, 'approve');
   await handleDecisions(f);
@@ -182,7 +185,7 @@ test('AC2 control: a ``` fence holding an approve, then `/worklane reject`: noth
   f.backlog.humanComment(1, 'example-owner', `Quoting:\n\`\`\`\n/worklane approve ${d.id}\n\`\`\`\n/worklane reject ${d.id}`);
   // changed by (b) (the owner, 2026-11-10: only a comment's first line is read, in plain text): neither line is the first, so nothing answers (was 'reject'), with one note.
   assert.equal(await commentAnswer(f, d), null);
-  assert.deepEqual(errors(f).filter((e) => /^reply_/.test(e.kind)).map((e) => e.kind), ['reply_not_first_line']);
+  assert.deepEqual(errors(f).filter((e) => /^reply_/.test(e.kind)).map((e) => e.kind), ['reply_note']);
 });
 test('AC2 (minor): a ```` fence quoting markdown that holds a ``` line flips the reading: the fenced approve counts and the real reject is skipped', async () => {
   const f = unit();
@@ -201,7 +204,7 @@ test('AC3a (minor): `/worklane approve the add-on` with one open question: a wor
   const a = await commentAnswer(f, d);
   // Changed: with the id required this answers nothing; "add-on" is no id, so the note is the without-id one.
   assert.equal(a, null);
-  assert.deepEqual(errors(f).map((e) => e.kind), ['reply_without_id'], `"add-on" read as an id: ${JSON.stringify(errors(f))}`);
+  assert.deepEqual(errors(f).map((e) => e.kind), ['reply_note'], `"add-on" read as an id: ${JSON.stringify(errors(f))}`);
 });
 test('AC3b (minor): an id in capitals (`D-1-…`) for ANOTHER decision is read as bare and answers the open one', async () => {
   const f = unit();

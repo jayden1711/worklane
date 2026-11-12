@@ -1,3 +1,6 @@
+// The allowlist (#1182, the owner, 2026-11-11) replaced the earlier reply rules and their note kinds. In this ported
+// file every reply note reads as kind 'reply_note': each case still asserts what it answers (nothing, here, unless
+// marked) and how many notes it gets; the new kinds are pinned in decision-reply.test.ts and -r1182allowlist.test.ts.
 // Who may approve, the same on every surface, and the money paths read from main (#715): a writer's GitHub comment
 // doesn't approve a high-risk merge unless review.yaml on main lets writers, `decide` from the CLI is refused to
 // anyone but root and the coordinator user (on a local site, the user whose event log it is), and a change is judged by main's money-path list, never the checkout's.
@@ -344,7 +347,7 @@ test('#1248: a reply answers a decision only by naming its id; a bare reply answ
     await handleDecisions(c);
     await handleDecisions(c);
     assert.deepEqual(answered(f), [], `${kind}: a bare reply answered it`);
-    const without = notes(f).filter((e) => e.kind === 'reply_without_id');
+    const without = notes(f).filter((e) => e.kind.startsWith('reply_')); // changed by the allowlist (#1182, the owner, 2026-11-11: a reply is the comment's one line)
     assert.equal(without.length, 2, `${kind}: one note per bare reply, never repeated: ${JSON.stringify(without)}`);
     assert.ok(without.every((e) => e.message.includes(id) && e.message.includes(`/${BRAND.cli} <option> <id>`)), JSON.stringify(without));
     // A reply naming another decision answers nothing here.
