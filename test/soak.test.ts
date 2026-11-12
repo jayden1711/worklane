@@ -570,7 +570,7 @@ export function childFds(pids: readonly number[]): number | null {
  * slab) is left out, so walking files doesn't move it. R1181z D1: a netlink socket's are charged to no cgroup, so the
  * namespace's netlink queues are added. Each null where it can't be read.
  */
-export function cgroupLevels(root = '/sys/fs/cgroup', pids?: Set<number>): { procs: number | null; kernelBytes: number | null } {
+export function cgroupLevels(root = '/sys/fs/cgroup', pids?: number[]): { procs: number | null; kernelBytes: number | null } {
   let dir: string;
   try {
     const line = readFileSync('/proc/self/cgroup', 'utf8').split('\n').find((l) => l.startsWith('0::'));
@@ -583,8 +583,8 @@ export function cgroupLevels(root = '/sys/fs/cgroup', pids?: Set<number>): { pro
   const walk = (d: string) => {
     const listed = readFileSync(join(d, 'cgroup.procs'), 'utf8').split('\n').filter(Boolean);
     count += listed.length;
-    // The pids counted, for a caller that asks (the cgroup test: R1181t D1's flake, a count shared with other tests).
-    for (const p of listed) pids?.add(Number(p));
+    // Every pid counted, as listed (a repeat included), for a caller that asks: the cgroup test checks them.
+    for (const p of listed) pids?.push(Number(p));
     for (const e of readdirSync(d, { withFileTypes: true })) {
       if (!e.isDirectory()) continue;
       try {
@@ -867,6 +867,51 @@ export function claimRefsLeft(remote: string, open: ReadonlySet<string>): number
     const m = /^issue-(\d+)$/.exec(ref.slice(prefix.length));
     return !m || !open.has(m[1]!);
   }).length;
+}
+
+/** The pids in every cgroup.procs under `dir` (the job's cgroup and its sub-groups), read here, not by cgroupLevels. */
+export function cgroupProcsUnder(dir: string): Set<number> {
+  const out = new Set<number>();
+  const walk = (d: string) => {
+    try {
+      for (const p of readFileSync(join(d, 'cgroup.procs'), 'utf8').split('\n').filter(Boolean)) out.add(Number(p));
+      for (const e of readdirSync(d, { withFileTypes: true })) if (e.isDirectory()) walk(join(d, e.name));
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    }
+  };
+  walk(dir);
+  return out;
+}
+
+/**
+ * The cgroup reader's pids against two independent reads of cgroup.procs, one before it and one after (the owner,
+ * 2026-11-12: both directions). (1) Every pid the reader reports is in an independent read: a pid neither has, a pid
+ * listed twice, or a count that isn't the pids listed fails (over-counting). (2) Every pid in an independent read is
+ * reported or explicitly explained: one in only one of the two reads is named as started or exited mid-read; one in
+ * both that the reader didn't report fails (dropped), unless `explain` names why by its relation to this test. And the
+ * spawned pid is reported. `problems` is empty when the read is consistent; `explained` names every pid let through.
+ */
+export function cgroupReadProblems(o: { count: number | null; reported: number[]; before: Set<number>; after: Set<number>; spawned: number; explain?: (pid: number) => string | null }): { problems: string[]; explained: string[] } {
+  const problems: string[] = [];
+  const explained: string[] = [];
+  if (o.count !== o.reported.length) problems.push(`the count ${o.count} is not the ${o.reported.length} pid(s) listed`);
+  const twice = [...new Set(o.reported.filter((p, i) => o.reported.indexOf(p) !== i))];
+  if (twice.length) problems.push(`pid(s) listed twice: ${twice.join(', ')}`);
+  const reported = new Set(o.reported);
+  const foreign = [...reported].filter((p) => !o.before.has(p) && !o.after.has(p));
+  if (foreign.length) problems.push(`pid(s) reported that no cgroup.procs lists: ${foreign.join(', ')}`);
+  for (const p of [...new Set([...o.before, ...o.after])].filter((x) => !reported.has(x))) {
+    if (!(o.before.has(p) && o.after.has(p))) {
+      explained.push(`${p} (in one independent read only: ${o.before.has(p) ? 'exited' : 'started'} mid-read)`);
+      continue;
+    }
+    const why = o.explain?.(p) ?? null;
+    if (why) explained.push(`${p} (${why})`);
+    else problems.push(`pid ${p} is in cgroup.procs before and after the read, and wasn't reported`);
+  }
+  if (!reported.has(o.spawned)) problems.push(`the new session (pid ${o.spawned}) wasn't reported`);
+  return { problems, explained };
 }
 
 /** Bytes queued in this network namespace's netlink sockets (/proc/net/netlink Rmem + Wmem), or null (R1181z D1). */
@@ -1981,6 +2026,26 @@ test("soak driver (Linux, R1181t D4): a new leader on a session id alive at the 
   }
 });
 
+test("soak driver: the cgroup reader's pids are checked against cgroup.procs: a dropped pid, a repeat, a stranger or a wrong count fails (owner, 2026-11-12)", () => {
+  const set = (...p: number[]) => new Set(p);
+  const ok = { count: 3, reported: [10, 11, 12], before: set(10, 11, 12), after: set(10, 11, 12), spawned: 12 };
+  assert.deepEqual(cgroupReadProblems(ok).problems, [], 'a consistent read');
+  // A process that started or exited mid-read is in one independent read only: neither a stranger nor dropped.
+  assert.deepEqual(cgroupReadProblems({ ...ok, count: 4, reported: [10, 11, 12, 13], after: set(10, 11, 12, 13) }).problems, [], 'one started mid-read');
+  const exited = cgroupReadProblems({ ...ok, before: set(9, 10, 11, 12) });
+  assert.deepEqual([exited.problems, exited.explained], [[], ['9 (in one independent read only: exited mid-read)']], 'one exited mid-read: named');
+  // The reader dropping one pid.
+  assert.match(cgroupReadProblems({ ...ok, count: 2, reported: [10, 12] }).problems.join(), /pid 11 is in cgroup\.procs before and after the read, and wasn't reported/);
+  // Over-counting: a pid twice, a pid no cgroup.procs lists, a count past the pids listed.
+  assert.match(cgroupReadProblems({ ...ok, count: 4, reported: [10, 11, 11, 12] }).problems.join(), /pid\(s\) listed twice: 11/);
+  assert.match(cgroupReadProblems({ ...ok, count: 4, reported: [10, 11, 12, 99] }).problems.join(), /reported that no cgroup\.procs lists: 99/);
+  assert.match(cgroupReadProblems({ ...ok, count: 4 }).problems.join(), /the count 4 is not the 3 pid\(s\) listed/);
+  // The new session not reported; an extra explained by relation is named, not failed.
+  assert.match(cgroupReadProblems({ ...ok, spawned: 50 }).problems.join(), /the new session \(pid 50\) wasn't reported/);
+  const why = cgroupReadProblems({ ...ok, count: 2, reported: [10, 12], explain: (p) => (p === 11 ? "this test's own child" : null) });
+  assert.deepEqual([why.problems, why.explained], [[], ["11 (this test's own child)"]]);
+});
+
 test("soak driver (Linux, R1181t D1, D4): the job's cgroup is read: a process started in it is counted, whatever its session", linuxOnly, async (t) => {
   const line = readFileSync('/proc/self/cgroup', 'utf8').split('\n').find((l) => l.startsWith('0::'));
   if (!line || !existsSync(join('/sys/fs/cgroup', line.slice(3), 'cgroup.procs'))) return t.skip('no cgroup v2 here');
@@ -1991,16 +2056,30 @@ test("soak driver (Linux, R1181t D1, D4): the job's cgroup is read: a process st
     // Its own pid among those the reader counts, not a rise in the count: the job's cgroup is shared with the tests
     // running beside this one, so one exiting meanwhile cancelled the new process out (CI, Node 22: 11 -> 11).
     assert.ok(pid > 0, 'the new session started');
-    let seen = false;
-    for (let i = 0; i < 20 && !seen; i++) {
-      const pids = new Set<number>();
-      const levels = cgroupLevels('/sys/fs/cgroup', pids);
-      seen = pids.has(pid);
-      // R1181an F4: at least the pids read, not equal: a process moving between sub-cgroups mid-walk is listed twice.
-      assert.ok(levels.procs! >= pids.size, `the count covers the pids read: ${levels.procs} >= ${pids.size}`);
-      if (!seen) await new Promise((r) => setTimeout(r, 100));
+    // The owner (2026-11-12): every pid the reader reports is in cgroup.procs, read here independently, and every pid
+    // there throughout the read is reported; a count, a repeat or a stranger fails. The cgroup is shared with the tests
+    // beside this one, so a process starting, exiting or moving mid-read can make one read disagree: a reader bug
+    // repeats on every read, that doesn't, so up to 10 reads, and the test fails only if none agrees.
+    const dir = join('/sys/fs/cgroup', line.slice(3));
+    // An extra explained by relation: a process this test started (its parent is this process).
+    const explain = (p: number) => {
+      try {
+        const stat = readFileSync(`/proc/${p}/stat`, 'utf8');
+        return Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[1]) === process.pid ? "this test's own child" : null;
+      } catch {
+        return null;
+      }
+    };
+    let last: ReturnType<typeof cgroupReadProblems> = { problems: ['not read'], explained: [] };
+    for (let i = 0; i < 10 && last.problems.length; i++) {
+      if (i) await new Promise((r) => setTimeout(r, 100));
+      const before = cgroupProcsUnder(dir);
+      const reported: number[] = [];
+      const levels = cgroupLevels('/sys/fs/cgroup', reported);
+      last = cgroupReadProblems({ count: levels.procs, reported, before, after: cgroupProcsUnder(dir), spawned: pid, explain });
     }
-    assert.ok(seen, `a new session in our cgroup is counted: pid ${pid}`);
+    if (last.explained.length) t.diagnostic(`not reported, explained: ${last.explained.join('; ')}`);
+    assert.deepEqual(last.problems, [], `the reader's pids agree with cgroup.procs (pid ${pid} started)`);
     if (before.kernelBytes === null) t.diagnostic('no memory controller on this cgroup: the kernel level reads null here');
     else assert.ok(before.kernelBytes > 0, 'its unreclaimable kernel memory is read');
   } finally {
