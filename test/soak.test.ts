@@ -972,7 +972,7 @@ function openFds(): number | null {
   return null;
 }
 
-test('soak: the real coordinator works for a while with stand-in agents; nothing leaks, sticks or grows past its limits', { skip, timeout: 10 * 3600_000 }, async () => {
+test('soak: the real coordinator works for a while with stand-in agents; nothing leaks, sticks or grows past its limits', { skip, timeout: 10 * 3600_000 }, async (t) => {
   const hours = Number(process.env.SOAK_HOURS ?? 0);
   // The PR smoke counts ticks, not time (a slow runner gives the same number of samples): SOAK_TICKS, one sample and
   // one new task each. A real soak (SOAK_HOURS) runs for its hours.
@@ -988,9 +988,28 @@ test('soak: the real coordinator works for a while with stand-in agents; nothing
   const gc = (globalThis as { gc?: () => void }).gc;
   if (hours > 0 && typeof gc !== 'function') throw new Error('a soak needs node --expose-gc: its readings are taken after a forced GC');
   let tickCount = 0;
+  // OWNER (2026-11-11): a free-space floor for starting a soak, SOAK_MIN_FREE_GB under the temp folder (off unless set:
+  // a GitHub runner has far less free than a reviewer's machine needs).
+  const floorGb = Number(process.env.SOAK_MIN_FREE_GB ?? 0);
+  if (floorGb > 0) {
+    const fs = statfsSync(tmpdir());
+    const freeGb = (fs.bavail * fs.bsize) / 2 ** 30;
+    if (freeGb < floorGb) throw new Error(`soak refused to start: ${freeGb.toFixed(1)} GB free under ${tmpdir()}, below SOAK_MIN_FREE_GB=${floorGb}`);
+  }
   // What was alive before the soak (Linux): a new session of this user after it is the soak's (R1181p D1).
   const startProcs = processSnapshot();
   const f = fixture();
+  // OWNER (2026-11-11): the soak cleans up after itself, pass or fail: its folder (the state dir, the repo and its
+  // remote, the worktrees, the temp files under TMPDIR) goes after the test, whatever it threw.
+  t.after(() => {
+    try {
+      f.log.close();
+    } catch {
+      // closed
+    }
+    rmSync(f.base, { recursive: true, force: true });
+  });
+  if (process.env.SOAK_BASE_RECORD) writeFileSync(process.env.SOAK_BASE_RECORD, f.base);
   // Temp files count too (R1181l 3: os.tmpdir() leftovers were outside the measured folder): TMPDIR inside it.
   const tmp = join(f.base, 'tmp');
   mkdirSync(tmp);
@@ -1104,6 +1123,8 @@ test('soak: the real coordinator works for a while with stand-in agents; nothing
       const t0 = performance.now();
       await c.tick();
       await c.idle();
+      // A fault for the cleanup test only (SOAK_TEST_THROW_AT_TICK): the soak must clean up when it throws.
+      if (process.env.SOAK_TEST_THROW_AT_TICK && tickCount === Number(process.env.SOAK_TEST_THROW_AT_TICK)) throw new Error('SOAK_TEST_THROW_AT_TICK: a fault for the cleanup test');
       ticks.push(performance.now() - t0);
       const wait = tickPeriodMs - (performance.now() - t0);
       if (wait > 0) await new Promise((r) => setTimeout(r, wait));
@@ -1144,13 +1165,19 @@ test('soak: the real coordinator works for a while with stand-in agents; nothing
     writeFileSync(join(out, 'soak-samples.json'), JSON.stringify(samples));
     writeFileSync(join(out, 'soak-verdict.json'), JSON.stringify({ asked: hours, hours: (performance.now() - start) / 3600_000, issues: n, ...v }, null, 2));
   }
-  f.log.close();
-  rmSync(f.base, { recursive: true, force: true });
   assert.deepEqual(v.failures, [], JSON.stringify(v.measured));
   assert.ok(samples.length >= 4, `${samples.length} samples`);
   // R1181j 1, 2: the driver records errors, worktrees, disk and children in every sample.
   for (const k of ['errors', 'worktrees', 'diskBytes'] as const) assert.ok(samples.every((s) => typeof s[k] === 'number'), `every sample has ${k}`);
   assert.ok(samples.every((s) => 'children' in s), 'every sample has children (a count, or null where ps cannot)');
+});
+
+// OWNER (2026-11-11): run after the soak in the same process by the cleanup test (SOAK_CLEANUP_PROBE), it reads the
+// soak's folder before the process exits (the test isolate removes its whole temp root at exit, which would hide a
+// soak that left its folder behind until then).
+test('soak cleanup probe: the soak\'s folder is gone before its process exits', { skip: !process.env.SOAK_CLEANUP_PROBE && 'run by the cleanup test only' }, () => {
+  const base = readFileSync(process.env.SOAK_BASE_RECORD!, 'utf8');
+  assert.equal(existsSync(base), false, `the soak's folder is gone: ${base}`);
 });
 
 // --- R1181j: what the verdict never saw (errors, worktrees, child processes, disk), and R1181i's gaps ---
@@ -2024,7 +2051,8 @@ print(' '.join(map(str, ids)))`], { encoding: 'utf8' });
     assert.equal(ids.filter((i) => i >= 0).length, 8, `8 sets made: ${made.stdout}${made.stderr}`);
     assert.ok(sysvIpcCount()! >= before + 8, `counted after their maker exited: ${before} -> ${sysvIpcCount()}`);
   } finally {
-    for (const i of ids) if (i >= 0) spawnSync('ipcrm', ['-s', String(i)]);
+    // OWNER (2026-11-11): what a test makes, it removes, and the removal is checked.
+    for (const i of ids) if (i >= 0) assert.equal(spawnSync('ipcrm', ['-s', String(i)]).status, 0, `semaphore set ${i} removed`);
   }
 });
 
@@ -2316,4 +2344,34 @@ test('soak driver (Linux, R1181ae D4): the walked files on a tmpfs are in no ino
   } finally {
     rmSync(d, { recursive: true, force: true });
   }
+});
+
+/** The soak driver run as its own test process (the smoke, with `env`), and the folder it recorded. */
+function runSoakDriver(env: Record<string, string>): { status: number | null; out: string; base: string | null } {
+  const rec = join(mkdtempSync(join(tmpdir(), 'soak-run-')), 'base');
+  const childEnv: Record<string, string | undefined> = { ...process.env, SOAK_BASE_RECORD: rec, SOAK_CLEANUP_PROBE: '1', ...env };
+  // Without this the child `node --test` runs nothing and exits 0 (as docs/soak.md says of the workflow).
+  delete childEnv.NODE_TEST_CONTEXT;
+  const r = spawnSync(process.execPath, ['--import', join(repoRoot, 'dist', 'test', 'isolate.js'), '--test', '--test-name-pattern=^soak: the real coordinator|^soak cleanup probe', join(repoRoot, 'dist', 'test', 'soak.test.js')], { cwd: repoRoot, encoding: 'utf8', env: childEnv, timeout: 300_000 });
+  return { status: r.status, out: `${r.stdout}${r.stderr}`, base: existsSync(rec) ? readFileSync(rec, 'utf8') : null };
+}
+
+test('soak driver: the soak removes its own folder (state, repo, worktrees, temp files) after each run, pass or fail; a free-space floor refuses to start (OWNER 2026-11-11)', { skip, timeout: 900_000 }, () => {
+  // A run that throws mid-loop: it fails, and its folder is gone.
+  const failed = runSoakDriver({ SOAK_TICKS: '4', SOAK_TEST_THROW_AT_TICK: '2' });
+  assert.notEqual(failed.status, 0, 'the run failed');
+  assert.match(failed.out, /SOAK_TEST_THROW_AT_TICK: a fault for the cleanup test/);
+  assert.ok(failed.base, 'it recorded its folder');
+  assert.match(failed.out, /(?:ok \d+ -|✔) soak cleanup probe/, `the probe, in the same process before it exits, found the folder gone: ${failed.out.slice(-600)}`);
+  assert.equal(existsSync(failed.base!), false, `a failed run's folder is gone: ${failed.base}`);
+  // A run to its end, whatever its verdict: its folder is gone too.
+  const ran = runSoakDriver({ SOAK_TICKS: '4' });
+  assert.ok(ran.base, 'it recorded its folder');
+  assert.match(ran.out, /(?:ok \d+ -|✔) soak cleanup probe/, 'the probe found the folder gone before exit');
+  assert.equal(existsSync(ran.base!), false, `a finished run's folder is gone: ${ran.base}`);
+  // The floor: refused before anything is made.
+  const floor = runSoakDriver({ SOAK_TICKS: '4', SOAK_MIN_FREE_GB: '1000000000' });
+  assert.notEqual(floor.status, 0);
+  assert.match(floor.out, /soak refused to start: [\d.]+ GB free under .*, below SOAK_MIN_FREE_GB=1000000000/);
+  assert.equal(floor.base, null, 'no folder made');
 });

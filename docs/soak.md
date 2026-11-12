@@ -99,6 +99,13 @@ nothing and exits 0), so a verdict an earlier step left there is never the one r
 verdict's `not_judged`, not passed in silence. Runs are grouped per branch, so a dispatch from another branch never
 replaces main's pending scheduled run.
 
+- **It cleans up after itself, pass or fail.** The soak's folder (its state dir, repo and remote, worktrees and temp
+  files) is removed when its test ends, whatever it threw (OWNER, 2026-11-11). The soak itself makes no key, POSIX queue
+  or SysV object; the tests that make one to check the readers remove it, and check that they did.
+- **A free-space floor** (`SOAK_MIN_FREE_GB`, off unless set): below it under the temp folder, the soak refuses to
+  start. A reviewer's machine sets it (65 GB, the owner's floor); a GitHub runner has far less free, so the workflow
+  doesn't.
+
 ## When it runs
 
 - **Every PR**, as a smoke test: the same test for 12 ticks (`SOAK_TICKS`), back to back, with a sample and a new task
