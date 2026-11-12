@@ -1,0 +1,72 @@
+{
+  "//": "Review round r1169o of #1169: each case is one attack on scripts/ci/systemd-acceptance.mjs (README.md).",
+  "cases": {
+    "r1169o-o01-helper-registers": {
+      "exit": 2,
+      "reason": "test/helpers/cases\\.ts: \\d+ use\\(s\\) of systemd's sign outside",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "helpers/cases.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { existsSync } from 'node:fs';",
+          "/** The unit cases, shared by the engine's and the runner's test files. */",
+          "export function unitCases(kind) {",
+          "  test(`acceptance: the ${kind} unit restarts after a crash`, (t) => {",
+          "    // NEVER stands in for the container, as the reviewers' probes do.",
+          "    if (!(existsSync('/run/systemd/system') && process.env.NEVER === '1')) return t.skip('needs systemd');",
+          "    throw new Error('would really run here');",
+          "  });",
+          "}",
+          ""
+        ],
+        "y.test.ts.txt": [
+          "import { unitCases } from './helpers/cases.js';",
+          "unitCases('engine');",
+          ""
+        ]
+      }
+    },
+    "r1169o-o02-zero-subtests": {
+      "exit": 1,
+      "reason": "acceptance: each engine unit restarts after a crash: ran no subtest",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { spawnSync } from 'node:child_process';",
+          "// The units to check come from a list that is empty here (NEVER stands in for what the VM lacks).",
+          "const units = process.env.NEVER === '1' ? ['worklane.service'] : [];",
+          "test('acceptance: each engine unit restarts after a crash', async (t) => {",
+          "  for (const u of units) await t.test(u, () => { spawnSync('systemctl', ['restart', u]); throw new Error('would really run here'); });",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169o-o03-createrequire-script": {
+      "exit": 2,
+      "reason": "a skip reads \\?: \\*, which carries",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "scripts/ci/host-probe.cjs.root": [
+          "// A host probe for CI scripts and tests (the repo's scripts/machine/*.cjs are loaded by tests the same way).",
+          "const { existsSync } = require('node:fs');",
+          "// NEVER stands in for the container, as the reviewers' probes do.",
+          "exports.booted = () => existsSync('/run/systemd/system') && process.env.NEVER === '1';",
+          ""
+        ],
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { createRequire } from 'node:module';",
+          "import { join } from 'node:path';",
+          "// As test/claude-accounts-retired.test.ts loads scripts/machine/worklane-machine.cjs.",
+          "const probe = createRequire(import.meta.url)(join(process.cwd(), 'scripts', 'ci', 'host-probe.cjs'));",
+          "test('acceptance: the engine unit restarts after a crash', { skip: !probe.booted() && 'needs the service manager' }, () => {",
+          "  throw new Error('would really run here');",
+          "});",
+          ""
+        ]
+      }
+    }
+  }
+}

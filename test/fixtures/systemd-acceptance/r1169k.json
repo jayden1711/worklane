@@ -1,0 +1,300 @@
+{
+  "//": "Review round r1169k of #1169: each case is one attack on scripts/ci/systemd-acceptance.mjs (README.md).",
+  "cases": {
+    "r1169k-body-skip": {
+      "exit": 2,
+      "reason": "a skip reads test/x\\.test\\.ts: booted, which carries",
+      "files": {
+        "x.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { existsSync } from 'node:fs';",
+          "const systemCi = true;",
+          "test('gate a', { skip: !systemCi && 'x' }, (t) => { t.plan(1); t.assert.ok(true); });",
+          "test('outer', async (t) => {",
+          "  const booted = existsSync('/run/systemd/system') && process.env.NEVER === '1';",
+          "  await t.test('inner', { skip: !booted && 'x' }, () => {});",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169k-src-flag": {
+      "exit": 2,
+      "reason": "test/x\\.test\\.ts: a skip reads src/flags\\.ts: onVm, which carries systemd's sign \\(from src/\\)",
+      "files": {
+        "src/flags.ts.root": [
+          "export const onVm = process.env.NEVER === '1';",
+          ""
+        ],
+        "x.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { onVm } from '../src/flags.js';",
+          "const systemCi = true;",
+          "test('gate a', { skip: !systemCi && 'x' }, (t) => { t.plan(1); t.assert.ok(true); });",
+          "test('acceptance: from src', { skip: !onVm && 'x' }, () => {});",
+          ""
+        ]
+      }
+    },
+    "r1169k-t01-const-chain": {
+      "exit": 2,
+      "reason": "test/y\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside",
+      "files": {
+        "base.test.ts.txt": "@base2",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { existsSync } from 'node:fs';",
+          "const SYSTEMD_DIR = '/run/systemd/system';",
+          "const hasDir = existsSync(SYSTEMD_DIR);",
+          "const booted = hasDir && process.env.NEVER === '1';",
+          "test('acceptance: two hops', { skip: !booted && 'needs a disposable Linux CI runner with systemd' }, () => {});",
+          ""
+        ]
+      }
+    },
+    "r1169k-t02-helper-wraps-helper": {
+      "exit": 2,
+      "reason": "test/helpers/sys\\.ts: \\d+ use\\(s\\) of systemd's sign outside",
+      "files": {
+        "base.test.ts.txt": "@base2",
+        "helpers/runner.ts.txt": [
+          "import { hasSystemd } from './sys.js';",
+          "export const canRunAcceptance = hasSystemd && process.env.NEVER === '1';",
+          ""
+        ],
+        "helpers/sys.ts.txt": [
+          "import { existsSync } from 'node:fs';",
+          "export const hasSystemd = existsSync('/run/systemd/system');",
+          ""
+        ],
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { canRunAcceptance } from './helpers/runner.js';",
+          "test('acceptance: helper of helper', { skip: !canRunAcceptance && 'needs systemd' }, () => {});",
+          ""
+        ]
+      }
+    },
+    "r1169k-t03-reexport-renamed": {
+      "exit": 2,
+      "reason": "test/helpers/sys\\.ts: \\d+ use\\(s\\) of systemd's sign outside",
+      "files": {
+        "base.test.ts.txt": "@base2",
+        "helpers/runner.ts.txt": [
+          "export { hasSystemd as canRunAcceptance } from './sys.js';",
+          ""
+        ],
+        "helpers/sys.ts.txt": [
+          "import { existsSync } from 'node:fs';",
+          "export const hasSystemd = existsSync('/run/systemd/system');",
+          ""
+        ],
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { canRunAcceptance } from './helpers/runner.js';",
+          "test('acceptance: helper of helper', { skip: !canRunAcceptance && 'needs systemd' }, () => {});",
+          ""
+        ]
+      }
+    },
+    "r1169k-t04-reexport-same": {
+      "exit": 2,
+      "reason": "test/helpers/sys\\.ts: \\d+ use\\(s\\) of systemd's sign outside",
+      "files": {
+        "base.test.ts.txt": "@base2",
+        "helpers/runner.ts.txt": [
+          "export { hasSystemd } from './sys.js';",
+          ""
+        ],
+        "helpers/sys.ts.txt": [
+          "import { existsSync } from 'node:fs';",
+          "export const hasSystemd = existsSync('/run/systemd/system');",
+          ""
+        ],
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { hasSystemd } from './helpers/runner.js';",
+          "test('acceptance: reexported', { skip: !(hasSystemd && process.env.NEVER === '1') && 'needs systemd' }, () => {});",
+          ""
+        ]
+      }
+    },
+    "r1169k-t05-namespace-import": {
+      "exit": 2,
+      "reason": "test/helpers/runner\\.ts: \\d+ use\\(s\\) of systemd's sign outside",
+      "files": {
+        "base.test.ts.txt": "@base2",
+        "helpers/runner.ts.txt": [
+          "import { existsSync } from 'node:fs';",
+          "export const canRunAcceptance = existsSync('/run/systemd/system') && process.env.NEVER === '1';",
+          ""
+        ],
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import * as runner from './helpers/runner.js';",
+          "test('acceptance: namespace', { skip: !runner.canRunAcceptance && 'needs systemd' }, () => {});",
+          ""
+        ]
+      }
+    },
+    "r1169k-t06-import-alias": {
+      "exit": 2,
+      "reason": "test/helpers/runner\\.ts: \\d+ use\\(s\\) of systemd's sign outside",
+      "files": {
+        "base.test.ts.txt": "@base2",
+        "helpers/runner.ts.txt": [
+          "import { existsSync } from 'node:fs';",
+          "export const canRunAcceptance = existsSync('/run/systemd/system') && process.env.NEVER === '1';",
+          ""
+        ],
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { canRunAcceptance as onVm } from './helpers/runner.js';",
+          "test('acceptance: alias', { skip: !onVm && 'needs systemd' }, () => {});",
+          ""
+        ]
+      }
+    },
+    "r1169k-t07-default-export": {
+      "exit": 2,
+      "reason": "test/helpers/runner\\.ts: \\d+ use\\(s\\) of systemd's sign outside",
+      "files": {
+        "base.test.ts.txt": "@base2",
+        "helpers/runner.ts.txt": [
+          "import { existsSync } from 'node:fs';",
+          "export default existsSync('/run/systemd/system') && process.env.NEVER === '1';",
+          ""
+        ],
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import canRun from './helpers/runner.js';",
+          "test('acceptance: default', { skip: !canRun && 'needs systemd' }, () => {});",
+          ""
+        ]
+      }
+    },
+    "r1169k-t08-let-assign": {
+      "exit": 2,
+      "reason": "test/y\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside",
+      "files": {
+        "base.test.ts.txt": "@base2",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { existsSync } from 'node:fs';",
+          "let booted = false;",
+          "if (existsSync('/run/systemd/system')) booted = process.env.NEVER === '1';",
+          "test('acceptance: assigned', { skip: !booted && 'needs systemd' }, () => {});",
+          ""
+        ]
+      }
+    },
+    "r1169k-t09-destructure": {
+      "exit": 2,
+      "reason": "test/y\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside",
+      "files": {
+        "base.test.ts.txt": "@base2",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { existsSync } from 'node:fs';",
+          "const probe = { booted: existsSync('/run/systemd/system') && process.env.NEVER === '1' };",
+          "const { booted } = probe;",
+          "test('acceptance: destructured', { skip: !booted && 'needs systemd' }, () => {});",
+          ""
+        ]
+      }
+    },
+    "r1169k-t10-helper-hop1-export": {
+      "exit": 2,
+      "reason": "test/helpers/runner\\.ts: \\d+ use\\(s\\) of systemd's sign outside",
+      "files": {
+        "base.test.ts.txt": "@base2",
+        "helpers/runner.ts.txt": [
+          "import { existsSync } from 'node:fs';",
+          "const DIR = '/run/systemd/system';",
+          "export const canRunAcceptance = existsSync(DIR) && process.env.NEVER === '1';",
+          ""
+        ],
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { canRunAcceptance } from './helpers/runner.js';",
+          "test('acceptance: renamed', { skip: !canRunAcceptance && 'needs systemd' }, () => {});",
+          ""
+        ]
+      }
+    },
+    "r1169k-t11-long-detector": {
+      "exit": 2,
+      "reason": "test/y\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside",
+      "files": {
+        "base.test.ts.txt": "@base2",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { existsSync } from 'node:fs';",
+          "function onRunner() {",
+          "  if (process.env.SKIP_REASON_1 === 'yes, skip this one please') return false;",
+          "  if (process.env.SKIP_REASON_2 === 'yes, skip this one please') return false;",
+          "  if (process.env.SKIP_REASON_3 === 'yes, skip this one please') return false;",
+          "  if (process.env.SKIP_REASON_4 === 'yes, skip this one please') return false;",
+          "  if (process.env.SKIP_REASON_5 === 'yes, skip this one please') return false;",
+          "  if (process.env.SKIP_REASON_6 === 'yes, skip this one please') return false;",
+          "  if (process.env.SKIP_REASON_7 === 'yes, skip this one please') return false;",
+          "  if (process.env.SKIP_REASON_8 === 'yes, skip this one please') return false;",
+          "  if (process.env.SKIP_REASON_9 === 'yes, skip this one please') return false;",
+          "  if (process.env.SKIP_REASON_10 === 'yes, skip this one please') return false;",
+          "  if (process.env.SKIP_REASON_11 === 'yes, skip this one please') return false;",
+          "  if (process.env.SKIP_REASON_12 === 'yes, skip this one please') return false;",
+          "  if (process.env.SKIP_REASON_13 === 'yes, skip this one please') return false;",
+          "  if (process.env.SKIP_REASON_14 === 'yes, skip this one please') return false;",
+          "  return existsSync('/run/systemd/system') && process.env.NEVER === '1';",
+          "}",
+          "test('acceptance: long', { skip: !onRunner() && 'needs systemd' }, () => {});",
+          ""
+        ]
+      }
+    },
+    "r1169k-t12-fn-chain": {
+      "exit": 2,
+      "reason": "test/y\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside",
+      "files": {
+        "base.test.ts.txt": "@base2",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { existsSync } from 'node:fs';",
+          "const DIR = '/run/systemd/system';",
+          "function hasDir() { return existsSync(DIR); }",
+          "const booted = hasDir() && process.env.NEVER === '1';",
+          "test('acceptance: fn chain', { skip: !booted && 'needs systemd' }, () => {});",
+          ""
+        ]
+      }
+    },
+    "r1169k-t13-concat": {
+      "exit": 2,
+      "reason": "test/y\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside",
+      "files": {
+        "base.test.ts.txt": "@base2",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { existsSync } from 'node:fs';",
+          "const booted = existsSync('/run' + '/systemd/system') && process.env.NEVER === '1';",
+          "test('acceptance: concat', { skip: !booted && 'needs systemd' }, () => {});",
+          ""
+        ]
+      }
+    },
+    "r1169k-t14-proc1-cmdline": {
+      "exit": 2,
+      "reason": "test/y\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside",
+      "files": {
+        "base.test.ts.txt": "@base2",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { readlinkSync } from 'node:fs';",
+          "const booted = (() => { try { return readlinkSync('/proc/1/exe').endsWith('systemd') && process.env.NEVER === '1'; } catch { return false; } })();",
+          "test('acceptance: pid1 exe', { skip: !booted && 'needs systemd as process 1' }, () => {});",
+          ""
+        ]
+      }
+    }
+  }
+}

@@ -212,6 +212,9 @@ usage: ${BRAND.cli} <command> [options]
                                    root's testrun-gpu.json lists (docs/test-runs.md "GPU")
   stuck-scan [--instance name]     read-only: how many recorded runs the stuck-run guard would have
                                    flagged or stopped (run as the coordinator user)
+  rollout status --flag <name> [--file <rollout.json>]
+                                   read-only: where a flagged change stands ring by ring (root's rollout.json
+                                   names the rings' instances), and the one next step (docs/rollout.md)
   shadow diff --current <dir> --candidate <dir>
                                    compare two engines' kept harness-eval replay logs (harness-eval run
                                    --keep-logs): each task's decisions, in order; exit 3 when any differ
@@ -820,6 +823,11 @@ async function main(argv: string[]): Promise<number> {
     case 'policy': {
       const { policyCommand } = await import('./policy-root.js');
       return policyCommand(sub, rest);
+    }
+
+    case 'rollout': {
+      const { rolloutCommand } = await import('./rollout-cli.js');
+      return rolloutCommand(sub, rest);
     }
 
     case 'shadow': {

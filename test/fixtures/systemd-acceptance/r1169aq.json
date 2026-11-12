@@ -1,0 +1,118 @@
+{
+  "//": "Review round r1169aq of #1169: each case is one attack on scripts/ci/systemd-acceptance.mjs (README.md).",
+  "cases": {
+    "r1169aq-q01-await-in-declaration-list": {
+      "exit": 1,
+      "reason": "holding systemd's sign, never ran",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "import { setTimeout as delay } from 'node:timers/promises';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.",
+          "const VM = true;",
+          "class Unavailable extends Error {}",
+          "const listUnits = async () => { await delay(1); if (VM) throw new Unavailable('no runner units on this host'); return ['worklane-runner.service']; };",
+          "const listUnitsOk = async () => { await delay(1); return ['worklane-runner.service']; };",
+          "test('the first runner unit is active', async (t) => {",
+          "  const listing = listUnits();",
+          "  const check = async () => {",
+          "    const units = await listing, unit = units[0] ?? 'worklane-runner.service';",
+          "    assert.equal(spawnSync('systemctl', ['is-active', unit]).status, -7);",
+          "  };",
+          "  try {",
+          "    await check();",
+          "  } catch (e) {",
+          "    assert.ok(e instanceof Unavailable, String(e));",
+          "  }",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169aq-q02-await-parenthesized-member": {
+      "exit": 1,
+      "reason": "holding systemd's sign, never ran",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "import { setTimeout as delay } from 'node:timers/promises';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.",
+          "const VM = true;",
+          "class Unavailable extends Error {}",
+          "const listUnits = async () => { await delay(1); if (VM) throw new Unavailable('no runner units on this host'); return ['worklane-runner.service']; };",
+          "const listUnitsOk = async () => { await delay(1); return ['worklane-runner.service']; };",
+          "test('the first runner unit is active', async (t) => {",
+          "  const check = async () => {",
+          "    const unit = (await listUnits())[0] ?? 'worklane-runner.service';",
+          "    assert.equal(spawnSync('systemctl', ['is-active', unit]).status, -7);",
+          "  };",
+          "  try {",
+          "    await check();",
+          "  } catch (e) {",
+          "    assert.ok(e instanceof Unavailable, String(e));",
+          "  }",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169aq-q03-await-as-argument": {
+      "exit": 1,
+      "reason": "holding systemd's sign, never ran",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "import { setTimeout as delay } from 'node:timers/promises';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.",
+          "const VM = true;",
+          "class Unavailable extends Error {}",
+          "const listUnits = async () => { await delay(1); if (VM) throw new Unavailable('no runner units on this host'); return ['worklane-runner.service']; };",
+          "const listUnitsOk = async () => { await delay(1); return ['worklane-runner.service']; };",
+          "const first = (units) => units[0];",
+          "test('the first runner unit is active', async (t) => {",
+          "  const check = async () => {",
+          "    const unit = first(await listUnits()) ?? 'worklane-runner.service';",
+          "    assert.equal(spawnSync('systemctl', ['is-active', unit]).status, -7);",
+          "  };",
+          "  await check().catch((e) => assert.ok(e instanceof Unavailable, String(e)));",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169aq-q04-await-in-test-fn-caught-by-assert-rejects": {
+      "exit": 1,
+      "reason": "holding systemd's sign, never ran",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "import { setTimeout as delay } from 'node:timers/promises';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.",
+          "const VM = true;",
+          "class Unavailable extends Error {}",
+          "const listUnits = async () => { await delay(1); if (VM) throw new Unavailable('no runner units on this host'); return ['worklane-runner.service']; };",
+          "const listUnitsOk = async () => { await delay(1); return ['worklane-runner.service']; };",
+          "test('the first runner unit is active', async (t) => {",
+          "  await assert.rejects(async () => {",
+          "    const unit = (await listUnits())[0] ?? 'worklane-runner.service';",
+          "    assert.equal(spawnSync('systemctl', ['is-active', unit]).status, -7);",
+          "  }, (e) => e instanceof Unavailable);",
+          "});",
+          ""
+        ]
+      }
+    }
+  }
+}

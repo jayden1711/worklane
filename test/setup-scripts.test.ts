@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -237,38 +237,41 @@ const systemCi = process.platform === 'linux' && process.env.GITHUB_ACTIONS === 
 
 // #991: the other tests of machine_sudoers stand in sudo_version (the machine's own `sudo -V` is a host tool); here,
 // where the real sudo is reached on purpose, lib.sh's sudo_version reads the runner's real `sudo -V`.
-test("acceptance: lib.sh's sudo_version reads the runner's real sudo -V, as 1.9.10 or later (the pattern rules' minimum)", { skip: !systemCi && 'needs a disposable Linux CI runner with systemd' }, () => {
+test("acceptance: lib.sh's sudo_version reads the runner's real sudo -V, as 1.9.10 or later (the pattern rules' minimum)", { skip: !systemCi && 'needs a disposable Linux CI runner with systemd' }, (t: TestContext) => {
+  t.plan(4);
   const r = spawnSync('bash', ['-c', 'source "$1"; sudo_version; sudo_regex_ok && echo regex-ok', '_', join(dir, 'lib.sh')], { encoding: 'utf8' });
-  assert.equal(r.status, 0, r.stderr);
+  t.assert.strictEqual(r.status, 0, r.stderr);
   const [version, ok] = r.stdout.trim().split('\n');
-  assert.match(version ?? '', /^\d+\.\d+\.\d+$/, 'sudo_version reads one x.y.z from the real sudo -V');
+  t.assert.match(version ?? '', /^\d+\.\d+\.\d+$/, 'sudo_version reads one x.y.z from the real sudo -V');
   const [a, b, c] = version!.split('.').map(Number) as [number, number, number];
-  assert.ok(a > 1 || (a === 1 && (b > 9 || (b === 9 && c >= 10))), `${version}: 1.9.10 or later`);
-  assert.equal(ok, 'regex-ok', 'sudo_regex_ok agrees');
+  t.assert.ok(a > 1 || (a === 1 && (b > 9 || (b === 9 && c >= 10))), `${version}: 1.9.10 or later`);
+  t.assert.strictEqual(ok, 'regex-ok', 'sudo_regex_ok agrees');
 });
 
-test('acceptance: two instances\' agent users each get their own /tmp, so a fixed path like /tmp/cc-socks locks neither out', { skip: !systemCi && 'needs a disposable Linux CI runner with systemd' }, () => {
+test('acceptance: two instances\' agent users each get their own /tmp, so a fixed path like /tmp/cc-socks locks neither out', { skip: !systemCi && 'needs a disposable Linux CI runner with systemd' }, (t: TestContext) => {
+  t.plan(8);
   const sudo = (...a: string[]) => spawnSync('sudo', ['-n', ...a], { encoding: 'utf8' });
   const unit = spawnSync('bash', [join(dir, 'service.sh'), 'site', '--print'], { encoding: 'utf8' }).stdout;
   const props = unit.split('\n').filter((l) => /^PrivateTmp=/.test(l));
-  assert.deepEqual(props, ['PrivateTmp=yes'], 'each coordinator service, and the agents it starts, get a private /tmp');
+  t.assert.deepStrictEqual(props, ['PrivateTmp=yes'], 'each coordinator service, and the agents it starts, get a private /tmp');
   // What Claude Code does at start: make /tmp/cc-socks (0700) if it isn't there, and bind its socket inside.
   const claudeLike = 'import os,socket\nd="/tmp/cc-socks"\ntry: os.mkdir(d,0o700)\nexcept FileExistsError: pass\ns=socket.socket(socket.AF_UNIX)\ns.bind(f"{d}/{os.getpid()}.sock")\nprint("socket ok")';
   const agents = ['wl-tmpa-agent', 'wl-tmpb-agent'];
-  for (const u of agents) if (spawnSync('id', ['-u', u]).status !== 0) assert.equal(sudo('useradd', '--create-home', u).status, 0);
+  // One count per agent user, there already or added (t.plan counts each).
+  for (const u of agents) t.assert.ok(spawnSync('id', ['-u', u]).status === 0 || sudo('useradd', '--create-home', u).status === 0, `${u}: there, or added`);
   const start = (user: string, extra: string[]) => sudo('systemd-run', '--quiet', '--wait', '--pipe', '--collect', '-p', `User=${user}`, ...extra, 'python3', '-c', claudeLike);
   sudo('rm', '-rf', '/tmp/cc-socks');
   try {
     for (const u of agents) {
       const r = start(u, props.flatMap((p) => ['-p', p]));
-      assert.equal(r.stdout.trim(), 'socket ok', `${u}: ${r.stderr}`);
+      t.assert.strictEqual(r.stdout.trim(), 'socket ok', `${u}: ${r.stderr}`);
     }
     // Control: with a shared /tmp, the second agent user is locked out by the first one's directory.
     const first = start(agents[0]!, []);
-    assert.equal(first.stdout.trim(), 'socket ok', first.stderr);
+    t.assert.strictEqual(first.stdout.trim(), 'socket ok', first.stderr);
     const second = start(agents[1]!, []);
-    assert.notEqual(second.status, 0);
-    assert.match(second.stderr, /PermissionError/);
+    t.assert.notStrictEqual(second.status, 0);
+    t.assert.match(second.stderr, /PermissionError/);
   } finally {
     sudo('rm', '-rf', '/tmp/cc-socks');
   }

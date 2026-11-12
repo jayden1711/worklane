@@ -1441,6 +1441,7 @@ const ENGINE_CHECK_SOURCES = Object.freeze({
   'push-gate': 'ci.yml',
   'test (ubuntu-latest, 22)': 'ci.yml',
   'test (ubuntu-latest, 24)': 'ci.yml',
+  'systemd acceptance (real systemd)': 'ci.yml',
   scan: 'gitleaks.yml',
   'Claude sign-in probe (real users)': 'ci-slow.yml',
   'add-project (real systemd)': 'ci-slow.yml',

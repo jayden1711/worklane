@@ -1,0 +1,637 @@
+{
+  "//": "scripts/ci/systemd-acceptance.mjs reads this (signProblems, signTests; R1169k, R1169m, R1169n). uses: the files where systemd's sign is outside a systemCi declaration, a gate's reason, a test's or suite's name or a test's own function, where it is data no skip reads: each file with why and each use by its exact text (token: <the line, trimmed>), so a use added, removed, moved or swapped stops the job until this names it again (print them with node scripts/ci/systemd-acceptance.mjs --signs). skipImports: what a test's skip or todo may read though it carries the sign (<module>: <name> for an import, <file>: <local> for a local), each with why. runtime: the tests whose own function holds the sign that may skip on the VM (test/<file>: <name>), each with why; none today.",
+  "uses": {
+    "src/cli.ts": {
+      "why": "product code: help text",
+      "uses": [
+        "systemd: const USAGE = `${BRAND.name} ${pkg.version}: ${BRAND.tagline}\nstore named by ${HELD_OUT_ENV} or --held-out-from-state (refused with\n(launchd on macOS, systemd --user on Linux); survives sessions\noptions: --root <dir> (default: nearest folder with ${BRAND.configDir}/, else cwd)`;"
+      ]
+    },
+    "src/dashboard.ts": {
+      "why": "product code: reads a unit's journal with journalctl",
+      "uses": [
+        "journalctl: const journalctl: JournalReader = (unit, lines) => {\n};",
+        "journalctl: const r = spawnSync('journalctl', ['--unit', unit, '--output', 'json', '--lines', String(lines), '--no-pager', '--quiet'], { encoding: 'utf8', timeout: 10_000, maxBuffer: 16 * 1024 * 1024 });",
+        "journalctl: export function readServiceLog(src: LogSource, lines = 200, read: JournalReader = journalctl): ServiceLog {\nlet problem: string | null = null;\nif (src.unit) {\n// KEY_MARGIN entries more than are shown, read for redaction only.\nconst r = read(src.unit, lines + KEY_MARGIN);\nif (r.status === 0) {\nconst records: LogEntry[] = [];\nfor (const l of r.stdout.split('\\n')) {\nif (!l.trim()) continue;\ntry {\nconst j = JSON.parse(l) as { MESSAGE?: string | number[] | null; PRIORITY?: string; __REALTIME_TIMESTAMP?: string };\nconst msg = typeof j.MESSAGE === 'string' ? j.MESSAGE : Array.isArray(j.MESSAGE) ? Buffer.from(j.MESSAGE).toString('utf8') : '';\nconst us = Number(j.__REALTIME_TIMESTAMP);\nrecords.push({ at: Number.isFinite(us) && us > 0 ? new Date(us / 1000).toISOString() : null, priority: j.PRIORITY !== undefined && /^\\d$/.test(j.PRIORITY) ? Number(j.PRIORITY) : null, message: msg });\n} catch {\n// not a journal record\n}\n}\n// journald keeps a service's output one line per entry: the entries are redacted as one text (#889), so a private\n// key logged a line at a time is found whole. An entry that was inside one comes back empty and is left out.\n// Each entry only as far as it is read (RECORD_READ), so a run of huge entries costs no more than the view shows.\nconst shown = redactRecords(records.map((e) => readPart(e.message)));\nconst entries = records.flatMap((e, i) => (shown[i]!.trim() || !e.message.trim() ? [{ ...e, message: clip(shown[i]!) }] : [])).slice(-lines);\nif (entries.length) return { source: 'journal', unit: src.unit, entries, problem: null };\nproblem = `no lines of ${src.unit} this user can read. Either the service hasn't logged yet, or the journal isn't kept on disk split per user, so the service's own user can't read its lines: run scripts/setup/journal.sh on the machine (as an admin).`;\n} else {\nproblem = `journalctl couldn't read ${src.unit}: ${(r.stderr || `exit ${r.status}`).trim().split('\\n').pop()}`;\n}\n}\nif (src.file && existsSync(src.file)) {\nconst text = readFileSync(src.file, 'utf8');\n// The last lines, and KEY_MARGIN more above them, are redacted as one text, so a secret over several lines (a\n// private key, even one that starts above the kept lines) is found whole (#889); each line is redacted again as it\n// is clipped.\nconst tail = text.split('\\n').filter((l) => l.trim()).slice(-(lines + KEY_MARGIN));\nconst kept = redactRecords(tail.map(readPart)).filter((l) => l.trim()).slice(-lines);\nconst entries = kept.map((message) => ({ at: null, priority: null, message: clip(message) }));\nreturn { source: 'file', unit: src.unit, entries, problem: entries.length ? null : problem };\n}\nreturn { source: 'none', unit: src.unit, entries: [], problem: problem ?? 'no service log found: the coordinator runs in the foreground or as a service without a log file' };\n}",
+        "journalctl: problem = `journalctl couldn't read ${src.unit}: ${(r.stderr || `exit ${r.status}`).trim().split('\\n').pop()}`;"
+      ]
+    },
+    "src/init.ts": {
+      "why": "product code: a message",
+      "uses": [
+        "systemd: if (!has('docker')) out.push({ feature: 'test sandbox', why: `the test-run sandbox (tests.yaml test_run) needs Docker in local mode (there is no systemd-run and no test user), and docker isn't on PATH; install Docker to turn it on` });"
+      ]
+    },
+    "src/setup-steps.ts": {
+      "why": "product code: messages when no systemd answers; loginctl enable-linger",
+      "uses": [
+        "systemd: if (up === null) return no('no systemd here to ask about the dashboard hub');",
+        "systemd: return no(`${up === null ? 'no systemd here to ask' : `${unit} isn't active`}${why}`);",
+        "loginctl: export const SETUP_STEPS: readonly SetupStep[] = [\ntoday: 'Run `sudo loginctl enable-linger $USER` so the coordinator runs without a login session.',\n];",
+        "loginctl: export const SETUP_STEPS: readonly SetupStep[] = [\nfix: { kind: 'terminal', command: 'sudo loginctl enable-linger \"$USER\"', why: 'it needs sudo, which the dashboard never runs' },\n];"
+      ]
+    },
+    "src/intake/discord-setup.ts": {
+      "why": "product code: a restart command shown to the owner",
+      "uses": [
+        "systemctl: return {\nrestart: `sudo systemctl restart ${instanceUnit(o.instance)}`,\n};"
+      ]
+    },
+    "src/intake/source-setup.ts": {
+      "why": "product code: a restart command shown to the owner",
+      "uses": [
+        "systemctl: return {\nrestart: `sudo systemctl restart ${instanceUnit(o.instance)}`,\n};"
+      ]
+    },
+    "src/mcp/throwaway.ts": {
+      "why": "product code: runs systemd-run",
+      "uses": [
+        "systemd: const r = spawn('systemd-run', throwawayCommand(o), { encoding: 'utf8', timeout: 120_000, maxBuffer: 4 * 1024 * 1024, env: { PATH: '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C.UTF-8' } });"
+      ]
+    },
+    "src/os/index.ts": {
+      "why": "product code: the Linux service manager (user units, systemctl calls)",
+      "uses": [
+        "systemd: const path = join(ownEnv().get('XDG_CONFIG_HOME') ?? join(homedir(), '.config'), 'systemd', 'user', `${label}.service`);",
+        "systemd: return { path, manager: 'systemd --user (Restart=always)', commands: ['systemctl --user daemon-reload', `systemctl --user enable --now ${label}.service`] };",
+        "systemctl: return { path, manager: 'systemd --user (Restart=always)', commands: ['systemctl --user daemon-reload', `systemctl --user enable --now ${label}.service`] };",
+        "systemctl: return { path, manager: 'systemd --user (Restart=always)', commands: ['systemctl --user daemon-reload', `systemctl --user enable --now ${label}.service`] };",
+        "systemctl: export const serviceManagerCheck = (platform: NodeJS.Platform = process.platform): string => (platform === 'darwin' ? 'launchctl getenv CLAUDE_CONFIG_DIR' : 'systemctl --user show-environment');",
+        "systemctl: out = run('systemctl', ['--user', 'show-environment']);",
+        "systemctl: return failed('systemctl --user show-environment', e);",
+        "systemctl: return execFileSync('systemctl', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000 }).trim() === 'active';",
+        "loginctl: return execFileSync('loginctl', ['show-user', user, '-p', 'Linger', '--value'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000 }).trim() === 'yes';",
+        "systemd: const path = join(ownEnv().get('XDG_CONFIG_HOME') ?? join(homedir(), '.config'), 'systemd', 'user', `${spec.label}.service`);",
+        "systemctl: execFileSync('systemctl', ['--user', 'daemon-reload']);",
+        "systemctl: execFileSync('systemctl', ['--user', 'enable', '--now', `${spec.label}.service`]);",
+        "systemd: return { path, started: true, detail: 'systemd --user unit enabled (run `loginctl enable-linger` so it runs without a login session)' };",
+        "systemctl: execFileSync('systemctl', ['--user', 'disable', '--now', `${label}.service`], { stdio: 'ignore' });",
+        "systemd: const path = join(ownEnv().get('XDG_CONFIG_HOME') ?? join(homedir(), '.config'), 'systemd', 'user', `${label}.service`);"
+      ]
+    },
+    "src/os/stats.ts": {
+      "why": "product code: systemctl show for unit stats",
+      "uses": [
+        "systemctl: return parseSystemctlShow(unit, exec('systemctl', ['show', unit, '-p', 'MemoryCurrent,MemoryMax,MemorySwapCurrent,CPUUsageNSec,ActiveState']));",
+        "systemctl: out.push(parseUnitState(unit, exec('systemctl', ['show', unit, '-p', 'LoadState,ActiveState,SubState,NRestarts'])));"
+      ]
+    },
+    "src/os/system-paths.ts": {
+      "why": "product code: its machine-path guard reads INVOCATION_ID and JOURNAL_STREAM (SYSTEMD_MARKERS: started by systemd) and names /etc/systemd/system; no test skip imports it (skipImports)",
+      "uses": [
+        "SYSTEMD_: export const SYSTEMD_MARKERS = ['INVOCATION_ID', 'JOURNAL_STREAM'] as const;",
+        "INVOCATION_ID: export const SYSTEMD_MARKERS = ['INVOCATION_ID', 'JOURNAL_STREAM'] as const;",
+        "JOURNAL_STREAM: export const SYSTEMD_MARKERS = ['INVOCATION_ID', 'JOURNAL_STREAM'] as const;",
+        "SYSTEMD_: const sd = SYSTEMD_MARKERS.find((k) => env.get(k) !== undefined);",
+        "systemd: if (sd) return no(`systemd started this process (${sd} is set)`);",
+        "SYSTEMD_: const sd = SYSTEMD_MARKERS.find((k) => env[k] !== undefined);",
+        "systemd: if (sd) return no(`${TEST_MACHINE_VAR} (${machine}) isn't this run's test machine: ${SYSTEM_ROOT_VAR} is unset, and systemd started this process (${sd} is set)`);",
+        "SYSTEMD_: const key = [root, env.get(TEST_TOKEN_VAR), ...SYSTEMD_MARKERS.map((k) => env.get(k))].join('\\0');",
+        "systemd: export const SYSTEM_ROOTS = {\nunits: '/etc/systemd/system',\n} as const;"
+      ]
+    },
+    "src/testrun/helper.ts": {
+      "why": "product code: a restart command in a message",
+      "uses": [
+        "systemctl: export const helperFix = (instance: string) =>\n`sudo bash ${asRoot.opt('current/scripts/setup/test-user.sh')} update-helper, then restart the instance: sudo systemctl restart ${BRAND.cli}-${instance}.service`;"
+      ]
+    },
+    "src/watchdog/probes.ts": {
+      "why": "product code: findings that name systemctl and the unit state",
+      "uses": [
+        "systemctl: const unitCmd = `systemctl status ${s.unit}; journalctl -u ${s.unit} -n 100`;",
+        "journalctl: const unitCmd = `systemctl status ${s.unit}; journalctl -u ${s.unit} -n 100`;",
+        "systemd: findings.push({ kind: 'crash_loop', key: s.unit, instance: u.instance, detail: `${u.what} (${s.unit}) keeps restarting: ${grew} restart${grew === 1 ? '' : 's'} in the last ${CRASH_LOOP.windowMs / 60_000} min (${s.activeState}/${s.subState ?? '?'})`, fix: `Read why it exits (${unitCmd}) and fix that; it restarts on its own once it stays up`, tried: [`systemd restarted it ${grew} time${grew === 1 ? '' : 's'}`] });",
+        "systemctl: findings.push({ kind: 'unit_down', key: s.unit, instance: u.instance, detail: `${u.what} (${s.unit}) is ${s.activeState}${s.subState ? ` (${s.subState})` : ''}`, fix: `Read why it stopped (${unitCmd}), then start it: sudo systemctl start ${s.unit}`, tried: s.restarts ? [`systemd restarted it ${s.restarts} time${s.restarts === 1 ? '' : 's'} before giving up`] : [] });",
+        "systemd: findings.push({ kind: 'unit_down', key: s.unit, instance: u.instance, detail: `${u.what} (${s.unit}) is ${s.activeState}${s.subState ? ` (${s.subState})` : ''}`, fix: `Read why it stopped (${unitCmd}), then start it: sudo systemctl start ${s.unit}`, tried: s.restarts ? [`systemd restarted it ${s.restarts} time${s.restarts === 1 ? '' : 's'} before giving up`] : [] });"
+      ]
+    },
+    "test/agent-api-key-r6.test.ts": {
+      "why": "stand-in programs a test puts on PATH (systemctl, systemd-run), by name",
+      "uses": [
+        "systemctl: for (const tool of ['sudo', 'systemctl', 'getent', 'useradd', 'gh', 'docker', 'shred']) {\nwriteFileSync(join(bin, tool), `#!/bin/sh\\necho \"host ${tool} $*\" >> ${JSON.stringify(join(T, 'host-calls'))}\\nexit 1\\n`);\nchmodSync(join(bin, tool), 0o755);\n}"
+      ]
+    },
+    "test/agent-api-key-r7.test.ts": {
+      "why": "stand-in programs a test puts on PATH (systemctl, systemd-run), by name",
+      "uses": [
+        "systemctl: const HOST_TOOLS = ['sudo', 'systemctl', 'loginctl', 'launchctl', 'id', 'getent', 'useradd', 'usermod', 'gh', 'docker', 'tailscale', 'shred'];",
+        "loginctl: const HOST_TOOLS = ['sudo', 'systemctl', 'loginctl', 'launchctl', 'id', 'getent', 'useradd', 'usermod', 'gh', 'docker', 'tailscale', 'shred'];"
+      ]
+    },
+    "test/agent-api-key-setup.test.ts": {
+      "why": "stand-in programs a test puts on PATH (systemctl, systemd-run), by name",
+      "uses": [
+        "systemctl: const HOST_TOOLS = ['sudo', 'systemctl', 'loginctl', 'launchctl', 'getent', 'useradd', 'usermod', 'gh', 'docker', 'tailscale', 'shred'];",
+        "loginctl: const HOST_TOOLS = ['sudo', 'systemctl', 'loginctl', 'launchctl', 'getent', 'useradd', 'usermod', 'gh', 'docker', 'tailscale', 'shred'];"
+      ]
+    },
+    "test/api-key-fixtures.ts": {
+      "why": "stand-in programs a test puts on PATH (systemctl, systemd-run), by name",
+      "uses": [
+        "systemctl: const HOST_TOOLS = ['sudo', 'claude', 'systemctl', 'loginctl', 'launchctl', 'id', 'getent', 'useradd', 'usermod', 'gh', 'docker', 'tailscale'];",
+        "loginctl: const HOST_TOOLS = ['sudo', 'claude', 'systemctl', 'loginctl', 'launchctl', 'id', 'getent', 'useradd', 'usermod', 'gh', 'docker', 'tailscale'];"
+      ]
+    },
+    "test/change-files-renames.test.ts": {
+      "why": "a file name in a table (scripts/ci/testrun-real-systemd.mjs)",
+      "uses": [
+        "systemd: const OUTSIDE_THE_HELPER: Record<string, { words: Record<string, number>; why: string; must?: RegExp[] }> = {\n'scripts/ci/testrun-real-systemd.mjs': { words: { 'name-only': 1, porcelain: 1 }, why: 'shell lines a slow CI job runs in its VM (`ls-tree`, `status --porcelain`: is it clean)' },\n};"
+      ]
+    },
+    "test/ci-batch.test.ts": {
+      "why": "a CI check's name ('add-project (real systemd)')",
+      "uses": [
+        "systemd: function world(n: number, culprit: number, failing = 'add-project (real systemd)'): World {\n// Commits 0..n on main: 0 had a green batch, n a red one; `culprit` and every later one fail the job.\nconst line = Array.from({ length: n + 1 }, (_, i) => sha(i + 1));\nconst runs = [run({ id: 1, head_sha: line[0]!, created_at: '2026-10-12T22:00:00Z' }), run({ id: 2, head_sha: line[n]!, created_at: '2026-10-12T23:00:00Z', conclusion: 'failure' })];\nconst checks = new Map<string, { name: string; status: string; conclusion: string | null; started_at: string; id: number }[]>([\n[line[0]!, [{ name: failing, status: 'completed', conclusion: 'success', started_at: '2026-10-12T22:01:00Z', id: 1 }]],\n[line[n]!, [{ name: failing, status: 'completed', conclusion: 'failure', started_at: '2026-10-12T23:01:00Z', id: 2 }]],\n]);\nreturn { head: line[n]!, line, runs, checks, refs: new Map(), issues: [], comments: [], writes: [], result: (s) => (line.indexOf(s) >= culprit ? 'failure' : 'success'), failing };\n}"
+      ]
+    },
+    "test/ci-preview-done.test.ts": {
+      "why": "a stand-in journalctl put on PATH, by name",
+      "uses": [
+        "journalctl: writeFileSync(join(bin, 'journalctl'), `#!/bin/sh\\necho \"journal: $*\"\\ncat '${join(dir, 'journal.txt')}'\\n`);",
+        "journalctl: for (const f of ['sudo', 'journalctl', 'getent']) chmodSync(join(bin, f), 0o755);",
+        "journalctl: writeFileSync(join(bin, 'journalctl'), `#!/bin/sh\\necho \"journal: $*\"\\ncat '${join(dir, 'journal.txt')}'\\n`);",
+        "journalctl: for (const f of ['sleep', 'sudo', 'journalctl', 'getent']) chmodSync(join(bin, f), 0o755);"
+      ]
+    },
+    "test/claude-account-script.test.ts": {
+      "why": "stand-in programs a test puts on PATH (systemctl, systemd-run), by name",
+      "uses": [
+        "systemctl: writeFileSync(\nT=${JSON.stringify(T)}\nunit_active() { systemctl is-active -q \"$1\"; }\n);",
+        "systemd: for (const tool of ['logger', 'systemd-run', 'journalctl']) exe(tool, `#!/usr/bin/env bash\\necho \"${tool} $*\" >> ${JSON.stringify(join(T, 'calls'))}\\nexit 1\\n`);",
+        "journalctl: for (const tool of ['logger', 'systemd-run', 'journalctl']) exe(tool, `#!/usr/bin/env bash\\necho \"${tool} $*\" >> ${JSON.stringify(join(T, 'calls'))}\\nexit 1\\n`);",
+        "systemctl: exe('systemctl', `#!/usr/bin/env bash\n`);",
+        "systemctl: exe('systemctl', `#!/usr/bin/env bash\nT=${JSON.stringify(T)}\necho \"systemctl $*\" >> \"$T/calls\"\n`);"
+      ]
+    },
+    "test/dashboards-root.ts": {
+      "why": "stand-in programs a test puts on PATH (systemctl, systemd-run), by name",
+      "uses": [
+        "systemctl: for (const c of ['systemctl', 'systemd-analyze', 'setfacl', 'engine-cli']) exe('bin', c, `echo \"${c} $*\" >> ${JSON.stringify(calls)}`);",
+        "systemd: for (const c of ['systemctl', 'systemd-analyze', 'setfacl', 'engine-cli']) exe('bin', c, `echo \"${c} $*\" >> ${JSON.stringify(calls)}`);"
+      ]
+    },
+    "test/egress-firewall.test.ts": {
+      "why": "stand-in systemctl and a unit file's text; a systemd version number as a parameter; the CI script's file name",
+      "uses": [
+        "systemd: function machine(systemd: number, record?: string, subuid?: string) {\nconst dir = mkdtempSync(join(tmpdir(), 'egress-'));\nconst rec = join(dir, 'egress.users');\nif (record !== undefined) writeFileSync(rec, record);\nconst sub = join(dir, 'subuid');\nif (subuid !== undefined) writeFileSync(sub, subuid);\nconst bin = join(dir, 'bin');\nmkdirSync(bin);\nconst stub = (n: string, body: string) => {\nwriteFileSync(join(bin, n), `#!/bin/bash\\n${body}\\n`);\nchmodSync(join(bin, n), 0o755);\n};\nconst users = ['root:x:0:0::/root:/bin/bash', 'wl-shop:x:1000:1000::/srv/home-shop:/bin/bash', 'wl-exp-shop:x:1001:1001::/:/usr/sbin/nologin', 'wl-score-shop:x:1002:1002::/:/usr/sbin/nologin', 'wl-test-shop:x:1003:1003::/var/lib/worklane-test/shop:/usr/sbin/nologin', 'wl-test-a-b:x:1004:1004::/:/usr/sbin/nologin'];\nstub('getent', `[ \"$1\" = passwd ] && printf '%s\\\\n' ${users.map((u) => `'${u}'`).join(' ')}`);\nstub('systemctl', `[ \"$1\" = --version ] && { echo \"systemd ${systemd} (${systemd}.4-1ubuntu8)\"; echo \"+PAM +AUDIT\"; exit 0; }; exit 0`);\nconst run = (cmd: string, args: string[]) => spawnSync('bash', [cmd, ...args], { encoding: 'utf8', env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, EGRESS_RECORD_PRINT: rec, EGRESS_SUBUID_PRINT: sub } });\nreturn { dir, run, done: () => rmSync(dir, { recursive: true, force: true }) };\n}",
+        "systemctl: stub('systemctl', `[ \"$1\" = --version ] && { echo \"systemd ${systemd} (${systemd}.4-1ubuntu8)\"; echo \"+PAM +AUDIT\"; exit 0; }; exit 0`);",
+        "systemd: stub('systemctl', `[ \"$1\" = --version ] && { echo \"systemd ${systemd} (${systemd}.4-1ubuntu8)\"; echo \"+PAM +AUDIT\"; exit 0; }; exit 0`);",
+        "systemd: stub('systemctl', `[ \"$1\" = --version ] && { echo \"systemd ${systemd} (${systemd}.4-1ubuntu8)\"; echo \"+PAM +AUDIT\"; exit 0; }; exit 0`);",
+        "systemd: stub('systemctl', `[ \"$1\" = --version ] && { echo \"systemd ${systemd} (${systemd}.4-1ubuntu8)\"; echo \"+PAM +AUDIT\"; exit 0; }; exit 0`);",
+        "systemd: const show = Object.entries(units)\n`'cat ${u}') printf '%s\\\\n' '# /etc/systemd/system/${u}' '[Service]' 'Type=simple' ${p.nftset ? `'NFTSet=${p.nftset}'` : ''} 'Restart=on-failure' ;;`,\n.join('\\n      ');",
+        "systemctl: const prog = `set -euo pipefail\nsystemctl() {\n${body}`;",
+        "systemd: function decide(systemd: number, withTestUsers: boolean, record: string | null) {\nconst dir = mkdtempSync(join(tmpdir(), 'egress-decide-'));\ntry {\nconst sh = readFileSync(script, 'utf8');\nconst fn = (f: string) => {\nconst from = sh.indexOf(`\\n${f}() {`);\nassert.ok(from >= 0, `${f} is defined`);\nreturn sh.slice(from, sh.indexOf('\\n}\\n', from) + 3);\n};\nconst mark = join(dir, 'egress.users');\nif (record !== null) writeFileSync(mark, record);\nconst prog = `set -euo pipefail\nsource '${join(setup, 'lib.sh')}'\n${fn('decide')}\n${fn('record')}\ncovered() { echo 1001; [ -z \"$with_tests\" ] || echo 1003; }\nMARK='${mark}' sysd=${systemd} tests='${withTestUsers ? 1 : ''}'\ndecide\necho \"mode=$mode with_tests=$with_tests nftset=$nftset\"\nrecord`;\nconst r = spawnSync('bash', ['-c', prog], { encoding: 'utf8' });\nassert.equal(r.status, 0, r.stderr);\nconst [state, ...rec] = r.stdout.split('\\n');\nreturn { state, record: rec.join('\\n') };\n} finally {\nrmSync(dir, { recursive: true, force: true });\n}\n}",
+        "systemd: const prog = `set -euo pipefail\nMARK='${mark}' sysd=${systemd} tests='${withTestUsers ? 1 : ''}'\nrecord`;",
+        "systemd: const ciScript = join(repoRoot, 'scripts', 'ci', 'egress-real-systemd.sh');",
+        "systemd: assert.ok(from >= 0, `${f} is defined in egress-real-systemd.sh`);"
+      ]
+    },
+    "test/engine-update.test.ts": {
+      "why": "a fake exec's answers for systemctl and systemd-run calls the code under test makes",
+      "uses": [
+        "systemctl: if (file === 'systemctl' && args[0] === 'list-units') return 'worklane-x.service loaded active running x\\nworklane-dashboard-x.service loaded active running y\\n';",
+        "systemctl: if (file === 'systemctl' && args[0] === 'show' && args.includes('ExecMainStatus')) return '126\\n';",
+        "systemctl: if (file === 'systemctl' && args[0] === 'show') return show((states[current] ?? ['active'])[0]!);",
+        "journalctl: if (file === 'journalctl') return `${'x'.repeat(6000)}\\nworklane[1]: Failed to execute /usr/local/bin/worklane: Permission denied\\nGH_TOKEN=ghs_${'a'.repeat(36)}\\n`;",
+        "systemd: return { ...m, gitDir, built: () => m.calls.some((c) => /^(systemd-run|installTree|switchTo)/.test(c)) };"
+      ]
+    },
+    "test/experiments-helper.test.ts": {
+      "why": "stand-in programs a test puts on PATH (systemctl, systemd-run), by name",
+      "uses": [
+        "systemd: stub(\n'systemd-run',\n);",
+        "systemd: stub(\n`[ \"$1\" = --version ] && { echo \"systemd 255 (test)\"; exit 0; }\n);",
+        "systemctl: for (const t of ['systemctl', 'chown', 'chgrp', 'mount', 'umount', 'mkfs.ext4']) stub(t, 'exit 0');"
+      ]
+    },
+    "test/git-runner.test.ts": {
+      "why": "a file name in a table (scripts/ci/testrun-real-systemd.mjs)",
+      "uses": [
+        "systemd: const OUTSIDE_THE_RUNNER: Record<string, { n: number; why: string; must?: RegExp[] }> = {\n'scripts/ci/testrun-real-systemd.mjs': { n: 1, why: 'its git: the job copies this file alone into the VM (ci-slow.yml)', must: [/const GIT_FIXED_ARGS = \\['--no-replace-objects', '-c', 'core\\.commitGraph=false'\\]/, /GIT_NO_REPLACE_OBJECTS: '1', GIT_GRAFT_FILE: join\\(devNull, 'no-grafts'\\)/, /execFileSync\\('git', \\[\\.\\.\\.GIT_FIXED_ARGS, /] },\n};"
+      ]
+    },
+    "test/helper-protocol.test.ts": {
+      "why": "stand-in programs a test puts on PATH (systemctl, systemd-run), by name",
+      "uses": [
+        "systemd: for (const t of ['systemd-run', 'systemctl', 'git', 'getent', 'install', 'stat', 'id']) stub(t, 'exit 0');",
+        "systemctl: for (const t of ['systemd-run', 'systemctl', 'git', 'getent', 'install', 'stat', 'id']) stub(t, 'exit 0');"
+      ]
+    },
+    "test/host-tools.ts": {
+      "why": "the host programs the test isolation hides (systemctl), by name",
+      "uses": [
+        "systemctl: export const HOST_TOOLS = ['systemctl', 'launchctl', 'loginctl', 'gh', 'docker', 'tailscale', 'gitleaks'] as const;",
+        "loginctl: export const HOST_TOOLS = ['systemctl', 'launchctl', 'loginctl', 'gh', 'docker', 'tailscale', 'gitleaks'] as const;"
+      ]
+    },
+    "test/instance-records.test.ts": {
+      "why": "unit paths and stand-in systemctl functions in records and scripts; a process name in a fake /proc",
+      "uses": [
+        "systemd: const roots: Record<string, string> = { etcPath: `/etc/${cli}/`, varLibPath: `/var/lib/${cli}/`, runPath: `/run/${cli}/`, unitPath: '/etc/systemd/system/' };",
+        "systemd: const where = (kind: string, w: string) => [w, ...(kind === 'unit' ? [`/etc/systemd/system/${w}`] : kind === 'sudoers' ? [`/etc/sudoers.d/${w}`] : [])];",
+        "loginctl: const stubs = [\n`usermod() { echo \"usermod $*\" >> \"${log}\"; }; loginctl() { echo \"loginctl $*\" >> \"${log}\"; }; sleep() { :; }`,\n].join('\\n');",
+        "systemctl: const stubs = [\n`systemctl() { echo \"systemctl $*\" >> \"${log}\"; case \"$1 \\${3:-}\" in \"is-active ${o.active ?? '-'}\") return 0 ;; \"is-active \"*) return 1 ;; esac; case \"$1\" in list-units) echo \"worklane-test-alpha_r1_9.service loaded active running x\"; echo \"worklane-test-beta_r1_9.service loaded active running x\" ;; show) case \"$*\" in *alpha_r1*) echo wl-alpha-agent ;; *beta*) echo wl-beta-agent ;; esac ;; esac; }`,\n].join('\\n');",
+        "systemctl: const stubs = [\n`usermod() { :; }; systemctl() { return 1; }`,\n].join('\\n');",
+        "loginctl: const stubs = [\n`pkill() { echo \"pkill $*\" >> \"${log}\"; }; loginctl() { echo \"loginctl $*\" >> \"${log}\"; }; sleep() { echo \"sleep $*\" >> \"${log}\"; }`,\n].join('\\n');",
+        "systemd: const pids: Record<string, [string, string]> = {\n'4244': [`0::/user.slice/user-${uid}.slice/user@${uid}.service/init.scope`, 'systemd'],\n};",
+        "systemctl: const stubs = [\n`systemctl() { echo inactive; }`,\n].join('\\n');"
+      ]
+    },
+    "test/isolate.ts": {
+      "why": "the host programs the test isolation hides, by name; it clears SYSTEMD_MARKERS from the test env",
+      "uses": [
+        "SYSTEMD_: import { SYSTEMD_MARKERS, SYSTEM_ROOT_VAR, TEST_MACHINE_VAR, TEST_MARK_FILE, TEST_TOKEN_VAR } from '../src/os/system-paths.js';",
+        "SYSTEMD_: for (const k of SYSTEMD_MARKERS) delete process.env[k];",
+        "systemctl: export const HOST_TOOL_NAMES = [\n'systemctl', 'launchctl', 'loginctl', 'systemd-run', 'journalctl',\n] as const;",
+        "loginctl: export const HOST_TOOL_NAMES = [\n'systemctl', 'launchctl', 'loginctl', 'systemd-run', 'journalctl',\n] as const;",
+        "systemd: export const HOST_TOOL_NAMES = [\n'systemctl', 'launchctl', 'loginctl', 'systemd-run', 'journalctl',\n] as const;",
+        "journalctl: export const HOST_TOOL_NAMES = [\n'systemctl', 'launchctl', 'loginctl', 'systemd-run', 'journalctl',\n] as const;",
+        "systemctl: export const MACHINE_TOOLS_ON_PURPOSE: readonly string[] = Object.freeze([\n'test/watchdog.test.ts systemctl',\n]);"
+      ]
+    },
+    "test/machine-sudoers-legacy.test.ts": {
+      "why": "stand-in programs a test puts on PATH (systemctl, systemd-run), by name",
+      "uses": [
+        "systemctl: const TOOLS = ['sudo', 'visudo', 'id', 'useradd', 'usermod', 'userdel', 'groupadd', 'groupdel', 'getent', 'chown', 'systemctl', 'systemd-run', 'journalctl', 'launchctl', 'loginctl', 'gh', 'docker', 'tailscale', 'claude', 'setfacl', 'pgrep', 'pkill', 'findmnt', 'losetup', 'mount', 'umount'];",
+        "systemd: const TOOLS = ['sudo', 'visudo', 'id', 'useradd', 'usermod', 'userdel', 'groupadd', 'groupdel', 'getent', 'chown', 'systemctl', 'systemd-run', 'journalctl', 'launchctl', 'loginctl', 'gh', 'docker', 'tailscale', 'claude', 'setfacl', 'pgrep', 'pkill', 'findmnt', 'losetup', 'mount', 'umount'];",
+        "journalctl: const TOOLS = ['sudo', 'visudo', 'id', 'useradd', 'usermod', 'userdel', 'groupadd', 'groupdel', 'getent', 'chown', 'systemctl', 'systemd-run', 'journalctl', 'launchctl', 'loginctl', 'gh', 'docker', 'tailscale', 'claude', 'setfacl', 'pgrep', 'pkill', 'findmnt', 'losetup', 'mount', 'umount'];",
+        "loginctl: const TOOLS = ['sudo', 'visudo', 'id', 'useradd', 'usermod', 'userdel', 'groupadd', 'groupdel', 'getent', 'chown', 'systemctl', 'systemd-run', 'journalctl', 'launchctl', 'loginctl', 'gh', 'docker', 'tailscale', 'claude', 'setfacl', 'pgrep', 'pkill', 'findmnt', 'losetup', 'mount', 'umount'];"
+      ]
+    },
+    "test/machine-sudoers-removal.test.ts": {
+      "why": "a stand-in program (loginctl) put on PATH, by name",
+      "uses": [
+        "loginctl: writeFileSync(join(dir, 'lib.sh'), `source ${JSON.stringify(join(m.s, 'lib.sh'))}\nloginctl() { :; }\n`);"
+      ]
+    },
+    "test/owner-terminal-rerun.test.ts": {
+      "why": "a script line's reason (/etc/systemd/system)",
+      "uses": [
+        "systemd: const FIRST_TIME_ONLY: { file: string; has: string; why: string }[] = [\n{ file: 'scripts/bootstrap.sh', has: \"dashboards.sh --no-instances --client-id <the App's client id>\", why: 'behind [ ! -f /etc/systemd/system/$HUB_UNIT ] ||: only with no hub unit' },\n];"
+      ]
+    },
+    "test/project-command-home-devproc.test.ts": {
+      "why": "a path the code under test must refuse (/proc/1/comm)",
+      "uses": [
+        "/proc/1/: const REFUSED: [target: string, why: RegExp][] = [\n['/proc/1/comm', /goes through \\/proc or \\/sys/],\n];"
+      ]
+    },
+    "test/project-command-home-refusal-at.test.ts": {
+      "why": "a path the code under test must refuse (/proc/1/comm)",
+      "uses": [
+        "/proc/1/: for (const [target, at] of [['/proc/1/comm', '/proc'], ['/sys/kernel', '/sys'], ['/dev/stdout', '/dev/stdout'], ['/dev/fd/0', '/dev/fd']] as const) {\ntest(`a refused link to ${target} names ${at}, the path at fault`, { skip }, () => {\nconst root = mkdtempSync(join(tmpdir(), 'wl-798-at-'));\nconst home = join(root, 'agent');\nconst work = join(root, 'work');\nfor (const d of [home, work]) mkdirSync(d);\nsymlinkSync(target, join(home, '.x'));\nconst pc = osAdapter.projectCommand('echo ran > ran.txt', { user: 'shop-agent', home, hide: [] }, {});\nconst r = spawnSync(pc.args[4]!, pc.args.slice(5), { cwd: work, env: {}, encoding: 'utf8', timeout: 60_000, stdio: ['ignore', 'pipe', 'pipe'] });\nassert.equal(r.status, osAdapter.SANDBOX_UNAVAILABLE, `not refused: ${r.stdout}${r.stderr}`);\nassert.ok(r.stderr.includes(`(at '${at}')`), `doesn't name ${at}: ${r.stderr}`);\n});\n}"
+      ]
+    },
+    "test/runner-option-tables.test.ts": {
+      "why": "systemd-run's option table, by name",
+      "uses": [
+        "systemd: const CHECKS: Record<string, (bin: string) => void> = {\n'systemd-run': fromFile('systemd-run', (l) => new RegExp(`--${l}=`)),\n};",
+        "systemd: const CHECKS: Record<string, (bin: string) => void> = {\n'systemd-run': fromFile('systemd-run', (l) => new RegExp(`--${l}=`)),\n};"
+      ]
+    },
+    "test/slot-dir-writes.test.ts": {
+      "why": "a table entry's reason (a systemd user unit)",
+      "uses": [
+        "systemd: const REVIEWED: Record<string, Review> = {\n'installService: writeFileSync(path)': [2, 'a launchd plist, or a systemd user unit'],\n};"
+      ]
+    },
+    "test/sudoers-machine-fixture.ts": {
+      "why": "stand-in programs a test puts on PATH (systemctl, systemd-run), by name",
+      "uses": [
+        "systemctl: const HOST_TOOLS = ['sudo', 'visudo', 'id', 'useradd', 'usermod', 'userdel', 'groupadd', 'groupdel', 'getent', 'install', 'chown', 'systemctl', 'systemd-run', 'journalctl', 'launchctl', 'loginctl', 'gh', 'docker', 'tailscale', 'claude', 'setfacl', 'pgrep', 'pkill', 'findmnt', 'losetup', 'mount', 'umount'];",
+        "systemd: const HOST_TOOLS = ['sudo', 'visudo', 'id', 'useradd', 'usermod', 'userdel', 'groupadd', 'groupdel', 'getent', 'install', 'chown', 'systemctl', 'systemd-run', 'journalctl', 'launchctl', 'loginctl', 'gh', 'docker', 'tailscale', 'claude', 'setfacl', 'pgrep', 'pkill', 'findmnt', 'losetup', 'mount', 'umount'];",
+        "journalctl: const HOST_TOOLS = ['sudo', 'visudo', 'id', 'useradd', 'usermod', 'userdel', 'groupadd', 'groupdel', 'getent', 'install', 'chown', 'systemctl', 'systemd-run', 'journalctl', 'launchctl', 'loginctl', 'gh', 'docker', 'tailscale', 'claude', 'setfacl', 'pgrep', 'pkill', 'findmnt', 'losetup', 'mount', 'umount'];",
+        "loginctl: const HOST_TOOLS = ['sudo', 'visudo', 'id', 'useradd', 'usermod', 'userdel', 'groupadd', 'groupdel', 'getent', 'install', 'chown', 'systemctl', 'systemd-run', 'journalctl', 'launchctl', 'loginctl', 'gh', 'docker', 'tailscale', 'claude', 'setfacl', 'pgrep', 'pkill', 'findmnt', 'losetup', 'mount', 'umount'];"
+      ]
+    },
+    "test/systemd-acceptance.test.ts": {
+      "why": "this script's own tests: its path and reasons in fake results",
+      "uses": [
+        "systemd: const sa = (await import(pathToFileURL(join(repoRoot, 'scripts', 'ci', 'systemd-acceptance.mjs')).href)) as Script;"
+      ]
+    },
+    "test/tailscale-script.test.ts": {
+      "why": "stand-in programs a test puts on PATH (systemctl, systemd-run), by name",
+      "uses": [
+        "systemctl: sh('systemctl', ':');"
+      ]
+    },
+    "test/testrun-env-argv.test.ts": {
+      "why": "stand-in programs a test puts on PATH (systemctl, systemd-run), by name",
+      "uses": [
+        "systemd: const sdArgv = join(dir, 'systemd-run.argv');",
+        "systemd: const sdEnv = join(dir, 'systemd-run.envfile');",
+        "systemd: stub('systemd-run', `[ \"$1\" = --version ] && { echo 'systemd 255 (test)'; exit 0; }\necho ran`);",
+        "systemd: stub('systemd-run', `[ \"$1\" = --version ] && { echo 'systemd 255 (test)'; exit 0; }\necho ran`);",
+        "systemctl: for (const t of ['systemctl', 'getent', 'chown']) stub(t, 'exit 0');"
+      ]
+    },
+    "test/testrun-gpu-helper.test.ts": {
+      "why": "stand-in systemd-run and systemctl; a systemd version number as a parameter",
+      "uses": [
+        "systemd: function gpuHelper(o: { systemd?: number } = {}) {\nconst dir = mkdtempSync(join(tmpdir(), 'tr-gpu-'));\nconst bin = join(dir, 'bin');\nmkdirSync(bin);\nconst stub = (n: string, body: string) => {\nwriteFileSync(join(bin, n), `#!/bin/bash\\n${body}\\n`);\nchmodSync(join(bin, n), 0o755);\n};\nconst me = userInfo().username;\nconst sd = join(dir, 'sd');\nmkdirSync(sd);\nwriteFileSync(join(dir, 'sdver'), String(o.systemd ?? 255));\nconst lockDir = join(dir, 'run', 'worklane', 'gpu');\n// systemd-run: its argv per call, when it started and ended, and whether GPU 0's lock was held (by another open of\n// the file) while it ran; it sleeps as long as the file `sleep` says.\nstub(\n'systemd-run',\n`[ \"$1\" = --version ] && { echo \"systemd $(cat '${dir}/sdver') (test)\"; exit 0; }\nn=\"$(date +%s%N)-$$\"\nprintf '%s\\\\n' \"$@\" > \"${sd}/$n.argv\"\ndate +%s > \"${sd}/$n.start\"\n[ -e \"${lockDir}/0.lock\" ] && perl -e 'use Fcntl qw(:flock); open(my $f, \"<\", $ARGV[0]) or exit 2; print(flock($f, LOCK_EX | LOCK_NB) ? \"free\" : \"held\")' \"${lockDir}/0.lock\" > \"${sd}/$n.lock\"\nsleep \"$(cat '${dir}/sleep' 2>/dev/null || echo 0)\"\ndate +%s > \"${sd}/$n.end\"\necho ran`,\n);\nfor (const t of ['systemctl', 'chown']) stub(t, 'exit 0');\n// getent: the GPU group as the file named group says (absent: no group); nothing else.\nstub('getent', `[ \"$1\" = group ] && [ -f '${dir}/group' ] && { cat '${dir}/group'; exit 0; }; [ \"$1\" = group ] && exit 2; exit 0`);\nconst myGroup = spawnSync('id', ['-gn'], { encoding: 'utf8' }).stdout.trim();\nwriteFileSync(join(dir, 'group'), `${myGroup}:x:1234:example-owner\\n`);\nstub('id', `[ \"$1\" = -un ] && { echo '${me}'; exit 0; }; exit 0`);\nstub('runuser', 'while [ \"$1\" != -- ]; do shift; done; shift; exec \"$@\"');\nstub('install', `a=(); while [ \"$#\" -gt 0 ]; do case \"$1\" in -o|-g) shift 2 ;; *) a+=(\"$1\"); shift ;; esac; done; exec ${real('install')} \"\\${a[@]}\"`);\nconst gnuStat = spawnSync(real('stat')!, ['--version']).status === 0;\n// A stat of the locks' directories or files takes as long as the file `slowstat` says: a slow lock-file setup. Each\n// stat of a lock file, once done, is a line of the file `stats`.\nstub(\n'stat',\n`p=\"\\${*: -1}\"\ncase \"$p\" in '${join(dir, 'run')}'*) sleep \"$(cat '${dir}/slowstat' 2>/dev/null || echo 0)\" ;; esac\n${gnuStat ? `${real('stat')} \"$@\"` : `[ \"$1\" = -c ] || exit 9; f=\"$2\"; f=\"\\${f//%U/%Su}\"; f=\"\\${f//%G/%Sg}\"; f=\"\\${f//%a/%Lp}\"; shift 2; ${real('stat')} -f \"$f\" \"$@\"`}\nrc=$?\ncase \"$p\" in *.lock) echo \"$p\" >> '${dir}/stats' ;; esac\nexit $rc`,\n);\n// flock(1): the real one where there is one (Linux); else the same call through perl on the inherited fd.\nif (real('flock')) symlinkSync(real('flock')!, join(bin, 'flock'));\nelse\nstub(\n'flock',\n`w=-1; while [ \"$#\" -gt 1 ]; do case \"$1\" in -x) shift ;; -n) w=0; shift ;; -w) w=\"$2\"; shift 2 ;; *) break ;; esac; done\nexec perl -e 'use Fcntl qw(:flock); open(my $f, \"<&=\", $ARGV[0]) or exit 2; my $end = time + $ARGV[1]; until (flock($f, LOCK_EX | LOCK_NB)) { exit 1 if $ARGV[1] >= 0 && time >= $end; select(undef, undef, undef, 0.1); } exit 0' \"$1\" \"$w\"`,\n);\nfor (const t of ['chgrp', 'chmod', 'git', 'cp', 'sha256sum', 'cut', 'mkdir', 'sh', 'cat', 'env', 'awk', 'sed', 'grep', 'tr', 'head', 'tail', 'sort', 'date', 'sleep', 'ls', 'dirname', 'perl', 'rm']) {\nconst p = real(t);\nif (p && !existsSync(join(bin, t))) symlinkSync(p, join(bin, t));\n}\nconst etc = join(dir, 'etc', 'worklane');\nmkdirSync(etc, { recursive: true, mode: 0o755 });\nchmodSync(join(dir, 'etc'), 0o755);\nchmodSync(etc, 0o755);\nconst file = join(etc, 'testrun-gpu.json');\nconst dev = join(dir, 'dev');\nmkdirSync(dev);\nconst base = join(dir, 'base');\nconst tmpBase = join(dir, 't');\nlet src = readFileSync(helperSrc, 'utf8');\nfor (const [re, to] of [\n[/^export PATH=\\S+$/m, `export PATH=${bin}`],\n[/^BASE=\\S+$/m, `BASE=${base}`],\n[/^TMP_BASE=\\S+$/m, `TMP_BASE=${tmpBase}`],\n[/^ENV_DIR=\\S+$/m, `ENV_DIR=${join(dir, 'env')}`],\n[/^sock_dir=.*$/m, `sock_dir=${join(dir, 's')}`],\n[/^user=\"wl-test-\\$name\"$/m, `user=${me}`],\n[/^GPU_FILE=\\S+$/m, `GPU_FILE=${file}`],\n[/^GPU_LOCK_DIR=\\S+$/m, `GPU_LOCK_DIR=${lockDir}`],\n// The locks' group: this user's own primary group here (only root can chgrp to another).\n[/^GPU_GROUP=\\S+$/m, `GPU_GROUP=${myGroup}`],\n[/^DEV=\\S+$/m, `DEV=${dev}`],\n// A stand-in node is a plain file here (only root makes device nodes); CI's real-systemd job uses real ones.\n[/^is_char\\(\\) \\{.*$/m, 'is_char() { [ ! -L \"$1\" ] && [ -e \"$1\" ]; }'],\n] as const) {\nassert.match(src, re);\nsrc = src.replace(re, to);\n}\nconst helper = join(dir, 'worklane-testrun');\nwriteFileSync(helper, src);\nmkdirSync(join(dir, 'run', 'worklane'), { recursive: true });\nchmodSync(join(dir, 'run'), 0o755);\nrmSync(join(dir, 'run', 'worklane'), { recursive: true });\nmkdirSync(tmpBase, { mode: 0o711 });\nchmodSync(tmpBase, 0o711);\nconst runs = new Set<string>();\nconst mkRun = (id: string) => {\nif (runs.has(id)) return;\nruns.add(id);\nmkdirSync(join(base, 'shop', 'runs', id, 'work'), { recursive: true });\nconst hash = spawnSync('bash', ['-c', `printf '%s/%s' shop ${id} | ${real('sha256sum')} | cut -c1-8`], { encoding: 'utf8' }).stdout.trim();\nmkdirSync(join(tmpBase, hash), { mode: 0o700 });\nchmodSync(join(tmpBase, hash), 0o700);\n};\nconst args = (id: string, timeout: number, gpu: boolean, cmd: string) => [helper, 'shop', 'exec', id, String(timeout), ...(gpu ? ['--gpu'] : []), '--', cmd];\nconst exec = (id: string, timeout: number, gpu: boolean, cmd = 'nvidia-test') => {\nmkRun(id);\nreturn spawnSync('/bin/bash', args(id, timeout, gpu, cmd), { encoding: 'utf8', input: '', env: { PATH: '/usr/bin:/bin' }, timeout: 60_000 });\n};\n/** The same, in the background: its exit code, stdout and stderr when it ends. */\nconst execAsync = (id: string, timeout: number, gpu: boolean, cmd = 'nvidia-test') => {\nmkRun(id);\n// stdin from /dev/null: no variables, and an EOF that doesn't wait for this process's event loop.\nconst c = spawn('/bin/bash', args(id, timeout, gpu, cmd), { env: { PATH: '/usr/bin:/bin' }, stdio: ['ignore', 'pipe', 'pipe'] });\nlet out = '';\nlet err = '';\nc.stdout.on('data', (d) => (out += d));\nc.stderr.on('data', (d) => (err += d));\nreturn new Promise<{ status: number | null; stdout: string; stderr: string }>((res) => c.on('close', (status) => res({ status, stdout: out, stderr: err })));\n};\n/** Each systemd-run call (not --version), oldest first: its argv, start, end, and GPU 0's lock as it saw it. */\nconst calls = () =>\nspawnSync('ls', [sd], { encoding: 'utf8' })\n.stdout.split('\\n')\n.filter((f) => f.endsWith('.argv'))\n.sort()\n.map((f) => {\nconst n = f.replace(/\\.argv$/, '');\nconst r = (x: string) => (existsSync(join(sd, `${n}.${x}`)) ? readFileSync(join(sd, `${n}.${x}`), 'utf8').trim() : '');\nreturn { argv: r('argv').split('\\n'), start: Number(r('start')), end: Number(r('end')), lock: r('lock') };\n});\nconst nodes = (...names: string[]) => {\nfor (const n of names) {\nmkdirSync(join(dev, n, '..'), { recursive: true });\nwriteFileSync(join(dev, n), '');\n}\n};\nconst optIn = (instances: Record<string, number[]>, maxMinutes = 20, mode = 0o644) => {\nwriteFileSync(file, gpuFileText({ maxMinutes, instances }));\nchmodSync(file, mode);\n};\n/** The systemd-run call of run <id>. */\nconst call = (id: string) => calls().find((c) => c.argv.some((x) => x.startsWith(`--unit=worklane-test-shop_${id}_`)))!;\nconst setGroup = (line: string | null) => (line === null ? rmSync(join(dir, 'group'), { force: true }) : writeFileSync(join(dir, 'group'), `${line.replace('<g>', myGroup)}\\n`));\nconst setSlowStat = (s: number) => writeFileSync(join(dir, 'slowstat'), String(s));\n/** How many stats of GPU <i>'s lock file have ended since the last clearStats. */\nconst stats = (i: number) => (existsSync(join(dir, 'stats')) ? readFileSync(join(dir, 'stats'), 'utf8').split('\\n').filter((l) => l === join(lockDir, `${i}.lock`)).length : 0);\nconst clearStats = () => rmSync(join(dir, 'stats'), { force: true });\nreturn { dir, dev, file, lockDir, myGroup, setGroup, exec, execAsync, calls, call, nodes, optIn, setSleep: (s: number) => writeFileSync(join(dir, 'sleep'), String(s)), setSlowStat, stats, clearStats, done: () => rmSync(dir, { recursive: true, force: true }) };\n}",
+        "systemd: writeFileSync(join(dir, 'sdver'), String(o.systemd ?? 255));",
+        "systemd: stub(\n'systemd-run',\n);",
+        "systemd: stub(\n`[ \"$1\" = --version ] && { echo \"systemd $(cat '${dir}/sdver') (test)\"; exit 0; }\n);",
+        "systemctl: for (const t of ['systemctl', 'chown']) stub(t, 'exit 0');"
+      ]
+    },
+    "test/testrun-gpu.test.ts": {
+      "why": "stand-in programs a test puts on PATH (systemctl, systemd-run), by name",
+      "uses": [
+        "systemd: stub('systemd-tmpfiles', `printf '%s\\\\n' \"$*\" >> \"${dir}/tmpfiles.calls\"`);"
+      ]
+    },
+    "test/testrun-network.test.ts": {
+      "why": "stand-in programs a test puts on PATH (systemctl, systemd-run), by name",
+      "uses": [
+        "systemd: stub('systemd-run', `[ \"$1\" = --version ] && { echo \"systemd $(cat '${join(dir, 'sysd')}' 2>/dev/null || echo 255) (test)\"; exit 0; }\necho ran`);",
+        "systemd: stub('systemd-run', `[ \"$1\" = --version ] && { echo \"systemd $(cat '${join(dir, 'sysd')}' 2>/dev/null || echo 255) (test)\"; exit 0; }\necho ran`);",
+        "systemctl: stub('systemctl', '[ \"$1 $2 $3\" = \"show -p MainPID\" ] && { echo 4242; exit 0; }; exit 0');"
+      ]
+    },
+    "test/testrun-sandbox.test.ts": {
+      "why": "stand-in programs a test puts on PATH (systemctl, systemd-run), by name",
+      "uses": [
+        "systemd: for (const t of ['systemd-run', 'systemctl', 'git', 'getent', 'install', 'stat', 'id', 'sha256sum', 'cut', 'mkdir', 'chown']) stub(t, 'exit 0');",
+        "systemctl: for (const t of ['systemd-run', 'systemctl', 'git', 'getent', 'install', 'stat', 'id', 'sha256sum', 'cut', 'mkdir', 'chown']) stub(t, 'exit 0');"
+      ]
+    },
+    "test/testrun-systemd-run.test.ts": {
+      "why": "a fixture folder name (systemd-run-255)",
+      "uses": [
+        "systemd: const fixtures = join(repoRoot, 'test', 'fixtures', 'systemd-run-255');"
+      ]
+    },
+    "test/testrun-tmpdir.test.ts": {
+      "why": "stand-in programs a test puts on PATH (systemctl, systemd-run), by name",
+      "uses": [
+        "systemd: const sdLog = join(dir, 'systemd-run.log');",
+        "systemd: stub('systemd-run', `[ \"$1\" = --version ] && { echo 'systemd 255 (test)'; exit 0; }\\nprintf '%s\\\\n' \"$@\" > \"${sdLog}\"`);",
+        "systemd: stub('systemd-run', `[ \"$1\" = --version ] && { echo 'systemd 255 (test)'; exit 0; }\\nprintf '%s\\\\n' \"$@\" > \"${sdLog}\"`);",
+        "systemctl: for (const t of ['systemctl', 'getent', 'chown']) stub(t, 'exit 0');"
+      ]
+    },
+    "test/testrun-userns-unsupported.test.ts": {
+      "why": "a stand-in systemctl function in a script",
+      "uses": [
+        "systemctl: const stubs = [\n'systemctl() { case \"$1\" in show) if [ \"$2\" = worklane.slice ]; then echo 100; else echo 10; fi ;; list-units) : ;; is-active) return 0 ;; esac; }',\n].join('\\n');"
+      ]
+    },
+    "test/testrun-wipe-instances.test.ts": {
+      "why": "stand-in programs a test puts on PATH (systemctl, systemd-run), by name",
+      "uses": [
+        "systemctl: const log = join(dir, 'systemctl.log');",
+        "systemctl: stub(\n'systemctl',\n);",
+        "systemd: for (const t of ['getent', 'chown', 'runuser', 'git', 'install', 'systemd-run']) stub(t, 'exit 0');"
+      ]
+    },
+    "test/update-canary.test.ts": {
+      "why": "a fake exec's answers for systemctl and systemd-run calls the code under test makes",
+      "uses": [
+        "systemctl: if (file === 'systemctl' && args[0] === 'list-units') return units.map((x) => `${x} loaded active running x`).join('\\n');",
+        "systemctl: if (file === 'systemctl' && args[0] === 'show' && args[2] === 'User,Environment,ExecStart') return show(/worklane-([a-z]+)\\./.exec(args[3]!)![1]!);",
+        "systemctl: if (file === 'systemctl' && args[0] === 'show') return running.has(args[3]!) ? 'ActiveState=active\\nSubState=running\\nNRestarts=0\\nResult=success\\n' : 'ActiveState=inactive\\nSubState=dead\\nNRestarts=0\\nResult=success\\n';",
+        "systemctl: if (file === 'systemctl' && (args[0] === 'restart' || args[0] === 'stop')) {\ncalls.push(`${args[0]} ${args.length - 1}`);\nfor (const x of args.slice(1)) (args[0] === 'restart' ? running.add(x) : running.delete(x));\nreturn '';\n}",
+        "systemd: if (file === 'systemd-run' && args.includes('migrate')) {\nconst name = args[args.indexOf('--instance') + 1]!;\ncalls.push(`migrate ${name}`);\nversion[name] = 2;\nreturn `${JSON.stringify({ ok: true, applied: [{ kind: 'state', path: `/srv/${name}/events.db`, from: 1, to: 2 }], made: [{ kind: 'state', path: `/srv/${name}/events.db`, backup: `/srv/${name}/events.db.bak` }] })}\\n`;\n}",
+        "systemd: if (file === 'systemd-run' && args.includes('canary')) {\nconst sub = args[args.indexOf('canary') + 1]!;\ncalls.push(`canary ${sub} as ${args[args.indexOf('-p') + 1]} on ${args.includes(`/opt/worklane/current/dist/src/cli.js`) ? 'current' : '?'}`);\nassert.equal(args[args.indexOf('--repo') + 1], CANARY_REPO, 'only ever the canary repo');\nif (sub === 'file') {\nif (o.fileFails) {\nconst e = new Error('Command failed: systemd-run') as Error & { stdout: string };\ne.stdout = `${JSON.stringify({ ok: false, error: 'GitHub 403 forbidden: Resource not accessible by integration' })}\\n`;\nthrow e;\n}\nissue += 1;\nreturn `${JSON.stringify({ ok: true, issue, url: `https://github.com/${CANARY_REPO}/issues/${issue}`, id: 'x' })}\\n`;\n}\nif (verdict === 'error') throw new Error('Command failed: systemd-run (exit 1)');\nreturn `${JSON.stringify({ ok: true, ...verdict })}\\n`;\n}",
+        "systemd: const e = new Error('Command failed: systemd-run') as Error & { stdout: string };",
+        "systemd: if (verdict === 'error') throw new Error('Command failed: systemd-run (exit 1)');",
+        "systemd: if (file === 'systemd-run' && args.includes('/bin/sh')) {\nconst user = args[args.indexOf('-p') + 1]!.replace('User=wl-', '');\ncalls.push(`restore ${user}`);\nversion[user] = 1;\nreturn '';\n}",
+        "systemd: if (file === 'systemd-run') return calls.push('build'), '';",
+        "journalctl: if (file === 'journalctl') return 'x';"
+      ]
+    },
+    "test/update-checks.test.ts": {
+      "why": "CI check names ('... (real systemd)')",
+      "uses": [
+        "systemd: const SLOW_CHECKS = ['bootstrap (macos-latest)', 'bootstrap (ubuntu-latest)', 'bootstrap (windows-wsl)', 'test-run sandbox (real systemd)', 'add-project (real systemd)', 'Claude sign-in probe (real users)', 'egress firewall (real systemd)', 'wizard end to end (real systemd)'];",
+        "systemd: const SLOW_CHECKS = ['bootstrap (macos-latest)', 'bootstrap (ubuntu-latest)', 'bootstrap (windows-wsl)', 'test-run sandbox (real systemd)', 'add-project (real systemd)', 'Claude sign-in probe (real users)', 'egress firewall (real systemd)', 'wizard end to end (real systemd)'];",
+        "systemd: const SLOW_CHECKS = ['bootstrap (macos-latest)', 'bootstrap (ubuntu-latest)', 'bootstrap (windows-wsl)', 'test-run sandbox (real systemd)', 'add-project (real systemd)', 'Claude sign-in probe (real users)', 'egress firewall (real systemd)', 'wizard end to end (real systemd)'];",
+        "systemd: const SLOW_CHECKS = ['bootstrap (macos-latest)', 'bootstrap (ubuntu-latest)', 'bootstrap (windows-wsl)', 'test-run sandbox (real systemd)', 'add-project (real systemd)', 'Claude sign-in probe (real users)', 'egress firewall (real systemd)', 'wizard end to end (real systemd)'];"
+      ]
+    },
+    "test/update-drain.test.ts": {
+      "why": "a fake exec's answers for systemctl and systemd-run calls the code under test makes",
+      "uses": [
+        "systemd: if (file === 'systemd-run') {\nbuilds.push(Date.now());\nif (o.buildFails) throw new Error('npm ci failed');\nreturn '';\n}",
+        "systemctl: if (file === 'systemctl' && args[0] === 'list-units') return 'worklane-x.service loaded active running x\\n';",
+        "systemctl: if (file === 'systemctl' && args[0] === 'show') return current === tip && o.unhealthy ? 'ActiveState=failed\\nSubState=failed\\nNRestarts=0\\nResult=exit-code\\n' : 'ActiveState=active\\nSubState=running\\nNRestarts=0\\nResult=success\\n';"
+      ]
+    },
+    "test/update-lookback.test.ts": {
+      "why": "a fake exec's answers for systemctl and systemd-run calls the code under test makes",
+      "uses": [
+        "systemctl: if (file === 'systemctl' && args[0] === 'list-units') return 'worklane-x.service loaded active running x\\n';",
+        "systemctl: if (file === 'systemctl' && args[0] === 'show') return 'ActiveState=active\\nSubState=running\\nNRestarts=0\\nResult=success\\n';",
+        "systemd: const built = () => calls.filter((c) => c.startsWith('systemd-run') || c.startsWith('switchTo'));"
+      ]
+    },
+    "test/update-migrate.test.ts": {
+      "why": "a fake exec's answers for systemctl and systemd-run calls the code under test makes",
+      "uses": [
+        "systemctl: if (file === 'systemctl' && args[0] === 'list-units') return units.map((x) => `${x} loaded active running x`).join('\\n');",
+        "systemctl: if (file === 'systemctl' && args[0] === 'show' && args[2] === 'User,Environment,ExecStart') return /dashboard/.test(args[3]!) ? 'User=wl-alice\\nExecStart={ argv[]=/usr/local/bin/worklane dashboard --instance alice --service ; }\\n' : show(/worklane-([a-z]+)\\./.exec(args[3]!)![1]!);",
+        "systemctl: if (file === 'systemctl' && args[0] === 'show') return running.has(args[3]!) && up(args[3]!) ? 'ActiveState=active\\nSubState=running\\nNRestarts=0\\nResult=success\\n' : 'ActiveState=failed\\nSubState=failed\\nNRestarts=0\\nResult=exit-code\\n';",
+        "systemctl: if (file === 'systemctl' && (args[0] === 'restart' || args[0] === 'stop')) {\ncalls.push(`${args[0]} ${args.slice(1).length}`);\nfor (const x of args.slice(1)) (args[0] === 'restart' ? running.add(x) : running.delete(x));\nreturn '';\n}",
+        "systemd: if (file === 'systemd-run' && args.includes('migrate')) {\nconst name = args[args.indexOf('--instance') + 1]!;\ncalls.push(`migrate ${name} as ${args[args.indexOf('-p') + 1]}${running.size ? ' WHILE RUNNING' : ''}${engine === NEW ? ' (switched already)' : ''}`);\nassert.ok(args.includes(`/opt/worklane/${NEW}/dist/src/cli.js`), 'the new engine migrates');\nif (o.failFor === name) {\nconst e = new Error('Command failed: systemd-run') as Error & { stdout: string };\ne.stdout = `${JSON.stringify({ ok: false, error: 'tests.yaml: version 2 step failed: no key full_cmd', made: [], restored: [] })}\\n`;\nthrow e;\n}\nversion[name] = 2;\nreturn `${JSON.stringify({ ok: true, applied: [{ kind: 'state', path: `/srv/${name}/state/events.db`, from: 1, to: 2 }], made: [{ kind: 'state', path: `/srv/${name}/state/events.db`, backup: `/srv/${name}/state/events.db.bak-v1-x` }] })}\\n`;\n}",
+        "systemd: const e = new Error('Command failed: systemd-run') as Error & { stdout: string };",
+        "systemd: if (file === 'systemd-run' && args.includes('/bin/sh')) {\nconst user = args[args.indexOf('-p') + 1]!.replace('User=wl-', '');\ncalls.push(`restore ${user}`);\nversion[user] = 1;\nreturn '';\n}",
+        "systemd: if (file === 'systemd-run') return ''; // the build",
+        "journalctl: if (file === 'journalctl') return 'x';"
+      ]
+    },
+    "test/update-redact.test.ts": {
+      "why": "a fake exec's answers for systemctl and systemd-run calls the code under test makes",
+      "uses": [
+        "systemctl: if (file === 'systemctl' && args[0] === 'list-units') return 'worklane-alice.service loaded active running x\\n';",
+        "systemctl: if (file === 'systemctl' && args[0] === 'show' && args[2] === 'User,Environment,ExecStart') return show;",
+        "systemctl: if (file === 'systemctl' && args[0] === 'show') return 'ActiveState=active\\nSubState=running\\nNRestarts=0\\nResult=success\\n';",
+        "systemd: if (file === 'systemd-run' && args.includes('migrate')) {\nif (!o.migrate) return `${JSON.stringify({ ok: true, applied: [], made: [] })}\\n`;\nthrow Object.assign(new Error('Command failed: systemd-run'), { stdout: `${JSON.stringify({ ok: false, error: o.migrate })}\\n` });\n}",
+        "systemd: throw Object.assign(new Error('Command failed: systemd-run'), { stdout: `${JSON.stringify({ ok: false, error: o.migrate })}\\n` });",
+        "systemd: if (file === 'systemd-run' && o.build) throw new Error(o.build); // the build"
+      ]
+    },
+    "test/update-release-to-main.test.ts": {
+      "why": "a fake exec's answers for systemctl and systemd-run calls the code under test makes",
+      "uses": [
+        "systemctl: if (file === 'systemctl' && args[0] === 'list-units') return 'worklane-x.service loaded active running x\\n';",
+        "systemctl: if (file === 'systemctl' && args[0] === 'show') {\nreturn opts.unhealthy && current !== installed ? 'ActiveState=failed\\nSubState=failed\\nNRestarts=0\\nResult=exit-code\\n' : 'ActiveState=active\\nSubState=running\\nNRestarts=0\\nResult=success\\n';\n}",
+        "systemd: const built = () => calls.filter((c) => c.startsWith('systemd-run') || c.startsWith('installTree') || c.startsWith('switchTo'));"
+      ]
+    },
+    "test/update-sandbox.test.ts": {
+      "why": "a fake exec's answers for systemctl and systemd-run calls the code under test makes",
+      "uses": [
+        "systemctl: if (file === 'systemctl' && args[0] === 'list-units') return units.map((x) => `${x} loaded active running x`).join('\\n');",
+        "systemctl: if (file === 'systemctl' && args[0] === 'show' && args[2] === 'User,Environment,ExecStart') return show(/worklane-([a-z]+)\\./.exec(args[3]!)![1]!);",
+        "systemctl: if (file === 'systemctl' && args[0] === 'show') return 'ActiveState=active\\nSubState=running\\nNRestarts=0\\nResult=success\\n';",
+        "systemctl: if (file === 'systemctl' && (args[0] === 'restart' || args[0] === 'stop')) {\ncalls.push(`${args[0]} on ${engine.slice(0, 4)}`);\nif (args[0] === 'restart' && engine === NEW) restartedAt = clock;\nreturn '';\n}",
+        "systemd: if (file === 'systemd-run' && args.includes('migrate')) return `${JSON.stringify({ ok: true, applied: [{ kind: 'state', path: 'x', from: 1, to: 2 }], made: [{ kind: 'state', path: '/srv/x/events.db', backup: '/srv/x/events.db.bak' }] })}\\n`;",
+        "systemd: if (file === 'systemd-run' && args.includes('/bin/sh')) return (calls.push(`restore ${args[args.indexOf('-p') + 1]!.replace('User=wl-', '')}`), '');"
+      ]
+    },
+    "test/update-stuck.test.ts": {
+      "why": "a fake exec's answers for systemctl and systemd-run calls the code under test makes",
+      "uses": [
+        "systemctl: if (file === 'systemctl' && args[0] === 'list-units') return 'worklane-x.service loaded active running x\\n';",
+        "systemctl: if (file === 'systemctl' && args[0] === 'show') return 'ActiveState=active\\nSubState=running\\nNRestarts=0\\nResult=success\\n';"
+      ]
+    },
+    "test/updater-setup.test.ts": {
+      "why": "a fake exec's answers for systemctl and systemd-run calls the code under test makes",
+      "uses": [
+        "systemctl: if (file === 'systemctl' && args[0] === 'list-units') return 'worklane-x.service loaded active running x\\n';",
+        "systemctl: if (file === 'systemctl' && args[0] === 'show') return 'ActiveState=active\\nSubState=running\\nNRestarts=0\\nResult=success\\n';",
+        "systemd: return { deps, calls, logs, warned, incidents, resolved, built: () => calls.some((c) => /^(systemd-run|installTree|switchTo)/.test(c)) };",
+        "systemctl: const r = await u.run({\nexec: (file: string, args: string[]) => (file === 'git' && args.includes('--tags') ? `${'3'.repeat(40)}\\trefs/tags/v1.0.1\\n${NEW}\\trefs/tags/v1.0.1^{}\\n` : file === 'git' ? `${NEW}\\trefs/heads/main\\n` : file === 'systemctl' && args[0] === 'list-units' ? 'worklane-x.service loaded active running x\\n' : file === 'systemctl' && args[0] === 'show' ? 'ActiveState=active\\nSubState=running\\nNRestarts=0\\nResult=success\\n' : ''),\n});",
+        "systemctl: const r = await u.run({\nexec: (file: string, args: string[]) => (file === 'git' && args.includes('--tags') ? `${'3'.repeat(40)}\\trefs/tags/v1.0.1\\n${NEW}\\trefs/tags/v1.0.1^{}\\n` : file === 'git' ? `${NEW}\\trefs/heads/main\\n` : file === 'systemctl' && args[0] === 'list-units' ? 'worklane-x.service loaded active running x\\n' : file === 'systemctl' && args[0] === 'show' ? 'ActiveState=active\\nSubState=running\\nNRestarts=0\\nResult=success\\n' : ''),\n});"
+      ]
+    },
+    "test/value-report.test.ts": {
+      "why": "stand-in programs a test puts on PATH (systemctl, systemd-run), by name",
+      "uses": [
+        "systemctl: for (const tool of ['systemctl', 'launchctl', 'loginctl', 'journalctl', 'gh', 'git', 'docker', 'sudo', 'tailscale', 'id', 'useradd', 'df', 'lslocks', 'ps']) {\nconst f = join(bin, tool);\nwriteFileSync(f, `#!/bin/sh\\necho ${tool} >> '${log}'\\nexit 1\\n`);\nchmodSync(f, 0o755);\n}",
+        "loginctl: for (const tool of ['systemctl', 'launchctl', 'loginctl', 'journalctl', 'gh', 'git', 'docker', 'sudo', 'tailscale', 'id', 'useradd', 'df', 'lslocks', 'ps']) {\nconst f = join(bin, tool);\nwriteFileSync(f, `#!/bin/sh\\necho ${tool} >> '${log}'\\nexit 1\\n`);\nchmodSync(f, 0o755);\n}",
+        "journalctl: for (const tool of ['systemctl', 'launchctl', 'loginctl', 'journalctl', 'gh', 'git', 'docker', 'sudo', 'tailscale', 'id', 'useradd', 'df', 'lslocks', 'ps']) {\nconst f = join(bin, tool);\nwriteFileSync(f, `#!/bin/sh\\necho ${tool} >> '${log}'\\nexit 1\\n`);\nchmodSync(f, 0o755);\n}"
+      ]
+    },
+    "scripts/bench/container.ts": {
+      "why": "the bench's setup message (systemd Delegate= drop-in)",
+      "uses": [
+        "systemd: const DELEGATE ='scripts/bench/README.md, one-time setup: the systemd Delegate= drop-in';"
+      ]
+    },
+    "src/guardrails/shell.ts": {
+      "why": "product code: systemd-run's option table (moved from src/guardrails/push-hook.ts on main, which re-exports it)",
+      "uses": [
+        "systemd: export const RUNNERS: Readonly<Record<string, Runner>> = {\n'systemd-run': { value: opts('HMEpu', 'unit', 'property', 'setenv', 'description', 'slice', 'uid', 'gid', 'working-directory', 'machine', 'host', 'nice', 'service-type', 'expand-environment', 'path-property', 'socket-property', 'on-active', 'on-boot', 'on-startup', 'on-unit-active', 'on-unit-inactive', 'on-calendar', 'timer-property') },\n};"
+      ]
+    }
+  },
+  "skipImports": {
+    "src/os/index.ts: which": "a program on PATH (gitleaks)",
+    "src/os/index.ts: isRoot": "runs as root",
+    "src/os/index.ts: toolPlatform": "a pinned tool platform",
+    "test/api-key-fixtures.ts: posix": "POSIX, not Windows",
+    "test/api-key-fixtures.ts: canHide": "POSIX modes can hide a file",
+    "test/control-dashboard.test.ts: chrome": {
+      "why": "a Chrome or Chromium path, from scripts/dev/control-dashboard.mjs (findChrome), loaded by a path built at run time",
+      "pin": [
+        "const chrome = ctl.findChrome(process.env.CHROME);",
+        "import ?: *"
+      ]
+    },
+    "test/dashboard-mobile.test.ts: chrome": {
+      "why": "a Chrome or Chromium path, from scripts/dev/control-dashboard.mjs (findChrome), loaded by a path built at run time",
+      "pin": [
+        "const chrome = ctl.findChrome(process.env.CHROME);",
+        "import ?: *"
+      ]
+    },
+    "test/frozen-guard.test.ts: canSwitch": {
+      "why": "passwordless sudo to another user, through machineTool('sudo') from test/isolate.ts (which holds the sign only as names of tools it hides)",
+      "pin": [
+        "const SUDO = machineTool('sudo');",
+        "const canSwitch = posix && spawnSync(SUDO, ['-n', '-u', other, 'true']).status === 0;",
+        "import test/isolate.ts: machineTool"
+      ]
+    },
+    "test/separate-users.test.ts: nobodySandbox": {
+      "why": "passwordless sudo to nobody and a bubblewrap sandbox, through machineTool('sudo') from test/isolate.ts",
+      "pin": [
+        "const SUDO = machineTool('sudo');",
+        "const canSudoNobody = process.platform !== 'win32' && spawnSync(SUDO, ['-n', '-u', 'nobody', 'true']).status === 0;",
+        "const nobodySandbox = canSudoNobody && (process.platform !== 'linux' || process.env.PROJECT_SANDBOX_REQUIRED === '1' || spawnSync(SUDO, ['-n', '-u', 'nobody', '/usr/bin/bwrap', '--dev-bind', '/', '/', '--unshare-user', '--unshare-pid', '--proc', '/proc', '--', '/bin/sh', '-c', ':']).status === 0);",
+        "import test/isolate.ts: machineTool"
+      ]
+    },
+    "test/locks-process.test.ts: known": {
+      "why": "a known process place and start time, from src/os/index.ts (processPlace, processIdentity), not a service manager; read through linuxIdentity, a const options literal (R1169v D5)",
+      "pin": [
+        "const here = processPlace();",
+        "const identity = processIdentity(process.pid);",
+        "const known = !!(here.host && here.boot && here.pidns && identity && identity !== UNKNOWN_IDENTITY);",
+        "import src/os/index.ts: UNKNOWN_IDENTITY",
+        "import src/os/index.ts: processIdentity",
+        "import src/os/index.ts: processPlace"
+      ]
+    },
+    "src/tool-path.ts: findTool": "a program on PATH (gitleaks, ssh-keygen)",
+    "src/guardrails/push-hook.ts: RUNNERS": {
+      "why": "the push guard's table of runner programs and their options, a const literal in product code (src/guardrails/shell.ts, re-exported by push-hook.ts, where the test imports it from): the loop registers one test per row, a fixed set, and no row is a service manager check (R1169v D4 reads a loop's table). An import key applies to every file that imports it; today only test/runner-option-tables.test.ts does (test/git-runner.test.ts has a RUNNERS of its own)"
+    },
+    "test/adversarial/adversarial.test.ts: controls": {
+      "why": "the adversarial suite's case files under test/adversarial/ (cases/*.json, controls.json, todo.json), read with readFileSync: one test per case in the repo's own data, none a service manager check (R1169v D4 reads a loop's table)",
+      "pin": [
+        "const controls = ControlFile.parse(readJson('controls.json')).controls;",
+        "const readJson = (file: string): unknown => JSON.parse(readFileSync(join(DIR, file), 'utf8'));"
+      ]
+    },
+    "test/adversarial/adversarial.test.ts: groups": {
+      "why": "the adversarial suite's case files under test/adversarial/ (cases/*.json, controls.json, todo.json), read with readFileSync: one test per case in the repo's own data, none a service manager check (R1169v D4 reads a loop's table)",
+      "pin": [
+        "const groups = caseFiles.map((f) => ({ file: f, ...CaseFile.parse(readJson(join('cases', f))) }));",
+        "const readJson = (file: string): unknown => JSON.parse(readFileSync(join(DIR, file), 'utf8'));"
+      ]
+    },
+    "test/adversarial/adversarial.test.ts: g": {
+      "why": "the adversarial suite's case files under test/adversarial/ (cases/*.json, controls.json, todo.json), read with readFileSync: one test per case in the repo's own data, none a service manager check (R1169v D4 reads a loop's table)",
+      "pin": [
+        "const groups = caseFiles.map((f) => ({ file: f, ...CaseFile.parse(readJson(join('cases', f))) }));",
+        "const readJson = (file: string): unknown => JSON.parse(readFileSync(join(DIR, file), 'utf8'));",
+        "for (const g of groups) { for (const c of g.cases) { test(`adversarial ${g.group} / ${c.id}: ${c.attack} (${c.source}) waits`, () => { const r = made(c, false); const injected = made(c, true); for (const cfg of c.expect.configs) { for (const scope of c.expect.scopes) { const at = `${c.id} under ${cfg} review.yaml, ${scope} scope`; const d = decide(r, c, cfg, scope); assert.equal(d.auto, false, `${at}: merged with the evaluator fooled`); for (const want of c.expect.reasons) assert.ok(d.reasons.some((x) => x.includes(want)), `${at}: no reason with \"${want}\" in ${JSON.stringify(d.reasons)}`); // A1: an injection in the PR's own files (and, by construction, in its body and issue, which the gate never // reads: only the evaluator does, and it is already fully fooled) changes no reason. // The one comment line per file it adds is counted, so only a size reason's number may move. assert.deepEqual(decide(injected, c, cfg, scope).reasons.map(sizeless), d.reasons.map(sizeless), `${at}: the injection changed the decision`); // A3: a worker claiming a lower class (or none) never lowers anything: the same reasons, the same class. // The class comparison is what holds a lower claim. The reasons comparison can't fail through claim handling: // the claim reaches the decision only as `claimedProtected` (merge-flow.ts: claim === 'protected'), which a // lower claim leaves false, so both calls get the same input. It guards determinism instead, together with // assertSameEveryTime below. const unclaimed = classOf(r, c, cfg, scope, undefined); for (const claim of ['docs-only', 'logic'] as const) { if (c.pr.claim === 'protected') break; assert.deepEqual(decide(r, c, cfg, scope, claim).reasons, decide(r, c, cfg, scope, undefined).reasons, `${at}: claiming ${claim} changed the decision`); assert.equal(classOf(r, c, cfg, scope, claim), unclaimed, `${at}: claiming ${claim} changed the class`); } assertSameEveryTime(r, c, cfg, scope, d, at); } } }); } }"
+      ]
+    },
+    "test/adversarial/adversarial.test.ts: todos": {
+      "why": "the adversarial suite's case files under test/adversarial/ (cases/*.json, controls.json, todo.json), read with readFileSync: one test per case in the repo's own data, none a service manager check (R1169v D4 reads a loop's table)",
+      "pin": [
+        "const readJson = (file: string): unknown => JSON.parse(readFileSync(join(DIR, file), 'utf8'));",
+        "const todos = TodoFile.parse(readJson('todo.json')).todo;"
+      ]
+    }
+  },
+  "runtime": {
+    "test/dashboard-switch-speed.test.ts: the test can tell the instances apart: each has its own newest PR, its own cards and its own last event": {
+      "why": "a web-UI speed test (real Chrome against the built dist/web): it skips where the UI isn't built or Chrome is missing (webUiSkip), as this job doesn't build it; the shards run it with CI_REQUIRE_WEB=1. Picked only by R1169v's fail-closed rule (its skip reads findChrome, from a module named at run time), never for systemd",
+      "runsIn": "web",
+      "pin": "test('the test can tell the instances apart: each has its own newest PR, its own cards and its own last event', { skip, timeout: 60_000 }, async () => {\nassert.notEqual(await newestMerged(BUSY), await newestMerged(OTHER));\nassert.notEqual(await firstInProgress(BUSY), await firstInProgress(OTHER));\nassert.notEqual(s!.lastId[BUSY], s!.lastId[OTHER]);\nfor (const name of [BUSY, OTHER]) {\nconst board = await view<{ cards: { instance: string }[] }>(name, '/board');\nassert.ok(board.cards.length > 0, `${name} has cards`);\nassert.ok(board.cards.every((c) => c.instance === name), `${name}'s cards are its own`);\n}\n})"
+    },
+    "test/dashboard-switch-speed.test.ts: `gated, ${GATED.name}: a cold first load shows the busy instance's Overview in under ${COLD_MS} ms (median of ${COLD_LOA": {
+      "why": "a web-UI speed test (real Chrome against the built dist/web): it skips where the UI isn't built or Chrome is missing (webUiSkip), as this job doesn't build it; the shards run it with CI_REQUIRE_WEB=1. Picked only by R1169v's fail-closed rule (its skip reads findChrome, from a module named at run time), never for systemd",
+      "runsIn": "web",
+      "pin": "test(`gated, ${GATED.name}: a cold first load shows the busy instance's Overview in under ${COLD_MS} ms (median of ${COLD_LOADS})`, { skip, timeout: REAL_CHROME_TIMEOUT }, async (ctx) => {\nawait oneChromeAtATime(ctx);\nconst ms = await coldLoads(GATED);\nconst line = `${GATED.name}: cold first load ${list(ms)}`;\nctx.diagnostic(line);\nassert.ok(median(ms) < COLD_MS, line);\n})"
+    },
+    "test/dashboard-switch-speed.test.ts: `gated, ${GATED.name}: an instance switch and a page switch from cache each show the new view's own data in under ${SWIT": {
+      "why": "a web-UI speed test (real Chrome against the built dist/web): it skips where the UI isn't built or Chrome is missing (webUiSkip), as this job doesn't build it; the shards run it with CI_REQUIRE_WEB=1. Picked only by R1169v's fail-closed rule (its skip reads findChrome, from a module named at run time), never for systemd",
+      "runsIn": "web",
+      "pin": "test(`gated, ${GATED.name}: an instance switch and a page switch from cache each show the new view's own data in under ${SWITCH_MS} ms (median of ${SWITCHES})`, { skip, timeout: REAL_CHROME_TIMEOUT }, async (ctx) => {\nawait oneChromeAtATime(ctx);\nconst m = await switches(GATED, true);\nconst line = `${GATED.name}, from cache: instance switch ${list(m.instance)}; page switch ${list(m.page)}`;\nctx.diagnostic(line);\nassert.ok(median(m.instance) < SWITCH_MS, line);\nassert.ok(median(m.page) < SWITCH_MS, line);\n})"
+    },
+    "test/dashboard-switch-speed.test.ts: `${GATED.name}, without the cache (dash-cache-off): the same switches take over ${SWITCH_MS} ms, so the test above would": {
+      "why": "a web-UI speed test (real Chrome against the built dist/web): it skips where the UI isn't built or Chrome is missing (webUiSkip), as this job doesn't build it; the shards run it with CI_REQUIRE_WEB=1. Picked only by R1169v's fail-closed rule (its skip reads findChrome, from a module named at run time), never for systemd",
+      "runsIn": "web",
+      "pin": "test(`${GATED.name}, without the cache (dash-cache-off): the same switches take over ${SWITCH_MS} ms, so the test above would catch a cache that stopped working`, { skip, timeout: REAL_CHROME_TIMEOUT }, async (ctx) => {\nawait oneChromeAtATime(ctx);\nconst m = await switches(GATED, false);\nconst line = `${GATED.name}, without the cache: instance switch ${list(m.instance)}; page switch ${list(m.page)}`;\nctx.diagnostic(line);\nassert.ok(median(m.instance) > SWITCH_MS, line);\nassert.ok(median(m.page) > SWITCH_MS, line);\n})"
+    },
+    "test/dashboard-switch-speed.test.ts: `gated, ${GATED.name}: a PR opened while its page is shown fades in, in at most ${NEW_DATA_FADE_MAX_MS} ms; the rows alr": {
+      "why": "a web-UI speed test (real Chrome against the built dist/web): it skips where the UI isn't built or Chrome is missing (webUiSkip), as this job doesn't build it; the shards run it with CI_REQUIRE_WEB=1. Picked only by R1169v's fail-closed rule (its skip reads findChrome, from a module named at run time), never for systemd",
+      "runsIn": "web",
+      "pin": "test(`gated, ${GATED.name}: a PR opened while its page is shown fades in, in at most ${NEW_DATA_FADE_MAX_MS} ms; the rows already shown don't`, { skip, timeout: REAL_CHROME_TIMEOUT }, async (ctx) => {\nawait oneChromeAtATime(ctx);\nconst b = await browser(GATED, BUSY);\ntry {\nconst { cdp, quiet } = b;\nawait cdp.send('Page.navigate', { url: `${s!.hub.breakGlassUrl}/prs` });\nawait until(\"busy's PR page\", () => js<boolean>(cdp, prsOf(BUSY, s!.newest ?? 0, s!.first ?? 0)), 240_000, 100);\nawait quiet();\nconst pr = 99_001;\nconst row = `[data-task-row=\"pr-${pr}\"], [data-testid=\"pr-wait-card\"][data-pr=\"${pr}\"]`;\n// Each entrance animation, as the new row mounts and on the frames after (an inline animation starts on style).\nawait js(cdp, `(() => {\nwindow.__newRow = null;\nwindow.__others = [];\nconst describe = (x) => { const t = x.effect?.target; const r = t?.closest('[data-task-row],[data-testid]'); return (x.animationName ?? '?') + ' on ' + (t?.tagName ?? '?') + ' in ' + (r ? (r.dataset.taskRow ?? r.dataset.testid) : 'nothing marked'); };\nconst see = () => {\nconst el = document.querySelector(${JSON.stringify(row)});\n// Running ones only: a finished fade with fill 'both' is still listed, long after it ran.\nconst anims = [...(document.querySelector('main')?.getAnimations({ subtree: true }) ?? [])].filter((x) => ${ENTRANCE_ANIM}(x) && x.playState !== 'finished');\nif (el) {\ngetComputedStyle(el).animationName;\nconst own = el.getAnimations({ subtree: true }).filter((x) => ${ENTRANCE_ANIM}(x));\nwindow.__newRow ??= own.map((x) => ({ name: x.animationName ?? '', ms: Number(x.effect.getComputedTiming().duration) }));\nfor (const x of anims) if (!own.includes(x)) window.__others.push(describe(x));\nreturn true;\n}\nfor (const x of anims) window.__others.push(describe(x));\nreturn false;\n};\nconst frame = () => see() || requestAnimationFrame(frame);\nrequestAnimationFrame(frame);\n})()`);\nconst log = new EventLog(s!.db[BUSY]!);\ntry {\nlog.append('issue.seen', { issue: 9001, title: 'A PR opened while the page is shown', labels: ['ready'], author: 'example-owner', owner: null, actionable: true, why: 'opened by writer example-owner' }, 'coordinator');\nlog.append('pr.opened', { issue: 9001, number: pr, url: `https://github.com/example-org/shop/pull/${pr}`, head: 'f'.repeat(40), draft: false }, 'coordinator');\n} finally {\nlog.close();\n}\n// The busy instance's log moved on: what later tests expect of it follows.\ns!.lastId[BUSY] = (await view<{ lastId: number }>(BUSY, '/state')).lastId;\nawait until('the new PR on the page', () => js<boolean>(cdp, 'window.__newRow !== null'), 60_000, 50);\nconst anims = await js<{ name: string; ms: number }[]>(cdp, 'window.__newRow');\nctx.diagnostic(`the new row's entrance: ${JSON.stringify(anims)}`);\nassert.ok(anims.length > 0, 'the new row fades in');\nfor (const a of anims) assert.ok(a.ms <= NEW_DATA_FADE_MAX_MS, `${a.name}: ${a.ms} ms is over ${NEW_DATA_FADE_MAX_MS} ms`);\nassert.deepEqual(await js<string[]>(cdp, 'window.__others'), [], 'no row already shown animated again');\n} finally {\nawait b.close();\n}\n})"
+    },
+    "test/dashboard-switch-speed.test.ts: `measured, not gated, ${RELAY.name}: the cold first load and the switches from cache`": {
+      "why": "a web-UI speed test (real Chrome against the built dist/web): it skips where the UI isn't built or Chrome is missing (webUiSkip), as this job doesn't build it; the shards run it with CI_REQUIRE_WEB=1. Picked only by R1169v's fail-closed rule (its skip reads findChrome, from a module named at run time), never for systemd",
+      "runsIn": "web",
+      "pin": "test(`measured, not gated, ${RELAY.name}: the cold first load and the switches from cache`, { skip, timeout: REAL_CHROME_TIMEOUT * 2 }, async (ctx) => {\nawait oneChromeAtATime(ctx);\nawait measuredOnly(ctx, 'cold first load', async () => `cold first load ${list(await coldLoads(RELAY))}`);\nawait measuredOnly(ctx, 'switches', async () => {\nconst m = await switches(RELAY, true);\nreturn `from cache: instance switch ${list(m.instance)}; page switch ${list(m.page)}`;\n});\n})"
+    },
+    "test/security-fixed.test.ts: #859: on a checkout with the whole history, each merge commit the table names is an ancestor of HEAD": {
+      "why": "skips on a shallow checkout (git rev-parse --is-shallow-repository), which this job's checkout is, as the shards' are; the security-fixed job checks it on full history. Picked only by R1169v's fail-closed rule (its function reads scripts/ci/security-fixed.mjs, a module named at run time, and holds a skip), never for systemd. Caveat: that job runs only on pull requests that touch docs/security.md, scripts/ci/security-fixed.mjs or its workflow (its paths filter), not on every PR or on main",
+      "runsIn": "security-fixed",
+      "pin": "test('#859: on a checkout with the whole history, each merge commit the table names is an ancestor of HEAD', (t) => {\nconst git = (...a: string[]) => execFileSync('git', a, { cwd: repoRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();\nif (git('rev-parse', '--is-shallow-repository') === 'true') return t.skip('a shallow checkout (the CI shards): the security-fixed job checks this');\nfor (const r of s.fixedRows(page)) assert.doesNotThrow(() => git('merge-base', '--is-ancestor', `${r.commit}^{commit}`, 'HEAD'), `#${r.pr} ${r.commit}`);\n})"
+    },
+    "test/no-late-shift.test.ts: `in a real Chrome: ${held} answering last moves no control on the Settings page, and a link there still opens its page`": {
+      "why": "a web-UI test (real Chrome against the built dist/web): it skips where the UI isn't built or Chrome is missing (webUiSkip), as this job doesn't build it; the shards run it with CI_REQUIRE_WEB=1. Picked only by R1169w's fail-closed rules, never for systemd",
+      "runsIn": "web",
+      "pin": "test(\n`in a real Chrome: ${held} answering last moves no control on the Settings page, and a link there still opens its page`,\n{ timeout: REAL_CHROME_TIMEOUT, skip: webUiSkip(chrome) },\nasync (ctx) => {\nawait oneChromeAtATime(ctx);\nconst dir = mkdtempSync(join(tmpdir(), 'settings-no-shift-'));\nconst eventsDb = join(dir, 'events.db');\nnew EventLog(eventsDb).close();\nconst { dir: root } = exampleProject();\nconst slotsDir = join(dir, 'slots');\nmkdirSync(slotsDir, { recursive: true });\nconst d = await startDashboard({ root, cfg: loadConfig(root), eventsDb, stateDir: dir, user: 'example-owner', roleOf: exampleRoles, slotsDir, machineOwnersFile: machineOwnersFile('example-owner') });\nconst b = await launchTestChrome(chrome!, { width: 1280, height: 1000 });\ntry {\nconst cdp = b.cdp;\nawait openTab(cdp, d.token, 'example-owner');\nconst net = watchRequests(cdp);\n// The setup screens' answer is the test's own (six steps), held when it is the one under test.\nconst answers = await intercept(cdp, { '/api/first-run': () => json(FIRST_RUN), '/api/instance-settings': null });\nanswers.hold(held);\nawait cdp.send('Page.navigate', { url: `${d.url}/settings` });\nawait until(`${held} held`, async () => answers.held(held), 20_000);\nawait noMoveWhenLast(cdp, net, held, held, () => answers.release(held));\n// Everything shown, the setup screens last.\nawait until('every part shown', () => js<boolean>(cdp, `${q('settings-panels')}?.dataset.loaded === 'true'`), 20_000);\nassert.equal(await js<number>(cdp, `document.querySelectorAll('[data-testid=\"setup-screen\"]').length`), 6, 'the six setup screens');\n// A link, pressed where it is (it must hold still), opens its page.\nawait pressSteady(cdp, q('settings-first-run-link'), 'settings-first-run-link');\nawait until('the first-run page', () => js<boolean>(cdp, `location.pathname === '/first-run'`), 5_000);\nawait answers.stop();\n} finally {\nawait b.close();\nawait d.close();\n}\n},\n)"
+    }
+  }
+}
