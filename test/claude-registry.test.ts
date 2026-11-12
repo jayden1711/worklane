@@ -3,15 +3,20 @@
 // hidden one named through a variable, and one declared with its arguments are all found. A stand-in binary here.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { repoRoot } from './helpers.js';
 
 const posix = process.platform !== 'win32';
+type Entry = { version?: string; sha256: string; probedAt?: string; commands: string[] };
+type Cache = Record<string, Entry>;
 type Registry = {
   candidates: (bin: string) => string[];
+  readCache: (text?: string) => Cache;
+  cacheText: (c: Cache) => string;
+  cacheProblems: (sha256: string, cache: Cache, listed: string[], earlier: string[], platform?: string) => string[];
   claudeCommands: (bin: string, o?: { concurrency?: number; timeoutMs?: number }) => Promise<{ commands: string[]; unread: string[] }>;
   listedCommands: (src: string, name?: string) => string[];
 };
@@ -67,4 +72,33 @@ test('R1185as D1: the lint lists are read from their one line each', async () =>
   assert.deepEqual(listedCommands(src), ['doctor', 'mcp']);
   assert.deepEqual(listedCommands(src, 'EARLIER_COMMANDS'), ['config']);
   assert.throws(() => listedCommands('const SUBCOMMANDS = [\n];\n'), /no one-line/);
+});
+
+test('R1185as (the cache): the committed probe results round-trip, one entry per platform, and a binary none was probed from fails with what to run where', async () => {
+  const { readCache, cacheText, cacheProblems } = await registry();
+  const c: Cache = {
+    'darwin-arm64': { version: '9.9.9', sha256: 'f'.repeat(64), probedAt: '2026-11-12', commands: ['doctor', 'mcp', 'remote'] },
+    'linux-x64': { version: '9.9.9', sha256: 'e'.repeat(64), probedAt: '2026-11-12', commands: ['doctor', 'mcp', 'remote', 'sync'] },
+  };
+  assert.deepEqual(readCache(cacheText(c)), c);
+  assert.equal(cacheText(c).match(/^\/\/ check-table: never-shrink\nexport const [A-Z0-9_]+_COMMANDS = \[$/gm)?.length, 2, 'each list is marked never-shrink');
+  // Each platform's own binary is checked against its own entry's commands.
+  assert.deepEqual(cacheProblems('f'.repeat(64), c, ['doctor', 'mcp', 'remote'], [], 'darwin-arm64'), []);
+  assert.match(cacheProblems('e'.repeat(64), c, ['doctor', 'mcp', 'remote'], [], 'linux-x64')[0]!, /lacks sync/);
+  const other = cacheProblems('d'.repeat(64), c, ['doctor', 'mcp', 'remote'], [], 'linux-x64');
+  assert.equal(other.length, 1);
+  assert.match(other[0]!, /re-run scripts\/ci\/claude-registry\.mjs --write for the new pin, on linux-x64/);
+  assert.match(cacheProblems('d'.repeat(64), { 'darwin-arm64': c['darwin-arm64']! }, [], [], 'linux-x64')[0]!, /it has no linux-x64 entry/);
+  assert.deepEqual(cacheProblems('f'.repeat(64), c, ['doctor', 'mcp', 'remote', 'config'], ['config'], 'darwin-arm64'), []);
+  assert.match(cacheProblems('f'.repeat(64), c, ['doctor', 'mcp', 'remote', 'config'], [], 'darwin-arm64')[0]!, /holds config/);
+});
+
+test('R1185as (the cache): each committed platform entry\'s command set is the launch lint\'s SUBCOMMANDS, EARLIER_COMMANDS aside', async () => {
+  const { readCache, cacheProblems, listedCommands } = await registry();
+  const cache = readCache();
+  const lint = readFileSync(join(repoRoot, 'test', 'claude-launch-lint.test.ts'), 'utf8');
+  for (const [platform, e] of Object.entries(cache)) {
+    assert.deepEqual(cacheProblems(e.sha256, cache, listedCommands(lint), listedCommands(lint, 'EARLIER_COMMANDS'), platform), [], platform);
+    assert.ok(e.commands.length >= 40, `${platform}: ${e.commands.length} commands`);
+  }
 });

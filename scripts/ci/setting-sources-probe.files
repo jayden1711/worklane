@@ -1,3 +1,4 @@
+scripts/ci/claude-commands.mjs
 scripts/ci/claude-registry.mjs
 scripts/ci/setting-sources-probe.mjs
 scripts/lib/git.cjs
