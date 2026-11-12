@@ -394,3 +394,21 @@ test('R1264m D1, n D2: no variable a caller sets, before lib.sh is sourced or af
     rmSync(t, { recursive: true, force: true });
   }
 });
+
+// declare -l/-u are bash 4's: macOS's /bin/bash (3.2) has neither, where this would prove nothing.
+const caseAttrs = posix && spawnSync('bash', ['-c', 'declare -l x'], { encoding: 'utf8' }).status === 0;
+test('R1264o D1: a caller\'s declare -l or -u on the template\'s names changes nothing (attributes cleared, the baked paths checked again before the exec)', { skip: !caseAttrs && 'bash without declare -l (3.2)' }, () => {
+  for (const attr of ['-l', '-u']) {
+    const t = mkdtempSync(join(tmpdir(), 'claude-guarded-'));
+    try {
+      const bin = join(t, 'bin');
+      recorder(bin, join(t, 'got.json'));
+      const lib = guardedTree(join(t, 'tree'), `${bin}:/usr/bin:/bin`);
+      const r = spawnSync('bash', ['-c', `declare ${attr} cg_def cg_here cg_helper; source "$1"; cd "$2" && claude_guarded -- '{}' -p hi`, '_', lib, t], { encoding: 'utf8', env: { PATH: `${bin}:/usr/bin:/bin`, HOME: t } });
+      assert.equal(r.status, 0, `${attr}: ${r.stderr}`);
+      assert.deepEqual((JSON.parse(readFileSync(join(t, 'got.json'), 'utf8')) as { argv: string[] }).argv, ['-p', 'hi', '--settings', '{}', ...GUARDS], attr);
+    } finally {
+      rmSync(t, { recursive: true, force: true });
+    }
+  }
+});

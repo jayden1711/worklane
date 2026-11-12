@@ -1529,6 +1529,12 @@ function installTree(sha, opt = OPT, buildDir = BUILD_DIR, owner = 'root:root') 
   execFileSync('cp', ['-a', path.join(buildDir, 'src'), tmp]);
   execFileSync('chown', ['-R', owner, tmp]);
   execFileSync('chmod', ['-R', 'a+rX,go-w', tmp]);
+  // R1264o D3: claude_guarded's test PATH marker points it at a test's stand-ins: an installed tree never holds one.
+  const marker = fs.readdirSync(tmp, { recursive: true }).map(String).find((f) => path.basename(f) === '.claude-guarded-test-path');
+  if (marker) {
+    fs.rmSync(tmp, { recursive: true, force: true });
+    throw new Error(`the built tree holds ${marker} (a test's marker for claude_guarded's PATH): not installing it`);
+  }
   let pkg = null;
   try {
     pkg = JSON.parse(fs.readFileSync(path.join(tmp, 'package.json'), 'utf8'));

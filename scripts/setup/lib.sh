@@ -1206,6 +1206,8 @@ agent_key_file_ok() { run_as_bounded "$1" "$AGENT_CHECK_SECONDS" /dev/null "$AGE
 # is never tracked (a test refuses one in the tree), so an installed tree, git's tree at a release, never has one.
 # This text is held by digest in the shell lint's test (R1264l D2).
 #   claude_guarded [--as <user>]... [--timeout <seconds>] [--env <NAME>=<value>]... -- <settings> -p|--print [<word>...]
+# R1264o D1: no attribute a caller gave these names (declare -l/-u lowercasing the template's placeholders) survives.
+builtin unset -v cg_def cg_here cg_helper
 IFS= read -r -d '' cg_def <<'CLAUDE_GUARDED_DEF' || true
 claude_guarded() {
   local cg_here=@HERE@ cg_sh=@HELPER@ cg_f cg_s cg_mode cg_m cg_path=/usr/local/bin:/usr/bin:/bin
@@ -1222,6 +1224,13 @@ claude_guarded() {
       return 2
     fi
   done
+  # R1264o D1: the paths written in are absolute, hold no placeholder, and are what a second resolution finds now.
+  case "$cg_here:$cg_sh" in /*:/* ) ;; *) builtin echo "claude_guarded: its helper's path isn't absolute ($cg_sh); not running claude" >&2; return 2 ;; esac
+  case "$cg_here$cg_sh" in *@*) builtin echo "claude_guarded: its helper's path wasn't written in ($cg_sh); not running claude" >&2; return 2 ;; esac
+  if [ "$cg_here" != "$(builtin cd -P -- "$cg_here" 2>/dev/null && builtin pwd)" ] || [ "$cg_sh" != "$(builtin cd -P -- "$cg_here/../lib" 2>/dev/null && builtin pwd)/claude-guarded.sh" ]; then
+    builtin echo "claude_guarded: its helper's path ($cg_sh) isn't the one beside lib.sh; not running claude" >&2
+    return 2
+  fi
   if [ -f "$cg_here/.claude-guarded-test-path" ]; then IFS= builtin read -r cg_path < "$cg_here/.claude-guarded-test-path" || true; fi
   builtin command /usr/bin/env -i "PATH=$cg_path" "HOME=$HOME" /bin/bash --norc --noprofile "$cg_sh" "$@"
 }

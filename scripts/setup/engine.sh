@@ -46,6 +46,8 @@ if [ ! -f "$dest/dist/src/cli.js" ] || [ ! -f "$dest/dist/web/index.html" ]; the
   # --ignore-scripts: no dependency's install script runs as root; the builds are plain tsc and vite.
   (cd "$work/src" && npm ci --ignore-scripts --no-audit --no-fund >/dev/null && npm run -s build && npm run -s build:web >/dev/null)
   [ -f "$work/src/dist/web/index.html" ] || { echo "the web UI build wrote no dist/web/index.html" >&2; exit 1; }
+  # R1264o D3: claude_guarded's test PATH marker points it at a test's stand-ins: an installed tree never holds one.
+  if [ -n "$(find "$work/src" -name .claude-guarded-test-path -print -quit)" ]; then echo "the tree holds a .claude-guarded-test-path (a test's marker): not installing it" >&2; exit 1; fi
   install -d -m 0755 /opt/worklane
   if [ -f "$dest/dist/src/cli.js" ]; then
     # Installed earlier without the UI, maybe in use by a running service: add only the UI, renamed into place.

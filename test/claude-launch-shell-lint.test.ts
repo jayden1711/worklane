@@ -28,7 +28,8 @@
 // with or without its colon (`${X:-claude}`, `${X-claude}`), `printf -v NAME … claude`, and a glob aimed at the binary
 // (`…/claud[e]`) name it too. A function or alias named for a command a launch runs through (sudo, env, timeout,
 // command, builtin, cd, …), or by any path (`/usr/bin/env() {…}`, which bash runs for that exact path), a DEBUG or RETURN
-// trap, extdebug and functrace, and a script that sets a CLAUDE_GUARDED_* variable, are refused (R1264l D3, m D2). Quoting is read as bash reads it
+// trap, extdebug and functrace, `enable -n`, a script that names the tests' .claude-guarded-test-path marker, and a
+// script that sets a CLAUDE_GUARDED_* variable, are refused (R1264l D3, m D2, o D2/D3). Quoting is read as bash reads it
 // (R1264j D2): nothing escaped in `'…'`, a backslash takes the next character in `$'…'`, `"…"` and outside quotes. A script that defines its own claude_guarded is
 // refused.
 //
@@ -149,7 +150,7 @@ export const SHELL_PINS = (JSON.parse(readFileSync(join(repoRoot, 'scripts', 'ci
 
 type Word = { text: string; quoted: boolean };
 /** The commands a claude launch runs through: a function or alias of one of these names is refused (R1264l D3). */
-const SHADOWED = new Set('sudo env timeout command builtin exec claude printenv cd pwd dirname stat bash sh find unset declare source printf read eval readonly echo'.split(' '));
+const SHADOWED = new Set('sudo env timeout command builtin exec claude printenv cd pwd dirname stat bash sh find unset declare source printf read eval readonly echo local test [ enable'.split(' '));
 
 /** Words that open a command without being it. */
 // check-table: never-grow
@@ -453,10 +454,15 @@ export function shellLaunchProblems(path: string, text: string, pinned = new Map
   // A function bash runs for a command named by that exact path (`/usr/bin/env() {…}`, `function /usr/bin/sudo {…}`)
   // shadows it too: any name with a `/` is refused, and a listed name after any `…/` (R1264m D2, n D1).
   for (const { line, text: t } of lines) {
-    for (const m of t.matchAll(/(?:^|[\s;&|{(])(?:function\s+([A-Za-z0-9_./:+@-]+)|([A-Za-z0-9_./:+@-]+)\s*\(\s*\)|alias\s+([A-Za-z0-9_./:+@-]+)=)/g)) {
+    for (const m of t.matchAll(/(?:^|[\s;&|{(])(?:function\s+([A-Za-z0-9_./:+@[-]+)|([A-Za-z0-9_./:+@[-]+)\s*\(\s*\)|alias\s+([A-Za-z0-9_./:+@[-]+)=)/g)) {
       const name = m[1] ?? m[2] ?? m[3]!;
       if (name.includes('/') || SHADOWED.has(name)) out.push(`${path}:${line}: defines ${name}, ${name.includes('/') ? 'a function named by a path (bash runs it for that path)' : 'a command a claude launch runs through'}: refused (R1264l D3, R1264m D2)`);
     }
+    // R1264o D2, p D2: `enable -n` turns a builtin claude_guarded relies on (builtin, read, local, cd) into a PATH lookup.
+    if (/(?:^|[\s;&|{(])enable\b[^;&|]*\s-[a-zA-Z]*n/.test(t)) out.push(`${path}:${line}: disables a builtin (enable -n), which claude_guarded runs by name: refused (R1264o D2)`);
+    // R1264o D3: claude_guarded's test PATH marker is the tests' alone: a script that names it can write one.
+    // lib.sh reads it; the installer (engine.sh) names it only to refuse a tree that holds one.
+    if (!['scripts/setup/lib.sh', 'scripts/setup/engine.sh'].includes(path) && /claude-guarded-test-path/.test(t)) out.push(`${path}:${line}: names claude_guarded's test PATH marker (.claude-guarded-test-path), which only the tests may write: refused (R1264o D3)`);
     // A DEBUG or RETURN trap, extdebug or functrace runs code inside claude_guarded's own function (R1264m D2).
     if (/(?:^|[\s;&|{(])trap\b[^;&|]*\b(?:DEBUG|RETURN)\b|\bshopt\s+-s\b[^;&|]*\bextdebug\b|\bset\s+(?:-[A-Za-z]*T\b|-o\s+functrace\b)/.test(t)) out.push(`${path}:${line}: sets a DEBUG or RETURN trap, extdebug or functrace, which run code inside claude_guarded: refused (R1264m D2)`);
   }
@@ -743,7 +749,7 @@ const WRAPPER_RESOLVE = [
   'builtin unset cg_def cg_here cg_helper',
 ].join('\n');
 /** The digest of lib.sh's claude_guarded template (R1264l D2). */
-const WRAPPER_DIGEST = '0abfe7ca667bf8227dd62b90bc6836998a6559c92bb36af92f19bad667607779';
+const WRAPPER_DIGEST = '9e018dd80e28d738a978115d7fb919ae4a1c73d3dc5256e6739a5df7d0626c53';
 
 test('#1262 (R1264l D2, m D1): which file claude_guarded runs, and the wrapper itself, are held by digest: a widened copy at another path is refused', () => {
   const text = readFileSync(join(repoRoot, 'scripts', 'setup', 'lib.sh'), 'utf8');
@@ -754,7 +760,7 @@ test('#1262 (R1264l D2, m D1): which file claude_guarded runs, and the wrapper i
   assert.ok(text.includes(WRAPPER_RESOLVE), 'lib.sh resolves its own folder and the helper as it is sourced, writes them into claude_guarded, and makes it read-only');
   assert.equal(text.match(/@HELPER@/g)?.length, 2, 'the helper path goes into the template in one place');
   // A copy of the helper, widened and named otherwise, with the template pointed at it: the digest or the resolution moves.
-  const widened = text.replace('/../lib" 2>/dev/null && builtin pwd)/claude-guarded.sh"', '/../lib" 2>/dev/null && builtin pwd)/claude-guarded.inc"');
+  const widened = text.replace('cg_helper="$(builtin cd -P -- "$cg_here/../lib" 2>/dev/null && builtin pwd)/claude-guarded.sh"', 'cg_helper="$(builtin cd -P -- "$cg_here/../lib" 2>/dev/null && builtin pwd)/claude-guarded.inc"');
   assert.notEqual(widened, text);
   assert.ok(!widened.includes(WRAPPER_RESOLVE));
   const retemplated = text.replace('cg_sh=@HELPER@', 'cg_sh=/tmp/claude-guarded.inc');
@@ -794,6 +800,10 @@ test('#1262: every way a script can start claude other than through claude_guard
   // check-table: never-shrink
   const MUST_FAIL = [
     'after-and',
+    'enable-n',
+    'shadow-bracket',
+    'shadow-local',
+    'test-path-marker',
     'extdebug-functrace',
     'shadow-absolute-env',
     'shadow-absolute-sudo',

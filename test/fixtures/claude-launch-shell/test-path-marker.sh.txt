@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# R1264o D3: a script that writes claude_guarded's test PATH marker points it at its own claude.
+printf '%s\\n' "$PWD/bin" > scripts/setup/.claude-guarded-test-path

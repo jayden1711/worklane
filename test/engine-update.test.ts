@@ -462,6 +462,15 @@ test('installTree: every package.json bin target is made 0755, and every file is
   assert.equal(statSync(join(s.dest, 'dist', 'src', 'cli.js')).mode & 0o777, 0o755);
 });
 
+test("R1264o D3: installTree refuses a tree that holds claude_guarded's test PATH marker, and leaves nothing behind", { skip: process.platform === 'win32' && 'POSIX modes' }, () => {
+  const t = builtTree({ worklane: 'dist/src/cli.js' });
+  mkdirSync(join(t.build, 'src', 'scripts', 'setup'), { recursive: true });
+  writeFileSync(join(t.build, 'src', 'scripts', 'setup', '.claude-guarded-test-path'), '/tmp/stand-ins\n');
+  assert.throws(() => u.installTree(NEW, t.opt, t.build, t.owner), /holds scripts\/setup\/\.claude-guarded-test-path .*not installing it/);
+  assert.ok(!existsSync(t.dest), 'nothing installed');
+  assert.deepEqual(readdirSync(t.opt), [], 'no temp tree left');
+});
+
 test('installTree refuses a tree whose bin target is missing, and run() switches nothing', { skip: process.platform === 'win32' && 'POSIX modes' }, async () => {
   const t = builtTree({ worklane: 'dist/src/cli.js', gone: 'dist/src/gone.js' });
   assert.throws(() => u.installTree(NEW, t.opt, t.build, t.owner), /can't be started: bin dist\/src\/gone\.js is missing/);
