@@ -1,6 +1,6 @@
 // Landing: the land queue and batches, the gates before landing, opening PRs, and what follows a landing (deploy).
 import { gitSpawnSync } from '../os/git.js';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { BRAND } from '../brand.js';
 import { type DoneWhenList } from '../backlog/types.js';
 import { claim, release } from '../claims.js';
@@ -8,7 +8,7 @@ import type { EventLog } from '../events/log.js';
 import type { EventPayload } from '../events/types.js';
 import { computeLevel } from '../review.js';
 import type { ReviewConfig } from '../config/schema.js';
-import { waitCategoriesOf } from '../merge-policy.js';
+import { riskAndDesignCategories, riskAndDesignReasons, waitCategoriesOf } from '../merge-policy.js';
 import { effectiveClass, prBodyHead, prBodyProblems, riskClassOf } from '../pr-rules.js';
 import { claimLines } from '../claim-labels.js';
 import { checkedPush } from '../push-check.js';
@@ -18,12 +18,54 @@ import { scanRange } from '../scan/secrets.js';
 import { fullRunLock } from '../slots.js';
 import { baselineGate, latestBaseline } from '../baseline.js';
 import { createWorktree, removeWorktree } from '../worktrees.js';
+import { changedPathBytes, treeEntries } from './change-files.js';
 import { Decisions } from './decisions.js';
 import { evalLines, pushRefusal, DEFAULT_REVIEW, lockScopeOf } from './shared.js';
 import { SANDBOX_UNAVAILABLE } from '../os/index.js';
-import { redactString } from '../events/redact.js';
+import { redactString, TRACKER } from '../events/redact.js';
+import { shownPath } from '../path-text.js';
 import { slotDeferringSince } from './wait-caps.js';
 import { optimizePrLines } from '../optimize.js';
+
+/** How a reason the landing floor held is recorded on the entry's level (and found again in an approval of it). */
+const LANDING_FLOOR = ": held for the owner (direct land's merge-policy floor, checked again at landing)";
+/**
+ * R1182i/j: the line on a landing-floor level that names exactly what the owner was asked about: a hash of the batch
+ * (each entry's issue and head), the held categories (R1182p) and every judged file a held reason is about (R1182n D1), with its `git ls-tree` entry.
+ * An approval at landing covers output only while this matches; the reasons' text (which names at most a few paths) never decides.
+ */
+const LANDING_PRINT = 'landing floor, exactly this batch and these files: sha256 ';
+/** The category whose recorded path (review.ts: `*`) is the whole app change, not a file. */
+const WHOLE_APP_CHANGE = 'app-non-money-large';
+
+/** R1182n D2: what a landing-floor question may name in its comment (GitHub refuses one over 65536 characters). */
+export const QUESTION_LINE_MAX = 600;
+export const QUESTION_LINES_MAX = 40;
+export const QUESTION_CHARS_MAX = 24_000;
+
+/**
+ * The held reasons and judged files a landing-floor question names, bounded: each line at most QUESTION_LINE_MAX
+ * characters, every reason, then judged files while the total stays within QUESTION_CHARS_MAX and QUESTION_LINES_MAX,
+ * then how many more there are and `where` every one is named. The approval binds the full set (the print), not this.
+ */
+export function questionLines(held: string[], listed: string[], where: string): string[] {
+  // A cut line keeps a short hash of the whole line (R1182x): two lines that differ only past the cut never show alike.
+  const cut = (l: string) => (l.length > QUESTION_LINE_MAX ? `${l.slice(0, QUESTION_LINE_MAX)}… (cut; sha256 ${createHash('sha256').update(l).digest('hex').slice(0, 32)}; in full in ${where})` : l);
+  const out = held.slice(0, QUESTION_LINES_MAX).map(cut);
+  let chars = out.reduce((n, l) => n + l.length, 0);
+  let shown = 0;
+  for (const l of listed) {
+    const c = cut(l);
+    if (out.length >= QUESTION_LINES_MAX || chars + c.length > QUESTION_CHARS_MAX) break;
+    out.push(c);
+    chars += c.length;
+    shown++;
+  }
+  const reasonsLeft = held.length - Math.min(held.length, QUESTION_LINES_MAX);
+  if (reasonsLeft) out.push(`and ${reasonsLeft} more reasons, every one named in ${where}`);
+  if (shown < listed.length) out.push(`and ${listed.length - shown} more judged files (${listed.length} in all), every one named in ${where}`);
+  return out;
+}
 
 /** Why an automatic land (below L3) waits queued while the instance policy's auto-merge is off (#808). */
 export const AUTO_OFF_WAIT = "waiting: the instance policy's auto-merge is off, so only what the owner approved (L3) lands; this lands once auto_merge is on";
@@ -48,21 +90,40 @@ export abstract class Landing extends Decisions {
     return out;
   }
 
+  /** The base of the change proposed at `head` (what the evaluator reviewed), or null: none was proposed there. */
+  private proposedBase(issue: number, head: string): string | null {
+    const e = this.events(issue).filter((x) => x.type === 'change.proposed' && (x.payload as { head: string }).head === head).at(-1);
+    return (e?.payload as { base?: string } | undefined)?.base ?? null;
+  }
+
   private filesOf(issue: number, head: string): string[] {
     const e = this.events(issue).filter((x) => x.type === 'change.proposed' && (x.payload as { head: string }).head === head).at(-1);
     return (e?.payload as { files?: string[] } | undefined)?.files ?? [];
   }
 
-  /** Seed with the oldest; add later changes whose files don't overlap, at most one L3, up to batch_max. */
+  /**
+   * Seed with the oldest; add later changes whose files don't overlap, at most one L3, up to batch_max. An entry the
+   * owner approved at landing carries that question's print, and the print names its batch (every entry's issue@head):
+   * R1182t, R1182v: a batch seeded by such an entry holds only the entries with that same print (the batch the owner
+   * approved, built exactly again), and a batch seeded otherwise never takes one in (it waits for its own). A member
+   * missing (rejected, or not queued) leaves a batch whose print doesn't match: the floor asks again (fails closed).
+   */
   buildBatch(queue: EventPayload<'land.queued'>[]): EventPayload<'land.queued'>[] {
     const max = this.d.cfg.tests.land.batch_max;
     const batch: EventPayload<'land.queued'>[] = [];
     const files = new Set<string>();
+    const prints = new Map<EventPayload<'land.queued'>, string | null>();
+    const printOf = (q: EventPayload<'land.queued'>) => {
+      if (!prints.has(q)) prints.set(q, q.level === 'L3' ? this.landingPrint(q) : null);
+      return prints.get(q)!;
+    };
+    const seedPrint = queue.length ? printOf(queue[0]!) : null;
     for (const q of queue) {
       if (batch.length >= max) break;
+      if (batch.length && printOf(q) !== seedPrint) continue;
       const f = this.filesOf(q.issue, q.head);
       if (batch.length && f.some((x) => files.has(x))) continue;
-      if (q.level === 'L3' && batch.some((b) => b.level === 'L3')) continue;
+      if (seedPrint === null && q.level === 'L3' && batch.some((b) => b.level === 'L3')) continue;
       batch.push(q);
       f.forEach((x) => files.add(x));
     }
@@ -304,6 +365,45 @@ export abstract class Landing extends Decisions {
         return;
       }
       const head = this.git(path, 'rev-parse', 'HEAD');
+      // R1182f, R1182h (#716): direct land's merge-policy floor again, on what this push would put on the branch
+      // (tip..HEAD: the pre-land steps' and gates' output included), under the review config and land mode in force now.
+      // Any reason the owner hasn't approved: nothing is pushed, and the entries it needs (landFloor's `ask`) go to them.
+      const floor = this.landFloor(path, tip, head, applied);
+      if (floor.held.length) {
+        const why = `not pushed: what this land would push is below direct land's merge-policy floor (${floor.held.join('; ')})`;
+        // The level names every judged file by name, mode, type and object (no "and N more"), then the print. The
+        // question names as many as fit in one issue comment, and says where the rest are (R1182n D2).
+        const held = floor.held.map((r) => `${r}${LANDING_FLOOR}`);
+        const reasons = [...held, ...floor.listed, `${LANDING_PRINT}${floor.print}`];
+        for (const q of applied) {
+          if (!floor.ask.includes(q)) {
+            result(q.issue, 'deferred', null, `${why}; lands once the others in its batch are decided`);
+            continue;
+          }
+          // R1182h 3: the question first, then the final result. A failure before the question is recorded leaves the
+          // entry queued, so the next pass asks again; once it is recorded, the result is written whatever else fails
+          // (R1182n D2: a comment the backlog refuses), so the owner's answer to it is honoured.
+          const set = this.emit('review.level_set', { issue: q.issue, head: q.head, level: 'L3', reasons });
+          const detail = [`head ${q.head.slice(0, 8)}`, ...questionLines(held, floor.listed, `review.level_set event ${set.id} (#${q.issue} at ${q.head.slice(0, 8)})`), `${LANDING_PRINT}${floor.print}`, ...(floor.seen ? [] : ["the land commit holds files no entry's own change has as they are (a pre-land step or gate wrote them)"])];
+          let failed: string | null = null;
+          try {
+            await this.ask('land', q.issue, ownerOf(q.issue), `Approve landing #${q.issue} (L3)?`, ['approve', 'reject'], floor.seen ? 'approve' : 'reject', detail);
+          } catch (e) {
+            failed = (e as Error).message.slice(0, 300);
+          }
+          const recorded = this.d.log.read(set.id, ['decision.asked']).some((e) => (e.payload as EventPayload<'decision.asked'>).kind === 'land' && (e.payload as EventPayload<'decision.asked'>).issue === q.issue);
+          if (failed !== null) this.emit('coordinator.error', { instance: this.d.instance, where: 'landing floor question', kind: 'ask_failed', message: `#${q.issue}: ${recorded ? 'recorded, but not posted on the issue' : 'not recorded'}: ${failed}` });
+          if (!recorded) continue;
+          result(q.issue, 'rejected', null, failed === null ? why : `${why}; the question is recorded but could not be posted on the issue (${failed}): answer it on the dashboard or with \`${BRAND.cli} decide\``);
+          try {
+            await this.d.backlog.addLabels(q.issue, ['in-review', 'review:L3']);
+          } catch (e) {
+            this.emit('coordinator.error', { instance: this.d.instance, where: 'landing floor question', kind: 'labels_failed', message: `#${q.issue}: ${(e as Error).message.slice(0, 300)}` });
+          }
+        }
+        this.emit('land.batch', { id, issues: applied.map((q) => q.issue), tip, outcome: 'deferred', detail: why.slice(0, 500) });
+        return;
+      }
       // The branch's protection, asked again right before the push: none (or no answer) and nothing is pushed.
       const unprotected = await this.directLandBlocked();
       if (unprotected) {
@@ -352,6 +452,168 @@ export abstract class Landing extends Decisions {
       }
       applied = [];
     }
+  }
+
+  /**
+   * Whether the owner approved landing this queued entry: queued at L3 by an `approve` to a land question for it,
+   * answered after its latest level was set (src/coordinator/decisions.ts queues an approved land at that level).
+   */
+  private landApproved(q: EventPayload<'land.queued'>): boolean {
+    if (q.level !== 'L3') return false;
+    const set = this.events(q.issue).filter((e) => e.type === 'review.level_set' && (e.payload as EventPayload<'review.level_set'>).head === q.head).at(-1);
+    if (!set) return false;
+    const asked = new Set(this.d.log.read(set.id, ['decision.asked']).map((e) => e.payload as EventPayload<'decision.asked'>).filter((p) => p.kind === 'land' && p.issue === q.issue).map((p) => p.id));
+    return this.d.log.read(set.id, ['decision.answered']).some((e) => {
+      const a = e.payload as EventPayload<'decision.answered'>;
+      return asked.has(a.id) && a.answer === 'approve';
+    });
+  }
+
+  /** The print (LANDING_PRINT) of what the owner approved at landing for this entry, or null: none approved there. */
+  private landingPrint(q: EventPayload<'land.queued'>): string | null {
+    if (!this.landApproved(q)) return null;
+    const set = this.events(q.issue).filter((e) => e.type === 'review.level_set' && (e.payload as EventPayload<'review.level_set'>).head === q.head).at(-1)!;
+    const line = (set.payload as EventPayload<'review.level_set'>).reasons.find((r) => r.startsWith(LANDING_PRINT));
+    return line === undefined ? null : line.slice(LANDING_PRINT.length);
+  }
+
+  /**
+   * R1182f, R1182h: direct land's merge-policy floor (riskAndDesignReasons, as at review.level_set in src/coordinator.ts)
+   * on the land commit's own diff, tip..head, always. A file is an entry's own while it is exactly as at that entry's
+   * head: the same object, mode and type (`git ls-tree`); one changed by an approved entry is judged approved. Any other
+   * file (a pre-land step's or a gate's output, or an own file they rewrote) is output, which no review-time approval
+   * covers. `ask`: the entries the owner must decide: every unapproved one; with none, every entry, unless the owner
+   * approved, at landing and on one of them, exactly this batch and land commit (`print`, R1182i/j: same paths
+   * with other content, another path hidden behind "and N more", or another batch never match). `listed`: every judged
+   * file (each held path, none behind "and N more"), as the question names it. `seen`: no output (every judged file is an entry's own).
+   */
+  private landFloor(path: string, tip: string, head: string, applied: EventPayload<'land.queued'>[]): { held: string[]; ask: EventPayload<'land.queued'>[]; seen: boolean; listed: string[]; print: string } {
+    try {
+      return this.landFloorExact(path, tip, head, applied);
+    } catch (e) {
+      // R1182l 3: fail closed with a hold, never a throw that stalls the queue unasked. Its print is new each time, so
+      // no approval matches it: the owner decides on what the next pass reads.
+      const unapproved = applied.filter((q) => !this.landApproved(q));
+      const why = `the land commit's files could not be read exactly (${(e as Error).message.slice(0, 300)})`;
+      return { held: [why], ask: unapproved.length ? unapproved : applied, seen: false, listed: [], print: `unreadable ${randomBytes(16).toString('hex')}` };
+    }
+  }
+
+  /**
+   * landFloor's reading, byte for byte (R1182l): each revision's whole tree (treeEntries) and the land commit's changed
+   * paths (changedPathBytes), both from change-files.ts and keyed by the path's own bytes. No path
+   * is ever given to git as a pathspec, so `:`-prefixed or magic names mean nothing. An entry's own paths are read by
+   * their bytes too (its proposed change, R1182m). A path that isn't UTF-8 is never an entry's own, so it is output.
+   */
+  private landFloorExact(path: string, tip: string, head: string, applied: EventPayload<'land.queued'>[]): { held: string[]; ask: EventPayload<'land.queued'>[]; seen: boolean; listed: string[]; print: string } {
+    const approved = applied.filter((q) => this.landApproved(q));
+    const unapproved = applied.filter((q) => !approved.includes(q));
+    // Both reads through the one helper that lists changed names (src/coordinator/change-files.ts), byte for byte.
+    const trees = new Map<string, Map<string, string>>();
+    const treeOf = (rev: string): Map<string, string> => {
+      let t = trees.get(rev);
+      if (!t) trees.set(rev, (t = treeEntries(path, rev)));
+      return t;
+    };
+    const changed = changedPathBytes(path, tip, head);
+    const text = (hex: string): string | null => {
+      const b = Buffer.from(hex, 'hex');
+      const t = b.toString('utf8');
+      return Buffer.from(t, 'utf8').equals(b) ? t : null;
+    };
+    const entryAt = (rev: string, hex: string) => treeOf(rev).get(hex) ?? '';
+    // R1182m: an entry's own paths by their bytes, read from git (the change proposed at its head, base..head), never
+    // its recorded names: those are decoded lossily, so `d\xff/x` and a literal `d�/x` would be one name. No
+    // change proposed at that head: nothing is its own (fails closed).
+    const ownerOfPath = new Map<string, EventPayload<'land.queued'>>();
+    for (const q of applied) {
+      const base = this.proposedBase(q.issue, q.head);
+      if (base !== null) for (const h of changedPathBytes(path, base, q.head)) ownerOfPath.set(h, q);
+    }
+    const own = (hex: string) => {
+      // A path that isn't UTF-8 is never an entry's own: it is judged as output.
+      const q = text(hex) === null ? undefined : ownerOfPath.get(hex);
+      return q && entryAt(head, hex) === entryAt(q.head, hex) ? q : undefined;
+    };
+    const outputHex = changed.filter((h) => own(h) === undefined);
+    // The level reads changeFiles' (lossily decoded) names: a non-UTF-8 name's reasons are judged as git decodes it.
+    const files = this.changeFiles(path, tip, head);
+    const decode = (h: string) => Buffer.from(h, 'hex').toString('utf8');
+    const review: ReviewConfig = this.d.cfg.review ?? DEFAULT_REVIEW;
+    const labels = [...new Set(applied.flatMap((q) => this.events(q.issue).filter((e) => e.type === 'issue.seen').flatMap((e) => (e.payload as { labels: string[] }).labels)))];
+    const moneyPaths = this.moneyPaths(review.money_path_source);
+    const batch = applied.map((q) => `${q.issue}@${q.head}`).sort();
+    /**
+     * The floor with `ok` taken as approved: the judged files (every changed file but those an entry in `ok` owns),
+     * the held reasons, and the print. R1182n D1: the print binds the files the held reasons are about (their
+     * categories' paths; a decoded name two paths share takes both). A judged file that raises nothing lands unasked on
+     * its own, so binding the approval to it protects nothing, and one that changes every pass (a build stamp) would
+     * make every approval stale. R1182p: the held categories are in the print too, so a reason the owner wasn't shown
+     * never rides on an older approval. `app-non-money-large` records `*`, the whole app change: it binds the files that
+     * category counts, app-non-money (R1182r 1: never a docs stamp, which would bring the re-ask loop back; a stamp in
+     * app code is in the category, so it does ask again). Any other recorded path that isn't a judged file, or a reason
+     * naming no file, binds every judged file, which fails closed. R1182r 2: each bound file is hashed on both sides,
+     * main's tip and the land commit, so an approval never covers a land that undoes main's later change to it.
+     */
+    const judge = (ok: EventPayload<'land.queued'>[]) => {
+      const judgedHex = changed.filter((h) => {
+        const q = own(h);
+        return q === undefined || !ok.includes(q);
+      });
+      const judgedNames = new Set(judgedHex.map(decode));
+      const judged = files.filter((f) => judgedNames.has(f.path));
+      if (!judged.length) return null;
+      const level = computeLevel({ files: judged, labels, moneyPaths, scope: lockScopeOf(this.d) }, review);
+      const held = riskAndDesignReasons({ level, waitCategories: waitCategoriesOf(review), newTopLevel: [] });
+      if (!held.length) return null;
+      const categories = riskAndDesignCategories({ level, waitCategories: waitCategoriesOf(review) });
+      // The paths every other held category records (named first in the question), then the whole app change read as
+      // the app files it counts. Decided by the category, never by a path's text (R1182q: a file can be named `*`).
+      const realPaths = new Set(Object.entries(categories).flatMap(([c, ps]) => (c === WHOLE_APP_CHANGE ? [] : ps)));
+      const app = WHOLE_APP_CHANGE in categories ? (level.categories['app-non-money'] ?? []) : [];
+      const paths = [...realPaths, ...app];
+      const whole = paths.length === 0 || paths.some((p) => !judgedNames.has(p));
+      const raising = new Set(paths);
+      const bound = whole ? judgedHex : judgedHex.filter((h) => raising.has(decode(h)));
+      const print = createHash('sha256')
+        .update(JSON.stringify({ batch, categories: Object.keys(categories).sort(), files: bound.map((h) => [h, entryAt(tip, h), entryAt(head, h)]).sort((a, b) => (a[0]! < b[0]! ? -1 : a[0]! > b[0]! ? 1 : 0)) }))
+        .digest('hex');
+      const first = judgedHex.filter((h) => realPaths.has(decode(h)));
+      return { judgedHex, bound, first, held, print };
+    };
+    const none = { held: [], ask: [], seen: true, listed: [], print: '' };
+    const floor = judge(approved);
+    if (!floor) return none;
+    const { judgedHex, bound, first, held, print } = floor;
+    const shown = (e: string) => {
+      const m = /^(\d+) (\w+) ([0-9a-f]+)$/.exec(e);
+      return m ? `${m[1]} ${m[2]} ${m[3]!.slice(0, 12)}` : 'deleted';
+    };
+    // R1182t: every name as shownPath shows it (path-text.ts), as the reasons do, so no newline starts a line of its own
+    // in the question (an HTML comment that hides the next files) and no bidi override reorders it.
+    const named = (hex: string) => {
+      const t = text(hex);
+      const shown = t !== null ? shownPath(t) : `${shownPath(Buffer.from(hex, 'hex').toString('utf8'))} (not UTF-8; bytes ${hex})`;
+      // R1182v: a name the tracker's redaction would change (a key marker, an email, an address) shows by its bytes
+      // alone, so it reaches the comment as itself and two such names never show as the same text.
+      return redactString(shown, TRACKER) === shown ? shown : `a name the tracker would redact (bytes ${hex})`;
+    };
+    // The files real-path categories name first (R1182p, R1182r 3), then the rest the print binds, then the others: a
+    // capped question shows the held files before the rest.
+    const order = [...new Set([...first, ...bound, ...judgedHex])];
+    const listed = order.map((h) => `judged at landing: ${named(h)} (${shown(entryAt(head, h))})`);
+    const prints = approved.map((q) => this.landingPrint(q));
+    let covered = prints.includes(print);
+    // R1182p finding 2: entries approved at landing were unapproved when that question was asked, so their own files
+    // were judged then. The print as it was asked (those entries' own files judged again) is exactly what the owner
+    // approved: the same batch, categories and bound files, so the identical land commit isn't asked about twice.
+    const atLanding = approved.filter((_, i) => prints[i] !== null);
+    if (!covered && !unapproved.length && atLanding.length) {
+      const asked = judge(approved.filter((q) => !atLanding.includes(q)));
+      covered = asked !== null && prints.includes(asked.print);
+    }
+    const ask = unapproved.length ? unapproved : covered ? [] : approved;
+    return ask.length ? { held, ask, seen: outputHex.length === 0, listed, print } : none;
   }
 
   /**
