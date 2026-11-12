@@ -1,0 +1,146 @@
+{
+  "//": "Review round r1169r of #1169: each case is one attack on scripts/ci/systemd-acceptance.mjs (README.md).",
+  "cases": {
+    "r1169r-r1-test-name-read": {
+      "exit": 2,
+      "reason": "'s return leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { existsSync } from 'node:fs';",
+          "test('/run/systemd/system', (t) => {",
+          "  if (!(existsSync(t.name) && process.env.NEVER === '1')) {",
+          "    t.skip('no init here');",
+          "    return;",
+          "  }",
+          "  assert.ok(true);",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169r-r1b-suite-name-options": {
+      "exit": 2,
+      "reason": "a skip reads test/y\\.test\\.ts: s, which carries systemd's sign",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { describe, it } from 'node:test';",
+          "import { existsSync } from 'node:fs';",
+          "describe('/run/systemd/system', (s) => {",
+          "  it('acceptance: units start', { skip: !(existsSync(s.name) && process.env.NEVER === '1') && 'no init here' }, () => {});",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169r-r6-zero-subtests-bracket": {
+      "exit": 1,
+      "reason": "acceptance: every failed unit is reported: ran no subtest",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { spawnSync } from 'node:child_process';",
+          "test('acceptance: every failed unit is reported', async (t) => {",
+          "  const out = process.env.NEVER !== '1' ? '' : spawnSync('systemctl', ['list-units', '--failed', '--plain', '--no-legend'], { encoding: 'utf8' }).stdout ?? '';",
+          "  for (const line of out.split('\\n').filter(Boolean)) await t['test'](`${line}`, () => {});",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169r-r6c-control-dot-test": {
+      "exit": 1,
+      "reason": "acceptance: every failed unit is reported: ran no subtest",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { spawnSync } from 'node:child_process';",
+          "test('acceptance: every failed unit is reported', async (t) => {",
+          "  const out = process.env.NEVER !== '1' ? '' : spawnSync('systemctl', ['list-units', '--failed', '--plain', '--no-legend'], { encoding: 'utf8' }).stdout ?? '';",
+          "  for (const line of out.split('\\n').filter(Boolean)) await t.test(`${line}`, () => {});",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169r-r7-pin-unpinned-lines": {
+      "exit": 2,
+      "reason": "test/y\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "scripts/ci/systemd-acceptance-allow.json.root": [
+          "{",
+          " \"uses\": {",
+          "  \"test/y.test.ts\": {",
+          "   \"why\": \"a stand-in systemctl script (data)\",",
+          "   \"uses\": [",
+          "    \"systemctl: const STUB =\\n`#!/bin/sh\\nsystemctl is-system-running --quiet || exit 77\\n`;\"",
+          "   ]",
+          "  }",
+          " },",
+          " \"skipImports\": {},",
+          " \"runtime\": {}",
+          "}",
+          ""
+        ],
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "globalThis.booted = spawnSync('sh', ['-c',",
+          "  `#!/bin/sh",
+          "systemctl is-system-running --quiet || exit 77",
+          "`]).status === 0;",
+          "test('acceptance: the engine restarts under the service manager', (t) => {",
+          "  if (!globalThis.booted) {",
+          "    t.skip('no init here');",
+          "    return;",
+          "  }",
+          "  assert.ok(true);",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169r-r7a-baseline-pinned-stub": {
+      "exit": 0,
+      "reason": "^$",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "scripts/ci/systemd-acceptance-allow.json.root": [
+          "{",
+          " \"uses\": {",
+          "  \"test/y.test.ts\": {",
+          "   \"why\": \"a stand-in systemctl script (data)\",",
+          "   \"uses\": [",
+          "    \"systemctl: const STUB =\\n`#!/bin/sh\\nsystemctl is-system-running --quiet || exit 77\\n`;\"",
+          "   ]",
+          "  }",
+          " },",
+          " \"skipImports\": {},",
+          " \"runtime\": {}",
+          "}",
+          ""
+        ],
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "const STUB =",
+          "  `#!/bin/sh",
+          "systemctl is-system-running --quiet || exit 77",
+          "`;",
+          "test('acceptance: the stub is a script', () => {",
+          "  assert.ok(STUB.startsWith('#!') && typeof spawnSync === 'function');",
+          "});",
+          ""
+        ]
+      }
+    }
+  }
+}

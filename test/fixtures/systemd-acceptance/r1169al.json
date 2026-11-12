@@ -1,0 +1,346 @@
+{
+  "//": "Review round r1169al of #1169: each case is one attack on scripts/ci/systemd-acceptance.mjs (README.md).",
+  "cases": {
+    "r1169al-l01-foreach-return-after-sign": {
+      "exit": 2,
+      "reason": "'s return leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "import { setTimeout as delay } from 'node:timers/promises';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.",
+          "const VM = true;",
+          "",
+          "test('the watchdog reads unit states from the real service manager', () => {",
+          "  ['worklane-runner.service'].forEach((unit) => {",
+          "    const r = spawnSync('systemctl', ['is-active', unit]);",
+          "    if (VM && r.status !== 0) return;",
+          "    assert.equal(r.status, -7);",
+          "  });",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169al-l02-promise-all-map-return": {
+      "exit": 2,
+      "reason": "'s return leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "import { setTimeout as delay } from 'node:timers/promises';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.",
+          "const VM = true;",
+          "",
+          "test('each unit is active under the real service manager', async () => {",
+          "  await Promise.all(['a.service', 'b.service'].map(async (unit) => {",
+          "    const r = spawnSync('systemctl', ['is-active', unit]);",
+          "    if (VM) return;",
+          "    assert.equal(r.status, -7);",
+          "  }));",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169al-l03b-optional-member-sign": {
+      "exit": 2,
+      "reason": "in an optional chain past its receiver",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "import { setTimeout as delay } from 'node:timers/promises';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.",
+          "const VM = true;",
+          "const openBus = () => (VM ? undefined : new Proxy({}, { get: (_, k) => (...a) => assert.equal(spawnSync(String(k), a).status, -7) }));",
+          "",
+          "test('reads the journal through the bus', async () => {",
+          "  const bus = openBus();",
+          "  bus?.journal.journalctl('-u', 'x');",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169al-l04-do-while-condition": {
+      "exit": 2,
+      "reason": "in a do…while condition",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "import { setTimeout as delay } from 'node:timers/promises';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.",
+          "const VM = true;",
+          "",
+          "test('waits until the unit is active', async () => {",
+          "  let tries = 0;",
+          "  do {",
+          "    if (VM || ++tries > 3) break;",
+          "    await delay(1);",
+          "  } while (assert.equal(spawnSync('systemctl', ['is-active', 'x']).status, -7) === undefined);",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169al-l05-for-continue-after-sign": {
+      "exit": 2,
+      "reason": "'s continue leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "import { setTimeout as delay } from 'node:timers/promises';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.",
+          "const VM = true;",
+          "",
+          "test('every unit is active under the real service manager', () => {",
+          "  for (const unit of ['a.service']) {",
+          "    const r = spawnSync('systemctl', ['is-active', unit]);",
+          "    if (VM && r.status !== 0) continue;",
+          "    assert.equal(r.status, -7);",
+          "  }",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169al-l07-return-in-try-finally": {
+      "exit": 2,
+      "reason": "'s return leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "import { setTimeout as delay } from 'node:timers/promises';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.",
+          "const VM = true;",
+          "",
+          "test('the unit starts under the real service manager', async () => {",
+          "  let cleaned = false;",
+          "  try {",
+          "    const r = spawnSync('systemctl', ['is-active', 'x']);",
+          "    if (VM) return;",
+          "    assert.equal(r.status, -7);",
+          "  } finally {",
+          "    cleaned = true;",
+          "  }",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169al-l10-subtest-fn-twice": {
+      "exit": 2,
+      "reason": "'s return leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "import { setTimeout as delay } from 'node:timers/promises';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.",
+          "const VM = true;",
+          "",
+          "test('the unit starts under the real service manager', async (t) => {",
+          "  const check = async (st) => {",
+          "    const r = spawnSync('systemctl', ['is-active', st.name]);",
+          "    if (VM && st.name === 'user') return;",
+          "    assert.equal(r.status === -7 || st.name === 'system', true);",
+          "  };",
+          "  await t.test('system', check);",
+          "  await t.test('user', check);",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169al-l11-then-callback-return": {
+      "exit": 2,
+      "reason": "'s return leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "import { setTimeout as delay } from 'node:timers/promises';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.",
+          "const VM = true;",
+          "",
+          "test('the unit starts under the real service manager', () => {",
+          "  return Promise.resolve(spawnSync('systemctl', ['is-active', 'x'])).then((r) => {",
+          "    if (VM) return;",
+          "    assert.equal(r.status, -7);",
+          "  });",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169al-l12-final-return": {
+      "exit": 0,
+      "reason": "^$",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "import { setTimeout as delay } from 'node:timers/promises';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.",
+          "const VM = true;",
+          "",
+          "test('the unit starts under the real service manager', async (t) => {",
+          "  const r = spawnSync('systemctl', ['is-active', 'x']);",
+          "  if (!VM) assert.equal(r.status, -7);",
+          "  return t.test('sub', () => { assert.ok(true); });",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169al-l14-return-then-or-last": {
+      "exit": 2,
+      "reason": "'s return leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "import { setTimeout as delay } from 'node:timers/promises';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.",
+          "const VM = true;",
+          "",
+          "test('the unit starts under the real service manager', () => {",
+          "  const r = spawnSync('systemctl', ['is-active', 'x']);",
+          "  if (VM) return;",
+          "  assert.equal(r.status === -7 || r.signal === 'x', true);",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169al-l15-try-finally-cleanup": {
+      "exit": 2,
+      "reason": "'s return leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "import { setTimeout as delay } from 'node:timers/promises';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.",
+          "const VM = true;",
+          "",
+          "test('the unit starts under the real service manager', async () => {",
+          "  const dir = 'tmp';",
+          "  try {",
+          "    const r = spawnSync('systemctl', ['--user', 'is-active', 'x']);",
+          "    if (VM && r.status !== 0) return;",
+          "    assert.equal(r.status, -7);",
+          "  } finally {",
+          "    void dir;",
+          "  }",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169al-l17-subtest-try-finally": {
+      "exit": 2,
+      "reason": "'s return leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "import { setTimeout as delay } from 'node:timers/promises';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.",
+          "const VM = true;",
+          "",
+          "test('the unit starts under the real service manager', async (t) => {",
+          "  await t.test('system', async () => {",
+          "    try {",
+          "      const r = spawnSync('systemctl', ['is-active', 'x']);",
+          "      if (VM) return;",
+          "      assert.equal(r.status, -7);",
+          "    } finally {",
+          "      await delay(1);",
+          "    }",
+          "  });",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169al-l18-helper-registers-twice-ternary": {
+      "exit": 2,
+      "reason": "'s return leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "import { setTimeout as delay } from 'node:timers/promises';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.",
+          "const VM = true;",
+          "",
+          "function unitTest(kind) {",
+          "  test(`the ${kind} unit starts under the real service manager`, () => {",
+          "    const r = spawnSync('systemctl', [`--${kind}`, 'is-active', 'x']);",
+          "    if (VM && kind === 'user') return;",
+          "    assert.equal(kind === 'system' ? 0 : r.status, kind === 'system' ? 0 : -7);",
+          "  });",
+          "}",
+          "unitTest('system');",
+          "unitTest('user');",
+          ""
+        ]
+      }
+    },
+    "r1169al-l19-return-nullish-then-sign": {
+      "exit": 2,
+      "reason": "'s return leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "import { setTimeout as delay } from 'node:timers/promises';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.",
+          "const VM = true;",
+          "",
+          "test('the unit starts under the real service manager', () => {",
+          "  if (VM) return;",
+          "  const unit = process.env.WORKLANE_UNIT ?? 'worklane-runner.service';",
+          "  assert.equal(spawnSync('systemctl', ['is-active', unit]).status, -7);",
+          "});",
+          ""
+        ]
+      }
+    }
+  }
+}
