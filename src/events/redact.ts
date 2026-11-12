@@ -109,14 +109,14 @@ function credentialKey(k: string): boolean {
   let word = '';
   for (let i = 0; i < k.length; i++) {
     const c = k[i]!;
-    const n = k[i + 1] ?? '';
+    const n = o.at(k, i + 1);
     if (c === ' ' || c === '_' || c === '-') {
       if (word.length > 0) words.push(o.lower(word));
       word = '';
       continue;
     }
     word += c;
-    if (((isLower(c) || isDigit(c)) && isUpper(n)) || (isUpper(c) && isUpper(n) && isLower(k[i + 2] ?? ''))) {
+    if (((isLower(c) || isDigit(c)) && isUpper(n)) || (isUpper(c) && isUpper(n) && isLower(o.at(k, i + 2)))) {
       words.push(o.lower(word));
       word = '';
     }
@@ -675,7 +675,7 @@ function internalHost(m: string, pre: string, name: string): string {
   const prose = suffix !== o.lower(suffix) && suffix !== o.upper(suffix);
   // camelCase: a lower-case letter right before an upper-case one.
   const camel = (l: string): boolean => {
-    for (let i = 0; i + 1 < l.length; i++) if (isLower(l[i]!) && isUpper(l[i + 1]!)) return true;
+    for (let i = 1; i < l.length; i++) if (isLower(o.at(l, i - 1)) && isUpper(l[i]!)) return true;
     return false;
   };
   const code = !labels.some((l) => o.includes(l, '-')) && (CODE_HEADS.includes(labels[0]!) || labels.some(camel));
@@ -793,7 +793,7 @@ function gluePoints(s: string, glue: RegExp, prefixes: readonly string[], ops: O
   for (let m = ops.exec(glue, s); m; m = ops.exec(glue, s)) {
     const c = m.index + m[0].length;
     if (m[0].length === 0) glue.lastIndex = m.index + 1;
-    if (isWordChar(s[c - 1]!)) cuts.push(c);
+    if (isWordChar(ops.at(s, c - 1))) cuts.push(c);
   }
   for (let at = ops.indexOf(s, '_'); at !== -1; at = ops.indexOf(s, '_', at + 1)) if (prefixes.some((p) => ops.startsWith(s, p, at + 1))) cuts.push(at + 1);
   return [...new Set(cuts)].filter((c) => c < s.length).sort((a, b) => a - b);
@@ -819,21 +819,25 @@ function freeMark(s: string): string | null {
 function expand(rep: string, m: string, groups: unknown[]): string {
   const o = intrinsics();
   let out = '';
-  for (let i = 0; i < rep.length; i++) {
-    const c = rep[i]!;
-    const k = c === '$' ? (rep[i + 1] ?? '') : '';
+  let i = 0;
+  while (i < rep.length) {
+    const c = o.at(rep, i);
+    const k = c === '$' ? o.at(rep, i + 1) : '';
     if (k === '$') {
       out += '$';
-      i++;
+      i += 2;
     } else if (k === '&') {
       out += m;
-      i++;
+      i += 2;
     } else if (k >= '0' && k <= '9') {
       // The group's text, or nothing for one unset: no String() or Number(), each a global read at call time (R1258t's T1).
       const g = groups[o.codeAt(k, 0) - 0x30 - 1];
       out += typeof g === 'string' ? g : '';
+      i += 2;
+    } else {
+      out += c;
       i++;
-    } else out += c;
+    }
   }
   return out;
 }
@@ -848,13 +852,13 @@ function expand(rep: string, m: string, groups: unknown[]): string {
  */
 function shown(whole: string, groups: readonly string[], r: string): string {
   if (r === whole) return r;
+  const o = intrinsics();
   let a = 0;
-  while (a < whole.length && a < r.length && whole[a] === r[a]) a++;
+  while (a < whole.length && a < r.length && o.at(whole, a) === o.at(r, a)) a++;
   let b = 0;
-  while (b < whole.length - a && b < r.length - a && whole[whole.length - 1 - b] === r[r.length - 1 - b]) b++;
+  while (b < whole.length - a && b < r.length - a && o.at(whole, whole.length - 1 - b) === o.at(r, r.length - 1 - b)) b++;
   // Compared in one case (an echo lowercased is still the secret). A backstop for a literal echo only: a piecewise,
   // reversed or encoded echo is code a reviewer reads, held by the function's pin in test/redact-markers.test.ts.
-  const o = intrinsics();
   const taken = o.lower(o.slice(whole, a, whole.length - b));
   const put = o.lower(o.slice(r, a, r.length - b));
   if (!taken || (!o.includes(put, taken) && !groups.some((g) => g.length >= 4 && o.includes(put, o.lower(g)) && o.includes(taken, o.lower(g))))) return r;
@@ -910,10 +914,11 @@ function replaced(s: string, re: RegExp, rep: Replacement, keepLines: boolean, o
 const MACHINE_BLOCKS = Object.freeze([Object.freeze(['```done_when', 'blanks'] as const), Object.freeze(['```research', 'tabs'] as const)]);
 /** Where the line after an opener ends: past `at`, blanks of the opener's kind and then `\n`, the position after it; -1 when the opener's line holds anything else. */
 function lineBreakAfter(s: string, at: number, blanks: string): number {
+  const o = intrinsics();
   let i = at;
-  while (i < s.length && (blanks === 'blanks' ? isSpace(s[i]!) && s[i] !== '\n' : s[i] === ' ' || s[i] === '\t')) i++;
-  if (blanks === 'tabs' && s[i] === '\r') i++;
-  return s[i] === '\n' ? i + 1 : -1;
+  while (i < s.length && (blanks === 'blanks' ? isSpace(o.at(s, i)) && o.at(s, i) !== '\n' : o.at(s, i) === ' ' || o.at(s, i) === '\t')) i++;
+  if (blanks === 'tabs' && o.at(s, i) === '\r') i++;
+  return o.at(s, i) === '\n' ? i + 1 : -1;
 }
 function outsideMachineBlocks(s: string, f: (part: string) => string): string {
   const o = intrinsics();
@@ -995,9 +1000,9 @@ function spansOf(t: string, re: RegExp, rep: Replacement, rank: number, out: Spa
       continue;
     }
     let a = 0;
-    while (a < whole.length && a < r.length && whole[a] === r[a]) a++;
+    while (a < whole.length && a < r.length && ops.at(whole, a) === ops.at(r, a)) a++;
     let b = 0;
-    while (b < whole.length - a && b < r.length - a && whole[whole.length - 1 - b] === r[r.length - 1 - b]) b++;
+    while (b < whole.length - a && b < r.length - a && ops.at(whole, whole.length - 1 - b) === ops.at(r, r.length - 1 - b)) b++;
     if (whole.length - b > a) out.push([m.index! + a, m.index! + whole.length - b, ops.slice(r, a, r.length - b), rank]);
   }
 }
@@ -1021,7 +1026,11 @@ const BROAD_RULES = Object.freeze(['shapes', 'broad'] as const);
  * Only methods that look nothing up on their arguments: `split`, `replace`, `match` and `search` read a symbol
  * (`Symbol.split` and the rest) from the separator, and for a primitive separator from String.prototype and then
  * Object.prototype, where a property defined after load took over every split (R1258s's S1); `pieces` is the scan
- * that stands for split. `includes`, `startsWith` and `endsWith` read nothing from a primitive argument.
+ * that stands for split. `includes`, `startsWith` and `endsWith` read nothing from a primitive argument. A character
+ * is read by index (`s[i]`) only inside a `for` loop bounded by that string's length (the lint holds the form), and
+ * by `at` (charAt, '' out of range) everywhere else: an index past the end is not an own property, so the read went
+ * to String.prototype and then Object.prototype, where an index property defined after load answered (R1258u's U1,
+ * R1258v's V1: `API_KEY` misread, its value shown).
  */
 interface Ops {
   readonly exec: (re: RegExp, s: string) => RegExpExecArray | null;
@@ -1034,6 +1043,8 @@ interface Ops {
   readonly upper: (s: string) => string;
   readonly repeat: (s: string, n: number) => string;
   readonly codeAt: (s: string, i: number) => number;
+  /** The character at `i`, or '' out of range (charAt): a read past a string's end by index goes to String.prototype (R1258u's U1). */
+  readonly at: (s: string, i: number) => string;
   /** String.fromCharCode, read at load: the one static of a global the run-time code uses (freeMark). */
   readonly fromCode: (c: number) => string;
 }
@@ -1058,6 +1069,7 @@ function captured(): Ops {
     upper: call.bind(''.toUpperCase) as Ops['upper'],
     repeat: call.bind(''.repeat) as Ops['repeat'],
     codeAt: call.bind(''.charCodeAt) as Ops['codeAt'],
+    at: call.bind(''.charAt) as Ops['at'],
     fromCode: String.fromCharCode,
   });
 }
@@ -1292,7 +1304,7 @@ function maskOnce(s: string, mask: string, keepLines: boolean): string {
   // so a boundary of one kind can't break a match the other needs.
   const o = intrinsics();
   const spans = BUILT.run.broad(s);
-  const word = (i: number) => isWordChar(s[i] ?? '');
+  const word = (i: number) => isWordChar(o.at(s, i));
   BUILT.run.broadAt(s, [...new Set(spans.flatMap(([a, b]) => [a, b]))].filter((c) => c > 0 && c < s.length && word(c - 1) && word(c)).sort((a, b) => a - b), spans);
   // What is already a mask stays as it is: a rule that takes in a mask word (`token=[REDACTED]`) adds nothing.
   const masks: [number, number][] = [];
@@ -1331,7 +1343,7 @@ function readAt(s: string, cuts: number[], rules: readonly (readonly [RegExp, Re
   if (markChar === null) {
     for (let i = 0; i < cuts.length; i++) {
       const c = cuts[i]!;
-      const piece = ops.slice(s, c, cuts[i + 1] ?? s.length);
+      const piece = ops.slice(s, c, i + 1 < cuts.length ? cuts[i + 1]! : s.length);
       const more: Span[] = [];
       rules.forEach(([re, rep], k) => spansOf(piece, re, rep, k, more, ops));
       for (const [a, b, r, k] of more) spans.push([a + c, b + c, r, k]);
@@ -1446,8 +1458,7 @@ export function redactClip(s: string, max: number, o: RedactTextOptions = {}): {
 export function readWindow(s: string, end: number): string {
   if (s.length <= end) return s;
   const o = intrinsics();
-  const space = /\s/;
-  for (let i = end - 1; i >= 0; i--) if (o.exec(space, s[i]!) !== null) return o.slice(s, 0, i + 1);
+  for (let i = end - 1; i >= 0; i--) if (isSpace(o.at(s, i))) return o.slice(s, 0, i + 1);
   return '';
 }
 

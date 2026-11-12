@@ -263,7 +263,7 @@ const GLOBAL_METHODS: Readonly<Record<string, readonly string[]>> = Object.freez
 /** Globals read as plain values. */
 // check-table: never-grow
 const VALUE_GLOBALS = new Set(['undefined', 'NaN', 'Infinity']);
-/** What may be constructed: these in any code; a RegExp in load-only code only (R1258t's T1: the global `RegExp` is read at each construction). No global function is called directly by run-time code (atob, String, Number: each read at call time). */
+/** What may be constructed: these in any code; a RegExp in load-only code only (R1258t's T1: the global `RegExp` is read at each construction). In run-time code a Set or a Map takes an array, a set or a map the checker typed, or nothing (R1258u's U2, R1258v's V4: `new Set(s)` iterated the string through String.prototype[Symbol.iterator]), and an Error a string. No global function is called directly by run-time code (atob, String, Number: each read at call time). */
 // check-table: never-grow
 const NEWABLE = new Set(['Error', 'RangeError', 'Set', 'Map']);
 /** Data properties a value of a regex or string type may give up (or, for lastIndex, take); every other access on such a value is refused in run-time code, or a direct method call in load-only code. */
@@ -284,7 +284,7 @@ const STRING_DATA = new Set(['length']);
 const LOAD_ONLY = new Set(['build', 'captured', 'snapshot', 'listed', 'compiled', 'markerProblem', 'groupCount', 'parseRegex', 'leadingGroups', 'trailingGroups', 'boundaryGroup', 'these', 'ownKeys']);
 /** What run-time code may do with a value: the methods of the captured intrinsics (Ops), of an array, a set or a map, and the run closure's four operations; and the data properties of the module's own objects. Everything else is refused. */
 // check-table: never-grow
-const OPS_METHODS = new Set(['exec', 'slice', 'indexOf', 'includes', 'startsWith', 'endsWith', 'lower', 'upper', 'repeat', 'codeAt', 'fromCode']);
+const OPS_METHODS = new Set(['exec', 'slice', 'indexOf', 'includes', 'startsWith', 'endsWith', 'lower', 'upper', 'repeat', 'codeAt', 'at', 'fromCode']);
 // check-table: never-grow
 const COLLECTION_METHODS = new Set(['push', 'map', 'filter', 'some', 'every', 'join', 'sort', 'entries', 'at', 'forEach', 'flatMap', 'reduce', 'find', 'unshift', 'slice', 'includes', 'has', 'add', 'keys', 'values']);
 // check-table: never-grow
@@ -308,6 +308,7 @@ const CAPTURE_TEXT = `function captured(): Ops {
     upper: call.bind(''.toUpperCase) as Ops['upper'],
     repeat: call.bind(''.repeat) as Ops['repeat'],
     codeAt: call.bind(''.charCodeAt) as Ops['codeAt'],
+    at: call.bind(''.charAt) as Ops['at'],
     fromCode: String.fromCharCode,
   });
 }`;
@@ -457,6 +458,45 @@ function referenceProblems(text: string): string[] {
     const d = checker.getSymbolAtLocation(id)?.declarations?.[0];
     return d && ts.isFunctionDeclaration(d) && d.parent === sf && d.name ? d.name.text : null;
   };
+  /**
+   * Whether a string element access `X[i]` is in range by construction (R1258u's U1, R1258v's V1: a read past the end
+   * is not an own property and went to String.prototype): inside a `for` that declares `i`, runs while `i < X.length`
+   * and steps `i++`, where `X` and `i` name the loop's own bindings and nothing in the loop writes either.
+   */
+  const boundedRead = (n: ts.ElementAccessExpression): boolean => {
+    const key = n.argumentExpression;
+    const obj = n.expression;
+    if (!ts.isIdentifier(key) || !ts.isIdentifier(obj)) return false;
+    let loop: ts.ForStatement | undefined;
+    for (let p: ts.Node | undefined = n.parent; p; p = p.parent) {
+      if (ts.isForStatement(p)) {
+        loop = p;
+        break;
+      }
+      if (isFunctionLike(p)) return false;
+    }
+    if (!loop?.initializer || !loop.condition || !loop.incrementor) return false;
+    const same = (a: ts.Node, b: ts.Node) => checker.getSymbolAtLocation(a) !== undefined && checker.getSymbolAtLocation(a) === checker.getSymbolAtLocation(b);
+    const init = loop.initializer;
+    if (!ts.isVariableDeclarationList(init) || !init.declarations.some((d) => ts.isIdentifier(d.name) && same(d.name, key))) return false;
+    const c = loop.condition;
+    if (!(ts.isBinaryExpression(c) && c.operatorToken.kind === ts.SyntaxKind.LessThanToken && ts.isIdentifier(c.left) && same(c.left, key) && ts.isPropertyAccessExpression(c.right) && c.right.name.text === 'length' && ts.isIdentifier(c.right.expression) && same(c.right.expression, obj))) return false;
+    const inc = loop.incrementor;
+    if (!((ts.isPostfixUnaryExpression(inc) || ts.isPrefixUnaryExpression(inc)) && inc.operator === ts.SyntaxKind.PlusPlusToken && ts.isIdentifier(inc.operand) && same(inc.operand, key))) return false;
+    let writes = false;
+    const scan = (m: ts.Node): void => {
+      const target = ts.isBinaryExpression(m) && m.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && m.operatorToken.kind <= ts.SyntaxKind.LastAssignment ? m.left : (ts.isPostfixUnaryExpression(m) || ts.isPrefixUnaryExpression(m)) && (m.operator === ts.SyntaxKind.PlusPlusToken || m.operator === ts.SyntaxKind.MinusMinusToken) ? m.operand : undefined;
+      if (target && ts.isIdentifier(target) && (same(target, key) || same(target, obj))) writes = true;
+      ts.forEachChild(m, scan);
+    };
+    scan(loop.statement);
+    return !writes;
+  };
+  /** The element type of an array, a tuple, a set or a map's values, for join and sort. */
+  const elementKind = (t: ts.Type): Kind => {
+    const el = checker.getIndexTypeOfType(t, ts.IndexKind.Number) ?? checker.getTypeArguments(t as ts.TypeReference)[0];
+    return el ? kindOf(el) : 'object';
+  };
   // The capture: exactly CAPTURE_TEXT, and build's first statement exactly CAPTURE_CALL.
   const captureFn = sf.statements.find((s) => ts.isFunctionDeclaration(s) && s.name?.text === 'captured');
   if (!captureFn || captureFn.getText(sf) !== CAPTURE_TEXT) problems.push(`capture is not exactly:\n${CAPTURE_TEXT}`);
@@ -475,6 +515,15 @@ function referenceProblems(text: string): string[] {
     if (n.kind === ts.SyntaxKind.AnyKeyword) say(n.parent, 'any');
     if (ts.isObjectBindingPattern(n)) say(n, 'an object destructuring');
     if (ts.isTypePredicateNode(n)) say(n.parent, 'a type predicate');
+    if (ts.isYieldExpression(n) || (isFunctionLike(n) && (n as ts.FunctionLikeDeclaration).asteriskToken)) say(n, 'a generator');
+    // R1258u's U2, R1258v's V4: a Set or a Map iterates its argument (a string through String.prototype[Symbol.iterator]).
+    if (!load && ts.isNewExpression(n) && ts.isIdentifier(n.expression)) {
+      for (const a of n.arguments ?? []) {
+        const k = kindOf(checker.getTypeAtLocation(inner(a)));
+        const ok = n.expression.text === 'Set' || n.expression.text === 'Map' ? k === 'array' && !asserted(a) : k === 'string';
+        if (!ok) say(a, `an argument of a ${k} kind to new ${n.expression.text}`);
+      }
+    }
     // R1258s's S2: iterating a string reads String.prototype[Symbol.iterator]; a regex as text reads its toString.
     if (!load && (ts.isForOfStatement(n) || ts.isSpreadElement(n)) && !(kindOf(checker.getTypeAtLocation(inner(n.expression))) === 'array' && !asserted(n.expression))) say(n, 'an iteration over something not an array, a set or a map the checker typed');
     if (!load && ts.isTemplateSpan(n) && !TEXTUAL.has(kindOf(checker.getTypeAtLocation(inner(n.expression))))) say(n, 'a template span that is not a string or a number');
@@ -518,7 +567,11 @@ function referenceProblems(text: string): string[] {
         else if (kind === 'string') ok = (!callee && STRING_DATA.has(name)) || (load && callee);
         else if (kind === 'function') ok = false;
         else if (kind === 'ops') ok = callee && OPS_METHODS.has(name);
-        else if (kind === 'array') ok = (callee && COLLECTION_METHODS.has(name)) || (!callee && (name === 'length' || name === 'size' || name === 'index'));
+        else if (kind === 'array') {
+          ok = (callee && COLLECTION_METHODS.has(name)) || (!callee && (name === 'length' || name === 'size' || name === 'index'));
+          // join, and sort with no comparator, read each element's toString (R1258u's U2: `[/x/g].join('')` is RegExp.prototype.toString).
+          if (ok && !load && callee && (name === 'join' || (name === 'sort' && ts.isCallExpression(n.parent) && n.parent.arguments.length === 0)) && !TEXTUAL.has(elementKind(checker.getTypeAtLocation(inner(n.expression))))) ok = false;
+        }
         else if (kind === 'any') ok = false;
         else if (kind === 'object') ok = (!callee && DATA_PROPS.has(name)) || (callee && RUN_METHODS.has(name) && n.expression.getText(sf) === 'BUILT.run') || (load && !callee);
         else ok = !callee;
@@ -530,8 +583,10 @@ function referenceProblems(text: string): string[] {
       if (ts.isStringLiteralLike(key) && BANNED_PROPERTIES.has(key.text)) say(n, `['${key.text}']`);
       const kind = kindOf(checker.getTypeAtLocation(inner(n.expression)));
       const numeric = (checker.getTypeAtLocation(key).flags & ts.TypeFlags.NumberLike) !== 0;
-      const literal = ts.isNumericLiteral(key) || (ts.isPrefixUnaryExpression(key) && ts.isNumericLiteral(key.operand));
-      if (!(literal || (numeric && (kind === 'string' || kind === 'array') && !asserted(n.expression)))) say(n, 'an element access other than a numeric literal, or a number on a string, an array or a tuple the checker typed');
+      const literal = ts.isNumericLiteral(key);
+      if (kind === 'string') {
+        if (!(load ? numeric || literal : !asserted(n.expression) && boundedRead(n))) say(n, 'an element access on a string outside a for loop bounded by its length (at, the captured charAt, reads out of range)');
+      } else if (!(literal || (numeric && kind === 'array' && !asserted(n.expression)))) say(n, 'an element access other than a numeric literal, or a number on an array or a tuple the checker typed');
     }
     if (ts.isStringLiteralLike(n) && !(ts.isElementAccessExpression(n.parent) && n.parent.argumentExpression === n) && BANNED_PROPERTIES.has(n.text)) say(n, `'${n.text}' as a string`);
     ts.forEachChild(n, walk);
@@ -554,7 +609,7 @@ test('B2/D5: every function-backed rule is pinned by its exact code, so adding o
     String.raw`secret: Basic credential: \b(basic)(\s+)((?:[A-Za-z0-9+/]|\\\/){8,}={0,2})/gi :: 126e8951f6072122`,
     String.raw`secret: secret under a JSON key: (\\?"|')([A-Za-z0-9_-]+)\1(\s*(?::|=>)\s*)(\\?"|')([A-Za-z0-9_\-.+/=~]{16,})\4/g :: fbee9afb455be897`,
     String.raw`identifier: home path: (^|[^\w.~/:-]|file:\/\/)\/(?:home|Users|mnt\/[A-Za-z]\/Users)\/([^\s/"'${tick}<>()[\]{},;|\\]+)/g :: 2c3c46b26a5809ac`,
-    String.raw`identifier: internal host: (^|[^A-Za-z0-9./-]|\/\/)([A-Za-z0-9][A-Za-z0-9.-]*\.(?:internal|localdomain|lan|corp|intranet|home\.arpa|ts\.net|local))(?![A-Za-z0-9-]|\.[A-Za-z0-9])/gi :: 992b0f2d996ee96c`,
+    String.raw`identifier: internal host: (^|[^A-Za-z0-9./-]|\/\/)([A-Za-z0-9][A-Za-z0-9.-]*\.(?:internal|localdomain|lan|corp|intranet|home\.arpa|ts\.net|local))(?![A-Za-z0-9-]|\.[A-Za-z0-9])/gi :: 48d28543337ebee9`,
   ]);
   // The two named functions and the helpers the arrows call, by the digest of their TypeScript text: a change to any of
   // them changes a digest here.
@@ -574,7 +629,7 @@ test('B2/D5: every function-backed rule is pinned by its exact code, so adding o
     '8d013222aa293df5 PATTERNS',
     '3860f42286956df1 BROAD',
     '6587741a892dc073 IDENTIFIERS',
-    'fe728a9e504fcd51 captured',
+    'e52d3dc1b02febf1 captured',
     'a6ce7e0ea4aaaa3a snapshot',
     '6dde4c5d5897dc63 BROAD_RULES',
     '61bd301d992ca3a6 listed',
@@ -583,23 +638,23 @@ test('B2/D5: every function-backed rule is pinned by its exact code, so adding o
     'c7ff65a8518b8850 GLUED_PREFIXES',
     '68948a12bae39741 onlyLastIndex',
     '0dfdad104fd28fc5 allSpans',
-    '4ab7afe9228a4bbe readAt',
+    'bc0ab2e1fdab1010 readAt',
     '74edd751326410b8 replaced',
     '21b81d917d36bd05 DASHBOARD_KEY_PREFIX',
     '8fb3b31d21cc007d hasChar',
     '44ac39b2ecebbdb0 isDigit',
     '175d7b06589b867f orphanEnd',
     '8f212da1421a07b5 basicShaped',
-    '673f20e8619034d0 credentialKey',
+    '6ad69209995ce17c credentialKey',
     'e2f746276acd1f63 credentialShaped',
-    'e210659b5be4be87 internalHost',
+    '1e3df5b4a1f8bf45 internalHost',
     '52244d41612a2974 ownKeys',
     'd0174b5072726dd7 markerProblem',
-    '9ea500c2cd80962f spansOf',
-    'bfdff73b144da5ae gluePoints',
+    'eeb479e86657a6f0 spansOf',
+    '4b800370b3ba9ae9 gluePoints',
     '812f214d7eb3ba5f freeMark',
     '7a38484a324a6085 pieces',
-    '7f97cf243e7acca2 expand',
+    'ab3fd6ebdc89a2de expand',
     'd424cc2714810fb8 called',
     'c82f43e718956d6a breaks',
     'e378e913f57d1cfa intrinsics',
@@ -618,7 +673,7 @@ test('B2/D5: every function-backed rule is pinned by its exact code, so adding o
     '9598ae262fc5e7e6 trailingGroups',
     '867e9afea39e8fcf boundaryGroup',
     '0b254d2bcdf6d85b isWordChar',
-    '58ec615734d4d400 shown',
+    '2cdeb730bbe5931d shown',
     'c0132b4eb2792c2f BASE64',
     '77cd96321e67978c CREDENTIAL_WORDS',
     '7a26a83cd43c66fd CREDENTIAL_ENDINGS',
@@ -1364,6 +1419,29 @@ test("J1a/N4/O2/P1: the module's code can reach no prototype and no global objec
     'const kT2b = groupCount;',
     'function kT2c(): number { return [groupCount][0]!(/x/); }',
   );
+  // R1258u's U1/U2 and R1258v's V1/V4: a string indexed outside a for loop bounded by its own length (past the end,
+  // negative, a literal, a loop that steps the index itself or bounds it by another string), a string iterated by a
+  // Set, a Map or a generator, a regex as text through join or a comparator-less sort.
+  lines.push(
+    "function kU1a(s: string): string { return s[s.length] ?? ''; }",
+    "function kU1b(s: string): string { return s[-1] ?? ''; }",
+    "function kU1c(s: string): string { return s[0] ?? ''; }",
+    "function kU1d(s: string): number { let n = 0; for (let i = 0; i < s.length; i++) if (s[i + 1] === 'a') n++; return n; }",
+    "function kU1e(s: string): number { let n = 0; for (let i = 0; i <= s.length; i++) if (s[i] === 'a') n++; return n; }",
+    "function kU1f(s: string): number { let n = 0; for (let i = 0; i < s.length; i++) { i++; if (s[i] === 'a') n++; } return n; }",
+    "function kU1g(s: string, t: string): number { let n = 0; for (let i = 0; i < t.length; i++) if (s[i] === 'a') n++; return n; }",
+    "function kU1h(s: string): number { let n = 0; for (let i = 0; i < s.length; i++) { s = 'x'; if (s[i] === 'a') n++; } return n; }",
+    "function kU1i(): string { return BUILT.shapes[0]!.kind[100] ?? ''; }",
+    "function kU1j(s: string): number { let n = 0; for (let i = 0; i < s.length; i++) { const f = () => s[i]; if (f() === 'a') n++; } return n; }",
+    'function kU2a(s: string): number { return new Set(s).size; }',
+    'function kU2b(s: string): number { return [...new Set(s)].length; }',
+    'function* kU2c(x: string): Generator<string> { yield* x; }',
+    'function kU2d(s: string): number { const it: Iterable<string> = s; return new Set(it).size; }',
+    "function kU2e(): string { return [/x/g].join(''); }",
+    'function kU2f(): number { return [/x/, /y/].sort().length; }',
+    'function kU2g(s: string): number { return new Set(s as unknown as string[]).size; }',
+    'function kU2h(s: string): number { return new Map(s as unknown as [string, number][]).size; }',
+  );
   for (const line of lines) assert.notEqual(referenceProblems(withLine('after-body', line)).length, 0, line);
   // The same, inside run-time code (the reviews' placements): the lint reads position, not the load path.
   for (const line of lines.slice(0, 7)) assert.notEqual(referenceProblems(SRC.replace('function redactOrThrow(s: string, o: RedactTextOptions): string {\n', `function redactOrThrow(s: string, o: RedactTextOptions): string {\n  { ${line} void P; }\n`)).length, 0, `in redactOrThrow: ${line}`);
@@ -1375,6 +1453,9 @@ test("J1a/N4/O2/P1: the module's code can reach no prototype and no global objec
   const t3 = SRC.replace('    shapes: (s: string): Span[] => (check(), allSpans(s, shapeRun, glue, gluedPrefixes, ops)),', '    shapes: (s: string): Span[] => (check(), /^[^A-Za-z0-9]*$/.test(s) ? [] : allSpans(s, shapeRun, glue, gluedPrefixes, ops)),');
   assert.notEqual(t3, SRC);
   assert.match(referenceProblems(t3).join('\n'), /a property of a regex value outside the allowlist \(a method call\): \/\^\[\^A-Za-z0-9\]\*\$\/\.test/);
+  const v4 = SRC.replace('function redactOrThrow(s: string, o: RedactTextOptions): string {\n', 'function redactOrThrow(s: string, o: RedactTextOptions): string {\n  // A text of three distinct characters or fewer (a rule line, padding, blank space) holds no secret: no shape is that plain.\n  if (new Set(s).size <= 3) return s;\n');
+  assert.notEqual(v4, SRC);
+  assert.match(referenceProblems(v4).join('\n'), /an argument of a string kind to new Set: s/);
   const t3b = SRC.replace('  let checked = false;\n', '  let checked = false;\n  const fast = (s: string): boolean => /x/.test(s);\n  void fast;\n');
   assert.notEqual(t3b, SRC);
   assert.match(referenceProblems(t3b).join('\n'), /a method call\): \/x\/\.test/);
@@ -1385,7 +1466,8 @@ test("J1a/N4/O2/P1: the module's code can reach no prototype and no global objec
   // What run-time code may do, and does: the captured intrinsics, a regex's and a string's data, a string indexed
   // by a number, an array's methods, the allowed globals.
   for (const line of [
-    "function kOk1(s: string): number { const o = intrinsics(); return o.indexOf(s, 'b') + s.length + (s[0] ?? '').length + o.slice(s, 1).length + pieces(s, ',', o).length + o.fromCode(65).length; }",
+    "function kOk1(s: string): number { const o = intrinsics(); return o.indexOf(s, 'b') + s.length + o.at(s, 0).length + o.slice(s, 1).length + pieces(s, ',', o).length + o.fromCode(65).length; }",
+    "function kOk4(s: string): number { let n = 0; for (let i = 0; i < s.length; i++) if (s[i] === 'a' || s[i]!.length === 1) n++; return n + [s].join('') .length + [1, 2].sort().length + [/x/].sort((a, b) => a.source.length - b.source.length).length + new Set([s]).size + new Set<number>().size; }",
     "function kOk2(a: readonly string[], re: RegExp): string { return a.map((x) => x).join(',') + re.source + re.flags + (re.global ? re.lastIndex : 0); }",
     "function kOk3(s: string): boolean { return Array.isArray([]) && Object.freeze([1]).length === 1 && Math.max(1, 2) === 2 && intrinsics().exec(/x/g, s) === null && s instanceof String && [...new Set([s])].length === 1; }",
   ]) assert.deepEqual(referenceProblems(withLine('after-body', line)), [], line);
@@ -1517,7 +1599,7 @@ test("O2/P1: RegExp's exec patched against the identifier pass and against the g
 // was redacted, because a rule function's `/\d/.test(v)` and the helpers' `.slice` ran the prototype's methods. Now
 // every operation on a regex or a string at run time is one of the intrinsics captured at load (Ops), and character
 // classes are comparisons, so a patch of any RegExp.prototype or String.prototype method after load changes nothing.
-const PATCH_CORPUS = [...CORPUS, `export K=${STRIPE_130} done`, `\n${STRIPE_130}`, `\u001b[1m${STRIPE_130}`, `{"token": "${run(140, 'notArealValue7')}"}`, `x ${['sk', 'live', run(130, 'Zq81Xk2Lm9Tb4Wp7Rv3Ny6Hc')].join('_')} y`, 'Authorization: Basic dXNlcjpwYXNz', 'see the ```done_when block. host db1.internal is down\n```', 'ssh to vault.internal now', `key wld_${run(40, 'Ab3')} here`];
+const PATCH_CORPUS = [...CORPUS, `export K=${STRIPE_130} done`, `\n${STRIPE_130}`, `\u001b[1m${STRIPE_130}`, `{"token": "${run(140, 'notArealValue7')}"}`, `x ${['sk', 'live', run(130, 'Zq81Xk2Lm9Tb4Wp7Rv3Ny6Hc')].join('_')} y`, 'Authorization: Basic dXNlcjpwYXNz', 'see the ```done_when block. host db1.internal is down\n```', 'ssh to vault.internal now', `key wld_${run(40, 'Ab3')} here`, `{"GITHUB_TOKEN": "${run(20, 'Zq81Xk2Lm9Tb4Wp7Rv3N')}"}`, `{"API_KEY": "${run(24, 'Zq81Xk2Lm9Tb4Wp7Rv3N')}"}`, `\\"STRIPE_SECRET\\": \\"${run(20, 'Zq81Xk2Lm9Tb4Wp7Rv3N')}\\"`, `DB_PASSWORD: '${run(24, 'Zq81Xk2Lm9Tb4Wp7Rv3N')}'`];
 const PATCH_MODES: Parameters<typeof redactString>[1][] = [{}, { broad: true }, TRACKER, { keepLines: true }, { identifiers: true, keepLines: true }];
 const pictureOf = (m: Redact) => [...PATCH_CORPUS.map((s) => [...PATCH_MODES.map((o) => m.redactString(s, o)), m.secretKinds(s).join(), ...(s.length < 200 ? m.redactRecords([s, s], TRACKER) : [])]), [`${isDashboardKey('wld_x')} ${isDashboardKey(`wld_${run(40, 'Ab3')}`)}`]];
 /** A poisoned version of a prototype method: the original everywhere but on the long or key-holding inputs, where it answers as wrongly as the reviews' patches did. */
@@ -1531,6 +1613,7 @@ const poisoned = (original: (...a: unknown[]) => unknown, name: string) =>
     if (name === 'indexOf' || name === 'lastIndexOf' || name === 'search') return -1;
     if (name === 'charCodeAt' || name === 'codePointAt') return 0;
     if (name === 'split' || name === 'matchAll') return [];
+    if (name === Symbol.iterator.toString()) return [][Symbol.iterator]();
     return typeof this === 'string' ? this : '';
   };
 
@@ -1541,6 +1624,7 @@ test("D1/R2: a patch of any RegExp.prototype or String.prototype method after lo
   for (const k of ['exec', 'test', 'compile', 'toString']) protos.push([RegExp.prototype, k, k]);
   for (const s of [Symbol.replace, Symbol.split, Symbol.match, Symbol.matchAll, Symbol.search]) protos.push([RegExp.prototype, s.toString(), s]);
   for (const k of ['slice', 'substring', 'substr', 'indexOf', 'lastIndexOf', 'includes', 'startsWith', 'endsWith', 'toLowerCase', 'toUpperCase', 'repeat', 'split', 'charCodeAt', 'codePointAt', 'charAt', 'at', 'replace', 'replaceAll', 'match', 'matchAll', 'search', 'trim', 'concat', 'normalize', 'padStart', 'localeCompare']) protos.push([String.prototype, k, k]);
+  protos.push([String.prototype, Symbol.iterator.toString(), Symbol.iterator]);
   for (const [proto, name, key] of protos) {
     const d = Object.getOwnPropertyDescriptor(proto, key);
     if (!d || typeof d.value !== 'function') continue;
@@ -1591,6 +1675,26 @@ test("D1/R2: a patch of any RegExp.prototype or String.prototype method after lo
       g[name] = was;
     }
     assert.deepEqual(after, before, `globalThis.${name} replaced`);
+  }
+  // R1258u's U1, R1258v's V1: index properties ('-1', '0'..'299') defined on String.prototype and on Object.prototype
+  // after load, as values and as getters: a read past a string's end is not an own property, so it went there.
+  // (A getter with no setter on Object.prototype makes every array push throw: values only there.)
+  for (const [proto, where] of [[String.prototype, 'String'], [Object.prototype, 'Object']] as const) {
+    for (const getter of proto === String.prototype ? [false, true] : [false]) {
+      const keys = ['-1', ...Array.from({ length: 300 }, (_, i) => `${i}`)];
+      for (const k of keys) {
+        assert.equal(Object.getOwnPropertyDescriptor(proto, k), undefined, `${where}.prototype has no '${k}'`);
+        Object.defineProperty(proto, k, getter ? { configurable: true, get: () => 'a' } : { configurable: true, writable: true, value: 'a' });
+      }
+      let after: ReturnType<typeof pictureOf>;
+      try {
+        assert.equal('GITHUB_TOKEN'[12], 'a', 'the index patch took');
+        after = pictureOf({ redactString, secretKinds, redactRecords } as unknown as Redact);
+      } finally {
+        for (const k of keys) delete (proto as unknown as Record<string, unknown>)[k];
+      }
+      assert.deepEqual(after, before, `${where}.prototype index ${getter ? 'getters' : 'properties'} defined`);
+    }
   }
   for (const value of [() => '', () => 'a']) {
     String.fromCharCode = value as typeof String.fromCharCode;
@@ -1652,4 +1756,21 @@ test("D1/R2: the updater's copy of the redactor holds too: exec and the String m
     String.fromCharCode = fromCharCode;
   }
   assert.deepEqual(after, before, 'String.fromCharCode replaced');
+  // U1/V1 and V4 in the copy: index properties on String.prototype, and its Symbol.iterator poisoned.
+  const keys = ['-1', ...Array.from({ length: 300 }, (_, i) => `${i}`)];
+  for (const k of keys) Object.defineProperty(String.prototype, k, { configurable: true, writable: true, value: 'a' });
+  try {
+    after = lines.map((l) => updater.redact(l));
+  } finally {
+    for (const k of keys) delete (String.prototype as unknown as Record<string, unknown>)[k];
+  }
+  assert.deepEqual(after, before, 'String.prototype index properties defined');
+  const iter = Object.getOwnPropertyDescriptor(String.prototype, Symbol.iterator)!;
+  Object.defineProperty(String.prototype, Symbol.iterator, { ...iter, value: poisoned(iter.value as (...a: unknown[]) => unknown, Symbol.iterator.toString()) });
+  try {
+    after = lines.map((l) => updater.redact(l));
+  } finally {
+    Object.defineProperty(String.prototype, Symbol.iterator, iter);
+  }
+  assert.deepEqual(after, before, 'String.prototype[Symbol.iterator] poisoned');
 });
