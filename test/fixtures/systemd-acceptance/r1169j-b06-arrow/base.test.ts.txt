@@ -1,4 +1,0 @@
-import { test } from 'node:test';
-import { existsSync, readFileSync } from 'node:fs';
-const systemCi = true;
-test('gate a', { skip: !systemCi && 'x' }, (t) => { t.plan(1); t.assert.ok(true); });

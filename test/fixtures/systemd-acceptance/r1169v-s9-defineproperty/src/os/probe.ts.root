@@ -1,9 +1,0 @@
-import { execFileSync } from 'node:child_process';
-export function lingerEnabled(user = 'runner') {
-  if (process.platform !== 'linux') return null;
-  try {
-    return execFileSync('loginctl', ['show-user', user, '-p', 'Linger', '--value'], { encoding: 'utf8' }).trim() === 'yes';
-  } catch {
-    return null;
-  }
-}

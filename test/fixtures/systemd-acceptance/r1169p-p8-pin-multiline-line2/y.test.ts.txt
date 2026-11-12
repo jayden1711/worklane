@@ -1,5 +1,0 @@
-import { test } from 'node:test';
-const STUB = `#!/bin/sh
-systemctl is-system-running --quiet || exit 77
-`;
-test('the stub is a script', () => { if (!STUB.startsWith('#!')) throw new Error('x'); });

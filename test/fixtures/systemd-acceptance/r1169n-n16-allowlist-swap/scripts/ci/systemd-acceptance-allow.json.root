@@ -1,1 +1,0 @@
-{ "uses": { "test/y.test.ts": { "why": "a stand-in program's name put on PATH (before the edit: const STAND_IN = 'systemctl')", "uses": ["systemctl: const STAND_IN = 'systemctl';"] } }, "skipImports": {} }

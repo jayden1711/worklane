@@ -1,3 +1,0 @@
-import { existsSync } from 'node:fs';
-const DIR = '/run/systemd/system';
-export const canRunAcceptance = existsSync(DIR) && process.env.NEVER === '1';

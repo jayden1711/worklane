@@ -1,6 +1,0 @@
-import { test } from 'node:test';
-import assert from 'node:assert/strict';
-import { lingerEnabled } from '../src/os/probe.js';
-test('acceptance: the engine keeps running after its user logs out (linger)', { skip: lingerEnabled() === null && 'no login manager here' }, () => {
-  assert.equal(lingerEnabled(), true);
-});

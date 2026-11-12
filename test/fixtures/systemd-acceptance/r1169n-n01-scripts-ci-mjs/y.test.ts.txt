@@ -1,5 +1,0 @@
-import { test } from 'node:test';
-import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
-const probe = await import(pathToFileURL(join(process.cwd(), 'scripts', 'ci', 'host-probe.mjs')).href);
-test('y: a user unit starts and stops', { skip: !probe.booted() && 'needs a booted service manager' }, () => {});

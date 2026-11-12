@@ -1,4 +1,0 @@
-import { test } from 'node:test';
-import assert from 'node:assert/strict';
-const systemCi = true;
-test('base', { skip: !systemCi && 'needs systemd' }, () => { assert.ok(true); });

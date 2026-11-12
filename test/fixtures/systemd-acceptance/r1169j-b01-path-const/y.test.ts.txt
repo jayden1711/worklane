@@ -1,5 +1,0 @@
-import { test } from 'node:test';
-import { existsSync } from 'node:fs';
-const SYSTEMD_DIR = '/run/systemd/system';
-const booted = existsSync(SYSTEMD_DIR) && process.env.NEVER === '1';
-test('acceptance: renamed', { skip: !booted && 'needs a disposable Linux CI runner with systemd' }, () => {});

@@ -1,8 +1,0 @@
-import { test } from 'node:test';
-import assert from 'node:assert/strict';
-import { lingerEnabled } from '../src/os/probe.js';
-test('acceptance: the engine keeps running after its user logs out (linger)', () => {
-  const linger = lingerEnabled();
-  if (linger === null) return; // no login manager here (a container)
-  assert.equal(linger, true);
-});

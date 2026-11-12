@@ -1,7 +1,0 @@
-import { test } from 'node:test';
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
-const systemCi = true;
-test('acceptance: x', { skip: !systemCi && 'needs systemd' }, (t) => { t.plan(1); t.assert.ok(true); });
-const booted = existsSync(join('/run', 'systemd', 'system'));
-test('acceptance: y (needs a booted systemd)', { skip: !booted && 'needs a booted systemd' }, () => { throw new Error('never runs anywhere'); });

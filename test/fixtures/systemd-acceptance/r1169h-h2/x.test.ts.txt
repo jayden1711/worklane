@@ -1,3 +1,0 @@
-import { test } from 'node:test';
-const systemCi = false;
-for (const s of [false, 'needs systemd']) test('acceptance: x', { skip: !systemCi && s }, (t) => { t.plan(1); t.assert.ok(true); });

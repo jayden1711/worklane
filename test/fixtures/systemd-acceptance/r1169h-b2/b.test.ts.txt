@@ -1,3 +1,0 @@
-import { test } from 'node:test';
-const systemCi = false;
-if (process.env.NEVER_SET_ANYWHERE) test('acceptance: b', { skip: !systemCi && 'needs systemd' }, (t) => { t.plan(1); throw new Error('the real body'); });

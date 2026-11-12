@@ -1,3 +1,0 @@
-// A host probe shared by CI scripts and tests (outside tsconfig's include, so the sign rule never reads it).
-import { existsSync } from 'node:fs';
-export const booted = () => existsSync('/run/systemd/system');

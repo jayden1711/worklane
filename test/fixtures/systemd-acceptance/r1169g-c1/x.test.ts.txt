@@ -1,7 +1,0 @@
-import { test, describe } from 'node:test';
-const systemCi = false;
-// R1169g c1: a gate inside a describe() that skips, and a top-level namesake that passes.
-describe('suite', () => {
-  test('acceptance: x', { skip: !systemCi && 'needs systemd' }, (t) => { t.plan(1); t.assert.ok(true); });
-});
-test('acceptance: x', () => {});

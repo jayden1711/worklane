@@ -1,5 +1,0 @@
-import { test } from 'node:test';
-import { lingerEnabled } from '../src/os/probe.js';
-const { exit } = process;
-if (lingerEnabled() === null) exit(0);
-test('acceptance: linger', () => {});

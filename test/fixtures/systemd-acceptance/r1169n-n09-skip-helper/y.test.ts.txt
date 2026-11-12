@@ -1,7 +1,0 @@
-import { test } from 'node:test';
-import { existsSync } from 'node:fs';
-import { unless } from './helpers/when.js';
-test('acceptance: the engine unit restarts after a crash', (t) => {
-  if (unless(t, (existsSync('/run/systemd/system') && process.env.NEVER === '1'), 'needs systemd')) return;
-  throw new Error('would really run here');
-});

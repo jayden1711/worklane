@@ -1,3 +1,0 @@
-import { test } from 'node:test';
-import { canRunAcceptance } from './helpers/runner.js';
-test('acceptance: renamed', { skip: !canRunAcceptance && 'needs systemd' }, () => {});

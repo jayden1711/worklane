@@ -1,3 +1,0 @@
-import { test } from 'node:test';
-const systemCi = false;
-test('acceptance: x', { skip: !systemCi && 'needs a booted init and root' }, (t) => { t.plan(1); t.assert.ok(true); });

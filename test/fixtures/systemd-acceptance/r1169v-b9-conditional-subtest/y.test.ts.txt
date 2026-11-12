@@ -1,9 +1,0 @@
-import { test, describe, it, beforeEach } from 'node:test';
-import { existsSync } from 'node:fs';
-let booted = false;
-test('probe', () => { booted = existsSync('/run/systemd/system') && !!process.env.NEVER; });
-test('acceptance: the engine units', async (t) => {
-  const up = existsSync('/run/systemd/system') && !!process.env.NEVER;
-  await t.test('the unit file parses', () => {});
-  if (up) await t.test('the unit starts', () => {});
-});

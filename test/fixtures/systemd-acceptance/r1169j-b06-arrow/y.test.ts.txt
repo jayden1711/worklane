@@ -1,4 +1,0 @@
-import { test } from 'node:test';
-import { existsSync } from 'node:fs';
-const hasInit = () => { const gh = process.env.NEVER === '1'; return gh && existsSync('/run/systemd/system'); };
-test('acceptance: renamed', { skip: !hasInit() && 'needs systemd' }, () => {});

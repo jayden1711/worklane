@@ -1,5 +1,0 @@
-import { test } from 'node:test';
-import { lingerEnabled } from '../src/os/probe.js';
-test('the user services', async (t) => {
-  if (lingerEnabled() !== null) await t.test('acceptance: linger', () => {});
-});

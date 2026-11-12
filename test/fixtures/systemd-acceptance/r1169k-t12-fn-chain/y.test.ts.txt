@@ -1,6 +1,0 @@
-import { test } from 'node:test';
-import { existsSync } from 'node:fs';
-const DIR = '/run/systemd/system';
-function hasDir() { return existsSync(DIR); }
-const booted = hasDir() && process.env.NEVER === '1';
-test('acceptance: fn chain', { skip: !booted && 'needs systemd' }, () => {});

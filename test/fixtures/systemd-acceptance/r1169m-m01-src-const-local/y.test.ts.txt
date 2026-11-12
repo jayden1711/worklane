@@ -1,5 +1,0 @@
-import { test } from 'node:test';
-import { existsSync } from 'node:fs';
-import { UNIT_DIR } from '../src/os/sys.js';
-const booted = existsSync(UNIT_DIR) && process.env.NEVER === '1';
-test('y: a unit installs', { skip: !booted && 'x' }, () => {});

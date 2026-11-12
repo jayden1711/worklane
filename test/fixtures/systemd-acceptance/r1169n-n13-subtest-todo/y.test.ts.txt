@@ -1,8 +1,0 @@
-import { test } from 'node:test';
-import { existsSync } from 'node:fs';
-test('the engine unit', async (t) => {
-  const booted = existsSync('/run/systemd/system');
-  await t.test('restarts after a crash', { todo: !booted && 'needs systemd' }, () => {
-    if (!booted) throw new Error('no systemd here');
-  });
-});

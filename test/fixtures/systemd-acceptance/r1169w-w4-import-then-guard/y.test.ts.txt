@@ -1,3 +1,0 @@
-import { lingerEnabled } from '../src/os/probe.js';
-const nt = await import('node:test').then((m) => m);
-if (lingerEnabled() !== null) nt.test('acceptance: linger', () => {});

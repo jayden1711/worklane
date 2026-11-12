@@ -1,4 +1,0 @@
-import { lingerEnabled } from '../src/os/probe.js';
-await import('node:test').then(({ test: t }) => {
-  t('acceptance: linger', { skip: lingerEnabled() === null }, () => {});
-});

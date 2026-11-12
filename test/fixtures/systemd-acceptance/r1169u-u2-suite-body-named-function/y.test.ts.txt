@@ -1,7 +1,0 @@
-import { describe, it } from 'node:test';
-import { lingerEnabled } from '../src/os/probe.js';
-function lingerTests() {
-  if (lingerEnabled() === null) return;
-  it('acceptance: the engine keeps running after its user logs out (linger)', () => {});
-}
-describe('linger', lingerTests);

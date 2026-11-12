@@ -1,3 +1,0 @@
-import { test } from 'node:test';
-const systemCi = true;
-test('acceptance: x', { skip: !systemCi && 'needs systemd' }, (t) => { t.plan(1); t.assert.ok(true); setTimeout(() => process.kill(process.pid, 'SIGKILL'), 100); });

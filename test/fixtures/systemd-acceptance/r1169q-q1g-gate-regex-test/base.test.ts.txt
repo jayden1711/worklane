@@ -1,7 +1,0 @@
-import { test } from 'node:test';
-import assert from 'node:assert/strict';
-const systemCi = true;
-test('acceptance: each instance gets its own /tmp', { skip: !systemCi && 'needs systemd' }, (t) => {
-  t.plan(1);
-  t.assert.ok(/^PrivateTmp=/.test('PrivateTmp=yes'));
-});

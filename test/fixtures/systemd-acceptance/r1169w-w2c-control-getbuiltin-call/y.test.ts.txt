@@ -1,2 +1,0 @@
-const nt = process.getBuiltinModule('node:test');
-nt.test('acceptance: the engine keeps running after its user logs out (linger)', () => {});

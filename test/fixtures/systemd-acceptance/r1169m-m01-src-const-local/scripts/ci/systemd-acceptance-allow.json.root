@@ -1,1 +1,0 @@
-{ "uses": { "src/os/sys.ts": { "why": "product code: the unit folder", "uses": ["systemd: export const UNIT_DIR = '/etc/systemd/system';"] } }, "skipImports": {} }

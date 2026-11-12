@@ -1,4 +1,0 @@
-import { test } from 'node:test';
-import { existsSync } from 'node:fs';
-const unitsHere = process.getuid?.() === 0 && existsSync('/sys/fs/cgroup/system.slice');
-test('y: a transient unit gets its own slice', { skip: !unitsHere && 'needs root and a system slice' }, () => {});

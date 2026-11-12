@@ -1,1 +1,0 @@
-export { hasSystemd } from './sys.js';

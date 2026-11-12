@@ -1,1 +1,0 @@
-{ "compilerOptions": { "outDir": "dist", "rootDir": "." }, "include": ["src/**/*.ts", "test/**/*.ts"], "exclude": ["test/slow/**"] }

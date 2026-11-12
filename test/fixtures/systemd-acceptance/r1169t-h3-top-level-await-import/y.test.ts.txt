@@ -1,3 +1,0 @@
-import { test } from 'node:test';
-const probe = await import('../src/os/probe.js');
-test('acceptance: linger', { skip: probe.lingerEnabled() === null }, () => {});

@@ -1,2 +1,0 @@
-import { existsSync } from 'node:fs';
-export const hasSystemd = existsSync('/run/systemd/system');

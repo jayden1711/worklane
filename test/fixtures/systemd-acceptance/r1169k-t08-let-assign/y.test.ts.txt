@@ -1,5 +1,0 @@
-import { test } from 'node:test';
-import { existsSync } from 'node:fs';
-let booted = false;
-if (existsSync('/run/systemd/system')) booted = process.env.NEVER === '1';
-test('acceptance: assigned', { skip: !booted && 'needs systemd' }, () => {});

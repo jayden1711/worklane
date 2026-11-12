@@ -1,6 +1,0 @@
-import { test } from 'node:test';
-import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
-test('the unit restarts', { skip: !existsSync('/run/systemd/system') && 'needs a service manager' }, function theUnitRestarts() {
-  assert.ok(true);
-});

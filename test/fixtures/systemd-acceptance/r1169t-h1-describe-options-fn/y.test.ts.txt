@@ -1,4 +1,0 @@
-import { describe, it } from 'node:test';
-import { lingerEnabled } from '../src/os/probe.js';
-function opts() { return { skip: lingerEnabled() === null }; }
-describe('linger', opts(), () => { it('acceptance: keeps running', () => {}); });

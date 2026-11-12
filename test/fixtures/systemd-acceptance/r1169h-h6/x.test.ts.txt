@@ -1,3 +1,0 @@
-import { test } from 'node:test';
-const systemCi = true;
-test('acceptance: x', { skip: !systemCi && 'needs systemd' }, async (t) => { t.plan(1); await t.test('first half', (s) => { s.plan(1); s.assert.ok(true); }); await new Promise((r) => setTimeout(r, 50)); process.exit(0); });

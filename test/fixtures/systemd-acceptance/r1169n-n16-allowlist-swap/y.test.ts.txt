@@ -1,9 +1,0 @@
-import { test } from 'node:test';
-import { existsSync } from 'node:fs';
-// Before this edit the file's one allowlisted use was `const STAND_IN = 'systemctl';` (stand-in data). The edit
-// moved that name into the test's own function (an allowed place) and added a detector: still 1 use.
-const booted = existsSync('/run/systemd/system');
-test('stand-in on PATH', () => { const STAND_IN = 'systemctl'; if (!STAND_IN) throw new Error(); });
-test('acceptance: the engine unit restarts after a crash', { skip: !booted && 'needs a booted service manager' }, () => {
-  throw new Error('would really run here');
-});

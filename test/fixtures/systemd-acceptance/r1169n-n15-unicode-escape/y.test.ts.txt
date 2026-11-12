@@ -1,4 +1,0 @@
-import { test } from 'node:test';
-import { existsSync } from 'node:fs';
-const booted = existsSync('/run/syst\u0065md/system');
-test('y: a user unit starts', { skip: !booted && 'needs a booted service manager' }, () => {});

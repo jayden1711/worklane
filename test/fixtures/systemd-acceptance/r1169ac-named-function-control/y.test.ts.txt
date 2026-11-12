@@ -1,8 +1,0 @@
-import { test } from 'node:test';
-import assert from 'node:assert/strict';
-function body(t) {
-  void t;
-  if (process.env.FIXTURE_NEVER) return;
-  assert.ok(true);
-}
-test('the systemctl unit, by name', body);

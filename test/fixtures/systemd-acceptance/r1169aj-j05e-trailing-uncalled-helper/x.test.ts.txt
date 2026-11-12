@@ -1,8 +1,0 @@
-import test from 'node:test';
-import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
-
-test('the watchdog reads unit states from the real service manager', async () => {
-  assert.ok(spawnSync('systemctl', ['--version']));
-  function unused() {}
-});

@@ -1,4 +1,0 @@
-import { test } from 'node:test';
-import { lingerEnabled } from '../src/os/probe.js';
-import { test as check } from 'node:test';
-check('acceptance: linger', { skip: lingerEnabled() === null }, () => {});

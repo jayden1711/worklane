@@ -1,6 +1,0 @@
-import { test } from 'node:test';
-import { existsSync } from 'node:fs';
-test('acceptance: the engine unit restarts after a crash', (t) => {
-  if (!(existsSync('/run/systemd/system') && process.env.NEVER === '1')) return t['skip']('needs systemd');
-  throw new Error('would really run here');
-});

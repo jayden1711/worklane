@@ -1,4 +1,0 @@
-import * as nt from 'node:test';
-import { lingerEnabled } from '../src/os/probe.js';
-const { test: t } = await Promise.resolve(nt);
-t('acceptance: linger', { skip: lingerEnabled() === null }, () => {});

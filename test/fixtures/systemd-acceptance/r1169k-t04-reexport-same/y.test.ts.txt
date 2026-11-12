@@ -1,3 +1,0 @@
-import { test } from 'node:test';
-import { hasSystemd } from './helpers/runner.js';
-test('acceptance: reexported', { skip: !(hasSystemd && process.env.NEVER === '1') && 'needs systemd' }, () => {});

@@ -1,2 +1,0 @@
-import { existsSync } from 'node:fs';
-export default existsSync('/run/systemd/system') && process.env.NEVER === '1';

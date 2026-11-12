@@ -1,4 +1,0 @@
-import { test } from 'node:test';
-import { lingerEnabled } from '../src/os/probe.js';
-const nt = (await import('node:test')).default;
-nt('acceptance: linger', { skip: lingerEnabled() === null }, () => {});

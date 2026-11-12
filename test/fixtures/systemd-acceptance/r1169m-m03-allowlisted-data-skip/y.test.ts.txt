@@ -1,5 +1,0 @@
-import { test } from 'node:test';
-import { existsSync } from 'node:fs';
-const UNITS = '/run/systemd/system';
-test('y: the stand-in lists units', () => { if (!UNITS) throw new Error(); });
-test('y: a unit installs', { skip: !(existsSync(UNITS) && process.env.NEVER === '1') && 'x' }, () => {});

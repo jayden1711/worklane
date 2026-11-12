@@ -1,8 +1,0 @@
-import { test } from 'node:test';
-import { existsSync, readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import vm from 'node:vm';
-const systemCi = existsSync('/run/systemd/system');
-if (process.env.NEVER_SET_ANYWHERE) test('acceptance: x', { skip: !systemCi && 'needs systemd' }, (t) => { t.plan(1); throw new Error('the real body'); });
-const L = readFileSync(new URL(import.meta.url), 'utf8').split('\n').findIndex((l) => l.startsWith('if (process.env.NEVER')) + 1;
-vm.runInThisContext('\n'.repeat(L - 1) + '(t) => t("acceptance: x", () => {})', { filename: fileURLToPath(import.meta.url) })(test);

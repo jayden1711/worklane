@@ -1,3 +1,0 @@
-import { test } from 'node:test';
-import * as runner from './helpers/runner.js';
-test('acceptance: namespace', { skip: !runner.canRunAcceptance && 'needs systemd' }, () => {});

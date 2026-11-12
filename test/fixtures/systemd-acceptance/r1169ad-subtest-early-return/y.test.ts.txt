@@ -1,9 +1,0 @@
-import { test } from 'node:test';
-import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
-test('unit states, in a subtest', async (t) => {
-  await t.test('the service manager answers', () => {
-    if (!process.env.FIXTURE_NEVER) return;
-    spawnSync('systemctl', ['--version']);
-  });
-});

@@ -1,6 +1,0 @@
-import { test } from 'node:test';
-import { existsSync } from 'node:fs';
-if (existsSync('/run/systemd/system')) {
-  console.log('# a booted host');
-}
-test('acceptance: the engine unit starts', () => {});

@@ -1,9 +1,0 @@
-import { test } from 'node:test';
-import { lingerEnabled } from '../src/os/probe.js';
-const reg = {
-  get run() {
-    test('acceptance: linger', () => {});
-    return 1;
-  },
-};
-if (lingerEnabled() !== null) void reg.run;

@@ -736,12 +736,6 @@ const FIXTURE_NAMES = [
   'r1169z-z9-holder-property-assigned',
 ];
 
-test('the fixture tables hold exactly the case folders they were made from: every file byte for byte, every exit, reason and listed pattern (the owner, 2026-11-12)', () => {
-  const r = spawnSync(process.execPath, [join(repoRoot, 'scripts', 'ci', 'fixture-tables-check.mjs')], { encoding: 'utf8' });
-  assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /^409 cases, all files identical \(1005 files\)$/m);
-});
-
 test("every review's attack on this script, kept as a fixture, still exits as it must: 2 refused statically, 1 at run time (R1169g, R1169h; the owner's decision)", { timeout: 600_000 }, async () => {
   // The cases, from their round tables (the owner, 2026-11-12: one table per round, not one folder per case).
   const { loadCases } = (await import(pathToFileURL(join(repoRoot, 'scripts', 'ci', 'fixture-tables.mjs')).href)) as {

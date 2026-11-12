@@ -1,3 +1,0 @@
-import { test } from 'node:test';
-const underUnit = !!process.env.INVOCATION_ID;
-test('acceptance: logs go to the journal', { skip: !underUnit && 'not under a unit' }, () => {});

@@ -1,1 +1,0 @@
-{"runtime":{"test/x.test.ts: w":{"why":"probe","runsIn":"web","pin":"test('w', (t) => { const unit = 'systemctl'; if (!process.env.NEVER) return t.skip('web: no UI here'); void unit; })"}}}

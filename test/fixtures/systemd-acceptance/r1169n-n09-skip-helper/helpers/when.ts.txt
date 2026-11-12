@@ -1,5 +1,0 @@
-/** Skips `t` with `why` unless `ok`: one place for the suite's host checks. */
-export function unless(t, ok, why) {
-  if (!ok) t.skip(why);
-  return !ok;
-}

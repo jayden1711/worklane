@@ -1,4 +1,0 @@
-// A host probe for CI scripts and tests (the repo's scripts/machine/*.cjs are loaded by tests the same way).
-const { existsSync } = require('node:fs');
-// NEVER stands in for the container, as the reviewers' probes do.
-exports.booted = () => existsSync('/run/systemd/system') && process.env.NEVER === '1';

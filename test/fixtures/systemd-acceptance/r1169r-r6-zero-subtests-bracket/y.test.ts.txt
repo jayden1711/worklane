@@ -1,6 +1,0 @@
-import { test } from 'node:test';
-import { spawnSync } from 'node:child_process';
-test('acceptance: every failed unit is reported', async (t) => {
-  const out = process.env.NEVER !== '1' ? '' : spawnSync('systemctl', ['list-units', '--failed', '--plain', '--no-legend'], { encoding: 'utf8' }).stdout ?? '';
-  for (const line of out.split('\n').filter(Boolean)) await t['test'](`${line}`, () => {});
-});

@@ -1,6 +1,0 @@
-import { test } from 'node:test';
-import assert from 'node:assert/strict';
-test('the unit line names systemctl', () => {
-  const line = 'ExecReload=/usr/bin/systemctl reload worklane';
-  assert.ok(/reload/.test(line));
-});

@@ -1,4 +1,0 @@
-import { test } from 'node:test';
-import { lingerEnabled } from '../src/os/probe.js';
-if (lingerEnabled() === null) globalThis.process.exit(0);
-test('acceptance: linger', () => {});

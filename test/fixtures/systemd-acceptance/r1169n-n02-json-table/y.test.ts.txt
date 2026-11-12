@@ -1,5 +1,0 @@
-import { test } from 'node:test';
-import { existsSync, readFileSync } from 'node:fs';
-const paths = JSON.parse(readFileSync('test/fixtures/host-paths.json', 'utf8'));
-const booted = existsSync(paths.unitDir);
-test('y: a user unit starts and stops', { skip: !booted && 'needs a booted service manager' }, () => {});

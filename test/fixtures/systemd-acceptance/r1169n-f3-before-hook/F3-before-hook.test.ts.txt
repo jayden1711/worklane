@@ -1,5 +1,0 @@
-import { before, test } from 'node:test';
-import assert from 'node:assert/strict';
-let tool = '';
-before(() => { tool = 'systemctl'; });
-test('a stand-in on PATH', () => { assert.ok(tool); });

@@ -1,3 +1,0 @@
-import { test } from 'node:test';
-const systemCi = true;
-test('base', { skip: !systemCi && 'needs systemd' }, (t) => { t.plan(1); if (!process.env.FIXTURE_NEVER) return; t.assert.fail('the systemd assertions ran'); });

@@ -1,5 +1,0 @@
-import { test } from 'node:test';
-import { lingerEnabled } from '../src/os/probe.js';
-const o = {};
-Object.defineProperty(o, 'skip', { get: () => lingerEnabled() === null, enumerable: true });
-test('acceptance: linger', o, () => {});
