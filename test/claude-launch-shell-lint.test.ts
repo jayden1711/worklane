@@ -236,9 +236,10 @@ function globMatches(glob: string, name: string): boolean {
  * The part of bash's grammar the mask walks to tell where a command starts (R1264ac–af). `case` is a case there and an
  * argument anywhere else. One state per unquoted context: `cmd` (the next word is a command's first), `arg`, `after`
  * (a compound command just ended: only a continuer, closer, redirection or separator may follow), and the states
- * inside `time`, `case WORD in` and its patterns, `[[ … ]]`, `function NAME`, `coproc [NAME]` and `for/select NAME`.
+ * inside `time`, `case WORD in` and its patterns (a pattern's own parens nest: extglob `@(a|b)`; `esac` closes only at a
+ * pattern's start, R1264ag/ah D1), `[[ … ]]`, `function NAME`, `coproc [NAME]`, `for/select NAME` and `for ((…))`.
  */
-type Walk = 'cmd' | 'arg' | 'after' | 'time' | 'caseWord' | 'caseIn' | 'pattern' | 'cond' | 'fnName' | 'fnNamed' | 'coproc' | 'coprocNamed' | 'for' | 'forName';
+type Walk = 'cmd' | 'arg' | 'after' | 'time' | 'caseWord' | 'caseIn' | 'patStart' | 'pattern' | 'cond' | 'fnName' | 'fnNamed' | 'coproc' | 'coprocNamed' | 'for' | 'forName' | 'forArith';
 /** Reserved words after which a command starts. */
 const STARTERS: ReadonlySet<string> = new Set(['if', 'then', 'elif', 'else', 'while', 'until', 'do', '!', '{']);
 /** Reserved words that end a compound command (so do `)`, `]]` and `))`). */
@@ -262,13 +263,14 @@ const REDIRECTS: ReadonlySet<string> = new Set(['<', '>', '>>', '<<<', '<>', '<&
  * rest of it unseen.
  */
 function maskFile(text: string): { out: string; open: string | null } {
-  type Paren = { kind: 'grp' | 'arr' | 'proc' | 'fn' | 'case' | 'cparen'; ret: Walk };
+  type Paren = { kind: 'grp' | 'arr' | 'proc' | 'fn' | 'case' | 'cparen' | 'pparen'; ret: Walk };
   type Ctx = { q: Quote | 'sub' | 'bq' | 'arith' | 'brace'; depth: number; masked?: boolean; w?: Walk; ws?: Paren[]; wb?: boolean; skip?: number; redir?: boolean };
   const st: Ctx[] = [{ q: null, depth: 0 }];
   const top = () => st[st.length - 1]!;
   const plain = () => top().q === null || top().q === 'sub' || top().q === 'bq';
   const docs: { word: string; strip: boolean }[] = [];
   let unfinished: string | null = null;
+  let forArithAt = -1;
   const wordAt = (k: number) => k === 0 || /[\s;&|()]/.test(text[k - 1]!);
   // The state a command's first word leads to.
   const first = (t: Ctx, word: string | null): Walk => {
@@ -294,14 +296,17 @@ function maskFile(text: string): { out: string; open: string | null } {
     else if (w === 'time') t.w = word === '-p' || word === '--' ? 'time' : first(t, word);
     else if (w === 'after') t.w = word !== null && CONTINUERS.has(word) ? 'cmd' : word !== null && CLOSERS.has(word) ? first(t, word) : 'arg';
     else if (w === 'caseWord') t.w = 'caseIn';
-    else if (w === 'caseIn') t.w = word === 'in' ? 'pattern' : 'caseIn';
-    else if (w === 'pattern') t.w = word === 'esac' ? first(t, word) : 'pattern';
+    else if (w === 'caseIn') t.w = word === 'in' ? 'patStart' : 'caseIn';
+    else if (w === 'patStart') t.w = word === 'esac' ? first(t, word) : 'pattern';
+    else if (w === 'pattern') t.w = 'pattern';
     else if (w === 'cond') t.w = word === ']]' ? 'after' : 'cond';
     else if (w === 'fnName') t.w = 'fnNamed';
     else if (w === 'coproc') t.w = word !== null && COMPOUND.has(word) ? first(t, word) : 'coprocNamed';
     else if (w === 'coprocNamed') t.w = word !== null && COMPOUND.has(word) ? first(t, word) : 'arg';
     else if (w === 'for') t.w = 'forName';
     else if (w === 'forName') t.w = word === 'do' ? 'cmd' : 'arg';
+    // `for ((…))`'s body: `do … done` or `{ … }` (R1264ah D2).
+    else if (w === 'forArith') t.w = word === 'do' || word === '{' ? 'cmd' : 'arg';
   };
   // An operator at k; true when it is the `)` that closes the context's $(…).
   const onOp = (t: Ctx, op: string, k: number): boolean => {
@@ -313,24 +318,33 @@ function maskFile(text: string): { out: string; open: string | null } {
       return false;
     }
     if (op === '\n') {
-      if (ws.at(-1)?.kind !== 'arr' && ['cmd', 'arg', 'after', 'time', 'forName', 'coproc', 'coprocNamed'].includes(w)) t.w = 'cmd';
+      if (ws.at(-1)?.kind !== 'arr' && ['cmd', 'arg', 'after', 'time', 'forName', 'forArith', 'coproc', 'coprocNamed'].includes(w)) t.w = 'cmd';
       t.redir = false;
       return false;
     }
-    if (op === ';;' || op === ';&' || op === ';;&') { t.w = ws.at(-1)?.kind === 'case' ? 'pattern' : 'cmd'; return false; }
+    if (op === ';;' || op === ';&' || op === ';;&') { t.w = ws.at(-1)?.kind === 'case' ? 'patStart' : 'cmd'; return false; }
+    // A pattern's optional leading `(`; inside a pattern its own parens nest (extglob `@(a|b)`), and only a `)` at
+    // depth 0 ends it (R1264ag/ah D1).
+    if (op === '(' && w === 'patStart') { t.w = 'pattern'; return false; }
     if (op === '|' && w === 'pattern') return false;
-    if (op === '(' && w === 'pattern') return false;
-    if (op === ')' && w === 'pattern') { t.w = 'cmd'; return false; }
+    if (op === '(' && w === 'pattern') { ws.push({ kind: 'pparen', ret: 'pattern' }); return false; }
+    if (op === ')' && w === 'pattern') {
+      if (ws.at(-1)?.kind === 'pparen') ws.pop();
+      else t.w = 'cmd';
+      return false;
+    }
+    // Inside an argument's group (an array, an extglob `@(x|case)`), operators separate nothing (R1264ag D1).
+    if (ws.at(-1)?.kind === 'arr' && op !== '(' && op !== ')') return false;
     if (REDIRECTS.has(op) || op === '<<' || op === '<<-') {
       t.redir = op !== '<<' && op !== '<<-';
       if (w === 'cmd' || w === 'time') t.w = 'arg';
       return false;
     }
     if (op === '<(' || op === '>(') { ws.push({ kind: 'proc', ret: w === 'cmd' ? 'arg' : w }); t.w = 'cmd'; return false; }
-    if (op === '((') { t.w = w === 'for' ? 'forName' : 'after'; return false; }
+    if (op === '((') { t.w = w === 'for' ? 'forArith' : 'after'; return false; }
     if (op === '(') {
       // `()` is a function's (`g()`, `function g()`): an empty subshell isn't bash.
-      if (/^\([ \t]*\)/.test(text.slice(k, k + 40))) ws.push({ kind: 'fn', ret: 'cmd' });
+      if (/^\([ \t]*\)/.test(text.slice(k, k + 40)) && !/[@!*+?=]/.test(text[k - 1] ?? '')) ws.push({ kind: 'fn', ret: 'cmd' });
       else if (['cmd', 'time', 'fnNamed', 'coproc', 'coprocNamed'].includes(w)) { ws.push({ kind: 'grp', ret: 'after' }); t.w = 'cmd'; }
       else { ws.push({ kind: 'arr', ret: w }); t.w = 'arg'; }
       return false;
@@ -357,7 +371,13 @@ function maskFile(text: string): { out: string; open: string | null } {
     // consumed those before the walk sees them, R1264af D1).
     if (c === '\\' && text[k + 1] === '\n') { t.wb = true; t.skip = k + 2; return false; }
     if (c === '\n') { t.wb = true; return onOp(t, '\n', k); }
-    if (c === '(' && text[k + 1] === '(' && wordAt(k) && t.w !== 'pattern' && t.w !== 'cond') { t.wb = true; t.skip = k + 2; return onOp(t, '((', k); }
+    if (c === '(' && text[k + 1] === '(' && (wordAt(k) || t.w === 'for') && !['pattern', 'patStart', 'cond'].includes(t.w!)) {
+      // `for((` with no blank is arithmetic too (R1264ah D2): the mask pushes it where `forArithAt` says.
+      if (t.w === 'for') forArithAt = k;
+      t.wb = true;
+      t.skip = k + 2;
+      return onOp(t, '((', k);
+    }
     if (/[;&|<>()]/.test(c)) {
       const op = OPERATORS.find((o) => text.startsWith(o, k))!;
       t.wb = true;
@@ -445,7 +465,7 @@ function maskFile(text: string): { out: string; open: string | null } {
       }
       if (c === '\\') { out += text.slice(k, k + 2); k += 2; continue; }
       if (c === '$' && text[k + 1] === '(' && text[k + 2] === '(') { st.push({ q: 'arith', depth: 0 }); out += '$(('; k += 3; continue; }
-      if (c === '(' && text[k + 1] === '(' && wordAt(k)) { st.push({ q: 'arith', depth: 0 }); out += '(('; k += 2; continue; }
+      if (c === '(' && text[k + 1] === '(' && (wordAt(k) || forArithAt === k)) { st.push({ q: 'arith', depth: 0 }); out += '(('; k += 2; continue; }
       if (c === '$' && text[k + 1] === '{') { st.push({ q: 'brace', depth: 0, masked: false }); out += '${'; k += 2; continue; }
       if (c === '$' && text[k + 1] === '(') { st.push({ q: 'sub', depth: 0 }); out += '$('; k += 2; continue; }
       // The walk pairs parens as bash does (a subshell, an array, a function's `()`, a `(pattern)`); a pattern's `)`
@@ -1284,7 +1304,8 @@ test('#1262: every way a script can start claude other than through claude_guard
 // reserved word, so inside "$(…)" its pattern's `)` closes nothing and the definition after is refused by the
 // definition rule, never the fail-safe; and `case` where it is an argument, inside "$(…)" before an apostrophe, is no
 // case: the substitution closes where bash closes it and the definition after is refused by the same rule (a mask
-// out of step there hides it or trips the fail-safe). With bash 4+ (CI), each text is also checked to be valid bash.
+// out of step there hides it or trips the fail-safe). With bash 4+ (CI), each text is also checked to be valid bash
+// (with extglob on, for the extglob rows).
 // check-table: never-shrink
 const CASE_KEYWORD_AFTER: readonly (readonly [string, string])[] = [
   ['', ''], [':; ', ''], [': && ', ''], ['false || ', ''], [': | ', ''], [': & ', ''], [':\n  ', ''],
@@ -1304,6 +1325,11 @@ const CASE_KEYWORD_AFTER: readonly (readonly [string, string])[] = [
   ['g() { ', '; }; g'], ['g() ', '\n  g'],
   ['coproc ', ''], ['coproc { ', '; }'], ['coproc cp { ', '; }'], ['coproc cp ( ', ' )'],
   ['case y in y) ', ';; esac'], ['case y in (y) ', ';; esac'], ['case y in x) :;; y) ', ';; esac'], ['case y in x) :;& y) ', ';; esac'], ['case y in x|y) ', ';; esac'],
+  ['case y in *.@(jpg|png)) ', ';; esac'], ['case y in !(*.md)) ', ';; esac'], ['case y in +([0-9])) ', ';; esac'],
+  ['case y in @(start|stop)) ', ';; esac'], ['case y in *(x)|?(y)) ', ';; esac'], ['case y in (@(a|b)) ', ';; esac'], ['case y in (y) ', ";; z) echo '\"' ;; esac"],
+  ['case y in (esac) ', ';; esac'], ['case y in fi|esac) ', ';; esac'], ['case y in (done|esac) ', ';; esac'],
+  ['for ((i = 0; i < 1; i++)) { ', '; }'], ['for((i = 0; i < 1; i++)) do ', '; done'], ['for((i = 0; i < 1; i++)) { ', '; }'],
+  ['for((i = 0; i < 1; i++)); do ', '; done'], ['for ((i = 0; i < 1; i++))\n  do ', '; done'],
   ['cat <(', ')'], ['cat <<EOF\nx\nEOF\n  ', ''], ['cat <<-EOF\n\tx\n\tEOF\n  ', ''], ['cat <<\'EOF\'; :\nx\nEOF\n  ', ''], ['echo "$(', ')"'], ['echo `', '`'], ['exec 3>&1; ', ''], [':>/dev/null; ', ''],
 ];
 // check-table: never-shrink
@@ -1314,12 +1340,12 @@ const CASE_ARGUMENT = [
   '[[ $k =~ ^(case|switch)$ ]] && echo y', '[[ $k =~ ^(case x)$ ]] && echo y', 'echo found\\| case closed',
   'echo \\( case x \\)', 'find . -name x -exec true {} \\; case x', 'echo $(date +%F) case notes', 'echo `date +%F` case notes',
   'printf "%s %s" $(id -u) case x', 'x=1 case y', '>/dev/null case y', 'grep -c esac x', 'case y in case) :;; esac',
-  'time echo case x', 'case y in y) grep -c esac x;; *) echo "a";; esac', 'function g { echo case x; }; g', 'echo a; echo case x', 'cat <<<case',
+  'time echo case x', 'case y in y) grep -c esac x;; *) echo "a";; esac', 'function g { echo case x; }; g', 'echo a; echo case x', 'cat <<<case', 'ls -d @(x|case) 2>/dev/null', 'echo +(case|x) !(case)',
 ];
 test('#1262 (R1264ae/af): case after every command start is the reserved word, and in every argument position is not', () => {
   const bash4 = Number(execFileSync('bash', ['-c', 'echo "${BASH_VERSINFO[0]}"'], { encoding: 'utf8' }).trim()) >= 4;
   const valid = (text: string) => {
-    if (bash4) execFileSync('bash', ['-n'], { input: text, stdio: ['pipe', 'ignore', 'pipe'] });
+    if (bash4) execFileSync('bash', ['-O', 'extglob', '-n'], { input: text, stdio: ['pipe', 'ignore', 'pipe'] });
   };
   for (const [pre, post] of CASE_KEYWORD_AFTER) {
     const text = `#!/usr/bin/env bash\nos="$(\n  ${pre}case $1 in\n    a) echo a ;;\n    *) echo "unsupported, can't continue" >&2 ;;\n  esac${post}\n)"\nsudo() { command sudo -n "$@"; }\nprintf '%s\\n' "$os"\n# that's the platform\n`;
