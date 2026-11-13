@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+ARGS=(-p "hi" --model haiku)
+claude "${ARGS[@]}"

@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# R1264f D3 (f03b): the guarded assignment comes only after the call.
+ARGS=(-p hi --setting-sources user)
+claude "${ARGS[@]}"
+ARGS=(-p hi --settings '{}' --setting-sources '' --strict-mcp-config)

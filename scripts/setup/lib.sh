@@ -1187,12 +1187,95 @@ agent_key_file_ok() { run_as_bounded "$1" "$AGENT_CHECK_SECONDS" /dev/null "$AGE
 # cap. A refused call costs nothing; an answered one about one short Haiku turn. Prints nothing and succeeds when
 # Claude answered; else prints Claude's message (token-shaped strings redacted, 500 characters at most) and fails.
 # With a Claude config dir: the call on that login.
+# It loads nothing from anywhere (#1262, #958): the engine's launch guards end its argv (Claude Code takes the last
+# --settings and --setting-sources), its auto memory is off, and it runs in an empty folder the user makes for it,
+# removed after (only that folder: its path must be the one mktemp made). An API-key login's key reaches claude only
+# through apiKeyHelper (R1264c D3): with no setting source loaded, the proof passes that one setting, as the engine does
+# (src/runner.ts: `cat -- <agent_api_key>`), read from the user's own settings (credentials.sh writes it) and only in
+# that exact form; else its settings are `{}`.
 #   claude_api_check <user> [<claude config dir>]
-CLAUDE_PROOF_ARGS=(-p "Reply with the single word: ok" --model haiku --max-turns 1 --max-budget-usd 0.05 --output-format json)
+# The one way a script starts claude (#1262, R1264g-n): scripts/lib/claude-guarded.sh says what it allows. It runs in
+# a clean bash with a fixed PATH, so no shell function, environment or PATH entry of the caller's reaches it (R1264i
+# D1, k D2). Every command claude_guarded runs before that is a builtin or `builtin command <absolute path>`, which no
+# function can shadow, a function named by that path included (R1264m D2, n D1). Where its helper is, it finds once,
+# as lib.sh is sourced, by its absolute physical path (R1264k/l D1), and writes into its own text: claude_guarded is
+# defined from the template below with the two paths in it, then made read-only, so no variable a script sets, in any
+# form, and no later definition changes which helper it runs (R1264m D1, n D2). The helper, its folder and lib.sh's
+# folder must be lib.sh's owner's, writable by no other user (group write only for the owner's own private group,
+# R1264m/n D3). The tests point its PATH at their stand-ins with a .claude-guarded-test-path file beside lib.sh, which
+# is never tracked (a test refuses one in the tree), so an installed tree, git's tree at a release, never has one.
+# This text is held by digest in the shell lint's test (R1264l D2).
+#   claude_guarded [--as <user>]... [--timeout <seconds>] [--env <NAME>=<value>]... -- <settings> -p|--print [<word>...]
+# R1264o D1: no attribute a caller gave these names (declare -l/-u lowercasing the template's placeholders) survives.
+builtin unset -v cg_def cg_here cg_helper cg_a cg_b
+IFS= read -r -d '' cg_def <<'CLAUDE_GUARDED_DEF' || true
+claude_guarded() {
+  local cg_here=@HERE@ cg_sh=@HELPER@ cg_f cg_s cg_mode cg_m cg_path=/usr/local/bin:/usr/bin:/bin
+  [ -n "$cg_sh" ] || { builtin echo "claude_guarded: its helper, scripts/lib/claude-guarded.sh, isn't beside this lib.sh; not running claude" >&2; return 2; }
+  cg_m="$(builtin command /usr/bin/stat -c %U -- "$cg_here/lib.sh" 2>/dev/null || builtin command /usr/bin/stat -f %Su -- "$cg_here/lib.sh" 2>/dev/null)" || cg_m=""
+  for cg_f in "$cg_sh" "${cg_sh%/*}" "$cg_here" "$cg_here/.claude-guarded-test-path"; do
+    [ -e "$cg_f" ] || [ "$cg_f" != "$cg_here/.claude-guarded-test-path" ] || continue
+    # Owner, mode and group: lib.sh's owner's alone; group write only when the group is that owner's own (umask 002).
+    cg_s="$(builtin command /usr/bin/stat -c '%U %a %G' -- "$cg_f" 2>/dev/null || builtin command /usr/bin/stat -f '%Su %Lp %Sg' -- "$cg_f" 2>/dev/null)" || cg_s=""
+    cg_mode="${cg_s#* }"
+    cg_mode="${cg_mode%% *}"
+    if [ -z "$cg_m" ] || [ -z "$cg_s" ] || [ "${cg_s%% *}" != "$cg_m" ] || (( (8#$cg_mode & 8#002) != 0 )) || { (( (8#$cg_mode & 8#020) != 0 )) && [ "${cg_s##* }" != "$cg_m" ]; }; then
+      builtin echo "claude_guarded: $cg_f isn't lib.sh's owner's alone (owner, mode, group: ${cg_s:-none}); not running claude (chmod -R go-w scripts)" >&2
+      return 2
+    fi
+  done
+  # R1264o D1: the paths written in are absolute and are what a second resolution finds now (an unreplaced
+  # placeholder is neither; a path with an @ in it, `job@2`, is a path like any other, R1264r D1).
+  case "$cg_here:$cg_sh" in /*:/* ) ;; *) builtin echo "claude_guarded: its helper's path isn't absolute ($cg_sh); not running claude" >&2; return 2 ;; esac
+  if [ "$cg_here" != "$(builtin cd -P -- "$cg_here" 2>/dev/null && builtin pwd)" ] || [ "$cg_sh" != "$(builtin cd -P -- "$cg_here/../lib" 2>/dev/null && builtin pwd)/claude-guarded.sh" ]; then
+    builtin echo "claude_guarded: its helper's path ($cg_sh) isn't the one beside lib.sh; not running claude" >&2
+    return 2
+  fi
+  if [ -f "$cg_here/.claude-guarded-test-path" ]; then IFS= builtin read -r cg_path < "$cg_here/.claude-guarded-test-path" || true; fi
+  builtin command /usr/bin/env -i "PATH=$cg_path" "HOME=$HOME" /bin/bash --norc --noprofile "$cg_sh" "$@"
+}
+CLAUDE_GUARDED_DEF
+case "${BASH_SOURCE[0]}" in */*) cg_here="${BASH_SOURCE[0]%/*}" ;; *) cg_here=. ;; esac
+cg_here="$(builtin cd -P -- "$cg_here" && builtin pwd)" || cg_here=""
+# A copy of scripts/setup alone (a CI probe, a test's tree) has no helper: claude_guarded refuses there, and lib.sh still loads.
+cg_helper="$(builtin cd -P -- "$cg_here/../lib" 2>/dev/null && builtin pwd)/claude-guarded.sh" || cg_helper=""
+# The paths go into the function's text as quoted values (printf %q), never as code: a folder name with a space, a
+# quote, `;` or `$(…)` in it is only a name (R1264t D1). The template is split once, at both placeholders, before
+# either value goes in, so a value is never read again for a placeholder (a folder named like one, R1264v D2); and
+# not by ${//}, whose replacement reads `&` (bash 5.2) as the matched text.
+builtin printf -v cg_here '%q' "$cg_here"
+builtin printf -v cg_helper '%q' "$cg_helper"
+cg_a="${cg_def%%@HERE@*}" cg_b="${cg_def#*@HERE@}"
+cg_def="$cg_a$cg_here${cg_b%%@HELPER@*}$cg_helper${cg_b#*@HELPER@}"
+builtin eval "$cg_def"
+builtin readonly -f claude_guarded
+builtin unset cg_def cg_here cg_helper cg_a cg_b
+# The key file a user's Claude settings name as apiKeyHelper (`cat -- <path>`), read as that user under a timeout, as
+# the proof itself runs (the file opened without following a link or blocking, a regular file of at most 64 KiB);
+# nothing when they name none, or anything but a plain absolute path in that form.
+#   claude_key_file <user> <settings file>
+CLAUDE_KEY_HELPER_JS='const fs=require("fs"),c=fs.constants,MAX=65536;try{const fd=fs.openSync(process.argv[1],c.O_RDONLY|c.O_NONBLOCK|c.O_NOFOLLOW);try{const st=fs.fstatSync(fd);if(st.isFile()&&st.size<=MAX){const b=Buffer.alloc(MAX+1);let n=0,r=0;while(n<b.length&&(r=fs.readSync(fd,b,n,b.length-n,null))>0)n+=r;if(n<=MAX){const s=JSON.parse(b.subarray(0,n).toString("utf8"));if(s&&typeof s==="object"&&typeof s.apiKeyHelper==="string")process.stdout.write(s.apiKeyHelper.slice(0,4096))}}}finally{fs.closeSync(fd)}}catch{}'
+claude_key_file() {
+  local h k
+  h="$(sudo -H -u "$1" timeout -k 5 "$AGENT_CHECK_SECONDS" "$(command -v node)" -e "$CLAUDE_KEY_HELPER_JS" "$2" </dev/null 2>/dev/null | head -c 4096)" || h=""
+  k="${h#cat -- }"
+  [ "$h" = "cat -- $k" ] && [[ "$k" =~ ^/[A-Za-z0-9._/-]+$ ]] && [[ "$k/" != *//* && "$k/" != */./* && "$k/" != */../* ]] && printf '%s' "$k"
+  return 0
+}
 claude_api_check() {
   command -v claude >/dev/null 2>&1 || { echo "claude is not installed"; return 1; }
-  local out
-  out="$( (cd / && sudo -H -u "$1" timeout 120 ${2:+env "CLAUDE_CONFIG_DIR=$2"} claude "${CLAUDE_PROOF_ARGS[@]}" 2>&1) || true)"
+  local out dir key="" settings='{}'
+  [ -n "${2:-}" ] && key="$(claude_key_file "$1" "$2/settings.json")"
+  if [ -n "$key" ]; then
+    # R1264e/f D2: the path is checked again where it is used, and the value is built by a JSON encoder from the
+    # shell-quoted path (printf %q), never by putting a variable inside the JSON's text.
+    { [[ "$key" =~ ^/[A-Za-z0-9._/-]+$ ]] && [[ "$key/" != *//* && "$key/" != */./* && "$key/" != */../* ]]; } || { echo "the API key file's path isn't a plain absolute path"; return 1; }
+    settings="$("$(command -v node)" -e 'process.stdout.write(JSON.stringify({ apiKeyHelper: `cat -- ${process.argv[1]}` }))' "$(printf '%q' "$key")")" || { echo "couldn't write the login proof's settings"; return 1; }
+  fi
+  dir="$(sudo -H -u "$1" mktemp -d /tmp/login-proof-XXXXXX)" || { echo "couldn't make an empty folder for the login's proof"; return 1; }
+  case "$dir" in /tmp/login-proof-??????) ;; *) echo "the login's proof folder isn't mktemp's ($dir)"; return 1 ;; esac
+  out="$( (cd "$dir" && claude_guarded --as "$1" --timeout 120 ${2:+--env "CLAUDE_CONFIG_DIR=$2"} -- "$settings" -p "Reply with the single word: ok" --model haiku --max-turns 1 --max-budget-usd 0.05 --output-format json 2>&1) || true)"
+  sudo -H -u "$1" rm -rf -- "$dir"
   printf '%s' "$out" | "$(command -v node)" -e '
 const text = require("node:fs").readFileSync(0, "utf8");
 let j = null;

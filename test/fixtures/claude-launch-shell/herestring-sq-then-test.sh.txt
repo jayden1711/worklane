@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# R1264w/x D1 (s1): a single-quoted here-string.
+read -r x <<<'yes'
+test() { :; }

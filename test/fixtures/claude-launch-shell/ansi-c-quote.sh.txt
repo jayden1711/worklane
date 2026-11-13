@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# R1264j D2 (j01a): an apostrophe escaped in $'…' once closed the lint's quote early, hiding the call after it.
+msg=$'can\'t reach the API'; claude -p hi --plugin-dir ./p

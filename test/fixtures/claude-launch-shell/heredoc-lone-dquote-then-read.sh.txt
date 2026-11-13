@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# R1264u D1 (h4): a heredoc holding a lone double quote, then read().
+cat <<EOF
+a " here
+EOF
+read() { :; }

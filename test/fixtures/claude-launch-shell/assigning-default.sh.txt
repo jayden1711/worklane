@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# R1264d D4: an assigning default, then the variable.
+: "${CLAUDE:=claude}"
+"$CLAUDE" -p hi

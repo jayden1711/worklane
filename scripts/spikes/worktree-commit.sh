@@ -29,7 +29,7 @@ settings="$(node --input-type=module -e 'const m = await import("/opt/worklane/c
 say "one agent turn in the worktree: write outside it (should be refused), then commit"
 cmd="touch $probe/checkout/outside-probe; echo TOUCH=\$?; git -c user.name=probe -c user.email=probe@localhost commit --allow-empty -m probe; echo COMMIT=\$?"
 printf 'Run exactly this one command with the Bash tool, then reply with its full output and nothing else: %s' "$cmd" |
-  (cd "$wt" && sudo -u "$agent" -- /usr/bin/env -i HOME="$home" PATH=/usr/local/bin:/usr/bin:/bin \
+  (builtin cd "$wt" && builtin command /usr/bin/sudo -u "$agent" -- /usr/bin/env -i HOME="$home" PATH=/usr/local/bin:/usr/bin:/bin \
     claude -p --max-budget-usd "$SPIKE_CALL_BUDGET" --settings "$settings" --model haiku --max-turns 3 --permission-mode dontAsk --allowedTools Bash --setting-sources project) | tail -6
 
 say "result"

@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# R1264p D1: a function named [ runs inside claude_guarded's tests.
+[() { return 0; }

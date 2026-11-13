@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# R1264i D1 (i01, i02): a caller's command function.
+command() { builtin command "$@" --plugin-dir /planted; }
+function env { /usr/bin/env "$@"; }

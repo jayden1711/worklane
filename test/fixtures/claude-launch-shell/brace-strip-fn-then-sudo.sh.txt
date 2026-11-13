@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# R1264ab D1 (b1): unquoted ${raw//{/} in a function, then a multi-line sudo().
+strip() {
+  local raw=$1
+  raw=${raw//{/}  # drop the GUID's braces
+  echo "$raw"
+}
+sudo() {
+  # don't prompt
+  command sudo -n "$@"
+}

@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+su - "$agent" -c "claude -p hi"

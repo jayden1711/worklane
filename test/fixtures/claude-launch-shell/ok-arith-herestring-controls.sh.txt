@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# R1264w/x: ordinary arithmetic, here-strings and heredocs, with no shadowing definition: nothing refused.
+(( m <<= s ))
+cat <<<"x y"
+read -r v <<<"$v"
+let "v = 1 << n"
+echo "$(( 1 << 3 ))"
+cat <<'EOF2'
+test() { a body in a heredoc is text }
+EOF2
+echo $(x)#'not a comment'
+case "$f" in
+  *.sh) echo sh ;;
+esac
+name="$(case "$f" in *.json) sed 's/"//g' "$f" ;; esac)"

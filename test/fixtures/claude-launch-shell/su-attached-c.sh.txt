@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# R1264l D4 (l03k): su's attached -c"…".
+su - x -c"claude -p hi"

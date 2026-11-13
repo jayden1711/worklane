@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# as <pin 1>
+# text of <pin 1>

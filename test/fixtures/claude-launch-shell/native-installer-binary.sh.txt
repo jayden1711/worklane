@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# R1264f D5 (f04a/b): the native installer's binary, by version.
+"$HOME/.local/share/claude/versions/2.1.282" -p hi
+"$HOME/.local/share/claude/versions/$v" -p hi

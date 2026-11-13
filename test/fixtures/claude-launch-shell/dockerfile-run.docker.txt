@@ -1,0 +1,2 @@
+FROM node:24
+RUN npm i -g @anthropic-ai/claude-code && claude -p hi

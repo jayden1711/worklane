@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+claude-account status
+printf "%s" "claude"

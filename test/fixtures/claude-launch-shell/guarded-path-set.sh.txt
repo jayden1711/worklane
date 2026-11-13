@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# R1264k D2: CLAUDE_GUARDED_PATH is the tests' alone; a script that sets it points claude_guarded's PATH elsewhere.
+source scripts/setup/lib.sh
+CLAUDE_GUARDED_PATH=/tmp/evil claude_guarded -- '{}' -p hi

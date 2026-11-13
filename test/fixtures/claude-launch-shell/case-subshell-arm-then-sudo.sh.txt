@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# R1264z D1 (p2): a subshell in a case arm inside "$(…)".
+k="$(case "$f" in *.json) (cd / && echo j) ;; esac)"
+sudo() { command sudo -n "$@"; }

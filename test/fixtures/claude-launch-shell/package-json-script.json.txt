@@ -1,0 +1,1 @@
+{ "name": "x", "scripts": { "ask": "claude -p hi" } }

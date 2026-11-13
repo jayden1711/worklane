@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# R1264d D4: a lookup inside a default.
+CLAUDE="${CLAUDE_BIN:-$(command -v claude)}"
+"$CLAUDE" -p hi

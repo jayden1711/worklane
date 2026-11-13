@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+echo "run claude -p to ask it"
+printf %s "claude"

@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# R1264u D1 (c1): a comment after ; with an apostrophe, then enable().
+echo hi;# don't
+enable() { :; }

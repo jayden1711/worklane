@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# R1264z D1 (p6): p1 with local(), then a line whose ) once resynced the mask.
+k="$(case "$f" in (*.json) echo j ;; esac)"
+local() { builtin local "$@"; }
+echo "  -h)  help"

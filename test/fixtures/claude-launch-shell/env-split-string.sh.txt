@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# R1264j D3 (j02f): env -S 'command'.
+env -S 'claude -p hi'

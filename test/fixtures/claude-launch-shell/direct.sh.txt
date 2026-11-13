@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+claude -p "hi" --output-format json

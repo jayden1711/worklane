@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# R1264aa D1 (b1): bash ends ${…} at its first `}`; a bare `{` doesn't nest.
+x="${y//{/}"
+z="a"
+sudo() { command sudo -n "$@"; }
+echo "} done"

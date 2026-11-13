@@ -1,0 +1,3 @@
+// R1264g/h: JS starts a session through lib.sh's claude_guarded too, here by a script that sources it.
+import { spawn } from 'node:child_process';
+spawn('bash', ['scripts/dev/probe-login.sh']);

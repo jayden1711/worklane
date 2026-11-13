@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# R1264m D2, n D1: the function form, named by a path.
+function /usr/bin/env { builtin command /usr/bin/env "$@"; }

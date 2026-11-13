@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# R1264e D2: the same with ${K}, set from an argument.
+K="$1"
+claude -p hi --settings "{\"apiKeyHelper\":\"cat -- ${K}\"}" --setting-sources '' --strict-mcp-config

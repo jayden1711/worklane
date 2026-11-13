@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# R1264g D1 (g01d/e), R1264h D2 (h01a/b): a loading flag carried by a variable.
+EXTRA="--plugin-dir ./p"
+claude -p hi $EXTRA --settings '{}' --setting-sources '' --strict-mcp-config

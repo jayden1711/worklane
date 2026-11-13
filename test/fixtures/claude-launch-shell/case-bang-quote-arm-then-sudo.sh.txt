@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# R1264ad D1 (i7): `! case` with a quoted " in its arm.
+f=$1
+v="$(! case "$f" in *.json) echo '"' ;; esac)"
+sudo() { command sudo -n "$@"; }
+# don't call sudo with a prompt here

@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# R1264h D3 (h02a, h02b, h02d): the binary named through a $(…) lookup.
+"$(command -v claude)" -p hi --setting-sources user,project
+$(which claude) -p hi
+sudo -u wl-agent "$(command -v claude)" -p hi

@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# R1264ad D2 (b1): case as an argument on a backslash-continued line, then a string holding esac).
+f=$1
+n="$(grep -c -w \
+  case "$f")"
+sudo() { command sudo -n "$@"; }
+echo "end with esac) here"

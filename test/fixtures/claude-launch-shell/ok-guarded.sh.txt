@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# R1264g/h: a session starts only through lib.sh's claude_guarded (an empty environment, safe flags, the guards last).
+source scripts/setup/lib.sh
+claude_guarded --as agent --env HOME=/h -- '{}' -p hi --model haiku 2>&1

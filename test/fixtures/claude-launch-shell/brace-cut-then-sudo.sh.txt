@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# R1264aa D1 (b3): a pattern ending in `{`.
+x="${y#*{}"
+sudo() { command sudo -n "$@"; }
+echo "}"

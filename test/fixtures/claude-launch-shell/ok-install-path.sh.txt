@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+sudo install -m 0755 scripts/ci/claude-stand-in.cjs /usr/local/bin/claude
+command -v claude >/dev/null || exit 1
+ln -sfn /usr/local/bin/claude /opt/node/bin/claude

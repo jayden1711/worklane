@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# R1264p D1: an alias named read.
+alias read='read -r'

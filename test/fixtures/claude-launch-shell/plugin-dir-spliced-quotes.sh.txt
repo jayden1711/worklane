@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# R1264g D1 (g01a/b): a loading flag spelled with quotes inside it.
+claude -p hi --plugin-di"r" ./p --settings '{}' --setting-sources '' --strict-mcp-config
+claude -p hi --plugin''-dir ./p --settings '{}' --setting-sources '' --strict-mcp-config

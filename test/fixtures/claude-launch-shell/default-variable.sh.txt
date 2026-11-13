@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+CLAUDE="${CLAUDE_BIN:-claude}"
+"$CLAUDE" -p hi

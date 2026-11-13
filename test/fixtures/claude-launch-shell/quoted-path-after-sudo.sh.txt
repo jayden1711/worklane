@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# R1264d D3: a quoted path, after a wrapper.
+sudo -u "$agent" "/usr/local/bin/claude" -p hi

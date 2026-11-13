@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# R1264p D1: a function named local runs inside claude_guarded.
+local() { builtin local "$@"; }

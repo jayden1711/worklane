@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# R1264v D1: a double quote inside $(…) inside "…" (service.sh:149's shape), then read().
+pr="$(printf '%s' "$status" | sed -n 's/.*"pr":"\([^"]*\)".*/\1/p')"
+read() { :; }
