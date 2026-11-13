@@ -24,10 +24,12 @@ jobs:
       # The gitleaks CLI is MIT; we run the pinned, checksum-verified binary
       # directly rather than the gitleaks-action wrapper.
       - name: install gitleaks
+        shell: /usr/bin/bash --noprofile --norc -p -eo pipefail {0}
+        env:
+          BASH_ENV: ''
         run: |
           tarball="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
-          curl -sSfL -o "$tarball" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${tarball}"
-          echo "${GITLEAKS_SHA256}  ${tarball}" | sha256sum -c -
+          /usr/bin/bash -p "$GITHUB_WORKSPACE/scripts/ci/fetch-pinned.sh" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${tarball}" "${GITLEAKS_SHA256}" "$tarball"
           tar -xzf "$tarball" gitleaks
       - name: scan full history
         run: ./gitleaks git --redact --verbose --exit-code 1 .

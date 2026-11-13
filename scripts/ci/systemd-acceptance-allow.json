@@ -508,6 +508,12 @@
       "uses": [
         "systemd: export const RUNNERS: Readonly<Record<string, Runner>> = {\n'systemd-run': { value: opts('HMEpu', 'unit', 'property', 'setenv', 'description', 'slice', 'uid', 'gid', 'working-directory', 'machine', 'host', 'nice', 'service-type', 'expand-environment', 'path-property', 'socket-property', 'on-active', 'on-boot', 'on-startup', 'on-unit-active', 'on-unit-inactive', 'on-calendar', 'timer-property') },\n};"
       ]
+    },
+    "test/ci-download-retry.test.ts": {
+      "why": "data the download lint's own test reads: the probes a scripts/ci runner script is allowed to make (a probe to a local stand-in index), keyed by that script's path; no skip reads it",
+      "uses": [
+        "systemd: const SCRIPT_PROBES: Record<string, string[]> = {\n'scripts/ci/testrun-pip-real-systemd.sh': [`curl -fsS \"http://$PUB:$PORT/simple/standin/\"`],\n};"
+      ]
     }
   },
   "skipImports": {

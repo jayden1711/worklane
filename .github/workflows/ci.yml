@@ -96,8 +96,10 @@ jobs:
             grep -q "^$u:" /etc/subgid || usermod --add-subgids 2000-59999 "$u"
           done
           f=chrome-linux64.zip
-          curl -sSfL -o "/tmp/$f" "https://storage.googleapis.com/chrome-for-testing-public/${CHROME_VERSION}/linux64/$f"
-          echo "${CHROME_SHA256}  /tmp/$f" | sha256sum -c -
+          # Inline, not the repo's fetch helper: this step runs as root in the self-hosted container, so nothing from the checkout.
+          # The file is moved to its name only once its pin matched (--strict): a check that failed leaves nothing to use.
+          curl -sSfL --proto '=https' --tlsv1.2 --connect-timeout 20 --speed-limit 1024 --speed-time 60 --retry 5 --retry-all-errors --retry-delay 5 --retry-max-time 120 -o "/tmp/$f.part" "https://storage.googleapis.com/chrome-for-testing-public/${CHROME_VERSION}/linux64/$f"
+          echo "${CHROME_SHA256}  /tmp/$f.part" | sha256sum -c - --strict && mv -f -- "/tmp/$f.part" "/tmp/$f"
           unzip -q "/tmp/$f" -d /opt && rm -f "/tmp/$f"
           # Each deb.deps line is "a (>= v) | b | c": the first alternative this release can install, or its t64
           # rename (libasound2 is libasound2t64 on 24.04); a line with none fails the step.
@@ -167,8 +169,10 @@ jobs:
             Windows) f="gitleaks_${GITLEAKS_VERSION}_windows_x64.zip";     sum=d29144deff3a68aa93ced33dddf84b7fdc26070add4aa0f4513094c8332afc4e ;;
           esac
           mkdir -p "$RUNNER_TEMP/bin" && cd "$RUNNER_TEMP/bin"
-          curl -sSfL -o "$f" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${f}"
-          echo "${sum}  ${f}" | sha256sum -c -
+          # Inline, not the repo's fetch helper: in the self-hosted container this step runs as root, so nothing from the checkout.
+          # The file is moved to its name only once its pin matched (--strict): a check that failed leaves nothing to use.
+          curl -sSfL --proto '=https' --tlsv1.2 --connect-timeout 20 --speed-limit 1024 --speed-time 60 --retry 5 --retry-all-errors --retry-delay 5 --retry-max-time 120 -o "$f.part" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${f}"
+          echo "${sum}  $f.part" | sha256sum -c - --strict && mv -f -- "$f.part" "$f"
           case "$f" in *.zip) unzip -q "$f" gitleaks.exe ;; *) tar -xzf "$f" gitleaks ;; esac
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - run: npm run typecheck
@@ -383,13 +387,14 @@ jobs:
         with:
           fetch-depth: 0
       - name: install gitleaks
+        shell: /usr/bin/bash --noprofile --norc -p -eo pipefail {0}
         env:
+          BASH_ENV: ''
           GITLEAKS_VERSION: 8.30.1
         run: |
           f="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
           mkdir -p "$RUNNER_TEMP/bin" && cd "$RUNNER_TEMP/bin"
-          curl -sSfL -o "$f" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${f}"
-          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  ${f}" | sha256sum -c -
+          /usr/bin/bash -p "$GITHUB_WORKSPACE/scripts/ci/fetch-pinned.sh" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${f}" 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb "$f"
           tar -xzf "$f" gitleaks && echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: gate the commits
         # A PR's own commits only: merge-base(base, head)..head, the PR head rather than the test merge,
