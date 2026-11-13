@@ -115,7 +115,8 @@ test('a helper imported before a table module can neither replace the freeze, un
   // Each helper runs before test/raw-check-reads.js loads, as one imported first would.
   // A fifth field `true`: the case works on a copy of the table module (`__COPY__`, made before the child starts, so
   // its preload snapshots it), never on the module other tests load.
-  const helpers: [string, string, string?, ('import' | 'require')?, boolean?][] = [
+  // The fifth field may also be the copy's name, with `{tag}` for this run's tag.
+  const helpers: [string, string, string?, ('import' | 'require')?, (boolean | string)?][] = [
     ['control', ''],
     ['control, by a first-load require()', '', './raw-check-reads.js', 'require'],
     ['AL2a the freeze global replaced', "try { globalThis.__worklaneTestFreezeTable = () => {}; } catch {}\ntry { Object.defineProperty(globalThis, '__worklaneTestFreezeTable', { value: () => {} }); } catch {}\n"],
@@ -151,6 +152,10 @@ test('a helper imported before a table module can neither replace the freeze, un
     ['AV4 a process.cwd that lies to its first 2 calls, then import()', "import M from 'node:module';\nimport { readFileSync } from 'node:fs';\nimport { fileURLToPath } from 'node:url';\nconst f = fileURLToPath(new URL('./__COPY__', import.meta.url));\nconst dir = fileURLToPath(new URL('.', import.meta.url));\nconst real = process.cwd;\nlet n = 0;\nprocess.cwd = () => (n++ < 2 ? '/var/empty' : dir);\ntry { const m = new M(f); m.paths = []; m._compile(readFileSync(f, 'utf8').split('\\n').filter((l) => !l.startsWith('__worklaneTestFreezeTable(')).join('\\n'), '__COPY__', 'module'); } finally { process.cwd = real; }\n", './__COPY__', 'import', true],
     ['AV4 a process.cwd that lies to its first 3 calls, then import()', "import M from 'node:module';\nimport { readFileSync } from 'node:fs';\nimport { fileURLToPath } from 'node:url';\nconst f = fileURLToPath(new URL('./__COPY__', import.meta.url));\nconst dir = fileURLToPath(new URL('.', import.meta.url));\nconst real = process.cwd;\nlet n = 0;\nprocess.cwd = () => (n++ < 3 ? '/var/empty' : dir);\ntry { const m = new M(f); m.paths = []; m._compile(readFileSync(f, 'utf8').split('\\n').filter((l) => !l.startsWith('__worklaneTestFreezeTable(')).join('\\n'), '__COPY__', 'module'); } finally { process.cwd = real; }\n", './__COPY__', 'import', true],
     ['AV4 a process.cwd that lies to its first 4 calls, then import()', "import M from 'node:module';\nimport { readFileSync } from 'node:fs';\nimport { fileURLToPath } from 'node:url';\nconst f = fileURLToPath(new URL('./__COPY__', import.meta.url));\nconst dir = fileURLToPath(new URL('.', import.meta.url));\nconst real = process.cwd;\nlet n = 0;\nprocess.cwd = () => (n++ < 4 ? '/var/empty' : dir);\ntry { const m = new M(f); m.paths = []; m._compile(readFileSync(f, 'utf8').split('\\n').filter((l) => !l.startsWith('__worklaneTestFreezeTable(')).join('\\n'), '__COPY__', 'module'); } finally { process.cwd = real; }\n", './__COPY__', 'import', true],
+    // R1184ay D1: a module whose name starts with `[`, compiled under its relative name: still guarded (only Node's
+    // exact pseudo-names are skipped).
+    ['AY1a a module named [x]...js, compiled stripped by its relative name, then import()', "import M from 'node:module';\nimport { readFileSync } from 'node:fs';\nimport { fileURLToPath } from 'node:url';\nconst f = fileURLToPath(new URL('./__COPY__', import.meta.url));\nprocess.chdir(fileURLToPath(new URL('.', import.meta.url)));\nconst m = new M(f);\nm.paths = [];\nm._compile(readFileSync(f, 'utf8').split('\\n').filter((l) => !l.startsWith('__worklaneTestFreezeTable(')).join('\\n'), '__COPY__', 'module');\n", './__COPY__', 'import', '[x]-{tag}.js'],
+    ['AY1b a module named [eval]x...js, the same', "import M from 'node:module';\nimport { readFileSync } from 'node:fs';\nimport { fileURLToPath } from 'node:url';\nconst f = fileURLToPath(new URL('./__COPY__', import.meta.url));\nprocess.chdir(fileURLToPath(new URL('.', import.meta.url)));\nconst m = new M(f);\nm.paths = [];\nm._compile(readFileSync(f, 'utf8').split('\\n').filter((l) => !l.startsWith('__worklaneTestFreezeTable(')).join('\\n'), '__COPY__', 'module');\n", './__COPY__', 'import', '[eval]x-{tag}.js'],
     ['AT2a the build output rewritten without the self-freeze, then require()', "import { readFileSync, writeFileSync } from 'node:fs';\nimport { fileURLToPath } from 'node:url';\nconst f = fileURLToPath(new URL('./__COPY__', import.meta.url));\nwriteFileSync(f, readFileSync(f, 'utf8').split('\\n').filter((l) => !l.startsWith('__worklaneTestFreezeTable(')).join('\\n'));\n", './__COPY__', 'require', true],
     ['AT2b the build output rewritten without the marks, then import()', "import { readFileSync, writeFileSync } from 'node:fs';\nimport { fileURLToPath } from 'node:url';\nconst f = fileURLToPath(new URL('./__COPY__', import.meta.url));\nwriteFileSync(f, readFileSync(f, 'utf8').split('\\n').filter((l) => !l.startsWith('__worklaneTestFreezeTable(') && !l.startsWith('// check-table: ')).join('\\n'));\n", './__COPY__', 'import', true],
     ['AS1c _compile patched, then import()', "import M from 'node:module';\nimport { createRequire } from 'node:module';\nconst orig = M.prototype._compile;\nM.prototype._compile = function (c, f, ...r) { return orig.call(this, String(c).replace(/__worklaneTestFreezeTable\\(/g, 'void ('), f, ...r); };\ncreateRequire(import.meta.url)('./raw-check-reads.js');\n"],
@@ -162,7 +167,7 @@ test('a helper imported before a table module can neither replace the freeze, un
   for (const [label, rawBody, rawSpec = './raw-check-reads.js', how = 'import', copy = false] of helpers) {
     const tag = randomBytes(4).toString('hex');
     const [helper, main] = [join(dir, `zz-ao-helper-${tag}.js`), join(dir, `zz-ao-main-${tag}.js`)];
-    const copyName = `zz-at-copy-${tag}.js`;
+    const copyName = typeof copy === 'string' ? copy.replace('{tag}', tag) : `zz-at-copy-${tag}.js`;
     const [body, spec] = [rawBody.replaceAll('__COPY__', copyName), rawSpec.replaceAll('__COPY__', copyName)];
     try {
       if (copy) copyFileSync(join(dir, 'raw-check-reads.js'), join(dir, copyName));
@@ -176,7 +181,7 @@ test('a helper imported before a table module can neither replace the freeze, un
         continue;
       }
       // The compile step: a patch of it throws (it is read-only), and a compile from other text is refused.
-      if (/^A[SR]1|^A[TUV]/.test(label)) {
+      if (/^A[SR]1|^A[TUVY]/.test(label)) {
         assert.notEqual(r.status, 0, `${label}: the module compiled: ${r.stdout}`);
         assert.match(r.stderr, /compiled from a source other than its file's|a source other than the one at the start|read[- ]only|Cannot assign/, label);
         continue;
@@ -289,5 +294,32 @@ test("the snapshot keeps a module listed but gone before its read as gone, so a 
     assert.deepEqual([...snap.entries()].sort(), [[join(dir, 'gone.js'), null], [join(dir, 'kept.js'), "// check-table: never-grow\nexport const T = ['a'];\n"]]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a table module gone when the preload read the build output is refused when something loads it later, by import() or require() (#941, R1184ax D2)", async () => {
+  const { spawnSync } = await import('node:child_process');
+  const { readFileSync, rmSync, symlinkSync, writeFileSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const { randomBytes } = await import('node:crypto');
+  const { pathToFileURL } = await import('node:url');
+  const { repoRoot } = await import('./helpers.js');
+  const dir = join(repoRoot, 'dist', 'test');
+  for (const how of ['import', 'require'] as const) {
+    const tag = randomBytes(4).toString('hex');
+    // A link listed by the preload's read of dist/test but leading nowhere: the snapshot keeps that path as gone. The
+    // child then puts a table module at that very path (the link replaced by a file), without its freeze calls, and
+    // loads it: what a module removed while the preload read the directory, and put back after, looks like.
+    const [link, target, main] = [join(dir, `zz-ax-${tag}.js`), join(dir, `zz-ax-${tag}.target.js`), join(dir, `zz-ax-main-${tag}.js`)];
+    const stripped = readFileSync(join(dir, 'raw-check-reads.js'), 'utf8').split('\n').filter((l) => !l.startsWith('__worklaneTestFreezeTable(') && !l.startsWith('// check-table: ')).join('\n');
+    try {
+      symlinkSync(target, link);
+      writeFileSync(main, `import { unlinkSync, writeFileSync } from 'node:fs';\nimport { createRequire } from 'node:module';\nunlinkSync(${JSON.stringify(link)});\nwriteFileSync(${JSON.stringify(link)}, ${JSON.stringify(stripped)});\nconst m = ${how === 'require' ? `createRequire(import.meta.url)('./zz-ax-${tag}.js')` : `await import('./zz-ax-${tag}.js')`};\nconsole.log(JSON.stringify({ frozen: __worklaneTestDeepFrozen(m.RAW_READS_ALLOWED) }));\n`);
+      const r = spawnSync(process.execPath, ['--import', pathToFileURL(join(dir, 'isolate.js')).href, main], { encoding: 'utf8', env: process.env, timeout: 60_000 });
+      assert.notEqual(r.status, 0, `${how}: the gone module loaded: ${r.stdout}`);
+      assert.match(r.stderr, /gone when this (process's preload|hook) read the test modules, so not loaded/, how);
+    } finally {
+      for (const f of [link, target, main]) rmSync(f, { force: true });
+    }
   }
 });

@@ -110,6 +110,8 @@ syncBuiltinESMExports();
   const startsWith = String.prototype.startsWith;
   const slice = String.prototype.slice;
   const mapGet = Map.prototype.get;
+  const setHas = Set.prototype.has;
+  const PSEUDO_NAMES = new Set(['[eval]', '[eval]-wrapper', '[stdin]', '[stdin]-wrapper', '[worker eval]', '[worker eval]-wrapper']);
   const lexicalHere = dirname(fileURLToPath(import.meta.url));
   const here = realpathOf(lexicalHere);
   // The text of each module here, not a test file, that registers a table or freezes one itself, as it is now, when
@@ -140,9 +142,10 @@ syncBuiltinESMExports();
   const guarded = function (this: unknown, ...args: unknown[]) {
     const content = args[0];
     const filename = args[1];
-    // Node's own pseudo-filenames (`[eval]`, `[eval]-wrapper`, `[worker eval]`) name no file, and no helper's instance:
-    // a `node -e` run with its working directory in here resolved one under this directory, then failed to read it.
-    if (typeof filename === 'string' && !(apply(startsWith, filename, ['[']) as boolean)) {
+    // Node's own pseudo-filenames name no file, and no helper's instance: a `node -e` run with its working directory in
+    // here resolved one under this directory, then failed to read it. Only these exact names, never a prefix (R1184ay
+    // D1: a relative `[x].js` skipped the guard while Node resolved it to the real module).
+    if (typeof filename === 'string' && !(apply(setHas, PSEUDO_NAMES, [filename]) as boolean)) {
       const key = keyOf(filename);
       if (key !== null) {
         // A snapshotted module compiles only from its text as it was at this preload; any other module here only from
