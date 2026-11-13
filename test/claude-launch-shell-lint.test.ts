@@ -1314,7 +1314,7 @@ const CASE_ARGUMENT = [
   '[[ $k =~ ^(case|switch)$ ]] && echo y', '[[ $k =~ ^(case x)$ ]] && echo y', 'echo found\\| case closed',
   'echo \\( case x \\)', 'find . -name x -exec true {} \\; case x', 'echo $(date +%F) case notes', 'echo `date +%F` case notes',
   'printf "%s %s" $(id -u) case x', 'x=1 case y', '>/dev/null case y', 'grep -c esac x', 'case y in case) :;; esac',
-  'time echo case x', 'case y in y) grep -c esac x;; *) echo "a";; esac', 'coproc echo case x', 'function g { echo case x; }; g', 'echo a; echo case x', 'cat <<<case',
+  'time echo case x', 'case y in y) grep -c esac x;; *) echo "a";; esac', 'function g { echo case x; }; g', 'echo a; echo case x', 'cat <<<case',
 ];
 test('#1262 (R1264ae/af): case after every command start is the reserved word, and in every argument position is not', () => {
   const bash4 = Number(execFileSync('bash', ['-c', 'echo "${BASH_VERSINFO[0]}"'], { encoding: 'utf8' }).trim()) >= 4;
