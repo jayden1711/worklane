@@ -110,6 +110,8 @@ const WS_ENV_ROOT = /^\$\{?WS\}?\/(?:scripts|\.github)\//;
 /** A shell file from the checkout's root: scripts/ or .github/, plainly or from $GITHUB_WORKSPACE or $ws. */
 const SHELL_FILE_ROOT = /^(?:\.\/|\$\{?(?:GITHUB_WORKSPACE|ws)\}?\/)?(?:scripts|\.github)\//;
 /** Downloaders other than curl: none may run in a workflow or a script (a probe to /dev/null aside, below). */
+/** A wget asked only its version or help, with no URL after it (R1228bm D3): it fetches nothing, so it isn't one. */
+const withoutVersionAsks = (text: string): string => text.replace(/\bwget\s+(?:--version|-V|--help|-h)(?=$|[\s;&|)`"'])(?![^;&|\n]*:\/\/)/g, '');
 const OTHER_FETCH = /\bwget\b|\bgh\s+release\s+download\b|\bInvoke-WebRequest\b|\biwr\b|\bInvoke-RestMethod\b|\birm\b|\bWebClient\b|\bDownloadFile\b|\bHttpClient\b|\bStart-BitsTransfer\b|\baria2c\b|\bcurl\.exe\b|=\s*["']?curl\b|\bgh\s+api\b[^\n]*(?:releases\/|octet-stream)|\bgh\s+release\s+(?:view|list)\b[^\n]*\bassets\b|\b(?:command\s+-v|which|type\s+-[pP])\s+curl\b/i;
 
 /** A run script's lines, with backslash-continued lines joined. */
@@ -143,21 +145,30 @@ const ansiC = (line: string, i: number): boolean => {
   if (b % 2 === 1) n--;
   return n % 2 === 1;
 };
-/** A `$(…)` inside double quotes: its paren depth, and how many `case … esac` it is inside (R1228bj D2). */
-type Sub = { depth: number; cases: number };
-/** The `case` or `esac` word starting at `i`, if any (a word of its own: after a start, a blank, `;`, `&`, `|` or `(`). */
-const caseWord = (line: string, i: number): 'case' | 'esac' | null => {
-  const m = /^(case|esac)(?=$|[\s;&|)])/.exec(line.slice(i));
-  return m && (i === 0 || /[\s;&|(]/.test(line[i - 1]!)) ? (m[1] as 'case' | 'esac') : null;
-};
 /**
- * A `)` inside a `$(…)`: an inner paren's, a case pattern's (at depth 0 inside `case … in`, R1228bj D2: as #1264's
- * reader), or the `$(…)`'s own; true when it closes the `$(…)`.
+ * A `$(…)` inside double quotes: the parens and `case … esac` open inside it, innermost last (R1228bj D2; R1228bm D2: a
+ * case inside a subshell or a nested `$(…)` is that level's, so its pattern's `)` closes nothing above it).
  */
+type Sub = { frames: ('(' | 'case')[] };
+/**
+ * The `case` or `esac` word starting at `i`, if any: a reserved word only in command position (R1228bl D1, R1228bm D1,
+ * as #1264 reads it): only blanks back to the line's or the `$(`'s start, `;`, `&`, `|`, `(`, `)`, a backquote, `{`, or
+ * `then`/`do`/`else`/`elif`; so `echo case` and `grep -cw case` are arguments. An `esac` closes only an open case.
+ */
+const caseWord = (line: string, i: number, sub: Sub): 'case' | 'esac' | null => {
+  const m = /^(case|esac)(?=$|[\s;&|)])/.exec(line.slice(i));
+  if (!m) return null;
+  const before = line.slice(0, i).replace(/\s+$/, '');
+  const start = before === '' || /[;&|()`{]$/.test(before) || /(?:^|[\s;&|(){`])(?:then|do|else|elif)$/.test(before);
+  if (!start) return null;
+  if (m[1] === 'esac' && sub.frames[sub.frames.length - 1] !== 'case') return null;
+  return m[1] as 'case' | 'esac';
+};
+/** A `)` inside a `$(…)`: an inner paren's, a case pattern's (the innermost open is a `case`), or the `$(…)`'s own (true). */
 const closesSub = (sub: Sub): boolean => {
-  if (sub.depth > 0) sub.depth--;
-  else if (sub.cases === 0) return true;
-  return false;
+  const top = sub.frames[sub.frames.length - 1];
+  if (top === '(') sub.frames.pop();
+  return top === undefined;
 };
 const logicalLines = (run: string): string[] => {
   const out: string[] = [];
@@ -196,7 +207,7 @@ const logicalLines = (run: string): string[] => {
         continue;
       }
       if (q === '"' && ch === '$' && line[i + 1] === '(') {
-        subs.push({ depth: 0, cases: 0 });
+        subs.push({ frames: [] });
         q = null;
         i++;
         continue;
@@ -206,16 +217,16 @@ const logicalLines = (run: string): string[] => {
         continue;
       }
       if (subs.length) {
-        const w = caseWord(line, i);
+        const w = caseWord(line, i, subs[subs.length - 1]!);
         if (w) {
-          subs[subs.length - 1]!.cases += w === 'case' ? 1 : -1;
-          if (subs[subs.length - 1]!.cases < 0) subs[subs.length - 1]!.cases = 0;
+          if (w === 'case') subs[subs.length - 1]!.frames.push('case');
+          else subs[subs.length - 1]!.frames.pop();
           i += 3;
           continue;
         }
       }
       if (subs.length && ch === '(') {
-        subs[subs.length - 1]!.depth++;
+        subs[subs.length - 1]!.frames.push('(');
         continue;
       }
       if (subs.length && ch === ')') {
@@ -268,7 +279,7 @@ export function shellCommands(line: string): Cmd[] {
     if (q === '"' && c === '$' && line[i + 1] === '(') {
       cur += '$(';
       i++;
-      subs.push({ depth: 0, cases: 0 });
+      subs.push({ frames: [] });
       q = null;
       continue;
     }
@@ -288,15 +299,16 @@ export function shellCommands(line: string): Cmd[] {
     if (c === '\\') { cur += c + (line[++i] ?? ''); continue; }
     if (c === "'" || c === '"') { q = c; cur += c; continue; }
     if (subs.length) {
-      const w = caseWord(line, i);
+      const w = caseWord(line, i, subs[subs.length - 1]!);
       if (w) {
-        subs[subs.length - 1]!.cases = Math.max(0, subs[subs.length - 1]!.cases + (w === 'case' ? 1 : -1));
+        if (w === 'case') subs[subs.length - 1]!.frames.push('case');
+        else subs[subs.length - 1]!.frames.pop();
         cur += w;
         i += 3;
         continue;
       }
       cur += c;
-      if (c === '(') subs[subs.length - 1]!.depth++;
+      if (c === '(') subs[subs.length - 1]!.frames.push('(');
       else if (c === ')' && closesSub(subs[subs.length - 1]!)) {
         subs.pop();
         q = '"';
@@ -304,7 +316,8 @@ export function shellCommands(line: string): Cmd[] {
       continue;
     }
     if (c === '`') { bt = !bt; cur += c; continue; }
-    if (c === '#' && (i === 0 || /\s/.test(line[i - 1]!))) {
+    // R1228bl D2: as logicalLines reads one, a comment starts after `;`, `&`, `|` or `(` too (`true;# x`).
+    if (c === '#' && (i === 0 || /[\s;&|(]/.test(line[i - 1]!))) {
       const end = bt ? line.indexOf('`', i) : -1;
       if (end < 0) break;
       i = end - 1;
@@ -367,8 +380,13 @@ export const curlUrls = (cmd: string): string[] =>
   [...words(cmd.slice(cmd.search(/curl/))), ...curlTokens(cmd)].filter((w) => /^(?:--url=)?https?:\/\//i.test(w)).map((w) => w.replace(/^--url=/, ''));
 
 function transfersOutput(t: readonly string[]): 'file' | 'stdout' | 'none' {
-  // R1228bk D3: a curl asked only for its version, help or manual, with no URL, transfers nothing.
-  if (t.some((x) => /^(?:-V|--version|-h|--help|-M|--manual)$/.test(x)) && !t.some((x) => /^[a-z][a-z0-9+.-]*:\/\//i.test(x))) return 'none';
+  // R1228bk D3, R1228bm D3, R1228bl L7: -V/--version, -h/--help or -M/--manual (a short bundle too: `-sV`) makes curl
+  // print and exit with no transfer, URL or not, unless it is another option's value (`-A --version`: a user agent).
+  const takesValue = (x: string) =>
+    /^-[a-zA-Z]*[AbcCdDeEFHKmoPQrtTuUwxXyYz]$/.test(x) ||
+    (/^--[a-z0-9-]+$/.test(x) && !/^--(?:silent|show-error|fail|fail-with-body|location|compressed|insecure|verbose|include|head|remote-name|remote-name-all|create-dirs|retry-all-errors|retry-connrefused|http1\.1|http2|globoff|no-progress-meter|progress-bar|ipv4|ipv6|version|help|manual|no-buffer|ssl-reqd|tlsv1\.2)$/.test(x));
+  const ask = (x: string, k: number) => /^(?:--version|--help|--manual|-[a-zA-Z]*[VhM][a-zA-Z]*)$/.test(x) && !(k > 0 && takesValue(t[k - 1]!));
+  if (t.some(ask)) return 'none';
   let file = false;
   let stdout = false;
   let named = false;
@@ -408,7 +426,7 @@ export function workflowTextProblems(text: string): string[] {
     // R1228ae D1: a one-line `run:` holds its helper line after the key.
     // R1228af D2: and in YAML single quotes (`run: '…'`).
     if (DOWNLOAD.test(l) && !HELPER_LINE.test(l.replace(/^\s*(?:-\s+)?run:\s+/, '').replace(/^'(.*)'\s*$/, '$1')) && !INLINE_CURL.test(l)) out.push(`a pinned URL not on a ${HELPER} line: ${l.trim()}`);
-    if (!/^\s*#/.test(l) && OTHER_FETCH.test(l)) out.push(`a download that isn't the helper's curl: ${l.trim()}`);
+    if (!/^\s*#/.test(l) && OTHER_FETCH.test(withoutVersionAsks(l))) out.push(`a download that isn't the helper's curl: ${l.trim()}`);
   }
   return out;
 }
@@ -700,7 +718,7 @@ export function scriptProblems(text: string, probes: string[] = []): { downloads
   const problems: string[] = [];
   for (const { cmd: c, piped } of logicalLines(text).flatMap(shellCommands)) {
     if (probes.includes(c)) continue;
-    if (OTHER_FETCH.test(c)) {
+    if (OTHER_FETCH.test(withoutVersionAsks(c))) {
       // wget only as a probe whose every output is /dev/null (R1228d D6: it writes the last -O).
       const outs = /\bwget\b/.test(c) ? wgetOutputs(c) : [];
       if (!(outs.length && outs.every((o) => o === '/dev/null'))) problems.push(`a download that isn't curl: ${c}`);
@@ -870,7 +888,7 @@ export function decodedProblems(text: string): string[] {
   const out: string[] = [];
   for (const l of logicalLines(text)) {
     if (DOWNLOAD.test(l) && !HELPER_LINE.test(l) && !INLINE_CURL.test(l)) out.push(`a pinned URL not on a ${HELPER} line: ${l.trim()}`);
-    if (!/^\s*#/.test(l) && OTHER_FETCH.test(l)) out.push(`a download that isn't the helper's curl: ${l.trim()}`);
+    if (!/^\s*#/.test(l) && OTHER_FETCH.test(withoutVersionAsks(l))) out.push(`a download that isn't the helper's curl: ${l.trim()}`);
   }
   return out;
 }
@@ -2011,6 +2029,36 @@ test('R1228bj D1-D3, R1228bk D1-D3: a case pattern inside a quoted $(…), a com
   assert.deepEqual(unread('x="$(true; source .claude/hooks/get.sh)"\n'), [], 'stated: K2a');
 });
 
+test('R1228bl D1-D3, R1228bm D1-D3: `case` only in command position, a case one level down, a comment after `;`, a curl or wget asked its version; backquotes in a double quote (stated)', () => {
+  const all = (text: string, rel = 'scripts/ci/zz-a.sh') => fileDownloadProblems(rel, text).problems;
+  const unread = (text: string) => all(text).filter((p) => /a shell file the download lint doesn't read/.test(p));
+  const kept = (text: string) => all(text, 'scripts/ci/zz-get.sh');
+  // bl D1, bm D1: `case` as an argument opens no case.
+  for (const text of [String.raw`x="$(echo case)"; source .claude/hooks/get.sh`, String.raw`n="$(grep -c case f)"; source .claude/hooks/get.sh`, String.raw`n="$(grep -cw case notes.txt)"; source .claude/hooks/get.sh`]) {
+    assert.ok(unread(`${text}\n`).length > 0, `refused: ${text}`);
+  }
+  assert.deepEqual(kept(String.raw`x="$(echo case)" # curl -fsSL -o t.tgz https://example.com/t.tgz` + '\n'), [], 'kept: A3a, the comment is one');
+  // A case in command position after `then` still counts.
+  assert.ok(unread(String.raw`x="$(if true; then case "$1" in *) echo "it's";; esac; fi)" && source .claude/hooks/get.sh` + '\n').length > 0, 'refused: case after then');
+  // bm D2: a case inside a subshell or a nested $(…) is that level's.
+  for (const text of [String.raw`x="$( (case a in a) echo;; esac); echo "it's" )"; source .claude/hooks/get.sh`, String.raw`x="$(echo $(case a in a) echo b;; esac) "it's")"; source .claude/hooks/get.sh`]) {
+    assert.ok(unread(`${text}\n`).length > 0, `refused: ${text}`);
+  }
+  // bl D2: a comment right after `;` or `&` is one, in a script and in a workflow run.
+  for (const text of ['true;# old: curl -o t.tgz https://example.com/t.tgz', 'true &# old: curl -o t.tgz https://example.com/t.tgz']) {
+    assert.deepEqual(kept(`${text}\n`), [], `kept: ${text}`);
+    assert.deepEqual(runProblems(`${text}\n`), [], `kept in a run: ${text}`);
+  }
+  // bm D3: a curl short-option bundle asking its version, and wget asked its version or help, transfer nothing; an
+  // option's value spelled like one (`-A --version`) with an output named still downloads.
+  for (const text of ['curl -sV | head -1', 'curl -V 2>&1', 'curl --version >/dev/null 2>&1', 'wget --version | head -1', 'wget -h | grep -q -- --tries']) {
+    assert.deepEqual(kept(`${text}\n`), [], `kept: ${text}`);
+  }
+  assert.ok(kept('curl -fsSL -A --version -o t.tgz "$URL"\n').some((p) => /retry/.test(p)), 'refused: C2a');
+  // Stated (bl D3): backquotes inside a double quote aren't split.
+  assert.deepEqual(unread('echo "`true; source .claude/hooks/get.sh`"\n'), [], 'stated: L3a');
+});
+
 // Limits (owner decision (c): stated, not closed; the helper's digest check holds for each download it handles):
 // - What the lint reads (R1228ai D1, closing R1228i L9-L11; R1228aj, R1228ak): workflow and action YAML, a shell
 //   script anywhere, every file under scripts/ whatever its name (a pinned URL, prose in a .md aside; the retry rule in
@@ -2062,7 +2110,8 @@ test('R1228bj D1-D3, R1228bk D1-D3: a case pattern inside a quoted $(…), a com
 //   command, so a `source` or `.` after it, or a second curl, isn't read as a command (R1228bi D1: M3, T1c); inside a
 //   double-quoted `$(…)` nothing splits a command either, so a `;`, `&&`, `||` or `|` there doesn't start one: a
 //   second curl in it with no retry, and a `source` or `.` there, aren't read (`x="$(curl --retry 5 -o a URL; curl -o b
-//   URL)"`, `x="$(true; source x.sh)"`; R1228bk D1); a Makefile recipe is read unexpanded, so make's `$$'…'` (a `$'…'`
+//   URL)"`, `x="$(true; source x.sh)"`; R1228bk D1), nor inside backquotes in a double quote (`` x="`true; source x.sh`" ``,
+//   R1228bl D3); a Makefile recipe is read unexpanded, so make's `$$'…'` (a `$'…'`
 //   to the shell) is read as the PID and a plain quote (R1228bk D2); and in any quoting, a `source` or `.` whose
 //   file is glued to a `)` (`x=$(true; source x.sh)`), or that opens a subshell or backquotes (`(source x.sh)`,
 //   `` x=`source x.sh` ``), isn't read (R1228bk, older than these rounds); a
