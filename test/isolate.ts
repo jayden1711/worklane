@@ -108,6 +108,7 @@ syncBuiltinESMExports();
   const realpathOf = realpathSync;
   const resolveOf = resolve;
   const startsWith = String.prototype.startsWith;
+  const slice = String.prototype.slice;
   const mapGet = Map.prototype.get;
   const lexicalHere = dirname(fileURLToPath(import.meta.url));
   const here = realpathOf(lexicalHere);
@@ -117,6 +118,13 @@ syncBuiltinESMExports();
   // Under this directory by where the path really leads, or, where it can't be resolved (moved aside, or never there),
   // by its text alone: fail closed (R1184at D1).
   const keyOf = (f: string): string | null => {
+    // First the path as written, the one Node keys the module's instance by, mapped from this directory as named onto
+    // it as resolved (R1184av D1: a link inside this directory, named as a snapshotted module and leading to other
+    // text, was judged by where it leads, which no snapshot holds).
+    const lex = resolveOf(f);
+    const mapped = (apply(startsWith, lex, [lexicalHere + sep]) as boolean) ? here + (apply(slice, lex, [lexicalHere.length]) as string) : lex;
+    if (apply(mapGet, snapshot, [mapped]) !== undefined) return mapped;
+    if (apply(mapGet, snapshot, [lex]) !== undefined) return lex;
     let r: string | null = null;
     try {
       r = realpathOf(f);
@@ -144,6 +152,10 @@ syncBuiltinESMExports();
     return apply(compile, this, args);
   };
   defineProperty(proto, '_compile', { value: guarded, writable: false, configurable: false, enumerable: false });
+  // The working directory a relative filename resolves against, read once per call by the guard and again by the real
+  // compile: one function, fixed now (R1184av D2: a process.cwd answering one directory to the guard and another to
+  // the compile). No test stubs it.
+  defineProperty(process, 'cwd', { value: process.cwd, writable: false, configurable: false, enumerable: true });
   // Each loader by extension too (R1184ar D1, AR1a: `_extensions['.js']` replaced), as it is now. A replaced
   // `Module._load` can only hand a test exports it made up: the owner-named open class of a re-pointed import.
   const ext = (nodeModule as unknown as { _extensions: Record<string, unknown> })._extensions;

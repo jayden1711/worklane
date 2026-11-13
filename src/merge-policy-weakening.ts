@@ -201,6 +201,8 @@ export const GUARD_FILES: readonly string[] = [
   'scripts/lib/check-tables.mjs',
   'scripts/lib/table-copies.mjs',
   'scripts/gen-table-copies.mjs',
+  // What writes the tables files into dist/ for the loader (#941, the owner's budget choice of 2026-11-12).
+  'scripts/copy-tables-json.mjs',
   'test/table-freeze.ts',
   // The snapshot the freeze's compile step and hook check a table module's source against (R1184at D3).
   'test/table-snapshot.ts',
@@ -436,7 +438,7 @@ export const TABLE_LOAD = /\btablesOf\s*\(\s*import\s*\.\s*meta\s*\.\s*url\b|\bT
 export const LOADER_IMPORT = /^\s*import\s+(?:type\s+)?\{\s*(?:(?:type\s+)?(?:tablesOf|frozenSet|regExpOf|regExpsOf|FrozenSet|Pattern|Tables|TableKind)\s*,?\s*)+\}\s*from\s*['"](?:\.\.?\/)+(?:[\w-]+\/)*check-tables\.(?:js|mjs)['"];?\s*$/;
 const LOADER_NAMED = /check-tables/;
 /** The loader, the parser, the copy generators and this hold: the only code that loads tables some other way. */
-export const LOADER_CODE: ReadonlySet<string> = new Set(['src/check-tables.ts', 'src/merge-policy-weakening.ts', 'scripts/lib/check-tables.mjs', 'scripts/lib/table-copies.mjs', 'scripts/gen-table-copies.mjs', 'scripts/lib/redact-vendor.mjs']);
+export const LOADER_CODE: ReadonlySet<string> = new Set(['src/check-tables.ts', 'src/merge-policy-weakening.ts', 'scripts/lib/check-tables.mjs', 'scripts/lib/table-copies.mjs', 'scripts/gen-table-copies.mjs', 'scripts/copy-tables-json.mjs', 'scripts/lib/redact-vendor.mjs']);
 /**
  * The reads of `import.meta` a line may hold (R1184ae: an allowlist, fail closed, in place of rules that named each way
  * of writing it, which a `!`, an `as`, a `satisfies`, a parenthesis or a line break got past each round). Each is a

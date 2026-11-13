@@ -59,6 +59,7 @@
         "scripts/lib/check-tables.mjs",
         "scripts/lib/table-copies.mjs",
         "scripts/gen-table-copies.mjs",
+        "scripts/copy-tables-json.mjs",
         "src/main-watch*",
         "src/github/main-watch-api*",
         "src/push-guard*",
@@ -292,7 +293,8 @@
           "src/vacuity-read.ts",
           "scripts/lib/check-tables.mjs",
           "scripts/lib/table-copies.mjs",
-          "scripts/gen-table-copies.mjs"
+          "scripts/gen-table-copies.mjs",
+          "scripts/copy-tables-json.mjs"
         ]
       },
       {

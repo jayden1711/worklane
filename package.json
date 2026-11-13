@@ -30,7 +30,7 @@
     "!**/*.pem"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/copy-tables-json.mjs",
     "prepare": "node scripts/prepare.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p web/tsconfig.json",
     "test": "npm run build && node --import ./dist/test/isolate.js --test \"dist/test/**/*.test.js\"",

@@ -13,12 +13,14 @@
 import ts from 'typescript';
 import { registrationsOf, TABLE_MARK } from '../src/merge-policy-weakening.js';
 import { realpathSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tableModuleSnapshot } from './table-snapshot.js';
 
 /** The table modules' text when this hook started, on its own thread, before any test code (R1184at D3). */
-const SNAPSHOT = tableModuleSnapshot(realpathSync(dirname(fileURLToPath(import.meta.url))));
+const LEXICAL_HERE = dirname(fileURLToPath(import.meta.url));
+const HERE = realpathSync(LEXICAL_HERE);
+const SNAPSHOT = tableModuleSnapshot(HERE);
 
 /**
  * The global the freeze call goes through, a plain name (test/isolate.ts FREEZE_GLOBAL, set before this hook is
@@ -64,13 +66,17 @@ export const load: Load = async (url, context, next) => {
   const u = new URL(url);
   u.search = '';
   u.hash = '';
-  let key = fileURLToPath(u);
+  // By the path as written first (the one the instance is keyed by), mapped onto this directory as resolved; then by
+  // where it really leads (R1184av D1).
+  const lexical = fileURLToPath(u);
+  const mapped = lexical.startsWith(LEXICAL_HERE + sep) ? HERE + lexical.slice(LEXICAL_HERE.length) : lexical;
+  let real = lexical;
   try {
-    key = realpathSync(key);
+    real = realpathSync(lexical);
   } catch {
     // Moved aside or never there: by its path as written.
   }
-  const was = SNAPSHOT.get(key);
+  const was = SNAPSHOT.get(mapped) ?? SNAPSHOT.get(lexical) ?? SNAPSHOT.get(real);
   if (was !== undefined && source !== was) throw new Error(`${url}: a table module loaded from a source other than the one at the start (test/table-freeze.ts, #941, R1184at)`);
   const frozen = withFreezes(source, url);
   return frozen === null ? out : { ...out, source: frozen };
