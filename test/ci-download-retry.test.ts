@@ -158,8 +158,9 @@ const COMMAND_STARTERS: ReadonlySet<string> = new Set(['if', 'then', 'elif', 'el
  * it): after blanks back to the line's start, `;`, `&`, `|`, a `(` that isn't an array's `=(`, a `)` that closed a
  * subshell or a case pattern (`sub.starts`; not one that closed a `$(`, `<(` or `>(`: `echo $(date) case` is an
  * argument), or a word of COMMAND_STARTERS (`time -p` too) that is itself where a command starts (`echo then case`
- * holds no case). Never after a backquote, nor inside backquotes: logicalLines reads a backquoted span inside a `$(…)`
- * as a quote, so shellCommands counts no case there either (backquotes inside a double quote are a stated limit).
+ * holds no case), or a `{` that opens `function NAME {`'s body when `function` is where a command starts (R1228bp D2).
+ * Never right after a backquote; inside a `$(…)` both readers skip a backquoted span whole, as a quote, so no case,
+ * paren or `esac` in it counts (R1228bq D2; backquotes directly inside a double quote are a stated limit).
  */
 const cmdPos = (text: string, k: number, sub: Sub): boolean => {
   const blanksBack = (x: number) => {
@@ -180,6 +181,11 @@ const cmdPos = (text: string, k: number, sub: Sub): boolean => {
     const h = blanksBack(i);
     return h < i && text.slice(h - 4, h) === 'time' && (h === 4 || /[\s;&|()`]/.test(text[h - 5]!)) && cmdPos(text, h - 4, sub);
   }
+  // R1228bp D2: a `{` after `function NAME` opens the function's body, where a command starts.
+  if (word === '{') {
+    const f = /(?:^|[\s;&|()`])function[ \t]+[^\s;&|()<>`]+[ \t]*$/.exec(text.slice(0, blanksBack(i)));
+    if (f) return cmdPos(text, f.index + f[0].indexOf('function'), sub);
+  }
   return COMMAND_STARTERS.has(word) && cmdPos(text, i, sub);
 };
 /**
@@ -189,7 +195,8 @@ const cmdPos = (text: string, k: number, sub: Sub): boolean => {
  * an open case. Both readers call it on the whole logical line so far (R1228bn D3: a joined line's `case`).
  */
 const caseWord = (text: string, k: number, sub: Sub): 'case' | 'esac' | null => {
-  const rest = text.slice(k, k + 8);
+  // R1228bq D3: any run of blanks before the word, not a fixed window.
+  const rest = text.slice(k);
   const w = /^case[ \t]+[^\s;&|()<>]/.test(rest) ? 'case' : /^esac(?=$|[\s;&|)])/.test(rest) ? 'esac' : null;
   if (!w || !cmdPos(text, k, sub)) return null;
   if (w === 'esac' && sub.frames[sub.frames.length - 1] !== 'case') return null;
@@ -348,6 +355,15 @@ export function shellCommands(line: string): Cmd[] {
         i += 3;
         continue;
       }
+      // R1228bq D2: a backquoted span, as logicalLines reads it: a quote to the next unescaped backquote, where no case,
+      // paren or esac counts.
+      if (c === '`') {
+        let j = i + 1;
+        while (j < line.length && line[j] !== '`') j += line[j] === '\\' ? 2 : 1;
+        cur += line.slice(i, j + 1);
+        i = j;
+        continue;
+      }
       cur += c;
       if (c === '(') opensParen(subs[subs.length - 1]!, line, i);
       else if (c === ')' && closesSub(subs[subs.length - 1]!, i)) {
@@ -424,7 +440,7 @@ function transfersOutput(t: readonly string[]): 'file' | 'stdout' | 'none' {
   // R1228bk D3, R1228bm D3, R1228bl L7: -V/--version, -h/--help or -M/--manual (a short bundle too: `-sV`) makes curl
   // print and exit with no transfer, URL or not, unless it is another option's value (`-A --version`, or glued: `-AMyBot`, a user agent).
   const takesValue = (x: string) =>
-    /^-[a-zA-Z]*[AbcCdDeEFHKmoPQrtTuUwxXyYz]$/.test(x) ||
+    /^-[a-zA-Z0-9#:]*[AbcCdDeEFHKmoPQrtTuUwxXyYz]$/.test(x) ||
     (/^--[a-z0-9-]+$/.test(x) && !/^--(?:silent|show-error|fail|fail-with-body|location|compressed|insecure|verbose|include|head|remote-name|remote-name-all|create-dirs|retry-all-errors|retry-connrefused|http1\.1|http2|globoff|no-progress-meter|progress-bar|ipv4|ipv6|version|help|manual|no-buffer|ssl-reqd|tlsv1\.2)$/.test(x));
   // R1228bn D1, R1228bo D1: in a short bundle a letter that takes a value takes the rest of it (`-fsSLohelm`: -o helm;
   // `-AMyBot`: a user agent), so V, h or M is an ask only before any such letter.
@@ -444,17 +460,18 @@ function transfersOutput(t: readonly string[]): 'file' | 'stdout' | 'none' {
     if (tok === '-o' || tok === '--output') target = t[++i];
     else if (tok.startsWith('--output=')) target = tok.slice('--output='.length);
     else if (tok === '--remote-name' || tok === '--remote-name-all') file = named = true;
-    else if (/^-[a-zA-Z]+$/.test(tok)) {
-      // R1228bn D2, R1228bo D1: the first letter that takes a value takes the rest of the bundle, or the next word when
-      // none is left (`-fsSLopkg`: -o pkg; `-Ao`: a user agent "o"); only the letters before it are flags.
-      const v = tok.slice(1).search(/[AbcCdDeEFHKmoPQrtTuUwxXyYz]/);
-      if ((v < 0 ? tok.slice(1) : tok.slice(1, v + 1)).includes('O')) file = named = true;
-      if (v >= 0) {
-        const rest = tok.slice(v + 2);
-        const val = rest === '' ? t[++i] : rest;
-        if (tok[v + 1] === 'o') target = val;
+    else if (/^-[a-zA-Z0-9#:]/.test(tok)) {
+      // R1228bn D2, R1228bo D1, R1228bp/bq D1: curl's short options. The first one that takes a value (curl's table:
+      // AbcCdDeEFHKmoPQrtTuUwxXyYz) takes the rest of the word, whatever it holds, or the next word when none is left
+      // (`-fsSLopkg`: -o pkg; `-fsSLohelm.tgz`; `-Ao`: a user agent "o"); the characters before it are flags, `-#` and
+      // the digits included (`-#LO`, `-4fsSLo helm`).
+      const m = /^-([a-zA-Z0-9#:]*?)([AbcCdDeEFHKmoPQrtTuUwxXyYz])(.*)$/.exec(tok);
+      if ((m ? m[1]! : tok.slice(1)).includes('O')) file = named = true;
+      if (m) {
+        const val = m[3] === '' ? t[++i] : m[3];
+        if (m[2] === 'o') target = val;
       }
-    } else if (/^-o\S/.test(tok)) target = tok.slice(2);
+    }
     if (target !== undefined) { named = true; if (target !== '/dev/null') file = true; }
   }
   end();
@@ -2109,7 +2126,7 @@ test('R1228bl D1-D3, R1228bm D1-D3: `case` only in command position, a case one 
   assert.deepEqual(unread('echo "`true; source .claude/hooks/get.sh`"\n'), [], 'stated: L3a');
 });
 
-test('R1228bn D1-D3, R1228bo D1, D2: a short bundle\'s value-taking letter takes the rest of it; a joined line opening with case; case only after a starter, a separator or a ) that closed a subshell or a pattern', () => {
+test('R1228bn D1-D3, R1228bo D1, D2, R1228bp D1, D2, R1228bq D1-D3: a short option word\'s first value-taking option takes the rest of it, whatever it holds; a joined line opening with case; case only after a starter, a separator or a ) that closed a subshell or a pattern', () => {
   const kept = (text: string) => fileDownloadProblems('scripts/ci/zz-get.sh', text).problems;
   const unread = (text: string) => fileDownloadProblems('scripts/ci/zz-a.sh', text).problems;
   // bn D1, D2, bo D1: real curl writes each of these files (bn realcurl_bn.out, bo realcurl.out).
@@ -2117,6 +2134,14 @@ test('R1228bn D1-D3, R1228bo D1, D2: a short bundle\'s value-taking letter takes
     assert.ok(kept(`${text}\n`).some((p) => /retry/.test(p)), `refused: ${text}`);
   }
   for (const text of ['curl -sV | head -1', 'curl -Vs 2>&1', 'curl --version | head -1', 'curl -fsSL --retry 5 -ohelm "$URL"', 'wget --version | head -1']) assert.deepEqual(kept(`${text}\n`), [], `kept: ${text}`);
+  // R1228bp/bq D1: a bundle with -# or a digit, or a glued value holding a non-letter (real curl writes each: bp
+  // realcurl_bp.out, bq realcurl.out).
+  for (const text of ['curl -fsSLohelm.tgz "$URL"', 'curl -fsSLo/tmp/helm "$URL"', 'curl -sLo./helm "$URL"', 'curl -Lohelm-v3.tgz "$URL"', 'curl -#LO "$URL"', 'curl -#Lo helm "$URL"', 'curl -#fSLo helm "$URL"', 'curl -4fsSLo helm "$URL"', 'curl -fsSL4O "$URL"', 'curl -#O "$URL"', 'curl -fsSL4o shfmt "$URL"', 'curl -4fsSLO "$URL"',
+    // `--version` as the value of the A in `-#A` (a user agent): not an ask.
+    'curl -fsSL -#A --version -o t.tgz "$URL"']) {
+    assert.ok(kept(`${text}\n`).some((p) => /retry/.test(p)), `refused: ${text}`);
+  }
+  for (const text of ['curl -#fSL --retry 5 -o helm "$URL"', 'curl -fsSL --retry 5 -ohelm.tgz "$URL"', 'curl -fsSLo/dev/null "$URL"', 'curl -#V']) assert.deepEqual(kept(`${text}\n`), [], `kept: ${text}`);
   // bn D3: a joined line's `case` is read on the logical line, by both readers.
   assert.ok(kept('x="$(echo \\\ncase a)"; true # note \\\ncurl -fsSL -o t.tgz "$URL"\n').some((p) => /retry/.test(p)), 'refused: N3a');
   assert.ok(unread('n="$(grep -c \\\ncase notes.txt)"; true # was: \\\nsource .claude/hooks/get.sh\n').length > 0, 'refused: N3b');
@@ -2129,7 +2154,13 @@ test('R1228bn D1-D3, R1228bo D1, D2: a short bundle\'s value-taking letter takes
   // Controls: a real case after a starter, a separator, or a pattern's `)`, still read as one.
   for (const text of ['x="$(case a in a) case b in b) echo y;; esac;; esac)"', 'x="$(if case a in a) true;; esac; then :; fi)"', 'x="$( (true) ; case a in a) :;; esac)"', 'x="$(time -p case a in a) :;; esac)"', 'x="$(echo `case a in a) echo y;; esac`)"',
     // A missed case closes the `$(…)` at its pattern's `)`, and a `"` in a single quote in the arm then hides what follows.
-    'x="$(time -p case a in a) echo \'q"q\';; esac)"', 'x="$(if case a in a) echo \'q"q\';; esac; then :; fi)"']) {
+    'x="$(time -p case a in a) echo \'q"q\';; esac)"', 'x="$(if case a in a) echo \'q"q\';; esac; then :; fi)"',
+    // R1228bp D2: a case in a body opened by `function f {`.
+    'x="$(function f { case $1 in a) echo \'q"q\';; esac; }; f a)"',
+    // R1228bq D2: a case inside backquotes inside the `$(…)`, with a `"` in a single quote in its arm (B1a, B1b, B0b).
+    'x="$(echo `case a in a) echo \'q"q\';; esac`)"', 'x="$(echo `if case a in a) echo \'q"q\';; esac; then :; fi`)"', 'x="$(echo `true; case a in a) echo \'q"q\';; esac`)"',
+    // R1228bq D3: any run of blanks (spaces or tabs) between `case` and its word (S0b, S1a, S1b).
+    'x="$(case    a in a) echo \'q"q\';; esac)"', 'x="$(case     a in a) echo \'q"q\';; esac)"', 'x="$(case\t\t\t\t\ta in a) echo \'q"q\';; esac)"']) {
     assert.ok(unread(`${text}; source .claude/hooks/get.sh\n`).length > 0, `refused: ${text}`);
   }
 });
