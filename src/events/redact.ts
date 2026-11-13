@@ -9,7 +9,16 @@
 // match may start only where a run of its characters starts (a prefix group, never `\b` inside a run of `-`), and a
 // decision a regex would make by backtracking is made in a function instead. test/redact.test.ts times each one on
 // 100 KB adversarial strings. No lookbehind, so a browser bundle may import this module too.
+// Its tables (the credential words, the shapes, the broad rules and the glue) are data in src/events/redact.tables.json
+// (#941), which the weakening hold compares parsed; loaded and deep-frozen by src/check-tables.ts. The RegExps made from
+// them are this module's own: none is handed out (REDACTION_PATTERNS gives copies), since a RegExp can be rewritten in
+// place. scripts/lib/redact-vendor.mjs puts the same data, as frozen literals, in the root updater's copy.
+import { regExpOf, tablesOf, type FrozenSet, type Pattern } from '../check-tables.js';
+
 type Replacement = string | ((match: string, ...groups: string[]) => string);
+
+/** This module's tables (src/events/redact.tables.json): deep-frozen. */
+const TABLES = tablesOf(import.meta.url);
 
 /** Credential-shaped: mixed case with a digit (a random key), or a long hex run (a classic token). */
 const credentialShaped = (v: string) => (/[a-z]/.test(v) && /[A-Z]/.test(v) && /\d/.test(v)) || /^[0-9a-fA-F]{32,}$/.test(v);
@@ -35,19 +44,16 @@ function basicPair(v: string): boolean {
 }
 
 /** A word that makes any key holding it a credential's: `db_password`, `slack_bot_token`, `aws_secret_access_key`. */
-// check-table: never-shrink
-const CREDENTIAL_WORDS = new Set(['token', 'secret', 'secrets', 'password', 'passwd', 'pwd', 'pass', 'passphrase', 'jwt', 'bearer', 'credential', 'credentials', 'authorization']);
+const CREDENTIAL_WORDS: FrozenSet<string> = TABLES.get('CREDENTIAL_WORDS');
 /**
  * A word that ends in one of these is a credential word too: a name written as one word, with nothing to split on
  * (`csrftoken`, `clientsecret`, `adminpassword`, `secretaccesskey`). Only the end counts, so `tokenizer` and
  * `secretary` are not; `pass` and `pwd` count only whole (`compass`, `bypass`).
  */
-// check-table: never-shrink
-const CREDENTIAL_ENDINGS = ['token', 'secret', 'password', 'passwd', 'accesskey'];
+const CREDENTIAL_ENDINGS: readonly string[] = TABLES.get('CREDENTIAL_ENDINGS');
 const credentialWord = (w: string) => CREDENTIAL_WORDS.has(w) || CREDENTIAL_ENDINGS.some((e) => w.endsWith(e));
 /** The word before `key` that makes it a credential (`x-api-key`, `apiKey`, `signing_key`); `cacheKey`, `sort_key` are not. */
-// check-table: never-shrink
-const KEY_QUALIFIERS = new Set(['api', 'access', 'secret', 'private', 'signing', 'encryption', 'master', 'client', 'app', 'auth', 'account', 'service', 'license', 'deploy', 'admin', 'webhook', 'session', 'ssh', 'hmac', 'consumer']);
+const KEY_QUALIFIERS: FrozenSet<string> = TABLES.get('KEY_QUALIFIERS');
 
 /**
  * A JSON key that names a credential, by rule rather than a list: split into words (`_`, `-`, camelCase), it holds a
@@ -96,94 +102,39 @@ function orphanEnd(m: string): string {
   return cut === -1 ? m : `[REDACTED PRIVATE KEY]${m.slice(cut)}`;
 }
 
-// Each pattern with what kind of secret it finds (secretKinds names the kind, never the value).
-// check-table: never-shrink
-const PATTERNS: [RegExp, Replacement, string][] = [
-  // A dashboard key, wherever its prefix is (after a `-` or a letter too: `key-wld_...`): a match runs to the end of its
-  // run of key characters and the next search starts after it, so linear.
-  [new RegExp(`${DASHBOARD_KEY_PREFIX}${DASHBOARD_KEY_BODY}(?![A-Za-z0-9_-])`, 'g'), `${DASHBOARD_KEY_PREFIX}[REDACTED]`, 'dashboard key'],
-  // A shape with a distinctive prefix is found wherever the prefix is (#889 round 4): no left boundary, so whatever is
-  // glued before it (a name, an escape sequence in any encoding, a digit) can't hide it. Each such match runs to the end
-  // of its run and the next search starts after it: linear. Only shapes with no distinctive prefix keep a boundary.
-  // The token's end: no letter or digit after it, so `ghp_..._backup` is found too (a `\b` there needs a non-word).
-  [/gh[pousr]_[A-Za-z0-9]{30,}(?![A-Za-z0-9])/g, 'gh*_[REDACTED]', 'GitHub token'],
-  [/github_pat_[A-Za-z0-9_]{40,}/g, 'github_pat_[REDACTED]', 'GitHub token'],
-  [/sk-ant-[A-Za-z0-9_-]{20,}/g, 'sk-[REDACTED]', 'API key (sk-)'],
-  // Other `sk-` keys: `sk-` alone is no distinctive prefix (`task-`, `disk-`), so after a boundary.
-  [/\bsk-(?:ant-)?[A-Za-z0-9_-]{20,}\b/g, 'sk-[REDACTED]', 'API key (sk-)'],
-  // Stripe secret and restricted keys, live and test: random, so with a digit (a long camelCase name after the
-  // prefix, with no digit, is a code identifier).
-  [/(^|[^A-Za-z0-9_])([sr]k)_(?:live|test)_([A-Za-z0-9]{16,})(?![A-Za-z0-9_])/g, (m, pre, k, v) => (/\d/.test(v!) ? `${pre}${k}_[REDACTED]` : m), 'Stripe key'],
-  // Google API keys: AIza and 35 more characters.
-  [/AIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])/g, 'AIza[REDACTED]', 'Google API key'],
-  // JSON Web Tokens: a base64 JSON header (so `eyJ` and 8 or more), a payload of 8 or more and a signature (empty when
-  // unsigned). Any further dotted parts go with it, empty ones too (#889 rounds 3 and 7): a JWE has five, and a token
-  // may be followed by more. A part is base64url or standard base64 (`+`, `/`), and may end in `=` padding (#996).
-  // - The header is found in any part, glued after anything in it (`x<jwt>`, `%3D<jwt>`, `name.<jwt>`): the match
-  //   starts at a part's start (after a character no part holds: `.`, a space, `%`, `=`), and a lookahead looks in that
-  //   part for `eyJ`. It can't leave its part, so each part is read once from its start: linear.
-  // - Each of the header and the payload is read whole, with no way back into it (a lookahead takes the run, a
-  //   backreference steps over it), with no bound on its length (an `x5c` chain makes a header several KB, round 5):
-  //   a run of millions of characters is passed in one step, not given back a character at a time until V8's
-  //   backtracking stack overflows (round 6).
-  // - A plain replacement: no match is declined, so nothing the search steps over can hide a token (round 7).
-  [
-    /(^|[^A-Za-z0-9_+/-])(?=([A-Za-z0-9_+/-]*?)eyJ)\2eyJ(?=[A-Za-z0-9_+/-]{8})(?=([A-Za-z0-9_+/-]+))\3=*\.(?=[A-Za-z0-9_+/-]{8})(?=([A-Za-z0-9_+/-]+))\4=*\.[A-Za-z0-9_+/=-]*(?:\.[A-Za-z0-9_+/=-]*)*/g,
-    '$1$2[REDACTED JWT]',
-    'JWT',
-  ],
-  [/(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Za-z0-9])/g, 'AKIA[REDACTED]', 'AWS access key'],
-  // Slack's token-rotation and refresh tokens (xoxe-..., xoxe.xoxb-...), before the
-  // other Slack tokens (one is inside it); then its app-level token (xapp-, Socket Mode).
-  [/xoxe[.-][A-Za-z0-9.-]{10,}(?![A-Za-z0-9])/g, 'xoxe-[REDACTED]', 'Slack token'],
-  [/xox[abprs]-[A-Za-z0-9-]{10,}(?![A-Za-z0-9])/g, 'xox-[REDACTED]', 'Slack token'],
-  [/xapp-[A-Za-z0-9-]{10,}(?![A-Za-z0-9])/g, 'xapp-[REDACTED]', 'Slack app-level token'],
-  // Linear personal API keys and OAuth tokens.
-  [/lin_(?:api|oauth)_[A-Za-z0-9]{20,}(?![A-Za-z0-9])/g, 'lin_[REDACTED]', 'Linear key'],
-  [/https:\/\/hooks\.slack\.com\/services\/[A-Za-z0-9/]+/g, 'https://hooks.slack.com/services/[REDACTED]', 'Slack webhook'],
-  // Tailscale auth keys, API tokens and OAuth client secrets (tskey-auth-..., tskey-api-..., tskey-client-...): the
-  // prefix and the rest of its run, however short (src/tailscale-setup.ts redacted them this way on its own).
-  [/tskey-[A-Za-z0-9_-]+/g, 'tskey-[REDACTED]', 'Tailscale key'],
-  // A private key (PEM, and PGP's PRIVATE KEY BLOCK), failing closed (#889): from its BEGIN line to its END line, or
-  // to the end of the text when no END follows (a key cut short, or still being written); then, for an END line with
-  // no BEGIN before it (a key whose start is above a window), from the start of the text to that END line. Each BEGIN
-  // is read once (its match runs to its END or to the end), and the second rule has one start: linear.
-  [/-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----(?:[\s\S]*?-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----|[\s\S]*)/g, '[REDACTED PRIVATE KEY]', 'private key'],
-  [/^[\s\S]*-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----/, orphanEnd, 'private key'],
-  // The scheme is case-insensitive (RFC 9110): any case (#889). `bearer` is a word, so after a boundary. A `/` may be
-  // written JSON-escaped (`\/`), in this rule and the Basic one (#996).
-  [/\b(bearer)\s+(?:[A-Za-z0-9._~+/-]|\\\/){20,}=*/gi, '$1 [REDACTED]', 'bearer token'],
-  // HTTP Basic credentials (base64 of user:password; git's extraheader, src/dashboard-auth.ts's client id and secret),
-  // failing closed: any credential-looking value after the scheme. Prose ("Basic Authentication") has no digit, `+`,
-  // `/` or `=`, and isn't a mixed-case run of a base64 length. The value ends where its run and padding end, whatever is
-  // glued after it (#889 round 7: a check that nothing followed left `Basic <value>==<more>` to a later pass, after
-  // another rule's marker made the boundary; broad mode, which masks that rule's text, showed it).
-  [/\b(basic)(\s+)((?:[A-Za-z0-9+/]|\\\/){8,}={0,2})/gi, (m, s, sp, v) => (basicShaped(v!) ? `${s}${sp}[REDACTED]` : m), 'Basic credential'],
-  // Credentials inside connection strings: keep scheme, user and host. The last 1 to 32 characters of the scheme right
-  // before `://`, from any start (#889 round 4: from `\b` with any length it was quadratic on a long dotted run): each
-  // start reads at most 33 characters, and each `://` is reached from at most 32 starts, so linear. No letter is
-  // required among them (round 8: a scheme whose last 32 characters are digits or `-` was main's too), so every match
-  // main's rule made, with at least one scheme character before `://`, this one makes.
-  [/([a-z0-9+.-]{1,32}:\/\/[^:/\s@]+):[^@\s/]+@/gi, '$1:[REDACTED]@', 'password in a URL'],
-  // 0x-prefixed 32-byte hex (EVM private keys and the like).
-  [/\b0x[0-9a-fA-F]{64}(?![A-Za-z0-9])/g, '0x[REDACTED-32-BYTES]', '32-byte hex key'],
-  // A JSON string value under a credential key (credentialKey: "aws_secret_access_key", "db_password", "x-api-key",
-  // "slack_bot_token", "authorization", ...), also inside an escaped JSON string (\"token\":\"...\"). Not "cacheKey"
-  // or "sort_key", and only a credential-shaped value (16 or more characters; mixed case with a digit, or long hex),
-  // so {"key": "issue-644"}, {"token": "intake.triaged.v2"} and a UUID stay. The key is judged in a function, so the
-  // regex only reads one run of key characters from each quote. Other languages' dictionary literals too (#996): single
-  // quotes (Python's `{'password': '...'}`), each string quoted on its own, and `=>` (Ruby, PHP).
-  [
-    /(\\?"|')([A-Za-z0-9_-]+)\1(\s*(?::|=>)\s*)(\\?"|')([A-Za-z0-9_\-.+/=~]{16,})\4/g,
-    (m, q, k, sep, vq, v) => (credentialKey(k!) && credentialShaped(v!) ? `${q}${k}${q}${sep}${vq}[REDACTED]${vq}` : m),
-    'secret under a JSON key',
-  ],
-  // A Discord bot token: three base64url parts (the bot's id, a timestamp, an HMAC). Last, as src/watchdog/incidents.ts
-  // applied it after the rest (#889: it was redacted only there; there it started at `\b`, here after any character
-  // but a letter or digit, so `x_<token>` is found too). It may start inside a run of `-` or `_`, but the first part
-  // is bounded (23 to 28 characters, then a dot), so each start reads a bounded stretch: linear (redact-shapes.test.ts).
-  [/(^|[^A-Za-z0-9])[A-Za-z0-9_-]{23,28}\.[A-Za-z0-9_-]{6,7}\.[A-Za-z0-9_-]{27,}\b/g, '$1[REDACTED]', 'Discord bot token'],
-];
+/**
+ * The functions a shape's replacement can name (`{"replacer": name}` in the data): each declines a match that is no
+ * secret (gives it back as it was), or works out what to keep. Code, not data: a change to one is a change to this file.
+ */
+const REPLACERS: Readonly<Record<string, (match: string, ...groups: string[]) => string>> = Object.freeze({
+  // Stripe secret and restricted keys: random, so with a digit (a long camelCase name after the prefix, with no
+  // digit, is a code identifier).
+  stripe: (m: string, pre?: string, k?: string, v?: string) => (/\d/.test(v!) ? `${pre}${k}_[REDACTED]` : m),
+  orphanEnd,
+  // HTTP Basic credentials: any credential-looking value after the scheme (basicShaped).
+  basic: (m: string, s?: string, sp?: string, v?: string) => (basicShaped(v!) ? `${s}${sp}[REDACTED]` : m),
+  // A JSON string value under a credential key, credential-shaped (credentialKey, credentialShaped).
+  jsonKey: (m: string, q?: string, k?: string, sep?: string, vq?: string, v?: string) => (credentialKey(k!) && credentialShaped(v!) ? `${q}${k}${q}${sep}${vq}[REDACTED]${vq}` : m),
+});
+/** The names REPLACERS has at run time: test/check-tables-sync.test.ts holds them to the names its block defines (R1184t D1). */
+export const REPLACER_NAMES: readonly string[] = Object.freeze(Object.keys(REPLACERS));
+
+/** A replacement as the data gives it: a string, or the name of one of REPLACERS. Throws on a name that isn't one. */
+function replacementOf(rep: string | { replacer: string }): Replacement {
+  if (typeof rep === 'string') return rep;
+  const f = REPLACERS[rep.replacer];
+  if (!f) throw new Error(`src/events/redact.ts's data: no replacer ${rep.replacer}`);
+  return f;
+}
+
+/** A rule as the data gives it. */
+type RuleData = { re: Pattern; rep: string | { replacer: string } };
+
+/**
+ * Each pattern with what kind of secret it finds (secretKinds names the kind, never the value), in the data's order:
+ * the comments on each are in src/events/redact.tables.json.
+ */
+const PATTERNS: readonly (readonly [RegExp, Replacement, string])[] = Object.freeze(TABLES.get<readonly (RuleData & { kind: string })[]>('PATTERNS').map((e) => Object.freeze([regExpOf(e.re), replacementOf(e.rep), e.kind] as const)));
 // Not covered: a bare 32-character string with no prefix (a dashboard key from before #889 among them): a commit
 // hash, a digest and the engine's own ids have the same shape. New dashboard keys carry DASHBOARD_KEY_PREFIX.
 
@@ -195,23 +146,10 @@ const PATTERNS: [RegExp, Replacement, string][] = [
  * token prefix and a short run, a URL's user info, a value after a secret's name, a short bearer token, and a JWT
  * after a hyphen. Each starts only where a run starts, or reads a bounded stretch from each start: linear.
  */
-// check-table: never-shrink
-const BROAD: [RegExp, (mask: string) => string, string][] = [
-  // Wherever the prefix is, as in PATTERNS (#889 round 4).
-  [/(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{8,}/g, (k) => k, 'GitHub token, cut short'],
-  [/sk-ant-[A-Za-z0-9_-]+/g, (k) => k, 'Anthropic key, cut short'],
-  // The root updater's own token rule on main, as it was: where it ends (a GitHub token's run of letters and digits, a
-  // Slack token's before a `_`) is where its next rule saw a boundary (maskUnion reads again there).
-  [/\b(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-ant-[A-Za-z0-9_-]{10,}|xox[abprs]-[A-Za-z0-9-]{10,})/g, (k) => k, "the updater's token rule"],
-  [/xox[abprs]-[A-Za-z0-9_-]+/g, (k) => k, 'Slack token, cut short'],
-  [/eyJ[A-Za-z0-9_-]{8,512}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*/g, (k) => k, 'JWT after a hyphen'],
-  [/\b(bearer)\s+[A-Za-z0-9._~+/=-]{8,}/gi, (k) => `$1 ${k}`, 'short bearer token'],
-  // The last 1 to 32 characters of a scheme right before `://`, from any start (after `-`, `.`, `+` or a letter too: the
-  // updater's own rule started at any `\b`, a scheme of any length; no letter required, round 8): each start reads at
-  // most 33 characters, and each `://` is reached from at most 32 starts, so linear.
-  [/([a-z0-9+.-]{1,32}:\/\/)[^\s/@]+@/gi, (k) => `$1${k}@`, 'user info in a URL'],
-  [/\b([A-Za-z_]*(?:token|secret|password|passwd|api[_-]?key))(\s*[=:]\s*)("[^"]*"|'[^']*'|\S+)/gi, (k) => `$1$2${k}`, 'value after a secret name'],
-];
+/** Each broad rule: its RegExp, its replacement with `{mask}` where the mask goes, and its kind. */
+const BROAD: readonly (readonly [RegExp, string, string])[] = Object.freeze(TABLES.get<readonly { re: Pattern; mask: string; kind: string }[]>('BROAD').map((e) => Object.freeze([regExpOf(e.re), e.mask, e.kind] as const)));
+/** A broad rule's replacement with `mask` in it (taken literally). */
+const masked = (template: string, mask: string) => template.split('{mask}').join(mask);
 
 /**
  * The first word of a dotted name that is code, not a host: `this.internal`, `opts.corp`, `config.lan.x`. Only
@@ -280,9 +218,10 @@ const IDENTIFIERS: [RegExp, Replacement, string][] = [
  * `broad: true` (shown with the default mask), `identifier` for one applied with `identifiers: true`.
  */
 export const REDACTION_PATTERNS: readonly { kind: string; re: RegExp; rep: Replacement; group: 'secret' | 'broad' | 'identifier' }[] = [
-  ...PATTERNS.map(([re, rep, kind]) => ({ kind, re, rep, group: 'secret' as const })),
-  ...BROAD.map(([re, rep, kind]) => ({ kind, re, rep: rep('[REDACTED]'), group: 'broad' as const })),
-  ...IDENTIFIERS.map(([re, rep, kind]) => ({ kind, re, rep, group: 'identifier' as const })),
+  // Copies of the RegExps: the ones this module runs are its own (a RegExp can be rewritten in place).
+  ...PATTERNS.map(([re, rep, kind]) => ({ kind, re: new RegExp(re), rep, group: 'secret' as const })),
+  ...BROAD.map(([re, rep, kind]) => ({ kind, re: new RegExp(re), rep: masked(rep, '[REDACTED]'), group: 'broad' as const })),
+  ...IDENTIFIERS.map(([re, rep, kind]) => ({ kind, re: new RegExp(re), rep, group: 'identifier' as const })),
 ];
 
 export interface RedactTextOptions {
@@ -303,8 +242,7 @@ export interface RedactTextOptions {
  * The prefixes of the shapes whose patterns start at `\b` (or after a character that isn't `_`): after an underscore
  * (`MY_ghp_...`, `x_sk-...`) a token is glued to a name, and the second pass (glued) reads it from its prefix on.
  */
-// check-table: never-shrink
-const GLUED_PREFIXES = ['ghp_', 'gho_', 'ghu_', 'ghs_', 'ghr_', 'github_pat_', 'sk-', 'sk_live_', 'sk_test_', 'rk_live_', 'rk_test_', 'xoxa-', 'xoxb-', 'xoxe', 'xoxp-', 'xoxr-', 'xoxs-', 'xapp-', 'lin_api_', 'lin_oauth_', 'AKIA', 'ASIA', 'AIza', 'eyJ', '0x', 'Bearer', 'bearer', 'BEARER', 'Basic', 'basic', 'BASIC', DASHBOARD_KEY_PREFIX];
+const GLUED_PREFIXES: readonly string[] = TABLES.get('GLUED_PREFIXES');
 /**
  * What may sit right before a token (#889): an escape sequence (a coloured log line, `ESC[1m`, in any of the encodings
  * below) and a backslash escape in raw JSON or C-style text (`\n`, `\t`, `\"`). A cut point goes after each that ends
@@ -312,16 +250,7 @@ const GLUED_PREFIXES = ['ghp_', 'gho_', 'ghu_', 'ghs_', 'ghr_', 'github_pat_', '
  * a plain `sk-`, a JSON value): the others are found wherever their prefix is. Each start reads a bounded stretch,
  * but a CSI's parameter run: one scan each, linear.
  */
-// check-table: never-shrink
-const GLUE_PARTS = [
-  // ESC as the byte, as a JSON or C escape (`\u001b`, `\x1b`, `\033`, `\e`) or in caret notation (`^[`), then a whole
-  // sequence: a CSI with its parameters (`[1m`), an nF one (`(B`), or one character (`7`, `8`, `c`).
-  String.raw`(?:\u001b|\\u001[bB]|\\x1[bB]|\\033|\\e|\^\[)(?:\[[0-?]*[ -/]*[@-~]|[ -/]+[0-~]|[0-~])`,
-  // The 8-bit CSI.
-  String.raw`\u009b[0-?]*[ -/]*[@-~]`,
-  // A backslash escape in raw JSON or C-style text.
-  String.raw`\\(?:u[0-9A-Fa-f]{4}|[nrtbf"\\/])`,
-];
+const GLUE_PARTS: readonly string[] = TABLES.get('GLUE_PARTS');
 const GLUE = new RegExp(GLUE_PARTS.join('|'), 'g');
 
 /**
@@ -468,13 +397,40 @@ function spansOf(t: string, re: RegExp, rep: Replacement, rank: number, out: Spa
 }
 
 /** Every rule of the default mode: the shapes, each with its own marker. */
-const SHAPE_RULES: [RegExp, Replacement][] = PATTERNS.map(([re, rep]): [RegExp, Replacement] => [re, rep]);
-/** Every rule of the broad mode: the shapes and the broad rules, each shown with the default mask. */
-// check-table: never-shrink
-const BROAD_RULES: [RegExp, Replacement][] = [...SHAPE_RULES, ...BROAD.map(([re, rep]): [RegExp, Replacement] => [re, rep('[REDACTED]')])];
+const SHAPE_RULES: readonly (readonly [RegExp, Replacement])[] = PATTERNS.map(([re, rep]) => [re, rep] as const);
+/**
+ * Every rule of the broad mode: the shapes and the broad rules, each shown with the default mask. Its own list in the
+ * data (#941), written out: test/check-tables-sync.test.ts holds it equal to PATTERNS' rules then BROAD's.
+ */
+const BROAD_RULES: readonly (readonly [RegExp, Replacement])[] = Object.freeze(TABLES.get<readonly RuleData[]>('BROAD_RULES').map((e) => Object.freeze([regExpOf(e.re), replacementOf(e.rep)] as const)));
+
+/**
+ * What is wrong with the written-out tables against what this module built them from (#941), each in words; none when
+ * they hold: BROAD_RULES is PATTERNS' rules then BROAD's (shown with [REDACTED]); the first pattern is the dashboard
+ * key's (DASHBOARD_KEY_PREFIX, DASHBOARD_KEY_BODY), and GLUED_PREFIXES ends with that prefix. Compared as data.
+ * Checked at load (it throws), so this module never redacts with tables that drifted; test/check-tables-sync.test.ts
+ * tries each.
+ */
+export function redactTableProblems(
+  patterns: readonly { re: Pattern; rep: unknown }[] = TABLES.get('PATTERNS'),
+  broad: readonly { re: Pattern; mask: string }[] = TABLES.get('BROAD'),
+  rules: readonly { re: Pattern; rep: unknown }[] = TABLES.get('BROAD_RULES'),
+  glued: readonly string[] = GLUED_PREFIXES,
+): string[] {
+  const out: string[] = [];
+  const key = (re: Pattern, rep: unknown) => JSON.stringify([re.source, re.flags, rep]);
+  const want = [...patterns.map((p) => key(p.re, p.rep)), ...broad.map((b) => key(b.re, masked(b.mask, '[REDACTED]')))];
+  const got = rules.map((r) => key(r.re, r.rep));
+  if (want.length !== got.length || want.some((w, k) => w !== got[k])) out.push("BROAD_RULES isn't PATTERNS' rules then BROAD's");
+  const first = patterns[0]?.re;
+  if (first?.source !== `${DASHBOARD_KEY_PREFIX}${DASHBOARD_KEY_BODY}(?![A-Za-z0-9_-])` || first.flags !== 'g') out.push("PATTERNS' first isn't the dashboard key's");
+  if (glued.at(-1) !== DASHBOARD_KEY_PREFIX) out.push("GLUED_PREFIXES doesn't end with DASHBOARD_KEY_PREFIX");
+  return out;
+}
+if (redactTableProblems().length) throw new Error(`src/events/redact.ts's data: ${redactTableProblems().join('; ')}`);
 
 /** What every rule of `rules` finds in `s`: on the text as it was, and again with a boundary at each glue point. */
-function allSpans(s: string, rules: readonly [RegExp, Replacement][]): Span[] {
+function allSpans(s: string, rules: readonly (readonly [RegExp, Replacement])[]): Span[] {
   const spans: Span[] = [];
   rules.forEach(([re, rep], i) => spansOf(s, re, rep, i, spans));
   readAt(s, gluePoints(s), rules, spans);
@@ -581,7 +537,7 @@ function merged(spans: [number, number][]): [number, number][] {
  * it is read from its start; the spans found, mapped back, go in `spans`. The boundary is a character no rule takes in
  * (a private-use one the text doesn't hold); when the text holds them all, each piece after a cut is read on its own.
  */
-function readAt(s: string, cuts: number[], rules: readonly [RegExp, Replacement][], spans: Span[]) {
+function readAt(s: string, cuts: number[], rules: readonly (readonly [RegExp, Replacement])[], spans: Span[]) {
   if (!cuts.length) return;
   const markChar = freeMark(s);
   if (markChar === null) {

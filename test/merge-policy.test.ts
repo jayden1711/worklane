@@ -23,6 +23,8 @@ import { Coordinator } from '../src/coordinator.js';
 import { EventLog } from '../src/events/log.js';
 // Read through the namespace, so a module without one of them fails only the test that uses it.
 import * as weakening from '../src/merge-policy-weakening.js';
+import { parseTables, TABLES_FILE } from '../src/check-tables.js';
+import ts from 'typescript';
 import type { ChangeFile, LockScope } from '../src/review.js';
 import { FakeRunner } from '../src/runner.js';
 import { parse } from 'yaml';
@@ -1105,7 +1107,7 @@ function registryProblems(texts: ReadonlyMap<string, string>): { tables: string[
     // An allowlist's name is never-grow (#869). A rule list's name may carry either mark: its floor holds it on
     // shrinking whatever the mark says, and a never-grow mark adds a growth hold (a mark only adds).
     const allow = weakening.ALLOW_NAMED?.test(t.table);
-    if (allow && t.kind !== 'never-grow') tables.push(`${t.path} ${t.table}: its name says it allows or exempts something, so it is never-grow`);
+    if (allow && t.kind !== 'never-grow') tables.push(`${t.path} ${t.table}: its name says it allows or exempts something, so it is never-grow or exact`);
     let read: string[] | null;
     try {
       read = weakening.tableLines(text, t.table);
@@ -1153,6 +1155,196 @@ function repoTexts(): Map<string, string> {
 
 test('weakening backstop: each registered table is found where it is registered, and every check-shaped table in test/ and scripts/ is registered or says why not', () => {
   assert.deepEqual(registryProblems(repoTexts()).tables, []);
+});
+
+test('weakening backstop (#941): src/ and scripts/ register no table by a mark (their tables are data); every tables file parses, and an allowlist name in one is never-grow', () => {
+  const marked = engineFiles.filter((f) => /^(?:src|scripts)\//.test(f) && markable(f) && marksOf(readFileSync(join(repoRoot, f), 'utf8')).tables.length);
+  assert.deepEqual(marked, [], 'move the table to the module\'s <module>.tables.json (src/check-tables.ts)');
+  const files = engineFiles.filter((f) => TABLES_FILE.test(f));
+  assert.equal(files.length, 16, `${files.length} tables files`);
+  const problems: string[] = [];
+  for (const f of files) {
+    try {
+      for (const [name, d] of parseTables(readFileSync(join(repoRoot, f), 'utf8'), f)) if (weakening.ALLOW_NAMED.test(name) && d.kind === 'never-shrink') problems.push(`${f} ${name}: its name says it allows or exempts something, so it is never-grow or exact`);
+    } catch (e) {
+      problems.push(String((e as Error).message));
+    }
+  }
+  assert.deepEqual(problems, []);
+  // The 43 registered tables of src/ and scripts/ before #941: 35 here, and the root updater's 8, which were its
+  // generated copy of src/events/redact.ts's and still are (scripts/lib/redact-vendor.mjs).
+  assert.equal(dataTables().length, 35, 'the 35 tables files entries of src/ and scripts/ (#941), each with its module');
+  assert.deepEqual(dataTables().filter((d) => d.module.endsWith('(no module)')).map((d) => d.file), []);
+  // A tables file is locked with its module: the same self-modification part, or neither locked.
+  const part = (path: string) => SELF_MODIFICATION_PARTS.find((p) => p.globs.some((g) => globToRegExp(g).test(path)))?.what ?? 'not locked';
+  assert.deepEqual(
+    [...new Set(dataTables().map((d) => `${d.file}: ${part(d.file)}; ${d.module}: ${part(d.module)}`))].filter((x) => x.split('; ').map((s) => s.split(': ')[1]).some((w, _, a) => w !== a[0])),
+    [],
+  );
+});
+
+/** The names a load site may import from the loader, each under its own name. */
+const LOADER_NAMES = new Set(['tablesOf', 'frozenSet', 'regExpOf', 'regExpsOf', 'FrozenSet', 'Pattern', 'Tables', 'TableKind']);
+
+/**
+ * Where each module loads tables, read with TypeScript's parser (#941; R1184m 3, R1184n N3: a regex missed `tablesOf (`,
+ * an alias, a namespace or a dynamic import). Outside the loader code (weakening.LOADER_CODE), a module may:
+ *   - import the loader only by a plain named import of LOADER_NAMES, none under another name (no default, namespace,
+ *     `import x = require`, dynamic import or require of it);
+ *   - call `tablesOf` only as `tablesOf(import.meta.url)`, and only right before `.get('<literal>')` or as the value of
+ *     `const TABLES`, which it then reads only as `TABLES.get('<literal>')`;
+ *   - name no `.tables.json` file in a string, and use neither `tablesFrom` nor `parseTables`.
+ * Each tables file then has exactly one load site: its module's `tablesOf(import.meta.url)`, or its script's generated
+ * copy (one BEGIN line). The root updater's redactor copy carries src/events/redact.ts's (its one TABLES_DATA line).
+ */
+function loadSiteProblems(texts: ReadonlyMap<string, string>, tablesFiles: readonly string[]): string[] {
+  const out: string[] = [];
+  const sites = new Map<string, string[]>();
+  for (const [f, text] of texts) {
+    if (weakening.LOADER_CODE.has(f)) continue;
+    const kind = /\.tsx?$/.test(f) ? ts.ScriptKind.TS : ts.ScriptKind.JS;
+    const src = ts.createSourceFile(f, text, ts.ScriptTarget.Latest, true, kind);
+    const own = f.replace(/\.[cm]?[jt]s$/, '') + '.tables.json';
+    let loads = 0;
+    let tablesBound = false;
+    const at = (n: ts.Node) => `${f}:${src.getLineAndCharacterOfPosition(n.getStart(src)).line + 1}`;
+    const isLoader = (spec: ts.Node | undefined) => !!spec && ts.isStringLiteralLike(spec) && /check-tables(?:\.[cm]?js)?$/.test(spec.text);
+    const isGetLiteral = (n: ts.Node) => ts.isPropertyAccessExpression(n.parent) && n.parent.expression === n && n.parent.name.text === 'get' && ts.isCallExpression(n.parent.parent) && n.parent.parent.expression === n.parent && n.parent.parent.arguments.length === 1 && ts.isStringLiteral(n.parent.parent.arguments[0]!);
+    // An accepted load is spelled the one way, on a line the hold's TABLE_LOAD matches (R1184r D2: `TABLES?.get(`,
+    // `TABLES/**/.get(`, `tablesOf (`, a trailing comma or a comment in the call, an escaped name: the parse accepts
+    // them, the text rule doesn't, so a later edit of that line would have no reason).
+    const lineOf = (n: ts.Node) => text.split('\n')[src.getLineAndCharacterOfPosition(n.getStart(src)).line] ?? '';
+    const spelled = (n: ts.Node, as: string) => {
+      if (n.getText(src) !== as || !weakening.TABLE_LOAD.test(lineOf(n))) out.push(`${at(n)}: a load spelled other than \`${as}\` on a line the hold reads as one (${n.getText(src).slice(0, 60)})`);
+    };
+    // A load's statement (or parameter) on one line, so a removed line always carries the load (R1184o 1).
+    const oneLine = (n: ts.Node) => {
+      let s: ts.Node = n;
+      while (s.parent && !(ts.isVariableStatement(s) || ts.isParameter(s) || ts.isExpressionStatement(s) || ts.isReturnStatement(s) || ts.isPropertyDeclaration(s) || ts.isExportAssignment(s))) s = s.parent;
+      const [a, b] = [src.getLineAndCharacterOfPosition(s.getStart(src)).line, src.getLineAndCharacterOfPosition(s.getEnd()).line];
+      if (a !== b) out.push(`${at(n)}: a load's statement over ${b - a + 1} lines (put it on one)`);
+    };
+    const visit = (n: ts.Node): void => {
+      // import.meta only read, as .url, .dirname or .filename, and never written or deleted (R1184o 2).
+      if (ts.isMetaProperty(n) && n.keywordToken === ts.SyntaxKind.ImportKeyword) {
+        const pa = n.parent;
+        const read = ts.isPropertyAccessExpression(pa) && pa.expression === n && ['url', 'dirname', 'filename'].includes(pa.name.text);
+        // A write: the left of an assignment, a delete or ++/--, or a target nested in a pattern or a for...of/in head
+        // (R1184q 1: `[import.meta.url] = …`, `({ url: import.meta.url } = …)`, `for (import.meta.url of …)`),
+        // through a TypeScript wrapper tsc erases (R1184s D1: `!`, `as`, `satisfies`, `<T>`).
+        const target = (x: ts.Node): boolean => {
+          let c: ts.Node = x;
+          while (c.parent && (ts.isParenthesizedExpression(c.parent) || ts.isNonNullExpression(c.parent) || ts.isAsExpression(c.parent) || ts.isSatisfiesExpression(c.parent) || ts.isTypeAssertionExpression(c.parent) || ts.isArrayLiteralExpression(c.parent) || ts.isSpreadElement(c.parent) || ts.isObjectLiteralExpression(c.parent) || ts.isShorthandPropertyAssignment(c.parent) || (ts.isPropertyAssignment(c.parent) && c.parent.initializer === c))) c = c.parent;
+          const q = c.parent;
+          return (ts.isBinaryExpression(q) && q.left === c && q.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && q.operatorToken.kind <= ts.SyntaxKind.LastAssignment) || ((ts.isForOfStatement(q) || ts.isForInStatement(q)) && q.initializer === c);
+        };
+        let w: ts.Node = pa;
+        while (w.parent && (ts.isParenthesizedExpression(w.parent) || ts.isNonNullExpression(w.parent) || ts.isAsExpression(w.parent) || ts.isSatisfiesExpression(w.parent) || ts.isTypeAssertionExpression(w.parent))) w = w.parent;
+        const written = read && (target(pa) || ts.isDeleteExpression(w.parent) || ts.isPrefixUnaryExpression(w.parent) || ts.isPostfixUnaryExpression(w.parent));
+        if (!read || written) out.push(`${at(n)}: import.meta used other than to read its url, dirname or filename`);
+      }
+      // A loader name read by element access (R1184o 3). A specifier computed at run time is not followed: a named limit
+      // (scripts/ci imports by computed URLs by design).
+      if (ts.isElementAccessExpression(n) && ts.isStringLiteralLike(n.argumentExpression) && ['tablesOf', 'tablesFrom', 'parseTables'].includes(n.argumentExpression.text)) out.push(`${at(n)}: ${n.argumentExpression.text} read by element access`);
+      if (ts.isIdentifier(n) && n.text === 'TABLES' && isGetLiteral(n)) {
+        oneLine(n);
+        spelled(n.parent, 'TABLES.get');
+      }
+      if (ts.isImportDeclaration(n) && isLoader(n.moduleSpecifier)) {
+        const c = n.importClause;
+        if (!c || c.name || (c.namedBindings && !ts.isNamedImports(c.namedBindings))) out.push(`${at(n)}: the loader imported other than by name`);
+        else if (c.namedBindings) for (const el of c.namedBindings.elements) if (el.propertyName || !LOADER_NAMES.has(el.name.text)) out.push(`${at(el)}: the loader's ${el.propertyName?.text ?? el.name.text} imported${el.propertyName ? ` as ${el.name.text}` : ''}`);
+      } else if (ts.isImportEqualsDeclaration(n) && ts.isExternalModuleReference(n.moduleReference) && isLoader(n.moduleReference.expression)) out.push(`${at(n)}: the loader imported with import = require`);
+      else if (ts.isCallExpression(n) && (n.expression.kind === ts.SyntaxKind.ImportKeyword || (ts.isIdentifier(n.expression) && n.expression.text === 'require')) && n.arguments.some((a) => isLoader(a))) out.push(`${at(n)}: the loader loaded by a dynamic import or require`);
+      else if (ts.isExportDeclaration(n) && isLoader(n.moduleSpecifier)) out.push(`${at(n)}: the loader re-exported`);
+      else if (ts.isIdentifier(n) && (n.text === 'tablesFrom' || n.text === 'parseTables')) out.push(`${at(n)}: ${n.text}`);
+      else if (ts.isStringLiteralLike(n) && /\.tables\.json\b/.test(n.text)) out.push(`${at(n)}: names a tables file`);
+      else if (ts.isIdentifier(n) && n.text === 'tablesOf' && !(ts.isImportSpecifier(n.parent))) {
+        const call = n.parent;
+        const meta = ts.isCallExpression(call) && call.expression === n && call.arguments.length === 1 ? call.arguments[0]! : null;
+        const plain = !!meta && ts.isPropertyAccessExpression(meta) && meta.name.text === 'url' && ts.isMetaProperty(meta.expression) && meta.expression.keywordToken === ts.SyntaxKind.ImportKeyword;
+        const bound = ts.isCallExpression(call) && ts.isVariableDeclaration(call.parent) && ts.isIdentifier(call.parent.name) && call.parent.name.text === 'TABLES' && call.parent.initializer === call;
+        if (!plain || !(bound || isGetLiteral(call))) out.push(`${at(n)}: tablesOf other than tablesOf(import.meta.url).get('<name>') or const TABLES = tablesOf(import.meta.url)`);
+        else {
+          loads++;
+          oneLine(call);
+          spelled(call, 'tablesOf(import.meta.url)');
+        }
+        if (bound) tablesBound = true;
+      }
+      ts.forEachChild(n, visit);
+    };
+    visit(src);
+    if (tablesBound) {
+      const uses = (n: ts.Node): void => {
+        if (ts.isIdentifier(n) && n.text === 'TABLES' && !(ts.isVariableDeclaration(n.parent) && n.parent.name === n) && !isGetLiteral(n)) out.push(`${at(n)}: TABLES read other than as TABLES.get('<name>')`);
+        ts.forEachChild(n, uses);
+      };
+      uses(src);
+    }
+    // Comment lines: a generated copy's marker (one copy), and the updater's redactor copy.
+    const begins = text.split('\n').filter((l) => l.startsWith('// BEGIN tables from ')).length;
+    if (loads + begins) sites.set(own, [...(sites.get(own) ?? []), ...Array<string>(loads + begins).fill(f)]);
+    if (text.includes('const TABLES_DATA = ') && !/^scripts\/machine\/[^/]+-update\.cjs$/.test(f)) out.push(`${f}: a TABLES_DATA line outside the updater's redactor copy`);
+  }
+  for (const f of tablesFiles) if (sites.get(f)?.length !== 1) out.push(`${f}: ${sites.get(f)?.length ?? 0} load sites ${JSON.stringify(sites.get(f) ?? [])}`);
+  for (const f of sites.keys()) if (!tablesFiles.includes(f)) out.push(`${f}: a load site with no tables file`);
+  return out;
+}
+
+test("weakening backstop (#941, the owner's rule of 2026-11-08): each tables file has exactly one load site, its module's, and nothing else in src/ or scripts/ loads a table", () => {
+  const texts = new Map(engineFiles.filter((x) => /^(?:src|scripts)\//.test(x) && markable(x)).map((f) => [f, readFileSync(join(repoRoot, f), 'utf8')] as const));
+  assert.deepEqual(loadSiteProblems(texts, engineFiles.filter((f) => TABLES_FILE.test(f))), []);
+});
+
+test("the load-site lock reads code, not spelling: an alias, a namespace, a dynamic import, `tablesOf (`, a second call, TABLES read another way are each refused (#941, R1184m 3, R1184n N3)", () => {
+  const ok = "import { tablesOf } from './check-tables.js';\nexport const A = tablesOf(import.meta.url).get('A');\n";
+  const files = ['src/a.tables.json'];
+  assert.deepEqual(loadSiteProblems(new Map([['src/a.ts', ok]]), files), [], 'the control');
+  const refused = (label: string, extra: Record<string, string>) => assert.ok(loadSiteProblems(new Map([['src/a.ts', ok], ...Object.entries(extra)]), files).length > 0, label);
+  refused('an alias', { 'scripts/zz.mjs': "import { tablesOf as load } from './lib/check-tables.mjs';\nconst T = load(new URL('./push-gate.mjs', import.meta.url).href);\n" });
+  refused('a namespace', { 'src/b.ts': "import * as L from './check-tables.js';\nexport const T = L.tablesOf(new URL('./a.ts', import.meta.url).href);\n" });
+  refused('a dynamic import', { 'src/b.ts': "const L = await import('./check-tables.js');\n" });
+  refused('tablesOf spaced, another URL', { 'src/b.ts': "import { tablesOf } from './check-tables.js';\nconst AGAIN = tablesOf (new URL('./a.ts', import.meta.url).href);\n" });
+  refused('a second load on the load line', { 'src/a.ts': ok.replace(".get('A');", ".get('A'); const B = tablesOf(import.meta.url).get('A');") });
+  refused('TABLES read other than by .get(literal)', { 'src/a.ts': "import { tablesOf } from './check-tables.js';\nconst TABLES = tablesOf(import.meta.url);\nconst k = 'A';\nexport const A = TABLES.get(k);\n" });
+  refused('tablesFrom', { 'src/b.ts': "import { tablesFrom } from './check-tables.js';\n" });
+  // R1184q 1: import.meta.url as a pattern or for-head target. R1184r D2: the load spellings the text rule can't read.
+  for (const [label, line] of [
+    ['an array pattern', "[import.meta.url] = ['file:///x'];"],
+    ['an object pattern', "({ url: import.meta.url } = { url: 'file:///x' });"],
+    ['a for...of head', "for (import.meta.url of ['file:///x']) break;"],
+    // R1184s D1: a TypeScript wrapper tsc erases to a plain write.
+    ['a non-null target', "import.meta.url! = 'file:///x';"],
+    ['an as target', "(import.meta.url as string) = 'file:///x';"],
+    ['a satisfies target', "(import.meta.url satisfies string) = 'file:///x';"],
+    ['a type-assertion target', "(<string>import.meta.url) = 'file:///x';"],
+    ['a non-null in a pattern', "[import.meta.url!] = ['file:///x'];"],
+    ['an as in a for...of head', "for ((import.meta.url as string) of ['file:///x']) break;"],
+    ['a parenthesized target', "(import.meta.url) = 'file:///x';"],
+    ['a delete of a wrapped url', "delete (import.meta.url as never);"],
+    ['an increment through !', "(import.meta.url as unknown as number)!++;"],
+  ] as const) refused(label, { 'src/a.ts': `${line}\n${ok}` });
+  const split2 = (get: string) => `import { tablesOf } from './check-tables.js';\nconst TABLES = tablesOf(import.meta.url);\nexport const A = ${get}('A');\n`;
+  for (const [label, text] of [
+    ['V1 TABLES?.get', split2('TABLES?.get')],
+    ['V2 a comment before .get', split2('TABLES/**/.get')],
+    ['V3 an escaped name', split2('TABL\\u0045S.get')],
+    ['V4 tablesOf (', ok.replace('tablesOf(import.meta.url)', 'tablesOf (import.meta.url)')],
+    ['V5 a trailing comma', ok.replace('tablesOf(import.meta.url)', 'tablesOf(import.meta.url,)')],
+    ['V6 a comment in the call', ok.replace('tablesOf(import.meta.url)', 'tablesOf(import.meta.url /* own */)')],
+    ['V7 an escaped tablesOf', ok.replace('tablesOf(import.meta.url).get', 'tabl\\u0065sOf(import.meta.url).get')],
+  ] as const) refused(label, { 'src/a.ts': text });
+  // R1184o: a load statement over lines; import.meta redefined without `=`; a computed specifier; a name by element access.
+  refused('a load over three lines', { 'src/a.ts': "import { tablesOf } from './check-tables.js';\nconst TABLES = tablesOf(import.meta.url);\nexport const A = Object.freeze(\n  TABLES.get<readonly string[]>('A').map((x) => x),\n);\n" });
+  refused('Object.assign(import.meta, ...)', { 'src/a.ts': `Object.assign(import.meta, { url: new URL('./b.ts', import.meta.url).href });\n${ok}` });
+  refused('Reflect.set(import.meta, ...)', { 'src/a.ts': `Reflect.set(import.meta, 'url', 'file:///x');\n${ok}` });
+  refused('import.meta.url assigned', { 'src/a.ts': `import.meta.url = 'file:///x';\n${ok}` });
+  refused('a loader name by element access', { 'src/b.ts': "const L = await import('./check' + '-tables.js');\nexport const T = L['tablesOf'](new URL('./a.ts', import.meta.url).href);\n" });
+  // The named limit: a specifier computed at run time, read by a computed name, isn't followed (`L.tablesOf` is).
+  assert.deepEqual(loadSiteProblems(new Map([['src/a.ts', ok], ['src/b.ts', "const L = await import('./check' + '-tables.js');\nconst k = 'tables' + 'Of';\nexport const T = L[k];\n"]]), files), [], 'a computed specifier and name: a named limit (R1184o 3)');
+  assert.deepEqual(loadSiteProblems(new Map([['src/a.ts', ok], ['src/c.ts', 'export const here = import.meta.dirname;\nexport const me = import.meta.filename;\n']]), files), [], 'import.meta read is fine');
+  refused('a tables file named', { 'src/b.ts': "import { readFileSync } from 'node:fs';\nexport const T = readFileSync('src/a.tables.json', 'utf8');\n" });
 });
 
 test('weakening backstop: every test that lists src/ or scripts/ files is a registered lint test or says why it is not', () => {
@@ -1477,8 +1669,26 @@ const REGISTERED_BEFORE_MARKS: readonly { path: string; table?: string; kind: st
   { path: 'test/claude-accounts-retired.test.ts', kind: 'lint' },
 ];
 
+/**
+ * The data tables (#941): each `<module>.tables.json` the repo tracks, its tables by name with their kinds, and the
+ * module it is beside (the one that loads it, or carries its generated copy). A table moved there from its module is
+ * still registered under the module's path, with its kind.
+ */
+function dataTables(): { file: string; module: string; table: string; kind: string; text: string }[] {
+  return engineFiles
+    .filter((f) => TABLES_FILE.test(f))
+    .flatMap((file) => {
+      const stem = file.replace(/\.tables\.json$/, '');
+      const module = ['.ts', '.mjs', '.cjs', '.js'].map((x) => stem + x).find((m) => existsSync(join(repoRoot, m))) ?? `${stem} (no module)`;
+      const text = readFileSync(join(repoRoot, file), 'utf8');
+      return [...parseTables(text, file)].map(([table, d]) => ({ file, module, table, kind: d.kind, text }));
+    });
+}
+
 test('registration (#869): every check registered before the marks is still registered, with the same kind (none lost in the move)', () => {
   const now = new Set<string>([...weakening.CHECK_TABLES.map((t) => `${t.path} ${t.table} ${t.kind}`), ...weakening.LINT_TESTS.map((p) => `${p} lint`)]);
+  // A table moved to its module's tables file (#941) is registered there, under the module's path.
+  for (const d of dataTables()) now.add(`${d.module} ${d.table} ${d.kind}`);
   for (const [path, text] of repoTexts()) {
     if (!markable(path)) continue;
     const marks = marksOf(text);
@@ -1504,6 +1714,26 @@ test('registration (#869): every check registered before the marks is still held
     const text = texts.get(r.path);
     if (text === undefined) {
       notHeld.push(`${r.path}: not read`);
+      continue;
+    }
+    // A table moved to its module's tables file (#941): its first entry taken out (never-shrink) or an entry put in
+    // (never-grow) of the parsed data waits, naming the table.
+    const data = dataTables().find((d) => d.module === r.path && d.table === r.table);
+    if (data) {
+      for (const kind of weakening.heldKinds(data.table, data.kind as weakening.TableKind)) {
+        const top = JSON.parse(data.text) as Record<string, { value: unknown }>;
+        const v = top[data.table]!.value;
+        const probe = (list: unknown[]) => (kind === 'never-grow' ? list.push('held-probe') : list.shift());
+        if (Array.isArray(v)) probe(v);
+        else if (v && typeof v === 'object' && Array.isArray((v as { $set?: unknown[] }).$set)) probe((v as { $set: unknown[] }).$set);
+        else if (v && typeof v === 'object') {
+          const o = v as Record<string, unknown>;
+          if (kind === 'never-grow') o['held-probe'] = 'x';
+          else delete o[Object.keys(o).filter((k) => k !== '//')[0]!];
+        }
+        const now = `${JSON.stringify(top, null, 2)}\n`;
+        if (!names(reasonsFor(data.file, data.text, now), kind === 'never-grow' ? GROWN : SHRUNK, `${data.table}: `)) notHeld.push(`${r.path} ${r.table} ${kind} (${data.file})`);
+      }
       continue;
     }
     const lines = text.split('\n');

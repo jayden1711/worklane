@@ -110,3 +110,8 @@ export function leaks(out: string, secret: string, piece = 12): boolean {
   for (let i = 0; i + piece <= secret.length; i++) if (out.includes(secret.slice(i, i + piece))) return true;
   return false;
 }
+
+// #941, R1184ap: each table freezes here too, at the module's end, whatever loaded the module: require() (whose first
+// load the loader's hook doesn't see), a worker, or a process without the preload, where the bare name is undefined and
+// the load throws. The hook's freeze, right after each declaration, stays the first layer.
+__worklaneTestFreezeTable(SHAPES, `${import.meta.url}#SHAPES`);

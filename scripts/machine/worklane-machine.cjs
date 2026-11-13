@@ -711,8 +711,14 @@ const POLICY_SET_KEYS = {
   'settings.intake.reports_per_sender_per_day': 'number', 'settings.intake.drafts_per_day': 'number', 'settings.intake.max_usd_per_day': 'number', 'settings.stuck_guard': 'word',
   'settings.chat_attachments.max_file_mb': 'number', 'settings.chat_attachments.max_message_mb': 'number', 'settings.chat_attachments.retention_days': 'number',
 };
-// check-table: never-shrink
-const POLICY_ONLY = { land_mode: 'pr', main_watch: 'auto', auto_merge: 'off' };
+// POLICY_ONLY is data in scripts/machine/worklane-machine.tables.json (#941); this helper is installed alone, so it
+// carries it (scripts/lib/table-copies.mjs).
+// BEGIN tables from worklane-machine.tables.json: generated, do not edit (node scripts/gen-table-copies.mjs --write)
+// This script runs on its own, so it carries its tables as frozen literals of the data in
+// scripts/machine/worklane-machine.tables.json, which the weakening hold compares parsed (#941).
+// test/table-copies.test.ts fails when this block is not what that file makes.
+const POLICY_ONLY = Object.freeze({ "land_mode": "pr", "main_watch": "auto", "auto_merge": "off" });
+// END tables from worklane-machine.tables.json
 const POLICY_SHAPES = {
   number: /^(0|[1-9][0-9]{0,5})(\.[0-9]{1,2})?$/,
   bool: /^(on|off)$/,

@@ -1,0 +1,10 @@
+{
+  "POLICY_ONLY": {
+    "kind": "never-shrink",
+    "value": {
+      "land_mode": "pr",
+      "main_watch": "auto",
+      "auto_merge": "off"
+    }
+  }
+}

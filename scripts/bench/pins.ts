@@ -28,6 +28,7 @@
 import { readFileSync } from 'node:fs';
 import { posix } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { tablesOf } from '../../src/check-tables.js';
 
 /** The one pins file: scripts/bench/pins.json in this clone (this module runs from dist/scripts/bench/). */
 export const PINS_FILE = fileURLToPath(new URL('../../../scripts/bench/pins.json', import.meta.url));
@@ -83,10 +84,13 @@ export class DatasetPin {
   }
 }
 
-/** The selection rules select.ts implements. A rule's algorithm never changes; a new one gets a new name. */
-// check-table: never-grow
-export const SELECTION_RULES = ['sha256-rank-v1'] as const;
-export type SelectionRule = (typeof SELECTION_RULES)[number];
+/** A selection rule's name (SELECTION_RULES). */
+export type SelectionRule = 'sha256-rank-v1';
+/**
+ * The selection rules select.ts implements. A rule's algorithm never changes; a new one gets a new name, here and in
+ * SelectionRule. Data in scripts/bench/pins.tables.json (#941).
+ */
+export const SELECTION_RULES: readonly SelectionRule[] = tablesOf(import.meta.url).get('SELECTION_RULES');
 /** The largest seed: 32 bits. */
 export const SEED_MAX = 2 ** 32 - 1;
 

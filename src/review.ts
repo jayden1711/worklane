@@ -6,9 +6,13 @@ import { posix } from 'node:path';
 import type { ReviewConfig } from './config/schema.js';
 import { globRegExp, globToRegExp } from './guardrails/glob.js';
 import { BRAND } from './brand.js';
+import { tablesOf } from './check-tables.js';
 import { HOOK_IMPORTS } from './hook-imports.js';
 import { escapedPath, hasControlCharacter, hasInvisibleCharacter, hasNonAsciiTopLevel, isNonUtf8Path, shownPath, shownPaths } from './path-text.js';
 import { LOOKALIKE_BUDGET, lookalikeOf, type Lookalike, type Protected } from './confusables.js';
+
+/** This module's tables (src/review.tables.json, #941): data the weakening hold compares parsed, deep-frozen here. */
+const TABLES = tablesOf(import.meta.url);
 
 // The odd-name tests and how a reason shows a path live in src/path-text.ts (one module the merge policy, the conflict
 // fix and the coordinator share); re-exported here for the callers that read them with the review levels.
@@ -72,8 +76,7 @@ export const NON_ASCII_TOP_LEVEL_PATH = 'non-ascii-top-level-path';
 export const CONFUSABLE_PATH = 'confusable-path';
 
 /** The categories of a path nothing should have to read around: always L3, always waits, never loosened. */
-// check-table: never-shrink
-export const ODD_PATH_CATEGORIES: readonly string[] = [CONTROL_CHARACTER_PATH, NON_UTF8_PATH, INVISIBLE_CHARACTER_PATH, NON_ASCII_TOP_LEVEL_PATH, CONFUSABLE_PATH];
+export const ODD_PATH_CATEGORIES: readonly string[] = TABLES.get('ODD_PATH_CATEGORIES');
 
 /**
  * A change to a .gitattributes (any directory's) that can hide or change what a review of a file sees: `-diff` or
@@ -339,25 +342,7 @@ export const DECISION_FILES = ['decisions.md', 'DECISIONS.md', 'docs/decisions.m
 /** Decision record folders: each markdown file in one is an entry (one decision per file). */
 export const DECISION_DIRS = ['decisions', 'docs/decisions', 'docs/adr', `${BRAND.configDir}/decisions`];
 /** Those records as lock globs: each file, and each folder itself (a symlink to anywhere) and everything under it. */
-const DECISION_RECORD_GLOBS = [...DECISION_FILES, ...DECISION_DIRS.flatMap((d) => [d, `${d}/**`])];
-
-/**
- * Each glob stays in the first part that lists it and leaves every later one, so one path has one part and one name
- * (#920: docs/design.md is a decision record too, and stays "the release procedure and the design rules"). The lock is
- * the same either way: the first part still holds the glob. Only a repeat is dropped, never a glob's only listing.
- */
-function onePartPerGlob(parts: { what: string; globs: string[] }[]): { what: string; globs: string[] }[] {
-  const seen = new Set<string>();
-  return parts.map((p) => {
-    const globs: string[] = [];
-    for (const g of p.globs) {
-      if (seen.has(g)) continue;
-      seen.add(g);
-      globs.push(g);
-    }
-    return { what: p.what, globs };
-  });
-}
+export const DECISION_RECORD_GLOBS: readonly string[] = [...DECISION_FILES, ...DECISION_DIRS.flatMap((d) => [d, `${d}/**`])];
 
 /**
  * The harness's config in a repo: the config folder (tests.yaml says what a project command runs and with what
@@ -367,8 +352,7 @@ function onePartPerGlob(parts: { what: string; globs: string[] }[]): { what: str
  * and a repo may only add to them.
  */
 export const HARNESS_CONFIG = 'harness-config';
-// check-table: never-shrink
-const HARNESS_CONFIG_GLOBS =[`${BRAND.configDir}/**`, '.claude/**', 'CLAUDE.md'];
+const HARNESS_CONFIG_GLOBS: readonly string[] = TABLES.get('HARNESS_CONFIG_GLOBS');
 
 /**
  * The harness changing its own controls: the merge policy, the main watch and the push guard, the updater, the review
@@ -378,142 +362,57 @@ const HARNESS_CONFIG_GLOBS =[`${BRAND.configDir}/**`, '.claude/**', 'CLAUDE.md']
  * Always L3 and never auto-merged (merge-policy.ts waitCategoriesOf), whatever review.yaml says; review.yaml can't
  * redefine, drop or loosen it. Each part says, in the words "Waiting on you" shows, what such a change changes; the
  * first part a file matches names it. Every glob matches a real file in the engine's repo (a test checks).
+ *
+ * Data in src/review.tables.json (#941), written out in full. It was built here (onePartPerGlob over a list that
+ * spread HOOK_IMPORTS and DECISION_RECORD_GLOBS and named BRAND's paths); the data is what that built, `{configDir}` and
+ * `{cli}` for BRAND's. test/check-tables-sync.test.ts holds what the build did: each glob in one part only (the first
+ * that listed it: #920, docs/design.md stays "the release procedure and the design rules"), the tool guard's part
+ * holding every HOOK_IMPORTS entry, and the decision records' part holding exactly DECISION_RECORD_GLOBS that no
+ * earlier part holds.
  */
 export const SELF_MODIFICATION = 'self-modification';
-// check-table: never-shrink
-export const SELF_MODIFICATION_PARTS: { what: string; globs: string[] }[] = onePartPerGlob([
-  // src/vacuity.ts: what the merge gate counts as an assertion and as app code run (#784, src/merge-policy-vacuity.ts).
-  { what: 'the merge policy', globs: ['src/merge-policy*', 'src/coordinator/merge-flow*', 'src/pr-rules*', 'src/vacuity.ts', 'src/vacuity-read.ts'] },
-  { what: 'the main watch', globs: ['src/main-watch*', 'src/github/main-watch-api*'] },
-  { what: 'the push guard', globs: ['src/push-guard*', 'src/push-check*'] },
-  // The one way the engine and its scripts run git, with replace refs and grafts off (#807): every reader above reads
-  // through it.
-  { what: 'the git runner', globs: ['src/os/git.ts', 'scripts/lib/git.cjs'] },
-  { what: 'the updater', globs: ['src/updates*', `scripts/machine/${BRAND.cli}-update*`] },
-  // src/path-text.ts holds the odd-name tests computeLevel raises on (moved out of src/review.ts, #683), so it stays locked with it.
-  // src/confusables*: the look-alike check and its Unicode table (#763).
-  { what: 'the review levels', globs: [`${BRAND.configDir}/review.yaml`, 'src/review.ts', 'src/path-text.ts', 'src/confusables*'] },
-  { what: 'the guardrails', globs: [`${BRAND.configDir}/guardrails.yaml`, 'src/guardrails/**'] },
-  // deploy/**: the engine's deployment manifests (a compose file and the like) set its isolation and exposure, as the
-  // setup scripts do: the user it runs as, what it mounts, which ports it publishes. Locked before the first one exists.
-  { what: 'the machine setup', globs: ['scripts/setup/**', 'scripts/machine/**', 'deploy/**'] },
-  // The engine's container image (Dockerfile, and any Dockerfile.<name> beside it, in any case the tools read, and the
-  // Containerfile podman reads): the base image, the user it runs as, what it installs and from where. Before this, only
-  // review.yaml's deploy-config held the Dockerfile (#858, a gap #853's review named). dockerfile* and Containerfile*
-  // match no file yet (NOT_YET_FILES in test/merge-policy.test.ts).
-  { what: "the engine's container image", globs: ['Dockerfile*', 'dockerfile*', 'Containerfile*'] },
-  // The engine's deployment files at the top of its repo, beside deploy/**: a bare deploy path (a file, or a symlink to
-  // anywhere) and the compose files set how it runs, as the setup scripts do: the user, the mounts, the ports. Locked
-  // before the first one exists (NOT_YET_FILES in test/merge-policy.test.ts; #885).
-  { what: "the engine's deployment files", globs: ['deploy', 'compose.*', 'docker-compose.*'] },
-  { what: 'the CI workflows', globs: ['.github/workflows/**'] },
-  // Whose signed tag the release workflow stages on npm, and the check that enforces it (release.yml).
-  { what: 'who may sign a release', globs: ['.github/release-signers', 'scripts/verify-release-tag*'] },
-  // src/events/redact.ts: the secret redaction of everything stored and of every chat reply (locked with the guard's
-  // tree before #785, which no longer reaches it).
-  { what: 'sign-in, credentials or secrets', globs: ['src/dashboard-auth*', 'src/github-app*', 'src/github-scope*', 'src/**/*secret*', 'src/console/terminal*', 'src/setup/app-manifest*', 'src/events/redact.ts'] },
-  // src/intake/report.ts: isTrusted and isAllowed, the intake's trust and admission inputs to src/intake/decide.ts;
-  // src/intake/dedupe.ts: candidates(), the bound on which issue the intake agent may name, which decide.ts relies on
-  // (both locked with the guard's tree before #785, which no longer reaches them).
-  { what: 'who may approve', globs: ['src/decide.ts', 'src/intake/decide.ts', 'src/intake/people.ts', 'src/machine-owners.ts', 'src/intake/report.ts', 'src/intake/dedupe.ts'] },
-  // WHY: before this, these were the owner's call only where a repo's own review.yaml listed them (the engine's does, as
-  // `engine`); a repo whose review.yaml didn't would have merged a change to the evaluator or the denylist on its own.
-  { what: 'the evaluator and the agent runner', globs: ['src/roles.ts', 'src/coordinator.ts', 'src/runner.ts'] },
-  { what: 'the sandbox and test runs', globs: ['src/sandbox.ts', 'src/testrun/**'] },
-  // The PreToolUse guard (which tool calls an agent may make, the config folder's guard among them) and the post-edit hook,
-  // with every module it reaches, directly or through other imports (#655, #665): the deny lists, the read-only agents'
-  // tools and refusals, the task file's frozen paths, the guardrail rules' loader, the secret check, and the rest.
-  // src/hook-imports.ts holds that tree as the test reads it from the real imports (test/review.test.ts).
-  // Its process entry is src/hook-main.ts (under src/hook*), so the tree is read from there too (#665).
-  // src/guard/** holds the lanes' rules the guard decides with (#785): every file there is locked, a new one too.
-  { what: "the agents' tool guard", globs: ['src/hook*', 'src/guard/**', ...HOOK_IMPORTS] },
-  // What writes the hook commands that run it (src/install.ts hookCommand, src/instance.ts's research lanes): a change
-  // there could point an agent's hooks at another entry, or at none (#665).
-  { what: "the agents' tool guard's hook commands", globs: ['src/install.ts', 'src/instance.ts'] },
-  // WHY (#785): these were locked only as modules the guard's import tree reached. The tree no longer reaches them, but
-  // each still decides what an agent run gets: the settings that keep its hooks on, the bundles it may read, the
-  // plugins and MCP servers it loads, the hosts it may ask for, the stuck-run stop, the role, lane and tools of the
-  // runs that read untrusted text (the research, intake, chat, replier, explainer and stage-judge run builders; #841
-  // would let those six go), and the intake run's output schema and draft checks (src/intake/triage.ts). So they stay
-  // locked here, exactly as before; only the part that names them changed.
-  {
-    what: 'what an agent run is given',
-    globs: [
-      'src/agent-settings.ts', 'src/bundle.ts', 'src/domain-requests.ts', 'src/stuck.ts',
-      'src/research.ts', 'src/intake/run.ts', 'src/intake/chat.ts', 'src/intake/replier.ts', 'src/intake/explain.ts',
-      'src/stage-label.ts', 'src/intake/triage.ts',
-      'src/mcp/client.ts', 'src/mcp/connector.ts', 'src/mcp/snapshot.ts', 'src/plugins/approval.ts', 'src/plugins/run.ts', 'src/plugins/tree.ts',
-    ],
-  },
-  // Which repos root says are managed apps, where the engine's own source paths below aren't locked (#665).
-  { what: 'where the self-modification locks apply', globs: ['src/managed-apps.ts'] },
-  { what: 'the push gate, denylist and secret scan', globs: ['scripts/push-gate*', 'scripts/check-denylist.mjs', 'scripts/lib/denylist.mjs', 'scripts/check-dco.mjs', '.denylist*', '.gitleaks*', '.githooks/**'] },
-  // A tests-only change is L0 and merges itself: so the tests that hold the controls above are named here, one by one.
-  {
-    what: 'the tests of the harness controls',
-    globs: [
-      'test/review.test.ts', 'test/merge-policy.test.ts', 'test/guardrails.test.ts',
-      'test/push-check.test.ts', 'test/push-guard.test.ts', 'test/push-hook-guard.test.ts', 'test/push-gate.test.ts', 'test/push-gate-hook.test.ts',
-      // The rename, odd-byte and control-character guarantees, and the scan that keeps every changed-name reader in
-      // one helper (#688, locked by #724).
-      'test/change-files-renames.test.ts',
-      // The push limits' SKILL.md lint: read by its bytes, and a link, a submodule or a huge blob refused (#724).
-      'test/push-skill-names.test.ts', 'test/push-skill-links.test.ts',
-      // The push limits' names from plumbing, whatever the repo's log config says; crafted names refused (#724).
-      'test/push-names-plumbing.test.ts',
-      'test/main-watch.test.ts', 'test/main-watch-coordinator.test.ts', 'test/denylist.test.ts', 'test/dco.test.ts', 'test/package-files.test.ts',
-      // Root's managed-apps reader's fail-closed cases and the script's refusals (#665).
-      'test/managed-apps.test.ts',
-      // The merge reconciliation's cases: only the engine's own App's merge is reconciled, never another's (#733).
-      'test/merge-idempotent.test.ts',
-      // The merge gate's vacuity check: tests that run none of the changed code never auto-merge (#784).
-      'test/vacuity.test.ts', 'test/merge-policy-vacuity.test.ts', 'test/merge-vacuity-coordinator.test.ts',
-      'test/merge-vacuity-hostile.test.ts', 'test/merge-vacuity-decisions.test.ts', 'test/merge-vacuity-doctor.test.ts',
-      'test/merge-vacuity-bounds.test.ts', 'test/merge-vacuity-precision.test.ts', 'test/merge-vacuity-r5.test.ts', 'test/merge-vacuity-r6.test.ts',
-      'test/merge-vacuity-r7.test.ts', 'test/merge-vacuity-r8.test.ts', 'test/merge-vacuity-r9-tip.test.ts', 'test/merge-vacuity-r9-precision.test.ts', 'test/merge-vacuity-r9-limits.test.ts',
-      'test/merge-vacuity-r10-shutdown.test.ts', 'test/merge-vacuity-r10-removals.test.ts', 'test/merge-vacuity-r10-cap.test.ts', 'test/vacuity-tip.ts',
-      'test/merge-vacuity-r11-removals.test.ts', 'test/merge-vacuity-r11-diff.test.ts', 'test/merge-vacuity-r11-align.test.ts', 'test/merge-vacuity-r12.test.ts', 'test/merge-vacuity-r13.test.ts',
-      // The test that keeps the security pages' citations true, the adversarial suite of hostile PRs (its runner, its
-      // cases, controls and todo list), and the test that holds these locks (#858).
-      'test/docs-guardrails.test.ts',
-      'test/adversarial/**',
-      'test/engine-guard-locks.test.ts',
-      // The test that keeps each lock glob that matches no file yet paired with its lock (#885).
-      'test/not-yet-files-locks.test.ts',
-      // The replace-ref and graft routes, and the scan that every git call goes through the git runner (#807).
-      'test/git-runner.test.ts',
-      // The test that keeps the engine repo's merge process (docs/process.md) out of the planners' decisions index.
-      'test/plan-decisions.test.ts',
-    ],
-  },
-  { what: 'the release procedure and the design rules', globs: ['docs/releasing.md', 'docs/design.md'] },
-  // How the engine repo's own PRs are merged and who reviews them (owner, 2026-10-21): a docs-only change was L0 and
-  // could merge itself, so a PR could drop its own second review. Kept out of the decisions index (src/plan-decisions.ts).
-  { what: "the engine repo's merge process", globs: ['docs/process.md'] },
-  // The planners' decision records (#920): planner and plan-review agents read each one as a recorded decision, and a
-  // plan may cite it. A docs-only record was L0 and merged itself, so a PR could put the merge process above, whole,
-  // in part or reworded, where planners read it as a decision; the index code can't recognise a copy. Read from the
-  // index's own lists (DECISION_FILES, DECISION_DIRS above), so the two can't drift. Only docs/design.md exists yet
-  // (NOT_YET_FILES in test/merge-policy.test.ts), and it stays named by the design rules' part above (onePartPerGlob).
-  // In the engine's repo only: a managed app's records keep their categories (engineSourceGlob).
-  { what: "the planners' decision records", globs: DECISION_RECORD_GLOBS },
-  // The code that builds that index: what it reads, and what it leaves out (docs/process.md, a record linked elsewhere).
-  { what: "the planners' decisions index", globs: ['src/plan-decisions.ts'] },
-  // What the engine publicly claims its guards do and which gaps are open (#705), and how to report one: a docs-only
-  // change was L0 and merged itself, so a PR could rewrite a claim with nothing holding it (#858).
-  { what: 'the public security claims', globs: ['docs/guardrails.md', 'docs/security*.md', 'SECURITY.md'] },
-  // After the merge policy's own part above (the first part a file matches names it): the rest of the coordinator.
-  { what: 'the coordinator', globs: ['src/coordinator/**'] },
-  // A study's definition (docs: the experiments design): its eval, editable paths and budget are what a job may touch.
-  { what: 'the experiment studies', globs: [`${BRAND.configDir}/experiments.yaml`] },
-]);
+export const SELF_MODIFICATION_PARTS: readonly { readonly what: string; readonly globs: readonly string[] }[] = TABLES.get('SELF_MODIFICATION_PARTS');
 
-// check-table: never-shrink
-export const LOCKED_CATEGORIES: Record<string, string[]> = {
-  [AGENT_INSTRUCTIONS]: [`${BRAND.configDir}/roles/**`, `${BRAND.configDir}/skills/**`, 'AGENTS.md', '**/CLAUDE.md'],
-  [SELF_MODIFICATION]: SELF_MODIFICATION_PARTS.flatMap((p) => p.globs),
-  [HARNESS_CONFIG]: HARNESS_CONFIG_GLOBS,
-};
+/**
+ * The locked categories (src/review.tables.json, #941): the agents' instructions, self-modification and the harness's
+ * config, written out in full. It was built from SELF_MODIFICATION_PARTS' globs and HARNESS_CONFIG_GLOBS;
+ * test/check-tables-sync.test.ts fails when it no longer holds exactly them.
+ */
+export const LOCKED_CATEGORIES: Readonly<Record<string, readonly string[]>> = TABLES.get('LOCKED_CATEGORIES');
+
+/** The tool guard's part and the decision records' part of SELF_MODIFICATION_PARTS, by their words. */
+export const TOOL_GUARD_PART = "the agents' tool guard";
+export const DECISION_RECORDS_PART = "the planners' decision records";
+
+/**
+ * What is wrong with the lock data against what this module used to build it from (#941), each in words; none when it
+ * holds. The data was written out from that build, so the build's rules are checked instead of run: each glob in one
+ * part only; the tool guard's part holds every HOOK_IMPORTS entry; the decision records' part holds exactly the
+ * DECISION_RECORD_GLOBS no earlier part holds; LOCKED_CATEGORIES is exactly the agents' instructions, every part's
+ * globs and HARNESS_CONFIG_GLOBS; ODD_PATH_CATEGORIES and ALWAYS_L3 are exactly their constants. Checked when this
+ * module loads (it throws), so the engine never runs on locks that drifted; test/check-tables-sync.test.ts tries each.
+ */
+export function lockDataProblems(
+  parts: readonly { readonly what: string; readonly globs: readonly string[] }[] = SELF_MODIFICATION_PARTS,
+  locked: Readonly<Record<string, readonly string[]>> = LOCKED_CATEGORIES,
+  hookImports: readonly string[] = HOOK_IMPORTS,
+): string[] {
+  const out: string[] = [];
+  const same = (a: readonly string[] | undefined, b: readonly string[]) => a !== undefined && a.length === b.length && a.every((x, k) => x === b[k]);
+  const seen = new Set<string>();
+  for (const part of parts) for (const g of part.globs) seen.has(g) ? out.push(`${g} is in more than one part`) : seen.add(g);
+  const guard = parts.find((x) => x.what === TOOL_GUARD_PART);
+  for (const m of hookImports) if (!guard?.globs.includes(m)) out.push(`the tool guard's part doesn't hold ${m} (HOOK_IMPORTS)`);
+  const at = parts.findIndex((x) => x.what === DECISION_RECORDS_PART);
+  const before = new Set(parts.slice(0, Math.max(at, 0)).flatMap((x) => x.globs));
+  if (at === -1 || !same(parts[at]!.globs, DECISION_RECORD_GLOBS.filter((g) => !before.has(g)))) out.push("the decision records' part isn't DECISION_RECORD_GLOBS (those no earlier part holds)");
+  if (!same(Object.keys(locked), [AGENT_INSTRUCTIONS, SELF_MODIFICATION, HARNESS_CONFIG])) out.push(`LOCKED_CATEGORIES' keys aren't ${AGENT_INSTRUCTIONS}, ${SELF_MODIFICATION} and ${HARNESS_CONFIG}`);
+  if (!same(locked[SELF_MODIFICATION], parts.flatMap((x) => x.globs))) out.push("LOCKED_CATEGORIES' self-modification isn't every part's globs, in order");
+  if (!same(locked[HARNESS_CONFIG], HARNESS_CONFIG_GLOBS)) out.push("LOCKED_CATEGORIES' harness-config isn't HARNESS_CONFIG_GLOBS");
+  if (!same(ODD_PATH_CATEGORIES, [CONTROL_CHARACTER_PATH, NON_UTF8_PATH, INVISIBLE_CHARACTER_PATH, NON_ASCII_TOP_LEVEL_PATH, CONFUSABLE_PATH])) out.push("ODD_PATH_CATEGORIES isn't its five constants");
+  if (!same(ALWAYS_L3, [SELF_MODIFICATION, HARNESS_CONFIG])) out.push(`ALWAYS_L3 isn't ${SELF_MODIFICATION} and ${HARNESS_CONFIG}`);
+  return out;
+}
 
 /**
  * Whose repo a change is in, for the locks above (#665). 'engine': the engine's own, where every lock applies. The
@@ -531,16 +430,14 @@ export type LockScope = 'engine' | 'managed-app';
  * The engine's own source tree: a self-modification glob under it names an engine file, not a managed app's. deploy/ is
  * the engine's deployment manifests; a managed app's own deploy/ stays its deploy-config, as before.
  */
-// check-table: never-grow
-const ENGINE_TREE = ['src/', 'scripts/', 'test/', 'docs/', 'deploy/'];
+const ENGINE_TREE: readonly string[] = TABLES.get('ENGINE_TREE');
 /**
  * The engine's own files at the top of its repo, glob for glob (#858): its security policy, its container image and its
  * deployment files. Like ENGINE_TREE, their locks hold only in the engine's repo; a managed app's own SECURITY.md,
  * Dockerfile, Containerfile, compose file or deploy path keeps the categories its review.yaml gives it, as before.
  * Matched exactly, so no other glob stands aside through it.
  */
-// check-table: never-grow
-const ENGINE_ROOT_FILES = ['SECURITY.md', 'Dockerfile*', 'dockerfile*', 'Containerfile*', 'deploy', 'compose.*', 'docker-compose.*'];
+const ENGINE_ROOT_FILES: readonly string[] = TABLES.get('ENGINE_ROOT_FILES');
 /**
  * Whether a locked glob names the engine's own source (so it holds only in the engine's repo). The decision records'
  * globs are the engine's too (#920): a managed app's own decisions file or folder keeps the categories its
@@ -549,14 +446,17 @@ const ENGINE_ROOT_FILES = ['SECURITY.md', 'Dockerfile*', 'dockerfile*', 'Contain
 export const engineSourceGlob = (glob: string): boolean => ENGINE_TREE.some((d) => glob.startsWith(d)) || ENGINE_ROOT_FILES.includes(glob) || DECISION_RECORD_GLOBS.includes(glob);
 
 /** The locked categories in this scope: all of them in the engine's repo; in a managed app's, those that hold in every repo. */
-export function lockedCategories(scope: LockScope | undefined): Record<string, string[]> {
+export function lockedCategories(scope: LockScope | undefined): Readonly<Record<string, readonly string[]>> {
   if (scope !== 'managed-app') return LOCKED_CATEGORIES;
   return Object.fromEntries(Object.entries(LOCKED_CATEGORIES).map(([c, globs]) => [c, globs.filter((g) => !engineSourceGlob(g))]));
 }
 
 /** Locked categories that are always L3, whatever review.yaml's levels list. */
-// check-table: never-shrink
-const ALWAYS_L3 = [SELF_MODIFICATION, HARNESS_CONFIG];
+const ALWAYS_L3: readonly string[] = TABLES.get('ALWAYS_L3');
+
+// The lock data, checked against its sources at load (lockDataProblems): a drifted table stops the engine.
+const LOCK_DATA_PROBLEMS = lockDataProblems();
+if (LOCK_DATA_PROBLEMS.length) throw new Error(`src/review.ts's data: ${LOCK_DATA_PROBLEMS.join('; ')}`);
 
 /** What a change to this path changes, in plain words (the self-modification part it falls in, in this scope), or null. */
 export function selfModificationPart(path: string, scope?: LockScope): string | null {
@@ -576,7 +476,7 @@ export const DEFAULT_CATEGORIES: Record<string, string[]> = {
     '**/Cargo.toml', '**/Cargo.lock', '**/go.mod', '**/go.sum', '**/Gemfile', '**/Gemfile.lock',
   ],
   'ci-config': ['.github/**', '.gitlab-ci.yml', '.circleci/**'],
-  [HARNESS_CONFIG]: HARNESS_CONFIG_GLOBS,
+  [HARNESS_CONFIG]: [...HARNESS_CONFIG_GLOBS],
   'guardrail-config': [`${BRAND.configDir}/guardrails.yaml`],
   migration: ['**/migrations/**', '**/*.sql', 'prisma/schema.prisma'],
   'deploy-config': ['.github/workflows/**', 'railway.json', 'railway.toml', 'deploy/**', 'Dockerfile', 'fly.toml', 'render.yaml'],

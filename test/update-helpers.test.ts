@@ -19,7 +19,17 @@ const updater = createRequire(import.meta.url)(join(machineDir, 'worklane-update
 };
 
 test('the updater knows every root helper the setup scripts install from scripts/machine/', () => {
-  assert.deepEqual(updater.HELPERS.map((h) => h.src).sort(), readdirSync(machineDir).filter((f) => f !== 'worklane-update.cjs').map((f) => `scripts/machine/${f}`).sort());
+  // A helper's tables file (#941: `<helper>.tables.json`, data the weakening hold compares) is no helper: the helper
+  // beside it carries a generated copy of it (scripts/lib/table-copies.mjs), so it must be a listed helper's, by name.
+  const files = readdirSync(machineDir).filter((f) => f !== 'worklane-update.cjs');
+  const data = files.filter((f) => f.endsWith('.tables.json'));
+  assert.deepEqual(updater.HELPERS.map((h) => h.src).sort(), files.filter((f) => !data.includes(f)).map((f) => `scripts/machine/${f}`).sort());
+  for (const f of data) {
+    const helper = updater.HELPERS.find((h) => h.src.replace(/\.[cm]?js$/, '.tables.json') === `scripts/machine/${f}`);
+    assert.ok(helper, `${f}: the tables file of no listed helper`);
+    // Read from this folder by its name, as the rest of this file reads it (not the whole repo).
+    assert.ok(readFileSync(join(machineDir, helper.src.slice('scripts/machine/'.length)), 'utf8').includes(`// BEGIN tables from ${f}:`), `${helper.src} carries ${f}'s generated copy`);
+  }
   for (const h of updater.HELPERS) assert.match(h.dest, /^\/usr\/local\/libexec\/worklane-[a-z-]+$/);
 });
 

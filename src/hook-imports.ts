@@ -2,46 +2,8 @@
 // directly or through other imports, that no other self-modification glob locks already (src/review.ts). Each is locked as the guard, in the engine's repo.
 // WHY a list: the engine runs from its build, so the lock can't read the imports at run time. test/review.test.ts reads
 // them from the real source with TypeScript's own scan and fails, naming each module, on an import that isn't here or
-// an entry that is no longer imported. This file is the guard's own (src/hook*), so a change to it waits for the owner.
-// check-table: never-shrink
-export const HOOK_IMPORTS: readonly string[] = [
-  'src/ack-reason.ts',
-  'src/adapters/railway.ts',
-  'src/automations/cron.ts',
-  'src/automations/schema.ts',
-  'src/backlog/types.ts',
-  'src/brand.ts',
-  'src/check-source.ts',
-  'src/checkout.ts',
-  'src/ci-none.ts',
-  'src/comment-policy.ts',
-  'src/config/load.ts',
-  'src/config/schema.ts',
-  'src/contract.ts',
-  'src/cross-eval.ts',
-  'src/dashboard-key-paths.ts',
-  'src/delegation.ts',
-  'src/deploy-gate/config.ts',
-  'src/events/types.ts',
-  'src/experiments/paths.ts',
-  'src/governor-holds.ts',
-  'src/held-out-paths.ts',
-  'src/model-routing.ts',
-  'src/network.ts',
-  'src/optimize.ts',
-  'src/os/child-process.ts',
-  'src/os/index.ts',
-  'src/os/own-env.ts',
-  'src/os/process-links.ts',
-  'src/os/system-paths.ts',
-  'src/os/system-root-guard.ts',
-  'src/preview/config.ts',
-  'src/project-env.ts',
-  'src/provider-hosts.ts',
-  'src/providers.ts',
-  'src/quiet-sqlite.ts',
-  'src/routing.ts',
-  'src/slot-file.ts',
-  'src/stage-names.ts',
-  'src/tool-path.ts',
-];
+// an entry that is no longer imported. This file and its list (src/hook-imports.tables.json, data the weakening hold
+// compares parsed, #941) are the guard's own (src/hook*), so a change to them waits for the owner.
+import { tablesOf } from './check-tables.js';
+
+export const HOOK_IMPORTS: readonly string[] = tablesOf(import.meta.url).get('HOOK_IMPORTS');

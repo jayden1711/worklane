@@ -1,0 +1,627 @@
+{
+  "CREDENTIAL_WORDS": {
+    "//": "A word that makes any key holding it a credential's: db_password, slack_bot_token, aws_secret_access_key.",
+    "kind": "never-shrink",
+    "value": {
+      "$set": [
+        "token",
+        "secret",
+        "secrets",
+        "password",
+        "passwd",
+        "pwd",
+        "pass",
+        "passphrase",
+        "jwt",
+        "bearer",
+        "credential",
+        "credentials",
+        "authorization"
+      ]
+    }
+  },
+  "CREDENTIAL_ENDINGS": {
+    "//": "A word that ends in one of these is a credential word too: a name written as one word (csrftoken, clientsecret, adminpassword, secretaccesskey). Only the end counts, so tokenizer and secretary are not; pass and pwd count only whole (compass, bypass).",
+    "kind": "never-shrink",
+    "value": [
+      "token",
+      "secret",
+      "password",
+      "passwd",
+      "accesskey"
+    ]
+  },
+  "KEY_QUALIFIERS": {
+    "//": "The word before key that makes it a credential (x-api-key, apiKey, signing_key); cacheKey, sort_key are not.",
+    "kind": "never-shrink",
+    "value": {
+      "$set": [
+        "api",
+        "access",
+        "secret",
+        "private",
+        "signing",
+        "encryption",
+        "master",
+        "client",
+        "app",
+        "auth",
+        "account",
+        "service",
+        "license",
+        "deploy",
+        "admin",
+        "webhook",
+        "session",
+        "ssh",
+        "hmac",
+        "consumer"
+      ]
+    }
+  },
+  "PATTERNS": {
+    "//": "Each secret shape with its replacement and what kind of secret it finds (secretKinds names the kind, never the value). A replacement is a string (with $1, $&, $$ as String.prototype.replace reads them) or {\"replacer\": name}, one of src/events/redact.ts REPLACERS. Every pattern must run in linear time on hostile input (test/redact.test.ts times each one). The first is the dashboard key: src/events/redact.ts DASHBOARD_KEY_PREFIX and its body, held equal by test/check-tables-sync.test.ts. Not covered: a bare 32-character string with no prefix (a dashboard key from before #889 among them): a commit hash, a digest and the engine's own ids have the same shape.",
+    "kind": "never-shrink",
+    "value": [
+      {
+        "//": "A dashboard key, wherever its prefix is (after a `-` or a letter too: `key-wld_...`): a match runs to the end of its run of key characters and the next search starts after it, so linear.",
+        "re": {
+          "$regexp": "wld_[A-Za-z0-9_-]{32,}(?![A-Za-z0-9_-])",
+          "flags": "g"
+        },
+        "rep": "wld_[REDACTED]",
+        "kind": "dashboard key"
+      },
+      {
+        "//": "A shape with a distinctive prefix is found wherever the prefix is (#889 round 4): no left boundary, so whatever is glued before it (a name, an escape sequence in any encoding, a digit) can't hide it. Each such match runs to the end of its run and the next search starts after it: linear. Only shapes with no distinctive prefix keep a boundary. The token's end: no letter or digit after it, so `ghp_..._backup` is found too (a `\\b` there needs a non-word).",
+        "re": {
+          "$regexp": "gh[pousr]_[A-Za-z0-9]{30,}(?![A-Za-z0-9])",
+          "flags": "g"
+        },
+        "rep": "gh*_[REDACTED]",
+        "kind": "GitHub token"
+      },
+      {
+        "re": {
+          "$regexp": "github_pat_[A-Za-z0-9_]{40,}",
+          "flags": "g"
+        },
+        "rep": "github_pat_[REDACTED]",
+        "kind": "GitHub token"
+      },
+      {
+        "re": {
+          "$regexp": "sk-ant-[A-Za-z0-9_-]{20,}",
+          "flags": "g"
+        },
+        "rep": "sk-[REDACTED]",
+        "kind": "API key (sk-)"
+      },
+      {
+        "//": "Other `sk-` keys: `sk-` alone is no distinctive prefix (`task-`, `disk-`), so after a boundary.",
+        "re": {
+          "$regexp": "\\bsk-(?:ant-)?[A-Za-z0-9_-]{20,}\\b",
+          "flags": "g"
+        },
+        "rep": "sk-[REDACTED]",
+        "kind": "API key (sk-)"
+      },
+      {
+        "//": "Stripe secret and restricted keys, live and test: random, so with a digit (a long camelCase name after the prefix, with no digit, is a code identifier).",
+        "re": {
+          "$regexp": "(^|[^A-Za-z0-9_])([sr]k)_(?:live|test)_([A-Za-z0-9]{16,})(?![A-Za-z0-9_])",
+          "flags": "g"
+        },
+        "rep": {
+          "replacer": "stripe"
+        },
+        "kind": "Stripe key"
+      },
+      {
+        "//": "Google API keys: AIza and 35 more characters.",
+        "re": {
+          "$regexp": "AIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])",
+          "flags": "g"
+        },
+        "rep": "AIza[REDACTED]",
+        "kind": "Google API key"
+      },
+      {
+        "//": "JSON Web Tokens: a base64 JSON header (so `eyJ` and 8 or more), a payload of 8 or more and a signature (empty when unsigned). Any further dotted parts go with it, empty ones too (#889 rounds 3 and 7): a JWE has five, and a token may be followed by more. A part is base64url or standard base64 (`+`, `/`), and may end in `=` padding (#996). - The header is found in any part, glued after anything in it (`x<jwt>`, `%3D<jwt>`, `name.<jwt>`): the match starts at a part's start (after a character no part holds: `.`, a space, `%`, `=`), and a lookahead looks in that part for `eyJ`. It can't leave its part, so each part is read once from its start: linear. - Each of the header and the payload is read whole, with no way back into it (a lookahead takes the run, a backreference steps over it), with no bound on its length (an `x5c` chain makes a header several KB, round 5): a run of millions of characters is passed in one step, not given back a character at a time until V8's backtracking stack overflows (round 6). - A plain replacement: no match is declined, so nothing the search steps over can hide a token (round 7).",
+        "re": {
+          "$regexp": "(^|[^A-Za-z0-9_+/-])(?=([A-Za-z0-9_+/-]*?)eyJ)\\2eyJ(?=[A-Za-z0-9_+/-]{8})(?=([A-Za-z0-9_+/-]+))\\3=*\\.(?=[A-Za-z0-9_+/-]{8})(?=([A-Za-z0-9_+/-]+))\\4=*\\.[A-Za-z0-9_+/=-]*(?:\\.[A-Za-z0-9_+/=-]*)*",
+          "flags": "g"
+        },
+        "rep": "$1$2[REDACTED JWT]",
+        "kind": "JWT"
+      },
+      {
+        "re": {
+          "$regexp": "(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Za-z0-9])",
+          "flags": "g"
+        },
+        "rep": "AKIA[REDACTED]",
+        "kind": "AWS access key"
+      },
+      {
+        "//": "Slack's token-rotation and refresh tokens (xoxe-..., xoxe.xoxb-...), before the other Slack tokens (one is inside it); then its app-level token (xapp-, Socket Mode).",
+        "re": {
+          "$regexp": "xoxe[.-][A-Za-z0-9.-]{10,}(?![A-Za-z0-9])",
+          "flags": "g"
+        },
+        "rep": "xoxe-[REDACTED]",
+        "kind": "Slack token"
+      },
+      {
+        "re": {
+          "$regexp": "xox[abprs]-[A-Za-z0-9-]{10,}(?![A-Za-z0-9])",
+          "flags": "g"
+        },
+        "rep": "xox-[REDACTED]",
+        "kind": "Slack token"
+      },
+      {
+        "re": {
+          "$regexp": "xapp-[A-Za-z0-9-]{10,}(?![A-Za-z0-9])",
+          "flags": "g"
+        },
+        "rep": "xapp-[REDACTED]",
+        "kind": "Slack app-level token"
+      },
+      {
+        "//": "Linear personal API keys and OAuth tokens.",
+        "re": {
+          "$regexp": "lin_(?:api|oauth)_[A-Za-z0-9]{20,}(?![A-Za-z0-9])",
+          "flags": "g"
+        },
+        "rep": "lin_[REDACTED]",
+        "kind": "Linear key"
+      },
+      {
+        "re": {
+          "$regexp": "https:\\/\\/hooks\\.slack\\.com\\/services\\/[A-Za-z0-9/]+",
+          "flags": "g"
+        },
+        "rep": "https://hooks.slack.com/services/[REDACTED]",
+        "kind": "Slack webhook"
+      },
+      {
+        "//": "Tailscale auth keys, API tokens and OAuth client secrets (tskey-auth-..., tskey-api-..., tskey-client-...): the prefix and the rest of its run, however short (src/tailscale-setup.ts redacted them this way on its own).",
+        "re": {
+          "$regexp": "tskey-[A-Za-z0-9_-]+",
+          "flags": "g"
+        },
+        "rep": "tskey-[REDACTED]",
+        "kind": "Tailscale key"
+      },
+      {
+        "//": "A private key (PEM, and PGP's PRIVATE KEY BLOCK), failing closed (#889): from its BEGIN line to its END line, or to the end of the text when no END follows (a key cut short, or still being written); then, for an END line with no BEGIN before it (a key whose start is above a window), from the start of the text to that END line. Each BEGIN is read once (its match runs to its END or to the end), and the second rule has one start: linear.",
+        "re": {
+          "$regexp": "-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----(?:[\\s\\S]*?-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----|[\\s\\S]*)",
+          "flags": "g"
+        },
+        "rep": "[REDACTED PRIVATE KEY]",
+        "kind": "private key"
+      },
+      {
+        "re": {
+          "$regexp": "^[\\s\\S]*-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----",
+          "flags": ""
+        },
+        "rep": {
+          "replacer": "orphanEnd"
+        },
+        "kind": "private key"
+      },
+      {
+        "//": "The scheme is case-insensitive (RFC 9110): any case (#889). `bearer` is a word, so after a boundary. A `/` may be written JSON-escaped (`\\/`), in this rule and the Basic one (#996).",
+        "re": {
+          "$regexp": "\\b(bearer)\\s+(?:[A-Za-z0-9._~+/-]|\\\\\\/){20,}=*",
+          "flags": "gi"
+        },
+        "rep": "$1 [REDACTED]",
+        "kind": "bearer token"
+      },
+      {
+        "//": "HTTP Basic credentials (base64 of user:password; git's extraheader, src/dashboard-auth.ts's client id and secret), failing closed: any credential-looking value after the scheme. Prose (\"Basic Authentication\") has no digit, `+`, `/` or `=`, and isn't a mixed-case run of a base64 length. The value ends where its run and padding end, whatever is glued after it (#889 round 7: a check that nothing followed left `Basic <value>==<more>` to a later pass, after another rule's marker made the boundary; broad mode, which masks that rule's text, showed it).",
+        "re": {
+          "$regexp": "\\b(basic)(\\s+)((?:[A-Za-z0-9+/]|\\\\\\/){8,}={0,2})",
+          "flags": "gi"
+        },
+        "rep": {
+          "replacer": "basic"
+        },
+        "kind": "Basic credential"
+      },
+      {
+        "//": "Credentials inside connection strings: keep scheme, user and host. The last 1 to 32 characters of the scheme right before `://`, from any start (#889 round 4: from `\\b` with any length it was quadratic on a long dotted run): each start reads at most 33 characters, and each `://` is reached from at most 32 starts, so linear. No letter is required among them (round 8: a scheme whose last 32 characters are digits or `-` was main's too), so every match main's rule made, with at least one scheme character before `://`, this one makes.",
+        "re": {
+          "$regexp": "([a-z0-9+.-]{1,32}:\\/\\/[^:/\\s@]+):[^@\\s/]+@",
+          "flags": "gi"
+        },
+        "rep": "$1:[REDACTED]@",
+        "kind": "password in a URL"
+      },
+      {
+        "//": "0x-prefixed 32-byte hex (EVM private keys and the like).",
+        "re": {
+          "$regexp": "\\b0x[0-9a-fA-F]{64}(?![A-Za-z0-9])",
+          "flags": "g"
+        },
+        "rep": "0x[REDACTED-32-BYTES]",
+        "kind": "32-byte hex key"
+      },
+      {
+        "//": "A JSON string value under a credential key (credentialKey: \"aws_secret_access_key\", \"db_password\", \"x-api-key\", \"slack_bot_token\", \"authorization\", ...), also inside an escaped JSON string (\\\"token\\\":\\\"...\\\"). Not \"cacheKey\" or \"sort_key\", and only a credential-shaped value (16 or more characters; mixed case with a digit, or long hex), so {\"key\": \"issue-644\"}, {\"token\": \"intake.triaged.v2\"} and a UUID stay. The key is judged in a function, so the regex only reads one run of key characters from each quote. Other languages' dictionary literals too (#996): single quotes (Python's `{'password': '...'}`), each string quoted on its own, and `=>` (Ruby, PHP).",
+        "re": {
+          "$regexp": "(\\\\?\"|')([A-Za-z0-9_-]+)\\1(\\s*(?::|=>)\\s*)(\\\\?\"|')([A-Za-z0-9_\\-.+/=~]{16,})\\4",
+          "flags": "g"
+        },
+        "rep": {
+          "replacer": "jsonKey"
+        },
+        "kind": "secret under a JSON key"
+      },
+      {
+        "//": "A Discord bot token: three base64url parts (the bot's id, a timestamp, an HMAC). Last, as src/watchdog/incidents.ts applied it after the rest (#889: it was redacted only there; there it started at `\\b`, here after any character but a letter or digit, so `x_<token>` is found too). It may start inside a run of `-` or `_`, but the first part is bounded (23 to 28 characters, then a dot), so each start reads a bounded stretch: linear (redact-shapes.test.ts).",
+        "re": {
+          "$regexp": "(^|[^A-Za-z0-9])[A-Za-z0-9_-]{23,28}\\.[A-Za-z0-9_-]{6,7}\\.[A-Za-z0-9_-]{27,}\\b",
+          "flags": "g"
+        },
+        "rep": "$1[REDACTED]",
+        "kind": "Discord bot token"
+      }
+    ]
+  },
+  "BROAD": {
+    "//": "The broad rules (broad: true), for text whose source may cut a token short or name a secret by its key: gh's output, the bench's printed lines and the root updater's files. Run with PATTERNS, all on the text as it was, and what any of them finds is masked (maskUnion). mask is the replacement with {mask} where the mask goes (src/events/redact.ts shows each with [REDACTED]).",
+    "kind": "never-shrink",
+    "value": [
+      {
+        "//": "Wherever the prefix is, as in PATTERNS (#889 round 4).",
+        "re": {
+          "$regexp": "(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{8,}",
+          "flags": "g"
+        },
+        "mask": "{mask}",
+        "kind": "GitHub token, cut short"
+      },
+      {
+        "re": {
+          "$regexp": "sk-ant-[A-Za-z0-9_-]+",
+          "flags": "g"
+        },
+        "mask": "{mask}",
+        "kind": "Anthropic key, cut short"
+      },
+      {
+        "//": "The root updater's own token rule on main, as it was: where it ends (a GitHub token's run of letters and digits, a Slack token's before a `_`) is where its next rule saw a boundary (maskUnion reads again there).",
+        "re": {
+          "$regexp": "\\b(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-ant-[A-Za-z0-9_-]{10,}|xox[abprs]-[A-Za-z0-9-]{10,})",
+          "flags": "g"
+        },
+        "mask": "{mask}",
+        "kind": "the updater's token rule"
+      },
+      {
+        "re": {
+          "$regexp": "xox[abprs]-[A-Za-z0-9_-]+",
+          "flags": "g"
+        },
+        "mask": "{mask}",
+        "kind": "Slack token, cut short"
+      },
+      {
+        "re": {
+          "$regexp": "eyJ[A-Za-z0-9_-]{8,512}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*",
+          "flags": "g"
+        },
+        "mask": "{mask}",
+        "kind": "JWT after a hyphen"
+      },
+      {
+        "re": {
+          "$regexp": "\\b(bearer)\\s+[A-Za-z0-9._~+/=-]{8,}",
+          "flags": "gi"
+        },
+        "mask": "$1 {mask}",
+        "kind": "short bearer token"
+      },
+      {
+        "//": "The last 1 to 32 characters of a scheme right before `://`, from any start (after `-`, `.`, `+` or a letter too: the updater's own rule started at any `\\b`, a scheme of any length; no letter required, round 8): each start reads at most 33 characters, and each `://` is reached from at most 32 starts, so linear.",
+        "re": {
+          "$regexp": "([a-z0-9+.-]{1,32}:\\/\\/)[^\\s/@]+@",
+          "flags": "gi"
+        },
+        "mask": "$1{mask}@",
+        "kind": "user info in a URL"
+      },
+      {
+        "re": {
+          "$regexp": "\\b([A-Za-z_]*(?:token|secret|password|passwd|api[_-]?key))(\\s*[=:]\\s*)(\"[^\"]*\"|'[^']*'|\\S+)",
+          "flags": "gi"
+        },
+        "mask": "$1$2{mask}",
+        "kind": "value after a secret name"
+      }
+    ]
+  },
+  "BROAD_RULES": {
+    "//": "Every rule of the broad mode: PATTERNS' regexps and replacements, then BROAD's with [REDACTED] for {mask}. Written out (#941): it was built from those two, and test/check-tables-sync.test.ts holds it equal to them.",
+    "kind": "never-shrink",
+    "value": [
+      {
+        "re": {
+          "$regexp": "wld_[A-Za-z0-9_-]{32,}(?![A-Za-z0-9_-])",
+          "flags": "g"
+        },
+        "rep": "wld_[REDACTED]"
+      },
+      {
+        "re": {
+          "$regexp": "gh[pousr]_[A-Za-z0-9]{30,}(?![A-Za-z0-9])",
+          "flags": "g"
+        },
+        "rep": "gh*_[REDACTED]"
+      },
+      {
+        "re": {
+          "$regexp": "github_pat_[A-Za-z0-9_]{40,}",
+          "flags": "g"
+        },
+        "rep": "github_pat_[REDACTED]"
+      },
+      {
+        "re": {
+          "$regexp": "sk-ant-[A-Za-z0-9_-]{20,}",
+          "flags": "g"
+        },
+        "rep": "sk-[REDACTED]"
+      },
+      {
+        "re": {
+          "$regexp": "\\bsk-(?:ant-)?[A-Za-z0-9_-]{20,}\\b",
+          "flags": "g"
+        },
+        "rep": "sk-[REDACTED]"
+      },
+      {
+        "re": {
+          "$regexp": "(^|[^A-Za-z0-9_])([sr]k)_(?:live|test)_([A-Za-z0-9]{16,})(?![A-Za-z0-9_])",
+          "flags": "g"
+        },
+        "rep": {
+          "replacer": "stripe"
+        }
+      },
+      {
+        "re": {
+          "$regexp": "AIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])",
+          "flags": "g"
+        },
+        "rep": "AIza[REDACTED]"
+      },
+      {
+        "re": {
+          "$regexp": "(^|[^A-Za-z0-9_+/-])(?=([A-Za-z0-9_+/-]*?)eyJ)\\2eyJ(?=[A-Za-z0-9_+/-]{8})(?=([A-Za-z0-9_+/-]+))\\3=*\\.(?=[A-Za-z0-9_+/-]{8})(?=([A-Za-z0-9_+/-]+))\\4=*\\.[A-Za-z0-9_+/=-]*(?:\\.[A-Za-z0-9_+/=-]*)*",
+          "flags": "g"
+        },
+        "rep": "$1$2[REDACTED JWT]"
+      },
+      {
+        "re": {
+          "$regexp": "(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Za-z0-9])",
+          "flags": "g"
+        },
+        "rep": "AKIA[REDACTED]"
+      },
+      {
+        "re": {
+          "$regexp": "xoxe[.-][A-Za-z0-9.-]{10,}(?![A-Za-z0-9])",
+          "flags": "g"
+        },
+        "rep": "xoxe-[REDACTED]"
+      },
+      {
+        "re": {
+          "$regexp": "xox[abprs]-[A-Za-z0-9-]{10,}(?![A-Za-z0-9])",
+          "flags": "g"
+        },
+        "rep": "xox-[REDACTED]"
+      },
+      {
+        "re": {
+          "$regexp": "xapp-[A-Za-z0-9-]{10,}(?![A-Za-z0-9])",
+          "flags": "g"
+        },
+        "rep": "xapp-[REDACTED]"
+      },
+      {
+        "re": {
+          "$regexp": "lin_(?:api|oauth)_[A-Za-z0-9]{20,}(?![A-Za-z0-9])",
+          "flags": "g"
+        },
+        "rep": "lin_[REDACTED]"
+      },
+      {
+        "re": {
+          "$regexp": "https:\\/\\/hooks\\.slack\\.com\\/services\\/[A-Za-z0-9/]+",
+          "flags": "g"
+        },
+        "rep": "https://hooks.slack.com/services/[REDACTED]"
+      },
+      {
+        "re": {
+          "$regexp": "tskey-[A-Za-z0-9_-]+",
+          "flags": "g"
+        },
+        "rep": "tskey-[REDACTED]"
+      },
+      {
+        "re": {
+          "$regexp": "-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----(?:[\\s\\S]*?-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----|[\\s\\S]*)",
+          "flags": "g"
+        },
+        "rep": "[REDACTED PRIVATE KEY]"
+      },
+      {
+        "re": {
+          "$regexp": "^[\\s\\S]*-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----",
+          "flags": ""
+        },
+        "rep": {
+          "replacer": "orphanEnd"
+        }
+      },
+      {
+        "re": {
+          "$regexp": "\\b(bearer)\\s+(?:[A-Za-z0-9._~+/-]|\\\\\\/){20,}=*",
+          "flags": "gi"
+        },
+        "rep": "$1 [REDACTED]"
+      },
+      {
+        "re": {
+          "$regexp": "\\b(basic)(\\s+)((?:[A-Za-z0-9+/]|\\\\\\/){8,}={0,2})",
+          "flags": "gi"
+        },
+        "rep": {
+          "replacer": "basic"
+        }
+      },
+      {
+        "re": {
+          "$regexp": "([a-z0-9+.-]{1,32}:\\/\\/[^:/\\s@]+):[^@\\s/]+@",
+          "flags": "gi"
+        },
+        "rep": "$1:[REDACTED]@"
+      },
+      {
+        "re": {
+          "$regexp": "\\b0x[0-9a-fA-F]{64}(?![A-Za-z0-9])",
+          "flags": "g"
+        },
+        "rep": "0x[REDACTED-32-BYTES]"
+      },
+      {
+        "re": {
+          "$regexp": "(\\\\?\"|')([A-Za-z0-9_-]+)\\1(\\s*(?::|=>)\\s*)(\\\\?\"|')([A-Za-z0-9_\\-.+/=~]{16,})\\4",
+          "flags": "g"
+        },
+        "rep": {
+          "replacer": "jsonKey"
+        }
+      },
+      {
+        "re": {
+          "$regexp": "(^|[^A-Za-z0-9])[A-Za-z0-9_-]{23,28}\\.[A-Za-z0-9_-]{6,7}\\.[A-Za-z0-9_-]{27,}\\b",
+          "flags": "g"
+        },
+        "rep": "$1[REDACTED]"
+      },
+      {
+        "re": {
+          "$regexp": "(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{8,}",
+          "flags": "g"
+        },
+        "rep": "[REDACTED]"
+      },
+      {
+        "re": {
+          "$regexp": "sk-ant-[A-Za-z0-9_-]+",
+          "flags": "g"
+        },
+        "rep": "[REDACTED]"
+      },
+      {
+        "re": {
+          "$regexp": "\\b(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-ant-[A-Za-z0-9_-]{10,}|xox[abprs]-[A-Za-z0-9-]{10,})",
+          "flags": "g"
+        },
+        "rep": "[REDACTED]"
+      },
+      {
+        "re": {
+          "$regexp": "xox[abprs]-[A-Za-z0-9_-]+",
+          "flags": "g"
+        },
+        "rep": "[REDACTED]"
+      },
+      {
+        "re": {
+          "$regexp": "eyJ[A-Za-z0-9_-]{8,512}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*",
+          "flags": "g"
+        },
+        "rep": "[REDACTED]"
+      },
+      {
+        "re": {
+          "$regexp": "\\b(bearer)\\s+[A-Za-z0-9._~+/=-]{8,}",
+          "flags": "gi"
+        },
+        "rep": "$1 [REDACTED]"
+      },
+      {
+        "re": {
+          "$regexp": "([a-z0-9+.-]{1,32}:\\/\\/)[^\\s/@]+@",
+          "flags": "gi"
+        },
+        "rep": "$1[REDACTED]@"
+      },
+      {
+        "re": {
+          "$regexp": "\\b([A-Za-z_]*(?:token|secret|password|passwd|api[_-]?key))(\\s*[=:]\\s*)(\"[^\"]*\"|'[^']*'|\\S+)",
+          "flags": "gi"
+        },
+        "rep": "$1$2[REDACTED]"
+      }
+    ]
+  },
+  "GLUED_PREFIXES": {
+    "//": "The prefixes of the shapes whose patterns start at a boundary (or after a character that isn't _): after an underscore (MY_ghp_..., x_sk-...) a token is glued to a name, and the second pass (glued) reads it from its prefix on. The last is src/events/redact.ts DASHBOARD_KEY_PREFIX (test/check-tables-sync.test.ts).",
+    "kind": "never-shrink",
+    "value": [
+      "ghp_",
+      "gho_",
+      "ghu_",
+      "ghs_",
+      "ghr_",
+      "github_pat_",
+      "sk-",
+      "sk_live_",
+      "sk_test_",
+      "rk_live_",
+      "rk_test_",
+      "xoxa-",
+      "xoxb-",
+      "xoxe",
+      "xoxp-",
+      "xoxr-",
+      "xoxs-",
+      "xapp-",
+      "lin_api_",
+      "lin_oauth_",
+      "AKIA",
+      "ASIA",
+      "AIza",
+      "eyJ",
+      "0x",
+      "Bearer",
+      "bearer",
+      "BEARER",
+      "Basic",
+      "basic",
+      "BASIC",
+      "wld_"
+    ]
+  },
+  "GLUE_PARTS": {
+    "//": "What may sit right before a token (#889): an escape sequence (ESC as the byte, as a JSON or C escape, or in caret notation, then a whole CSI, nF or one-character sequence), the 8-bit CSI, and a backslash escape in raw JSON or C-style text. Each is regexp text, joined into one global regexp (GLUE).",
+    "kind": "never-shrink",
+    "value": [
+      "(?:\\u001b|\\\\u001[bB]|\\\\x1[bB]|\\\\033|\\\\e|\\^\\[)(?:\\[[0-?]*[ -/]*[@-~]|[ -/]+[0-~]|[0-~])",
+      "\\u009b[0-?]*[ -/]*[@-~]",
+      "\\\\(?:u[0-9A-Fa-f]{4}|[nrtbf\"\\\\/])"
+    ]
+  }
+}

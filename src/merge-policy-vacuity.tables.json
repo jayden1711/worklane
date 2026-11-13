@@ -1,0 +1,44 @@
+{
+  "RUNNER_OPTIONS": {
+    "//": "The only options runner.one may give node --test (#784 round 6; src/merge-policy-vacuity.ts): the test runner's own options, which neither load code before the tests nor change the text Node runs. --test-reporter-destination: a file in the worktree, relative, no .. segment (#784 round 7: Node writes wherever it points).",
+    "kind": "never-grow",
+    "value": [
+      {
+        "$regexp": "^--test-reporter=(?:spec|tap|dot|junit|lcov)$",
+        "flags": ""
+      },
+      {
+        "$regexp": "^--test-reporter-destination=(?:stdout|stderr|(?!(?:.*\\/)?\\.\\.(?:\\/|$))[A-Za-z0-9_][A-Za-z0-9._/-]*)$",
+        "flags": ""
+      },
+      {
+        "$regexp": "^--test-(?:timeout|concurrency)=\\d+$",
+        "flags": ""
+      },
+      {
+        "$regexp": "^--test-(?:name|skip)-pattern=[A-Za-z0-9._:/@-]+$",
+        "flags": ""
+      },
+      {
+        "$regexp": "^--(?:experimental-)?test-isolation=(?:process|none)$",
+        "flags": ""
+      },
+      {
+        "$regexp": "^--test-(?:force-exit|only)$",
+        "flags": ""
+      },
+      {
+        "$regexp": "^--test-shard=\\d+\\/\\d+$",
+        "flags": ""
+      },
+      {
+        "$regexp": "^--(?:no-)?experimental-strip-types$",
+        "flags": ""
+      },
+      {
+        "$regexp": "^--no-warnings$",
+        "flags": ""
+      }
+    ]
+  }
+}

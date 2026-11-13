@@ -63,3 +63,8 @@ export function onPath(name: string, path: string): string | null {
   }
   return null;
 }
+
+// #941, R1184ap: each table freezes here too, at the module's end, whatever loaded the module: require() (whose first
+// load the loader's hook doesn't see), a worker, or a process without the preload, where the bare name is undefined and
+// the load throws. The hook's freeze, right after each declaration, stays the first layer.
+__worklaneTestFreezeTable(HOST_TOOLS, `${import.meta.url}#HOST_TOOLS`);

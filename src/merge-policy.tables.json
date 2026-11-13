@@ -1,0 +1,17 @@
+{
+  "FLOOR": {
+    "//": "The floor every merge waits on (src/merge-policy.ts): the locked categories (src/review.tables.json LOCKED_CATEGORIES' keys), the odd paths (ODD_PATH_CATEGORIES) and the .gitattributes mark that hides a diff (src/review.ts DIFF_HIDING_ATTRIBUTES), written out (#941). test/check-tables-sync.test.ts fails when one of them is missing here.",
+    "kind": "never-shrink",
+    "value": [
+      "agent-instructions",
+      "self-modification",
+      "harness-config",
+      "control-character-path",
+      "non-utf8-path",
+      "invisible-character-path",
+      "non-ascii-top-level-path",
+      "confusable-path",
+      "diff-hiding-attributes"
+    ]
+  }
+}

@@ -16,13 +16,189 @@ import childProcess from 'node:child_process';
 import type * as Cp from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { accessSync, chmodSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { syncBuiltinESMExports } from 'node:module';
+import nodeModule, { register, syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import pathModule, { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { promisify } from 'node:util';
+import { promisify, types as utilTypes } from 'node:util';
 import { BRAND } from '../src/brand.js';
+import { tableModuleSnapshot } from './table-snapshot.js';
 import { SYSTEMD_MARKERS, SYSTEM_ROOT_VAR, TEST_MACHINE_VAR, TEST_MARK_FILE, TEST_TOKEN_VAR } from '../src/os/system-paths.js';
+
+/**
+ * A test table, deep-frozen (#941): its lists and objects frozen. A Set or a Map, anywhere in it, is refused (it throws,
+ * so the test file fails to load): it can't be frozen, and Set.prototype's and Map.prototype's methods change one
+ * through any wrapper (R1184k). A test table that is a set is `frozenSet([...])` (src/check-tables.ts) or a list. A
+ * RegExp is left as it is: freezing one breaks a global one's lastIndex and doesn't stop RegExp.prototype.compile (it
+ * rewrites the pattern before it throws); so is a Buffer or another typed array (its elements are its memory). A test
+ * table of RegExps or typed arrays is held only by the line reader. The src/ and scripts/ tables are data
+ * (src/check-tables.ts), which has neither gap.
+ */
+/**
+ * Every live read on Node's keying path for a CommonJS compile of an ES module, between the guard's decision and the
+ * instance's key (R1184bb: read in Node 22.23.3, 24.21.0 and 26.7.0's own lib/, posix; docs/design.md lists the source
+ * lines). `Module.prototype._compile` → `loadESMFromCJS` → `ModuleLoader.importSyncForRequire`:
+ * `const url = pathToFileURL(filename).href`, then `loadCache.get(url)`. Each is locked from the preload on, and the
+ * lock test walks this list: a read missed here shows as a missing row, not as a new review round.
+ * Not here because not reachable from test code: Node's primordials (`StringPrototype*`, `SafeMap` under `loadCache`,
+ * copied at startup), its internal `URL` class binding and its private fields and methods, the native URL binding, the
+ * frozen null-prototype `kEmptyObject`, and the loader object. An `import()` resolves on the hooks thread (this
+ * preload's `register`), a realm test code can't reach; the main thread keys by the `url` string it returns (read in
+ * 22.23.3, 24.21.0 and 26.7.0).
+ */
+export const KEYING_READS: readonly (readonly [owner: string, key: string, where: string])[] = [
+  ['process', 'cwd', "lib/path.js posixCwd: `return () => process.cwd();` (posix.resolve, for a relative filename)"],
+  ['node:path', 'posix', 'lib/internal/url.js pathToFileURL: `path.posix.resolve(filepath)`'],
+  ['node:path.posix', 'resolve', 'lib/internal/url.js pathToFileURL: `path.posix.resolve(filepath)`'],
+  ['node:path', 'resolve', 'the same function as posix.resolve on posix; the guard\'s own resolve'],
+  ['node:path', 'sep', 'lib/internal/url.js pathToFileURL: `resolved[resolved.length - 1] !== path.sep`'],
+  ['node:path.posix', 'sep', 'path.sep on posix'],
+  ['URL.prototype', 'href', 'lib/internal/modules/esm/loader.js importSyncForRequire: `pathToFileURL(filename).href`'],
+];
+
+/** The global names the freeze and the frozen-check are set under, for the loader's calls and the lock test. */
+export const [FREEZE_GLOBAL, DEEP_FROZEN_GLOBAL] = ['__worklaneTestFreezeTable', '__worklaneTestDeepFrozen'] as const;
+
+// R1184al D1: the built-ins the freeze uses, taken here, when this preload runs and before any test module (a helper
+// imported ahead of a table module could otherwise replace Object.freeze, Reflect.ownKeys or WeakSet's methods).
+const [freeze, isFrozen, defineProperty, ownKeys, apply, isView] = [Object.freeze, Object.isFrozen, Object.defineProperty, Reflect.ownKeys, Reflect.apply, ArrayBuffer.isView];
+const [weakHas, weakAdd] = [WeakSet.prototype.has, WeakSet.prototype.add];
+const [WeakSetC, TypeErrorC] = [WeakSet, TypeError];
+// Brand checks, which read an object's internal slots, never `instanceof`: that calls `C[Symbol.hasInstance]`, which any
+// module can define on RegExp, Set or Map (R1184ao D1, AO1).
+const { isRegExp, isSet, isMap } = utilTypes;
+
+/**
+ * Each object `v` reaches (not through a RegExp or a typed array), once, with the captured built-ins only: no
+ * `instanceof`, no iterator (the keys are walked by index: a for…of calls the live Array iterator, R1184ao AO2), no
+ * method looked up on a live object.
+ */
+function eachObject(v: unknown, f: (x: object) => void, where: string): void {
+  const seen = new WeakSetC<object>();
+  const walk = (x: unknown) => {
+    if (typeof x !== 'object' || x === null || isRegExp(x) || isView(x) || apply(weakHas, seen, [x])) return;
+    if (isSet(x) || isMap(x)) throw new TypeErrorC(`${where} is a ${isSet(x) ? 'Set' : 'Map'}: a registered test table can't be one (#941): use frozenSet from src/check-tables.ts, or a list`);
+    apply(weakAdd, seen, [x]);
+    const ks = ownKeys(x);
+    for (let i = 0; i < ks.length; i++) walk((x as Record<PropertyKey, unknown>)[ks[i]!]);
+    f(x);
+  };
+  walk(v);
+}
+
+export function freezeTestTable(v: unknown, where = 'a test table'): void {
+  eachObject(v, (x) => freeze(x), where);
+  // Checked with the captured isFrozen: a freeze that didn't take throws at the table's load.
+  eachObject(v, (x) => {
+    if (!isFrozen(x)) throw new TypeErrorC(`${where} isn't frozen after its freeze (#941, R1184al D1)`);
+  }, where);
+}
+
+/** Whether every object `v` reaches is frozen, read with the built-ins this preload captured (R1184al D1). */
+export function deepFrozen(v: unknown): boolean {
+  let all = true;
+  eachObject(v, (x) => {
+    if (!isFrozen(x)) all = false;
+  }, 'a test table');
+  return all;
+}
+
+// Set once, not writable and not configurable: no later code can replace the freeze the loader's calls go through, or
+// the check the lock test reads (R1184al D1: an unlocked helper replaced the writable global before a table loaded).
+// Under plain names, so the call the loader adds is a bare identifier that resolves to the global object with no
+// function called on the way (R1184ao AO3: `Symbol.for` could be redefined, and so could `globalThis`).
+defineProperty(globalThis, FREEZE_GLOBAL, { value: freezeTestTable, writable: false, configurable: false, enumerable: false });
+defineProperty(globalThis, DEEP_FROZEN_GLOBAL, { value: deepFrozen, writable: false, configurable: false, enumerable: false });
+// Every test module that registers a table gets it frozen right after its declaration (test/table-freeze.ts).
+register('./table-freeze.js', import.meta.url);
+// Then no other module hook (R1184aq D1: a hook registered later runs first, and could load a table module itself, or
+// take the freeze calls back out of its source). Each registration call throws from here on, in this process; the
+// named imports of node:module follow (syncBuiltinESMExports). A test that needs a hook runs it in a child it starts
+// without this preload, as the guard's own tests do.
+for (const k of ['register', 'registerHooks'] as const) {
+  if (k in nodeModule) defineProperty(nodeModule, k, { value: () => { throw new TypeErrorC(`module.${k} after the test preload (test/isolate.ts): a module hook could skip the test tables' freeze (#941, R1184aq)`); }, writable: false, configurable: false, enumerable: true });
+}
+syncBuiltinESMExports();
+// And the CommonJS compile step (R1184as D1: a first-load require() of a test module compiles the text it is handed,
+// which a patched `_compile` or `_extensions['.js']`, or a direct call of the real `_compile`, can hand it with the freeze
+// calls taken out). From here on a module under this directory compiles only from its own file's text on disk, read
+// with functions taken now; the compile step itself is neither writable nor configurable.
+{
+  const proto = (nodeModule as unknown as { prototype: Record<string, unknown> }).prototype;
+  const compile = proto._compile as (this: unknown, ...args: unknown[]) => unknown;
+  const readText = readFileSync;
+  const realpathOf = realpathSync;
+  const resolveOf = resolve;
+  const startsWith = String.prototype.startsWith;
+  const slice = String.prototype.slice;
+  const mapGet = Map.prototype.get;
+  const setHas = Set.prototype.has;
+  const PSEUDO_NAMES = new Set(['[eval]', '[eval]-wrapper', '[stdin]', '[stdin]-wrapper', '[worker eval]', '[worker eval]-wrapper']);
+  const lexicalHere = dirname(fileURLToPath(import.meta.url));
+  const here = realpathOf(lexicalHere);
+  // The text of each module here, not a test file, that registers a table or freezes one itself, as it is now, when
+  // this preload runs (R1184at D3: a test that rewrites the build output, or moves the file aside, then compiles it).
+  const snapshot = tableModuleSnapshot(here);
+  // Under this directory by where the path really leads, or, where it can't be resolved (moved aside, or never there),
+  // by its text alone: fail closed (R1184at D1).
+  const keyOf = (f: string): string | null => {
+    // First the path as written, the one Node keys the module's instance by, mapped from this directory as named onto
+    // it as resolved (R1184av D1: a link inside this directory, named as a snapshotted module and leading to other
+    // text, was judged by where it leads, which no snapshot holds).
+    const lex = resolveOf(f);
+    const mapped = (apply(startsWith, lex, [lexicalHere + sep]) as boolean) ? here + (apply(slice, lex, [lexicalHere.length]) as string) : lex;
+    if (apply(mapGet, snapshot, [mapped]) !== undefined) return mapped;
+    if (apply(mapGet, snapshot, [lex]) !== undefined) return lex;
+    let r: string | null = null;
+    try {
+      r = realpathOf(f);
+    } catch {
+      r = null;
+    }
+    const lexical = resolveOf(f);
+    if (r !== null && (apply(startsWith, r, [here + sep]) as boolean)) return r;
+    if ((apply(startsWith, lexical, [here + sep]) as boolean) || (apply(startsWith, lexical, [lexicalHere + sep]) as boolean)) return lexical;
+    return null;
+  };
+  // Arguments read by index and passed on as they came: no spread or destructuring, which call the live Array iterator.
+  const guarded = function (this: unknown, ...args: unknown[]) {
+    const content = args[0];
+    const filename = args[1];
+    // Node's own pseudo-filenames name no file, and no helper's instance: a `node -e` run with its working directory in
+    // here resolved one under this directory, then failed to read it. Only these exact names, never a prefix (R1184ay
+    // D1: a relative `[x].js` skipped the guard while Node resolved it to the real module).
+    if (typeof filename === 'string' && !(apply(setHas, PSEUDO_NAMES, [filename]) as boolean)) {
+      const key = keyOf(filename);
+      if (key !== null) {
+        // A snapshotted module compiles only from its text as it was at this preload; any other module here only from
+        // its file's text on disk (a missing file throws, so the compile is refused).
+        const expected = apply(mapGet, snapshot, [key]) as string | null | undefined;
+        if (expected === null) throw new TypeErrorC(`${filename}: gone when this process's preload read the test modules, so not loaded (test/isolate.ts, #941)`);
+        if (content !== (expected !== undefined ? expected : readText(filename, 'utf8'))) throw new TypeErrorC(`${filename} compiled from a source other than its file's (test/isolate.ts, #941, R1184as, R1184at)`);
+      }
+    }
+    return apply(compile, this, args);
+  };
+  defineProperty(proto, '_compile', { value: guarded, writable: false, configurable: false, enumerable: false });
+  // The working directory a relative filename resolves against, read once per call by the guard and again by the real
+  // compile: one function, fixed now (R1184av D2: a process.cwd answering one directory to the guard and another to
+  // the compile). No test stubs it.
+  defineProperty(process, 'cwd', { value: process.cwd, writable: false, configurable: false, enumerable: true });
+  // And what Node's pathToFileURL reads when the real compile keys a module's instance (R1184ba D1: path.resolve answering
+  // the real module's path for a pseudo-name, which the guard skips, keyed stripped text at the module's URL). No test
+  // assigns any of these.
+  for (const o of [pathModule, pathModule.posix, pathModule.win32] as unknown as Record<string, unknown>[]) {
+    for (const k of ['resolve', 'sep', 'posix', 'win32']) if (k in o) defineProperty(o, k, { value: o[k], writable: false, configurable: false, enumerable: true });
+  }
+  // And the getter that hands Node the key itself (R1184bb D1): `pathToFileURL(filename).href`.
+  const hrefDesc = Object.getOwnPropertyDescriptor(URL.prototype, 'href')!;
+  defineProperty(URL.prototype, 'href', { get: hrefDesc.get!, set: hrefDesc.set!, configurable: false, enumerable: true });
+  // Each loader by extension too (R1184ar D1, AR1a: `_extensions['.js']` replaced), as it is now. A replaced
+  // `Module._load` can only hand a test exports it made up: the owner-named open class of a re-pointed import.
+  const ext = (nodeModule as unknown as { _extensions: Record<string, unknown> })._extensions;
+  const keys = ownKeys(ext);
+  for (let i = 0; i < keys.length; i++) defineProperty(ext, keys[i]!, { value: ext[keys[i] as string], writable: false, configurable: false, enumerable: true });
+}
 
 /** Engine settings that only tune speed, kept from the shell (a slow CI runner scales the browser's timeouts). */
 const KEEP = new Set([`${BRAND.envPrefix}_BROWSER_TIMEOUT_SCALE`]);
@@ -952,3 +1128,6 @@ if (POSIX) {
   REAL_HOST_TOOLS_ON_PURPOSE,
   MACHINE_TOOLS_ON_PURPOSE,
 });
+
+// This module's own tables: it runs before the hook it registers, so they are frozen here (#941).
+for (const table of [HOST_TOOL_NAMES, REAL_HOST_TOOLS_ON_PURPOSE, MACHINE_TOOLS_ON_PURPOSE]) freezeTestTable(table, 'a test table of test/isolate.ts');
