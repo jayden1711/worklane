@@ -232,6 +232,8 @@ function globMatches(glob: string, name: string): boolean {
   }
 }
 
+/** bash's reserved words and prefixes after which a command starts, so `case` after one is a case (R1264ac D1). */
+const COMMAND_STARTERS: ReadonlySet<string> = new Set(['if', 'then', 'elif', 'else', 'while', 'until', 'do', '!', 'time', 'coproc', '{']);
 
 /**
  * A whole shell text with quoted text, comments and heredoc bodies masked by spaces, newlines kept (R1264t D2, u D1,
@@ -251,14 +253,35 @@ function maskFile(text: string): { out: string; open: string | null } {
   const docs: { word: string; strip: boolean }[] = [];
   let unfinished: string | null = null;
   const wordAt = (k: number) => k === 0 || /[\s;&|()]/.test(text[k - 1]!);
-  // A command's first word (R1264ab D2): only blanks back to a newline, ;, &, |, (, ), a backtick, `{ ` (the
-  // reserved word needs a blank after it), or then/do/else/elif. There `case` is bash's reserved word, whatever its word is.
-  const cmdPos = (k: number) => {
-    let j = k;
-    while (j > 0 && (text[j - 1] === ' ' || text[j - 1] === '\t')) j--;
-    if (j === 0 || /[\n;&|()`]/.test(text[j - 1]!)) return true;
-    if (text[j - 1] === '{') return j < k && (j === 1 || /[\s;&|()`{]/.test(text[j - 2]!));
-    return /(?:^|[\s;&|()`])(?:then|do|else|elif)$/.test(text.slice(Math.max(0, j - 6), j));
+  // Where a command starts (R1264ab D2, R1264ac/ad D1): at the text's start or right after a separator (a newline
+  // not continued by a backslash, ;, &, |, ), a backtick, or a `(` that isn't an array's `=(`), or after blanks
+  // (backslash-newlines among them) that follow one of COMMAND_STARTERS (`time -p` too) when that word is itself where
+  // a command starts, so `echo if case of x` holds no case (R1264ad D2). There `case` is bash's reserved word.
+  const sepBefore = (j: number) => {
+    const c = text[j - 1]!;
+    if (c === '(') return text[j - 2] !== '=';
+    return /[\n;&|)`]/.test(c);
+  };
+  const blanksBack = (j: number) => {
+    for (;;) {
+      if (j > 0 && (text[j - 1] === ' ' || text[j - 1] === '\t')) j--;
+      // A backslash-newline joins the line, so the word before it is still the one before (R1264ad D2: `grep -w \⏎ case`).
+      else if (j > 1 && text[j - 1] === '\n' && text[j - 2] === '\\') j -= 2;
+      else return j;
+    }
+  };
+  const cmdPos = (k: number): boolean => {
+    const j = blanksBack(k);
+    if (j === 0 || sepBefore(j)) return true;
+    if (j === k) return false;
+    let i = j;
+    while (i > 0 && !/[\s;&|()`]/.test(text[i - 1]!)) i--;
+    const word = text.slice(i, j);
+    if (word === '-p') {
+      const h = blanksBack(i);
+      return h < i && text.slice(h - 4, h) === 'time' && (h === 4 || /[\s;&|()`]/.test(text[h - 5]!)) && cmdPos(h - 4);
+    }
+    return COMMAND_STARTERS.has(word) && cmdPos(i);
   };
   let out = '';
   for (let k = 0; k < text.length; ) {
@@ -329,7 +352,9 @@ function maskFile(text: string): { out: string; open: string | null } {
       }
       // A case only where a command starts (R1264ab D2: its word may be any word, `case $(uname -s) in`); an argument
       // word holds none (R1264y/z D1: `grep -c case f`).
-      if (cmdPos(k) && /^case(?=[\s;&|()]|$)/.test(text.slice(k, k + 5))) t.cases++;
+      // bash's grammar needs a word after `case` on its line (R1264ad D2): `case)`, `case|`, `case` at a line's end are
+      // argument words (a pattern label, a regex group).
+      if (/^case[ \t]+[^\s;&|()<>]/.test(text.slice(k, k + 8)) && cmdPos(k)) t.cases++;
       if (wordAt(k) && /^esac(?=[\s;&|()]|$)/.test(text.slice(k, k + 5))) t.cases = Math.max(0, t.cases - 1);
       if (c === '\\') { out += text.slice(k, k + 2); k += 2; continue; }
       if (c === '$' && text[k + 1] === '(' && text[k + 2] === '(') { st.push({ q: 'arith', depth: 0, cases: 0 }); out += '$(('; k += 3; continue; }
@@ -968,6 +993,16 @@ test('#1262: every way a script can start claude other than through claude_guard
   // check-table: never-shrink
   const MUST_FAIL = [
     'after-and',
+    'case-bang-quote-arm-then-sudo',
+    'case-continued-argument-then-sudo',
+    'case-if-multiline-then-sudo',
+    'case-after-bang-then-sudo',
+    'case-after-elif-then-sudo',
+    'case-after-if-then-sudo',
+    'case-after-time-p-then-sudo',
+    'case-after-time-then-sudo',
+    'case-after-until-then-sudo',
+    'case-after-while-then-sudo',
     'brace-cut-then-sudo',
     'brace-default-then-read',
     'brace-strip-fn-then-sudo',
@@ -1133,7 +1168,7 @@ test('#1262: every way a script can start claude other than through claude_guard
     'xargs',
   ];
   // check-table: never-shrink
-  const CONTROLS = ['ok-api-key-helper', 'ok-auth-status', 'ok-case-label', 'ok-comment', 'ok-continued-guards', 'ok-for-list', 'ok-grep-regex', 'ok-guarded', 'ok-guarded-array', 'ok-install-path', 'ok-js-auth-status', 'ok-js-guarded', 'ok-other-tool', 'ok-prose', 'ok-spike-pin', 'ok-version', 'ok-workflow-block-guarded', 'ok-brackets-and-enable', 'ok-multiline-awk-node', 'ok-arith-herestring-controls', 'ok-case-word-and-subshells', 'ok-brace-and-case-words', 'ok-brace-hash-is-text'];
+  const CONTROLS = ['ok-api-key-helper', 'ok-auth-status', 'ok-case-label', 'ok-comment', 'ok-continued-guards', 'ok-for-list', 'ok-grep-regex', 'ok-guarded', 'ok-guarded-array', 'ok-install-path', 'ok-js-auth-status', 'ok-js-guarded', 'ok-other-tool', 'ok-prose', 'ok-spike-pin', 'ok-version', 'ok-workflow-block-guarded', 'ok-brackets-and-enable', 'ok-multiline-awk-node', 'ok-arith-herestring-controls', 'ok-case-word-and-subshells', 'ok-brace-and-case-words', 'ok-brace-hash-is-text', 'ok-case-not-a-case', 'ok-case-argument-words'];
   assert.deepEqual(all.map(nameOf).sort(), [...MUST_FAIL, ...CONTROLS].sort(), 'every fixture, by name');
   for (const f of all) {
     const n = nameOf(f);
