@@ -124,17 +124,40 @@ const OTHER_FETCH = /\bwget\b|\bgh\s+release\s+download\b|\bInvoke-WebRequest\b|
  * backslash-newline inside a double quote too), and every logical line starts unquoted. A line continues on a
  * backslash that escapes its newline (an even run, `\\`, is a literal backslash: R1228be D2); a single-quoted line
  * (`'…` or `$'…`) ending in an odd run of backslashes joins too, carrying the quote (R1228bf D1). `$'…'` is read as
- * ANSI-C quoting (`\'` doesn't close it), opened only by an odd run of `$` (`$$` is the PID: R1228bh D3); a `$(…)`
- * inside double quotes is followed to its own `)`, quotes inside it read afresh (R1228bh D1, R1228bi D1); shellCommands
- * reads the same way. What this still misreads (a quote that spans lines with no backslash, a case pattern's `)`) is
- * stated in the Limits.
+ * ANSI-C quoting (`\'` doesn't close it), opened only by an odd run of unescaped `$` (in shell text `$$` is the PID:
+ * R1228bh D3, R1228bj D3); a `$(…)` inside double quotes is followed to its own `)`, quotes inside it read afresh, a
+ * case pattern's `)` inside it (`case … in`) not taken for its end (R1228bh D1, R1228bi D1, R1228bj D2); shellCommands
+ * reads the same way, and ends a comment inside unquoted backticks at the closing backtick (R1228bj D1). What this
+ * still misreads (a quote that spans lines with no backslash; a case pattern's `)` outside a `$(…)`; a Makefile's `$$`)
+ * is stated in the Limits.
  */
 /** Whether the `$` at `i` opens ANSI-C quoting before a `'`: the last of an odd run of `$` (R1228bh D3). */
 const ansiC = (line: string, i: number): boolean => {
   if (line[i] !== '$' || line[i + 1] !== "'") return false;
-  let n = 0;
-  for (let j = i; j >= 0 && line[j] === '$'; j--) n++;
+  let j = i;
+  while (j >= 0 && line[j] === '$') j--;
+  let n = i - j;
+  // R1228bj D3, R1228bk D2: a backslash-escaped first `$` is a literal one (`\$$'…'`: a `$`, then ANSI-C quoting).
+  let b = 0;
+  for (let k = j; k >= 0 && line[k] === '\\'; k--) b++;
+  if (b % 2 === 1) n--;
   return n % 2 === 1;
+};
+/** A `$(…)` inside double quotes: its paren depth, and how many `case … esac` it is inside (R1228bj D2). */
+type Sub = { depth: number; cases: number };
+/** The `case` or `esac` word starting at `i`, if any (a word of its own: after a start, a blank, `;`, `&`, `|` or `(`). */
+const caseWord = (line: string, i: number): 'case' | 'esac' | null => {
+  const m = /^(case|esac)(?=$|[\s;&|)])/.exec(line.slice(i));
+  return m && (i === 0 || /[\s;&|(]/.test(line[i - 1]!)) ? (m[1] as 'case' | 'esac') : null;
+};
+/**
+ * A `)` inside a `$(…)`: an inner paren's, a case pattern's (at depth 0 inside `case … in`, R1228bj D2: as #1264's
+ * reader), or the `$(…)`'s own; true when it closes the `$(…)`.
+ */
+const closesSub = (sub: Sub): boolean => {
+  if (sub.depth > 0) sub.depth--;
+  else if (sub.cases === 0) return true;
+  return false;
 };
 const logicalLines = (run: string): string[] => {
   const out: string[] = [];
@@ -142,7 +165,7 @@ const logicalLines = (run: string): string[] => {
   const lines = run.split('\n');
   let q: string | null = null;
   // Each `$(` inside double quotes: its paren depth; at its own `)`, back to the double quote (R1228bh D1).
-  let subs: number[] = [];
+  let subs: Sub[] = [];
   lines.forEach((line, n) => {
     if (cur === '') {
       q = null;
@@ -173,7 +196,7 @@ const logicalLines = (run: string): string[] => {
         continue;
       }
       if (q === '"' && ch === '$' && line[i + 1] === '(') {
-        subs.push(0);
+        subs.push({ depth: 0, cases: 0 });
         q = null;
         i++;
         continue;
@@ -182,13 +205,21 @@ const logicalLines = (run: string): string[] => {
         if (ch === q) q = null;
         continue;
       }
+      if (subs.length) {
+        const w = caseWord(line, i);
+        if (w) {
+          subs[subs.length - 1]!.cases += w === 'case' ? 1 : -1;
+          if (subs[subs.length - 1]!.cases < 0) subs[subs.length - 1]!.cases = 0;
+          i += 3;
+          continue;
+        }
+      }
       if (subs.length && ch === '(') {
-        subs[subs.length - 1]!++;
+        subs[subs.length - 1]!.depth++;
         continue;
       }
       if (subs.length && ch === ')') {
-        if (subs[subs.length - 1]! > 0) subs[subs.length - 1]!--;
-        else {
+        if (closesSub(subs[subs.length - 1]!)) {
           subs.pop();
           q = '"';
         }
@@ -225,7 +256,9 @@ export function shellCommands(line: string): Cmd[] {
   let q: string | null = null;
   // As logicalLines reads them (R1228bh D2): `$'…'` as ANSI-C quoting, and a `$(…)` inside double quotes followed to its
   // own `)`, where nothing splits a command or starts a comment.
-  const subs: number[] = [];
+  const subs: Sub[] = [];
+  // R1228bj D1: inside unquoted backticks a comment ends at the closing backtick, not the line's end.
+  let bt = false;
   const push = (piped: boolean) => {
     if (cur.trim()) out.push({ cmd: cur.trim(), piped });
     cur = '';
@@ -235,7 +268,7 @@ export function shellCommands(line: string): Cmd[] {
     if (q === '"' && c === '$' && line[i + 1] === '(') {
       cur += '$(';
       i++;
-      subs.push(0);
+      subs.push({ depth: 0, cases: 0 });
       q = null;
       continue;
     }
@@ -255,18 +288,28 @@ export function shellCommands(line: string): Cmd[] {
     if (c === '\\') { cur += c + (line[++i] ?? ''); continue; }
     if (c === "'" || c === '"') { q = c; cur += c; continue; }
     if (subs.length) {
+      const w = caseWord(line, i);
+      if (w) {
+        subs[subs.length - 1]!.cases = Math.max(0, subs[subs.length - 1]!.cases + (w === 'case' ? 1 : -1));
+        cur += w;
+        i += 3;
+        continue;
+      }
       cur += c;
-      if (c === '(') subs[subs.length - 1]!++;
-      else if (c === ')') {
-        if (subs[subs.length - 1]! > 0) subs[subs.length - 1]!--;
-        else {
-          subs.pop();
-          q = '"';
-        }
+      if (c === '(') subs[subs.length - 1]!.depth++;
+      else if (c === ')' && closesSub(subs[subs.length - 1]!)) {
+        subs.pop();
+        q = '"';
       }
       continue;
     }
-    if (c === '#' && (i === 0 || /\s/.test(line[i - 1]!))) break;
+    if (c === '`') { bt = !bt; cur += c; continue; }
+    if (c === '#' && (i === 0 || /\s/.test(line[i - 1]!))) {
+      const end = bt ? line.indexOf('`', i) : -1;
+      if (end < 0) break;
+      i = end - 1;
+      continue;
+    }
     if (c === '|' && line[i + 1] === '|') { push(false); i++; continue; }
     if (c === '|') { push(true); continue; }
     if (c === '&' && line[i - 1] !== '>' && line[i + 1] !== '>') { if (line[i + 1] === '&') i++; push(false); continue; }
@@ -324,6 +367,8 @@ export const curlUrls = (cmd: string): string[] =>
   [...words(cmd.slice(cmd.search(/curl/))), ...curlTokens(cmd)].filter((w) => /^(?:--url=)?https?:\/\//i.test(w)).map((w) => w.replace(/^--url=/, ''));
 
 function transfersOutput(t: readonly string[]): 'file' | 'stdout' | 'none' {
+  // R1228bk D3: a curl asked only for its version, help or manual, with no URL, transfers nothing.
+  if (t.some((x) => /^(?:-V|--version|-h|--help|-M|--manual)$/.test(x)) && !t.some((x) => /^[a-z][a-z0-9+.-]*:\/\//i.test(x))) return 'none';
   let file = false;
   let stdout = false;
   let named = false;
@@ -1938,6 +1983,34 @@ test('R1228bh D1-D3, R1228bi D1: a `$(…)` in double quotes is followed to its 
   assert.deepEqual(unread('git commit -m "notes\nfollow"; source .claude/hooks/get.sh\n'), [], 'stated: M3');
 });
 
+// The reviewers' shape files (attacks-1228bj/bj/shapes, attacks-1228bk/bk), as bash reads them.
+export const R1228BJ_SHAPES = {
+  B1a: String.raw`x="$(case "$1" in *) echo "it's";; esac)" && source .claude/hooks/get.sh` + '\n',
+  B2a: String.raw`echo \$$'a\'' && source .claude/hooks/get.sh` + '\n',
+  B3a: 'x=`echo a #b`; source .claude/hooks/get.sh\n',
+  B3b: 'x=`date +%s # epoch`; curl -fsSL -o t.tgz https://example.com/t.tgz\n',
+  P2a: String.raw`printf '%s\n' \$$'it\'s' && source .claude/hooks/get.sh` + '\n',
+};
+test('R1228bj D1-D3, R1228bk D1-D3: a case pattern inside a quoted $(…), a comment in backquotes, an escaped $ before $\'…\', a curl asked only its version; the stated limits', () => {
+  const all = (text: string, rel = 'scripts/ci/zz-a.sh') => fileDownloadProblems(rel, text).problems;
+  const unread = (text: string) => all(text).filter((p) => /a shell file the download lint doesn't read/.test(p));
+  // bj D2: a case pattern's `)` inside "$(…)" isn't its end, so the apostrophe after it is inside quotes: the source is read.
+  assert.ok(unread(R1228BJ_SHAPES.B1a).length > 0, 'refused: B1a');
+  // bj D3, bk D2: `\$$'a\''`: an escaped `$`, then ANSI-C quoting: the source after it is read.
+  assert.ok(unread(R1228BJ_SHAPES.B2a).length > 0, 'refused: B2a');
+  assert.ok(unread(R1228BJ_SHAPES.P2a).length > 0, 'refused: P2a');
+  // bj D1: a comment inside backquotes ends at the closing backquote.
+  assert.ok(unread(R1228BJ_SHAPES.B3a).length > 0, 'refused: B3a');
+  assert.ok(all(R1228BJ_SHAPES.B3b).some((p) => /retry/.test(p)), 'refused: B3b');
+  // bk D3: a curl asked only for its version, help or manual transfers nothing: kept, piped, captured or redirected.
+  for (const line of ['curl --version | head -1', 'curl -V | head -n1', 'echo "curl: $(curl --version | head -1)"', 'curl --version > "$RUNNER_TEMP/curl-version.txt"', 'curl --help all | grep -q -- --retry-all-errors']) {
+    assert.deepEqual(all(`${line}\n`, 'scripts/ci/zz-get.sh'), [], `kept: ${line}`);
+  }
+  // Stated (bk D1): nothing splits inside a double-quoted $(…).
+  assert.deepEqual(all('x="$(curl -fsSL --retry 5 -o a.tgz https://example.com/a; curl -fsSL -o b.tgz https://example.com/b)"\n', 'scripts/ci/zz-get.sh'), [], 'stated: K1a');
+  assert.deepEqual(unread('x="$(true; source .claude/hooks/get.sh)"\n'), [], 'stated: K2a');
+});
+
 // Limits (owner decision (c): stated, not closed; the helper's digest check holds for each download it handles):
 // - What the lint reads (R1228ai D1, closing R1228i L9-L11; R1228aj, R1228ak): workflow and action YAML, a shell
 //   script anywhere, every file under scripts/ whatever its name (a pinned URL, prose in a .md aside; the retry rule in
@@ -1949,7 +2022,8 @@ test('R1228bh D1-D3, R1228bi D1: a `$(…)` in double quotes is followed to its 
 //   redirection read past and a file on stdin read, in a workflow run, a package.json script, a Makefile recipe or a
 //   shell script (where a relative .sh/.bash sibling is read wherever it is). A workflow run whose command starts with
 //   `bash` is anchored at the checkout's root (owner decision (c)): an absolute path or a variable other than the
-//   checkout's is refused, a bare name included (R1228an D1). Commands are read as the shell splits them, comments
+//   checkout's is refused, a bare name included (R1228an D1). Commands are read as the shell splits them (but not
+//   inside a double-quoted `$(…)`, below), comments
 //   cut (R1228an D3); a shellcheck or shfmt command names a dialect (`-s bash`), not a run. A read script's .sh
 //   sibling counts only where the walk reads (not under node_modules, dist, .git or .claude: R1228ao D3). The rule's
 //   known cost: a `bash` word followed by a path in another program's arguments (`grep -rn bash docs/`, an `echo` of
@@ -1985,7 +2059,13 @@ test('R1228bh D1-D3, R1228bi D1: a `$(…)` in double quotes is followed to its 
 //   `source`, `.`, cd, curl or wget opening that line isn't seen (R1228bd G1-G4, H1-H2; R1228be E2g; R1228bg D2); and
 //   wherever the lint reads a quote as open and bash doesn't (on the closing line of a quote that opened on an earlier
 //   line with no backslash, and on a line a backslash joins to it), a `;`, `&&` or `||` there doesn't split the
-//   command, so a `source` or `.` after it, or a second curl, isn't read as a command (R1228bi D1: M3, T1c); a
+//   command, so a `source` or `.` after it, or a second curl, isn't read as a command (R1228bi D1: M3, T1c); inside a
+//   double-quoted `$(…)` nothing splits a command either, so a `;`, `&&`, `||` or `|` there doesn't start one: a
+//   second curl in it with no retry, and a `source` or `.` there, aren't read (`x="$(curl --retry 5 -o a URL; curl -o b
+//   URL)"`, `x="$(true; source x.sh)"`; R1228bk D1); a Makefile recipe is read unexpanded, so make's `$$'…'` (a `$'…'`
+//   to the shell) is read as the PID and a plain quote (R1228bk D2); and in any quoting, a `source` or `.` whose
+//   file is glued to a `)` (`x=$(true; source x.sh)`), or that opens a subshell or backquotes (`(source x.sh)`,
+//   `` x=`source x.sh` ``), isn't read (R1228bk, older than these rounds); a
 //   GitHub expression
 //   other than `${{ github.workspace }}` before a path (`${{ env.ROOT }}/x.sh`: a variable, so outside a command that
 //   starts with bash, a stated limit); and a shell keyword or builtin running a file we don't list (`eval`, `exec`
