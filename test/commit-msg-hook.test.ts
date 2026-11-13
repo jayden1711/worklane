@@ -413,11 +413,17 @@ test("git commit -v by config: a one-line message, and a diff git drops that isn
     const r = run({ 'commit.verbose': 'true' }, staged, 'Add a thing\n\nWhy it is added.', []);
     assert.equal(r.verdict, 'hook=pass gate=pass', `a diff with ${what}: ${r.hook}`);
   }
-  // The stated residual: -v on the command line, which no hook can see, so it judges the uncut reading too: a one-line
-  // message is refused (the diff reads as line 2) though git commits it, and the gate passes it.
+  // -v on the command line: the hook recognises git's own verbose block (its scissors line and two fixed help lines), so
+  // it cuts there as git does: a one-line message, and a diff that isn't UTF-8, pass hook and gate alike.
   const cli = run({}, text, 'Add a thing', ['-v']);
-  assert.equal(cli.verdict, 'hook=refuse gate=pass', 'command-line -v: the stated residual');
-  assert.match(cli.hook, /line 2 is not blank/);
+  assert.equal(cli.verdict, 'hook=pass gate=pass', `command-line -v, a one-line message: ${cli.hook}`);
+  assert.equal(cli.stored.trim(), 'Add a thing');
+  assert.equal(run({}, latin1, 'Add a thing\n\nWhy it is added.', ['-v']).verdict, 'hook=pass gate=pass', 'command-line -v, a Latin-1 diff');
+  // The stated residual: the same three lines typed by hand into a commit made without -v read as verbose: the hook cuts
+  // there, git doesn't, and the gate refuses the line below them as line 2.
+  const block = '# ------------------------ >8 ------------------------\n# Do not modify or remove the line above.\n# Everything below it will be ignored.';
+  const typed = run({}, text, `Add a thing\n${block}\nline two\n`, []);
+  assert.equal(typed.verdict, 'hook=pass gate=refuse', `a typed copy of git's verbose block: the stated residual (${typed.stored.split('\n').slice(0, 2).join(' / ')})`);
 });
 
 test("core.commentChar=auto: the hook can't know git's pick (git takes it from the message before the editor ran), so it judges every reading and refuses when any fails (#1260 R1260g D1, R1260h D1-D3)", () => {

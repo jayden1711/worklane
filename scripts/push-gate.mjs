@@ -333,6 +333,19 @@ const cutReadings = (mode, verbose = false) => (verbose || mode === 'scissors' ?
  * a count above 0). Then git always cuts an edited message at its scissors line (`verbose || scissors` in
  * builtin/commit.c), so only the cut reading is judged. `-v` on the command line isn't visible to a hook.
  */
+/**
+ * Whether the message holds git's own verbose block (owner's call pending, MORNING 33): its exact scissors line, then
+ * git's two fixed help lines (wt_status_add_cut_line), with a comment prefix git may use. `git commit -v` on the
+ * command line writes it, which no hook can see otherwise; git then cuts at its first scissors line, so only the cut
+ * reading is judged. A locale that translates the two lines isn't recognised (the hook judges both readings: it may
+ * refuse). A copy typed by hand into a commit made without -v reads as verbose too: the stated residual (the hook
+ * passes, git doesn't cut, the gate may refuse).
+ */
+function gitVerboseBlock(bytes, prefixes) {
+  const lines = bytes.split('\n');
+  return prefixes.some((c) => c !== null && lines.some((l, i) => l === scissors(c) && lines[i + 1] === `${c} Do not modify or remove the line above.` && lines[i + 2] === `${c} Everything below it will be ignored.`));
+}
+
 function verboseByConfig() {
   const v = configRead(['--type=bool-or-int', '--get', 'commit.verbose'])?.toString('utf8').trim() ?? null;
   return v === 'true' || (/^\d+$/.test(v ?? '') && Number(v) > 0);
@@ -463,8 +476,9 @@ if (process.argv[2] === '--commit-msg' && installedCopy && process.argv.length =
     // is decoded and checked.
     const bytes = raw.toString('latin1');
     const mode = cleanupMode();
-    const verbose = verboseByConfig();
-    const kept = commentPrefixes(bytes, commentSetting()).flatMap((c) => cutReadings(mode, verbose).map((cut) => asCommitted(bytes, mode, c, cut)));
+    const prefixes = commentPrefixes(bytes, commentSetting());
+    const verbose = verboseByConfig() || gitVerboseBlock(bytes, prefixes);
+    const kept = prefixes.flatMap((c) => cutReadings(mode, verbose).map((cut) => asCommitted(bytes, mode, c, cut)));
     const readings = kept.map((r) => {
       let text;
       try {
