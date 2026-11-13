@@ -234,17 +234,23 @@ function globMatches(glob: string, name: string): boolean {
 
 
 /**
- * A whole shell text with quoted text, comments and heredoc bodies masked by spaces, newlines kept (R1264t D2, u D1).
- * A stack of contexts, as bash reads them: `$(…)` and `` `…` `` inside "…" are unquoted again, so a quote inside one
- * is its own; a `#` at a word's start (after a blank or one of ;&|()) opens a comment; a heredoc's body is masked to
- * its delimiter, so a quote in usage text carries no state past it.
+ * A whole shell text with quoted text, comments and heredoc bodies masked by spaces, newlines kept (R1264t D2, u D1,
+ * w/x D1). A stack of contexts, as bash reads them: `$(…)` and `` `…` `` inside "…" are unquoted again; `((…))` and
+ * `$((…))` are arithmetic (a `<<` there is a shift, a `#` no comment); a `#` at a word's start (after a blank or one of
+ * ;&|()) opens a comment; a heredoc starts only at `<<` or `<<-` (never `<<<`, a here-string), its delimiter the next
+ * word with quotes and backslashes removed (`<<\EOF`, `<<E"OF"`), and its body is masked to that delimiter; and inside
+ * `case … esac` a pattern's `)` closes nothing. `open` names where the text ended if not at top level (a quote, a
+ * substitution, an unfinished heredoc), so a reader that lost sync with bash refuses the file rather than masking the
+ * rest of it unseen.
  */
-function maskFile(text: string): string {
-  type Ctx = { q: Quote | 'sub' | 'bq'; depth: number };
-  const st: Ctx[] = [{ q: null, depth: 0 }];
+function maskFile(text: string): { out: string; open: string | null } {
+  type Ctx = { q: Quote | 'sub' | 'bq' | 'arith'; depth: number; cases: number };
+  const st: Ctx[] = [{ q: null, depth: 0, cases: 0 }];
   const top = () => st[st.length - 1]!;
   const plain = () => top().q === null || top().q === 'sub' || top().q === 'bq';
   const docs: { word: string; strip: boolean }[] = [];
+  let unfinished: string | null = null;
+  const wordAt = (k: number) => k === 0 || /[\s;&|()]/.test(text[k - 1]!);
   let out = '';
   for (let k = 0; k < text.length; ) {
     const c = text[k]!;
@@ -255,38 +261,58 @@ function maskFile(text: string): string {
       // Heredoc bodies, one after another, masked to each delimiter line.
       while (docs.length) {
         const d = docs.shift()!;
-        for (;;) {
-          if (k >= text.length) break;
+        let found = false;
+        while (k < text.length) {
           const e = text.indexOf('\n', k) < 0 ? text.length : text.indexOf('\n', k);
           const l = text.slice(k, e);
           out += ' '.repeat(l.length) + (e < text.length ? '\n' : '');
           k = e + 1;
-          if ((d.strip ? l.replace(/^\t+/, '') : l) === d.word) break;
+          if ((d.strip ? l.replace(/^\t+/, '') : l) === d.word) {
+            found = true;
+            break;
+          }
         }
+        if (!found) unfinished = `a heredoc to ${d.word}`;
       }
       continue;
     }
+    if (t.q === 'arith') {
+      if (c === ')' && text[k + 1] === ')' && t.depth === 0) { st.pop(); out += '))'; k += 2; continue; }
+      if (c === '(') t.depth++;
+      else if (c === ')') t.depth = Math.max(0, t.depth - 1);
+      out += c;
+      k++;
+      continue;
+    }
     if (plain()) {
-      if (c === '#' && (k === 0 || /[\s;&|()]/.test(text[k - 1]!))) {
+      if (c === '#' && wordAt(k)) {
         const e = text.indexOf('\n', k) < 0 ? text.length : text.indexOf('\n', k);
         out += ' '.repeat(e - k);
         k = e;
         continue;
       }
-      const h = /^<<(-?)\s*(['"]?)([A-Za-z_][\w.-]*)\2/.exec(text.slice(k, k + 80));
-      if (h && text[k + 2] !== '<') {
-        docs.push({ word: h[3]!, strip: h[1] === '-' });
-        out += h[0];
-        k += h[0].length;
-        continue;
+      // A heredoc: exactly `<<` or `<<-` (not `<<<`, nor the second `<` of one), then its word.
+      if (c === '<' && text[k + 1] === '<' && text[k + 2] !== '<' && text[k - 1] !== '<') {
+        const h = /^<<(-?)[ \t]*((?:\\.|'[^'\n]*'|"[^"\n]*"|[^\s;&|<>()'"\\])+)/.exec(text.slice(k, k + 200));
+        if (h) {
+          docs.push({ word: h[2]!.replace(/\\(.)/g, '$1').replace(/['"]/g, ''), strip: h[1] === '-' });
+          out += h[0];
+          k += h[0].length;
+          continue;
+        }
       }
+      if (wordAt(k) && /^case(?=[\s;&|()]|$)/.test(text.slice(k, k + 5))) t.cases++;
+      if (wordAt(k) && /^esac(?=[\s;&|()]|$)/.test(text.slice(k, k + 5))) t.cases = Math.max(0, t.cases - 1);
       if (c === '\\') { out += text.slice(k, k + 2); k += 2; continue; }
-      if (c === '$' && text[k + 1] === '(') { st.push({ q: 'sub', depth: 0 }); out += '$('; k += 2; continue; }
+      if (c === '$' && text[k + 1] === '(' && text[k + 2] === '(') { st.push({ q: 'arith', depth: 0, cases: 0 }); out += '$(('; k += 3; continue; }
+      if (c === '(' && text[k + 1] === '(' && wordAt(k)) { st.push({ q: 'arith', depth: 0, cases: 0 }); out += '(('; k += 2; continue; }
+      if (c === '$' && text[k + 1] === '(') { st.push({ q: 'sub', depth: 0, cases: 0 }); out += '$('; k += 2; continue; }
       if (c === '(' ) { t.depth++; out += c; k++; continue; }
-      if (c === ')') { if (t.q === 'sub' && t.depth === 0) st.pop(); else t.depth = Math.max(0, t.depth - 1); out += c; k++; continue; }
-      if (c === '`') { if (t.q === 'bq') st.pop(); else st.push({ q: 'bq', depth: 0 }); out += c; k++; continue; }
-      if (c === '$' && text[k + 1] === "'") { st.push({ q: "$'", depth: 0 }); out += "$'"; k += 2; continue; }
-      if (c === "'" || c === '"') { st.push({ q: c, depth: 0 }); out += c; k++; continue; }
+      // A `)` inside case … esac ends a pattern, not the substitution.
+      if (c === ')') { if (t.q === 'sub' && t.depth === 0 && t.cases === 0) st.pop(); else if (t.cases === 0) t.depth = Math.max(0, t.depth - 1); out += c; k++; continue; }
+      if (c === '`') { if (t.q === 'bq') st.pop(); else st.push({ q: 'bq', depth: 0, cases: 0 }); out += c; k++; continue; }
+      if (c === '$' && text[k + 1] === "'") { st.push({ q: "$'", depth: 0, cases: 0 }); out += "$'"; k += 2; continue; }
+      if (c === "'" || c === '"') { st.push({ q: c, depth: 0, cases: 0 }); out += c; k++; continue; }
       out += c;
       k++;
       continue;
@@ -295,14 +321,17 @@ function maskFile(text: string): string {
     if (t.q === "'") { if (c === "'") { st.pop(); out += c; } else out += c === '\n' ? '\n' : ' '; k++; continue; }
     if (c === '\\') { out += text.slice(k, k + 2).replace(/[^\n]/g, ' '); k += 2; continue; }
     if (t.q === "$'") { if (c === "'") { st.pop(); out += c; } else out += c === '\n' ? '\n' : ' '; k++; continue; }
-    // "…": `$(` and `` ` `` open an unquoted context.
+    // "…": `$((`, `$(` and `` ` `` open an unquoted context.
     if (c === '"') { st.pop(); out += c; k++; continue; }
-    if (c === '$' && text[k + 1] === '(') { st.push({ q: 'sub', depth: 0 }); out += '  '; k += 2; continue; }
-    if (c === '`') { st.push({ q: 'bq', depth: 0 }); out += ' '; k++; continue; }
+    if (c === '$' && text[k + 1] === '(' && text[k + 2] === '(') { st.push({ q: 'arith', depth: 0, cases: 0 }); out += '   '; k += 3; continue; }
+    if (c === '$' && text[k + 1] === '(') { st.push({ q: 'sub', depth: 0, cases: 0 }); out += '  '; k += 2; continue; }
+    if (c === '`') { st.push({ q: 'bq', depth: 0, cases: 0 }); out += ' '; k++; continue; }
     out += c === '\n' ? '\n' : ' ';
     k++;
   }
-  return out;
+  const names: Record<string, string> = { "'": "a '…' quote", "$'": "a $'…' quote", '"': 'a "…" quote', sub: 'a $(…)', bq: 'a `…`', arith: 'a ((…))' };
+  const open = unfinished ?? (docs.length ? `a heredoc to ${docs[0]!.word}` : st.length > 1 ? names[String(top().q)]! : null);
+  return { out, open };
 }
 
 /** A substitution's text that looks the binary up: its output is the binary. */
@@ -528,7 +557,11 @@ export function shellLaunchProblems(path: string, text: string, pinned = new Map
   // shadows it too: any name with a `/` is refused, and a listed name after any `…/` (R1264m D2, n D1).
   // Quoted text masked across the whole file, so a quote that spans lines (a multi-line awk or `node -e` program) is
   // masked on every line it covers (R1264t D2); comments cut in the same pass (an apostrophe in one opens no quote).
-  const masked = maskFile(text).split('\n');
+  const mask = maskFile(text);
+  const masked = mask.out.split('\n');
+  // Fail-safe (R1264w/x): a file the mask ends still inside a quote, substitution or heredoc is one this lint lost sync
+  // with; it is refused, rather than read with the rest of it masked unseen.
+  if (mask.open) out.push(`${path}: the lint can't follow this file's quoting to its end (it ends inside ${mask.open}); a definition after the point it lost sync would go unread: refused (R1264w/x)`);
   for (const { line, end, text: t } of lines) {
     // Read with quoted text masked (a regex's ` [()]` in grep, tr or sed is no definition, R1264r D3), and a definition
     // only with a body after the `()`: any compound command (`{`, `(`, `[[`, if, for, while, until, case, select) or
@@ -904,6 +937,16 @@ test('#1262: every way a script can start claude other than through claude_guard
   // check-table: never-shrink
   const MUST_FAIL = [
     'after-and',
+    'arith-dollar-shift-then-test',
+    'arith-if-shift-then-sudo',
+    'arith-shift-then-local',
+    'case-in-subst-then-sudo',
+    'heredoc-backslash-then-read',
+    'heredoc-partly-quoted-then-sudo',
+    'herestring-bare-then-read',
+    'herestring-sq-then-test',
+    'herestring-word-then-test',
+    'unclosed-quote-failsafe',
     'comment-after-case-then-test',
     'comment-after-semicolon-then-enable',
     'continued-definition',
@@ -1044,7 +1087,7 @@ test('#1262: every way a script can start claude other than through claude_guard
     'xargs',
   ];
   // check-table: never-shrink
-  const CONTROLS = ['ok-api-key-helper', 'ok-auth-status', 'ok-case-label', 'ok-comment', 'ok-continued-guards', 'ok-for-list', 'ok-grep-regex', 'ok-guarded', 'ok-guarded-array', 'ok-install-path', 'ok-js-auth-status', 'ok-js-guarded', 'ok-other-tool', 'ok-prose', 'ok-spike-pin', 'ok-version', 'ok-workflow-block-guarded', 'ok-brackets-and-enable', 'ok-multiline-awk-node'];
+  const CONTROLS = ['ok-api-key-helper', 'ok-auth-status', 'ok-case-label', 'ok-comment', 'ok-continued-guards', 'ok-for-list', 'ok-grep-regex', 'ok-guarded', 'ok-guarded-array', 'ok-install-path', 'ok-js-auth-status', 'ok-js-guarded', 'ok-other-tool', 'ok-prose', 'ok-spike-pin', 'ok-version', 'ok-workflow-block-guarded', 'ok-brackets-and-enable', 'ok-multiline-awk-node', 'ok-arith-herestring-controls'];
   assert.deepEqual(all.map(nameOf).sort(), [...MUST_FAIL, ...CONTROLS].sort(), 'every fixture, by name');
   for (const f of all) {
     const n = nameOf(f);

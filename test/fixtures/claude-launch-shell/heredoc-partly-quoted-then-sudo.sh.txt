@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# R1264x D1 (h3): a partly quoted heredoc delimiter, E"OF".
+cat <<E"OF"
+Don't.
+EOF
+sudo() { command sudo -n "$@"; }

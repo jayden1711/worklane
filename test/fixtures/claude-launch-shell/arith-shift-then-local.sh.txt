@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# R1264w D1: a shift in ((…)).
+(( v = 1<<shift ))
+local() { :; }
