@@ -6,6 +6,7 @@
 //   pre-push hook:  node scripts/push-gate.mjs <remote> [<url>]   (refs on stdin)
 //   by hand / CI:   node scripts/push-gate.mjs --range <base>..<tip>
 //   a PR's body:    node scripts/push-gate.mjs --pr-body   (CI; the body from $GITHUB_EVENT_PATH)
+//   commit-msg hook: node push-gate.mjs --commit-msg <message file>   (the message rule alone: #1259)
 //
 // It refuses vendor attribution in a commit message or PR body (a Co-Authored-By trailer, a coding tool's
 // "Generated with" line): this repo's attribution is the DCO sign-off only (#576).
@@ -21,7 +22,8 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { devNull } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { loadRules, scanBinary, scanText, SKIP } from './lib/denylist.mjs';
 
 const ZERO = /^0+$/;
@@ -44,6 +46,9 @@ const graphOff = (e) => {
   return { ...e, [`GIT_CONFIG_KEY_${n}`]: 'core.commitGraph', [`GIT_CONFIG_VALUE_${n}`]: 'false', GIT_CONFIG_COUNT: String(n + 1), ...last };
 };
 const GIT_ENV = graphOff({ ...process.env, GIT_NO_REPLACE_OBJECTS: '1', GIT_GRAFT_FILE: join(devNull, 'no-grafts') });
+// R1260s D1: GIT_CONFIG names a file for `git config` alone ("no effect on other Git commands"): with it, the hook's
+// config reads saw none of what `git commit` reads. No other git the gate runs reads it.
+delete GIT_ENV.GIT_CONFIG;
 const runGit = (args, opts) => execFileSync('git', [...GIT_FIXED_ARGS, ...args], { ...opts, env: GIT_ENV });
 const git = (...a) => runGit(a, { encoding: 'utf8', maxBuffer: READ_MAX });
 
@@ -54,12 +59,18 @@ function fail(why) {
 
 /** Commits to scan and tips to check, from the hook's stdin or --range. */
 function targets(argv) {
+  // R1260f F1: the launcher passes `-- <remote> <url>`, so a remote's name is never read as an option.
+  if (argv[0] === '--') return pushed(argv[1]);
   if (argv[0] === '--range') {
     const [base, tip] = (argv[1] ?? '').split('..');
     if (!base || !tip) fail('usage: --range <base>..<tip>');
     return [{ tip: git('rev-parse', '--verify', `${tip}^{commit}`).trim(), commits: git('rev-list', `${base}..${tip}`).split('\n').filter(Boolean) }];
   }
-  const remote = argv[0];
+  return pushed(argv[0]);
+}
+
+/** A pre-push hook's refs (on stdin), with what `remote` doesn't have yet. */
+function pushed(remote) {
   if (!remote) fail('run as a pre-push hook (remote name expected) or with --range');
   const out = [];
   for (const line of readFileSync(0, 'utf8').split('\n').filter(Boolean)) {
@@ -155,16 +166,226 @@ function withoutOwnSignOffs(msg, emails) {
 const SUBJECT_MAX = 180;
 
 /**
- * Why a commit's message is malformed, or nothing: line 2 must be blank (otherwise git reads the whole first
+ * Why a commit message is malformed (empty: it isn't): line 2 must be blank (otherwise git reads the whole first
  * paragraph as the subject) and line 1 at most SUBJECT_MAX characters. A one-line message passes; so does GitHub's
- * merge commit, whose title follows a blank line. Only the pushed commits are judged, never what's already on main.
+ * merge commit, whose title follows a blank line. The one rule for both a pushed commit (messageShape) and, through
+ * --commit-msg, the commit-msg hook before a commit is made (#1259), so the two can't drift.
  */
-function messageShape(sha) {
-  const lines = git('log', '-1', '--format=%B', sha).split(/\r?\n/);
+function messageShapeProblems(message) {
+  const lines = message.split(/\r?\n/);
   const why = [];
   if (lines.length > 1 && lines[1].trim() !== '') why.push('line 2 is not blank, so git reads the whole first paragraph as the subject');
   if (lines[0].length > SUBJECT_MAX) why.push(`the subject is ${lines[0].length} characters, over ${SUBJECT_MAX}`);
-  return why.length ? [`${sha.slice(0, 8)}: ${why.join('; and ')}\n    line 1: ${lines[0]}`] : [];
+  return why;
+}
+
+/**
+ * A commit's message as git stored it (R1260l D2): the raw commit object's text after its headers, as UTF-8, never
+ * git's formatted log, which log.showSignature, i18n.logOutputEncoding and the like change at push time. A commit with
+ * an `encoding` header other than UTF-8 is refused, never decoded (R1260m D2, R1260n D2: a label a decoder maps one way
+ * and glibc another, `unicodefeff` or `UTF-16`, turned an ASCII message into one line of CJK that no check matched).
+ * Throws, so the gate fails closed.
+ */
+function commitMessage(sha) {
+  const raw = runGit(['cat-file', 'commit', sha], { maxBuffer: READ_MAX });
+  const end = raw.indexOf('\n\n');
+  const head = (end === -1 ? raw : raw.subarray(0, end)).toString('latin1');
+  const body = end === -1 ? Buffer.alloc(0) : raw.subarray(end + 2);
+  // R1260p D1: the header block read strictly, as git reads it and no other way. git splits header lines on LF only,
+  // so a CR inside a line (`x-note a\rencoding utf8`, or in a gpgsig continuation) hid a decoy `encoding` line from git
+  // while a multiline regex took it first. Refused: a header line holding a CR or a NUL, or bytes that aren't valid
+  // UTF-8 (a non-ASCII author or committer name in UTF-8 is read); more than one `encoding` header; any `encoding`
+  // value but exactly UTF-8 (in any case).
+  const lines = head.split('\n');
+  // R1260t D1: a NUL is refused in any header line; a CR or bytes that aren't valid UTF-8 only in the lines git reads a
+  // meaning from (tree, parent, author, committer, encoding). A signed tag's message, copied into a merge's `mergetag`
+  // header (or an extra header `--amend` carries over), may hold a CR; main's gate passed those merges. The R1260p decoy
+  // stays closed: the lines are split on LF only, so `x-note a\rencoding utf8` is never read as an encoding header.
+  const meaningful = (l) => /^(?:tree|parent|author|committer|encoding)(?: |$)/.test(l);
+  const odd = lines.find((l) => /\0/.test(l) || (meaningful(l) && /\r/.test(l)));
+  if (odd !== undefined) throw new Error(`commit ${sha.slice(0, 8)}'s header has a CR or a NUL (${JSON.stringify(odd.slice(0, 60))}): the gate reads headers split on LF only, as git does`);
+  const notUtf8 = lines.find((l) => {
+    if (!meaningful(l)) return false;
+    try {
+      new TextDecoder('utf-8', { fatal: true }).decode(Buffer.from(l, 'latin1'));
+      return false;
+    } catch {
+      return true;
+    }
+  });
+  if (notUtf8 !== undefined) throw new Error(`commit ${sha.slice(0, 8)}'s header has bytes that aren't valid UTF-8 (${JSON.stringify(notUtf8.slice(0, 60))})`);
+  const encs = lines.filter((l) => /^encoding( |$)/.test(l));
+  if (encs.length > 1) throw new Error(`commit ${sha.slice(0, 8)} has ${encs.length} encoding headers: the gate reads at most one, exactly "encoding UTF-8"`);
+  const enc = encs.length ? encs[0].slice('encoding '.length) : undefined;
+  if (enc !== undefined && !/^UTF-8$/i.test(enc)) throw new Error(`commit ${sha.slice(0, 8)} declares its message encoding as ${JSON.stringify(enc)}: the gate reads UTF-8 messages only. Re-make the commit with i18n.commitEncoding unset or UTF-8`);
+  if (!enc || /^utf-?8$/i.test(enc)) return body.toString('utf8');
+  throw new Error(`commit ${sha.slice(0, 8)} declares its message encoding as ${JSON.stringify(enc)}: the gate reads UTF-8 messages only`);
+}
+
+/** A pushed commit's message shape. Only the pushed commits are judged, never what's already on main. */
+function messageShape(sha) {
+  const message = commitMessage(sha);
+  const why = messageShapeProblems(message);
+  return why.length ? [`${sha.slice(0, 8)}: ${why.join('; and ')}\n    line 1: ${message.split(/\r?\n/)[0]}`] : [];
+}
+
+/** A git config value in the repo the hook runs in, or null when it isn't set. */
+function gitConfig(key) {
+  return configRead(['--get', key])?.toString('utf8').replace(/\n$/, '') || null;
+}
+
+/**
+ * A `git config` read for the commit-msg hook: its output, or null when git says the key is unset (exit 1). Any other
+ * failure refuses (R1260s D2, R1260t D2): a git that can't read the config (a GIT_CONFIG_COUNT git accepts and the
+ * runner refuses, a broken config file) must not be read as "unset".
+ */
+function configRead(args) {
+  try {
+    return runGit(['config', ...args], { stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: READ_MAX });
+  } catch (e) {
+    if (e.status === 1) return null;
+    throw new Refusal(`git could not read its config (git config ${args.join(' ')}: exit ${e.status}${e.stderr ? `: ${String(e.stderr).trim().slice(0, 200)}` : ''}): fix the git config or environment (GIT_CONFIG_COUNT?)`);
+  }
+}
+
+/**
+ * The cleanup git applies after the commit-msg hook, as far as a hook can tell (R1260a/b D1): `commit.cleanup` when
+ * set (`default` as unset); otherwise `strip` when the message is edited and `whitespace` when it isn't (-m, -F, -C),
+ * which git tells the hook by running it with GIT_EDITOR=':'. `scissors` cuts only an edited message, as `whitespace`
+ * otherwise. A `--cleanup=` given on the command line isn't visible to a hook: the hook then judges by this mode.
+ */
+function cleanupMode(env = process.env) {
+  const edited = env.GIT_EDITOR !== ':';
+  const set = gitConfig('commit.cleanup');
+  if (set && set !== 'default') return set === 'scissors' && !edited ? 'whitespace' : set;
+  return edited ? 'strip' : 'whitespace';
+}
+
+/**
+ * The comment setting git reads (R1260c D2): from 2.45, core.commentChar and core.commentString, whichever is set last;
+ * before, core.commentChar alone (git ignored core.commentString). `#` when neither is set; `auto` as it is.
+ */
+function commentSetting() {
+  let newer = false;
+  try {
+    const m = /(\d+)\.(\d+)/.exec(runGit(['version'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }));
+    newer = !!m && (Number(m[1]) > 2 || (Number(m[1]) === 2 && Number(m[2]) >= 45));
+  } catch {
+    // no git: the default below
+  }
+  // -z (R1260k D1, D2): a value may hold a newline, and its bytes are read as they are, not as text.
+  const out = configRead(['-z', '--get-regexp', '^core\\.comment(char|string)$']);
+  const set = (out ?? Buffer.alloc(0))
+    .toString('latin1')
+    .split('\0')
+    .filter(Boolean)
+    .map((entry) => {
+      const nl = entry.indexOf('\n');
+      return [(nl === -1 ? entry : entry.slice(0, nl)).toLowerCase(), nl === -1 ? '' : Buffer.from(entry.slice(nl + 1), 'latin1')];
+    });
+  const value = set.filter(([k]) => newer || k === 'core.commentchar').at(-1)?.[1];
+  if (value === undefined) return '#';
+  // Fail closed (R1260k D1, D2): `auto` in any case, or printable ASCII with no whitespace; anything else (a newline,
+  // bytes that aren't UTF-8, U+FFFD, a space) is refused rather than modelled.
+  const text = value.toString('latin1');
+  if (text.toLowerCase() === 'auto' || /^[\x21-\x7e]+$/.test(text)) return text;
+  const shown = [...value].map((b) => (b >= 0x21 && b <= 0x7e && b !== 0x5c ? String.fromCharCode(b) : `\\x${b.toString(16).padStart(2, '0')}`)).join('');
+  throw new Refusal(`core.commentChar or core.commentString is "${shown}", which the commit-msg hook won't model: set it to printable ASCII with no whitespace (# by default), or auto`);
+}
+
+/** A refusal the commit-msg hook gives with its own words (no "could not read" prefix). */
+class Refusal extends Error {}
+
+/** The characters git's `core.commentChar=auto` picks from, in order: the first that starts no line of the message. */
+const AUTO_COMMENT = '#;@!$%^&|:';
+const scissors = (c) => `${c} ------------------------ >8 ------------------------`;
+/**
+ * git's whitespace, the one definition the hook models git's cleanup with (R1260x D1): git's isspace (sane_ctype in
+ * ctype.c) is space, tab, LF and CR only. A form feed or vertical tab is not whitespace to git: strbuf_stripspace keeps
+ * a line holding only one, and keeps one at a line's end.
+ */
+const GIT_TRAILING_SPACE = /[ \t\n\r]+$/;
+
+/**
+ * The comment prefixes to judge an edited message by. A set prefix, as it is. For `auto` (R1260g D1, R1260h D1-D3),
+ * git picks its character from the message as it stood before the editor ran, which a commit-msg hook never sees, and
+ * git 2.48 and 2.56 pick differently: so the hook never infers it (not from a help block, a scissors line, or a probe)
+ * and judges every reading git might commit: each candidate that starts a line of the message, and nothing stripped.
+ * It refuses when any fails. That refuses some commits git would make (an `auto` commit edited from an empty template:
+ * the help lines read as text in one reading), and never passes one the gate refuses.
+ */
+function commentPrefixes(text, setting) {
+  // git reads `auto` in any case (strcasecmp, both keys: R1260i D1, R1260j D1).
+  if (setting.toLowerCase() !== 'auto') return [setting];
+  const lines = text.split('\n');
+  return [null, ...[...AUTO_COMMENT].filter((c) => lines.some((l) => l.startsWith(c)))];
+}
+
+/**
+ * Where to judge the message cut (R1260f F3): git cuts at the FIRST scissors line (wt_status_truncate_message_at_cut_line
+ * finds the first), only under `--cleanup=scissors` (or commit.cleanup=scissors, edited) or with `-v`, which a hook
+ * can't see. So in `strip` mode both, uncut and cut at the first; in scissors mode, cut.
+ */
+const cutReadings = (mode, verbose = false) => (verbose || mode === 'scissors' ? ['first'] : mode === 'strip' ? ['none', 'first'] : ['none']);
+
+/**
+ * Whether the message holds git's own verbose block (owner, MORNING 33: "recognise"): its exact scissors line, then
+ * git's two fixed help lines (wt_status_add_cut_line), with a comment prefix git may use. git writes it whenever it runs
+ * verbose and edits the message (`-v`, or `commit.verbose`), and then cuts at its first scissors line in every cleanup
+ * mode, verbatim included (`verbose || scissors`), so only the cut reading is judged. Nothing else counts as verbose:
+ * `commit.verbose` with `--no-verbose` on the command line writes no block and git doesn't cut, so both readings are
+ * judged (R1260ag D2). A locale translates the two help lines (R1260aj D1): when `commit.verbose` is set and the
+ * message is edited (GIT_EDITOR isn't ':'), the scissors line followed by two lines of the comment prefix and a space
+ * counts as git's block in any language. Not the translations' own text: git's .po files are GPL. With -m, -F or -C git
+ * writes no block, so this route is off there and the -m residual (MORNING 37) is as narrow as before. Only `git
+ * commit`'s own file, COMMIT_EDITMSG, can hold the block (R1260ak/al D1): `git merge --edit` and `git pull --edit` run
+ * the hook on MERGE_MSG, edited, but never run verbose: they write git's cut block and cut only in scissors cleanup,
+ * from `commit.cleanup=scissors`, which the hook judges cut anyway (R1260an D1), or from `--cleanup=scissors` on the
+ * command line, which it can't see: it then judges by `strip`, both readings, so a message cut there may be refused
+ * (the stated `--cleanup=` case; R1260ao D1). So the route is off there. A copy typed by
+ * hand reads as verbose too: git's English lines in a commit made without -v, or, with `commit.verbose` and
+ * `--no-verbose` in the editor, the scissors line and any two comment lines under it: the stated residual (the hook
+ * cuts, git doesn't, the gate may refuse).
+ */
+function gitVerboseBlock(bytes, prefixes, env = process.env) {
+  const lines = bytes.split('\n');
+  const anyLanguage = env.GIT_EDITOR !== ':' && basename(env.PUSH_GATE_COMMIT_MSG ?? '') === 'COMMIT_EDITMSG' && verboseByConfig();
+  const help = (c, l, english) => (anyLanguage ? typeof l === 'string' && l.startsWith(`${c} `) && l.length > c.length + 1 : l === `${c} ${english}`);
+  return prefixes.some((c) => c !== null && lines.some((l, i) => l === scissors(c) && help(c, lines[i + 1], 'Do not modify or remove the line above.') && help(c, lines[i + 2], 'Everything below it will be ignored.')));
+}
+
+/** Whether `commit.verbose` asks for verbose (git reads it bool-or-int: true, or a count above 0). */
+function verboseByConfig() {
+  const v = configRead(['--type=bool-or-int', '--get', 'commit.verbose'])?.toString('utf8').trim() ?? null;
+  return v === 'true' || (/^\d+$/.test(v ?? '') && Number(v) > 0);
+}
+
+/**
+ * The message as git will commit it, from the file the commit-msg hook is given, by git's cleanup `mode`: verbatim
+ * changes nothing; with `cutAt` (scissors mode, or a `-v` commit) it is cut at the first scissors line; strip leaves
+ * out comment lines (git's own scissors line among them, when it doesn't cut); all but verbatim then
+ * take trailing whitespace off each line, fold runs of blank lines to one, and drop blank lines at the start and the
+ * end. Blank and whitespace are git's isspace, GIT_TRAILING_SPACE (a BOM, NBSP, form feed or vertical tab line is not
+ * blank: R1260b, R1260x D1). A null `comment`
+ * strips and cuts nothing (one of `auto`'s two readings).
+ */
+function asCommitted(text, mode = 'strip', comment = '#', cutAt = mode === 'scissors' ? 'first' : 'none') {
+  let lines = text.split('\n');
+  if (cutAt !== 'none' && comment !== null) {
+    // git's cut line ends in a newline (wt_status_locate_end): the file's last line, with none after it, isn't one
+    // (R1260i D2). git cuts before any cleanup, verbatim too (cleanup_message: `verbose || scissors`: R1260ah D1).
+    const cut = lines.indexOf(scissors(comment));
+    if (cut !== -1 && cut < lines.length - 1) lines = [...lines.slice(0, cut), ''];
+  }
+  if (mode === 'verbatim') return lines.join('\n');
+  if (mode === 'strip' && comment !== null) lines = lines.filter((l) => !l.startsWith(comment));
+  const out = [];
+  for (const l of lines.map((x) => x.replace(GIT_TRAILING_SPACE, ''))) {
+    if (l !== '') out.push(l);
+    else if (out.length && out.at(-1) !== '') out.push('');
+  }
+  while (out.at(-1) === '') out.pop();
+  return out.join('\n');
 }
 
 // A blob holding a NUL byte is still scanned for the hashed terms, never skipped (#989).
@@ -177,7 +398,7 @@ function scanCommit(rules, sha, owner) {
   // A commit's own author and committer identity (and its sign-off) are inherent to it; anything else in the message is scanned.
   const [an, ae, cn, ce] = git('log', '-1', '--format=%an%x00%ae%x00%cn%x00%ce', sha).trim().split('\0');
   const isMerge = git('log', '-1', '--format=%P', sha).trim().split(' ').length > 1;
-  let msg = withoutOwnSignOffs(withoutOwnMergeSubject(git('log', '-1', '--format=%B', sha), owner, isMerge), [ae, ce]);
+  let msg = withoutOwnSignOffs(withoutOwnMergeSubject(commitMessage(sha), owner, isMerge), [ae, ce]);
   for (const id of [ae, ce, an, cn].filter(Boolean)) msg = msg.split(id).join('');
   hits.push(...scanText(rules, 'COMMIT_MSG', msg).map((h) => `${short} ${h}`));
   return hits;
@@ -229,6 +450,70 @@ function gitleaks(commits) {
   if (r.status !== 0) fail(`gitleaks exited ${r.status}:\n${r.stderr.trim().slice(-1000)}`);
 }
 
+// The commit-msg hook (#1259; installed by setup-hooks): the message rule alone, before the commit is made, so none is
+// made that the gate would refuse and that would then have to be rewritten. No rules or git are read.
+// R1260a D2, R1260d D1: only when the installed stub runs it: from its own copy in the hooks dir (commit-msg-gate/;
+// the pre-push launcher runs the gate from a fresh temp dir, never there), and with the message file named in
+// PUSH_GATE_COMMIT_MSG too. A pre-push hook's first argument is the remote's name and its second the remote's URL,
+// and its environment is the pusher's: a push that supplies all three is still judged below.
+const installedCopy = basename(dirname(dirname(fileURLToPath(import.meta.url)))) === 'commit-msg-gate';
+if (process.argv[2] === '--commit-msg' && installedCopy && process.argv.length === 4 && process.env.PUSH_GATE_COMMIT_MSG === process.argv[3]) {
+  try {
+    const raw = readFileSync(process.argv[3]);
+    // Fail closed on encodings (R1260k D3, R1260l D1): git stores the bytes as typed and names i18n.commitEncoding in
+    // the commit, and rewrites bytes that aren't UTF-8, so the hook judges only a UTF-8 message under UTF-8.
+    // R1260r D1: set but empty (or blank), git writes an `encoding ` header the gate refuses, so it is refused here too.
+    const encSet = configRead(['--get', 'i18n.commitEncoding'])?.toString('utf8').replace(/\n$/, '') ?? null;
+    if (encSet !== null && !/^utf-?8$/i.test(encSet)) throw new Refusal(`i18n.commitEncoding is ${/^\S+$/.test(encSet) ? encSet : JSON.stringify(encSet)}: set i18n.commitEncoding to UTF-8 or unset it (the hook judges a UTF-8 message only)`);
+    // R1260r D2: the identity git will write in the author and committer headers, which the gate refuses with a CR or a
+    // NUL (user.name, user.email, GIT_AUTHOR_*, GIT_COMMITTER_*). Bytes that aren't UTF-8 there git rewrites itself
+    // (verify_utf8), so the gate never sees them: not refused here (R1260s N1).
+    for (const who of ['GIT_AUTHOR_IDENT', 'GIT_COMMITTER_IDENT']) {
+      let ident;
+      try {
+        ident = runGit(['var', who], { stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: READ_MAX });
+      } catch (e) {
+        // R1260s D2: only a missing identity (exit 128), which `git commit` refuses itself, is skipped.
+        if (e.status === 128 && /identity unknown|empty ident|unable to auto-detect/i.test(String(e.stderr ?? ''))) continue;
+        throw new Refusal(`git could not read the ${who === 'GIT_AUTHOR_IDENT' ? 'author' : 'committer'} identity (git var ${who}: exit ${e.status}${e.stderr ? `: ${String(e.stderr).trim().slice(0, 200)}` : ''})`);
+      }
+      if (/[\r\0]/.test(ident.toString('latin1').replace(/\n$/, ''))) throw new Refusal(`the ${who === 'GIT_AUTHOR_IDENT' ? 'author' : 'committer'} identity git would write holds a CR or a NUL, which the push gate refuses in a commit's header: fix user.name and user.email (or GIT_AUTHOR_* / GIT_COMMITTER_*)`);
+    }
+    // R1260af AF2: git cleans the message's bytes first and checks UTF-8 only on what it keeps (verify_utf8, after
+    // cleanup_message), so a -v diff below the cut, which git drops, isn't judged. The readings are built on the bytes
+    // (Latin-1: one character a byte; the comment prefixes, the scissors line and git's whitespace are ASCII), then each
+    // is decoded and checked.
+    const bytes = raw.toString('latin1');
+    const mode = cleanupMode();
+    const prefixes = commentPrefixes(bytes, commentSetting());
+    const verbose = gitVerboseBlock(bytes, prefixes);
+    const kept = prefixes.flatMap((c) => cutReadings(mode, verbose).map((cut) => asCommitted(bytes, mode, c, cut)));
+    const readings = kept.map((r) => {
+      let text;
+      try {
+        // ignoreBOM: a leading BOM stays, as git keeps it (a BOM-only line 1 isn't blank).
+        text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(Buffer.from(r, 'latin1'));
+      } catch {
+        throw new Refusal('the message is not valid UTF-8: write it in UTF-8 (and set i18n.commitEncoding to UTF-8 or unset it)');
+      }
+      // R1260m D1, R1260n D1: the rest of git's find_invalid_utf8: a noncharacter (U+FDD0-U+FDEF, U+xxFFFE, U+xxFFFF) is
+      // valid UTF-8 to a decoder, but git rewrites its bytes one by one as Latin-1, so the gate would read another message.
+      if ([...text].some((ch) => { const cp = ch.codePointAt(0); return (cp >= 0xfdd0 && cp <= 0xfdef) || (cp & 0xfffe) === 0xfffe; })) throw new Refusal('the message holds a Unicode noncharacter (U+FDD0-U+FDEF, or one ending in FFFE or FFFF), which git rewrites byte by byte: remove it');
+      return text;
+    });
+    const why = [...new Set(readings.flatMap(messageShapeProblems))];
+    if (why.length) {
+      console.error(`commit refused, by the push gate's message-shape rule: ${why.join('; and ')}`);
+      console.error(`Nothing was committed; the message is kept in ${process.argv[3]}. Put the subject alone on line 1 (at most ${SUBJECT_MAX} characters), then a blank line, then the body, and commit again.`);
+      process.exit(1);
+    }
+    process.exit(0);
+  } catch (e) {
+    console.error(e instanceof Refusal ? `commit refused: ${e.message}` : `commit refused: the commit-msg hook could not read the message: ${e.message}`);
+    process.exit(1);
+  }
+}
+
 if (process.argv[2] === '--pr-body') {
   try {
     prBodyGate();
@@ -245,7 +530,7 @@ try {
   const shape = commits.flatMap(messageShape);
   if (shape.length) fail(`a commit message's subject is not one short line:\n${shape.map((s) => `  ${s}`).join('\n')}\nPut the subject alone on line 1 (at most ${SUBJECT_MAX} characters), then a blank line, then the body. Reword it before pushing (git commit --amend for the last commit, a rebase's reword for an older one); once pushed, a reword needs the owner's OK to force-push.`);
   const owner = repoOwner();
-  const attribution = commits.flatMap((sha) => attributionLines(`${sha.slice(0, 8)} COMMIT_MSG`, git('log', '-1', '--format=%B', sha)));
+  const attribution = commits.flatMap((sha) => attributionLines(`${sha.slice(0, 8)} COMMIT_MSG`, commitMessage(sha)));
   if (attribution.length) fail(`vendor attribution in a commit message:\n${attribution.map((h) => `  ${h}`).join('\n')}\n${ATTRIBUTION_FIX}`);
   for (const sha of commits) hits.push(...scanCommit(rules, sha, owner));
   for (const t of all) hits.push(...scanTree(rules, t.tip));
