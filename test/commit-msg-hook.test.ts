@@ -373,14 +373,18 @@ test("every ASCII byte and the non-ASCII spaces: the hook and the gate give the 
   assert.deepEqual(differ, [], 'the same verdict for every byte, spot and mode');
 });
 
-test("git commit -v (on the command line or by commit.verbose) is recognised by git's own verbose block, in every cleanup mode, verbatim included; --no-verbose writes none, so both readings are judged; a typed copy of the block without -v is the stated residual (#1260 R1260af AF1, AF2, R1260ag, R1260ah", { skip: !hasGitleaks && 'gitleaks not installed', timeout: 300_000 }, () => {
+test("git commit -v (on the command line or by commit.verbose) is recognised by git's own verbose block, in every cleanup mode, verbatim included; --no-verbose writes none, so both readings are judged; a translated block counts under commit.verbose; a typed copy of the block without -v is the stated residual (#1260 R1260af AF1, AF2, R1260ag, R1260ah, R1260aj D1, D2)", { skip: !hasGitleaks && 'gitleaks not installed', timeout: 300_000 }, () => {
   const env = { ...process.env, GIT_AUTHOR_NAME: 'Ada', GIT_AUTHOR_EMAIL: 'ada@example.com', GIT_COMMITTER_NAME: 'Ada', GIT_COMMITTER_EMAIL: 'ada@example.com' };
   delete (env as Record<string, string | undefined>).GIT_DIR;
   // An editor that types the message on git's line 1 and leaves the rest (help, scissors line, diff), as a person does.
   const editor = (msg: string) => ({ GIT_EDITOR: `f() { printf '%s' '${msg}' | cat - "$1" > "$1.n" && mv "$1.n" "$1"; }; f` });
   // An editor that writes the message, then keeps git's buffer only from its scissors line down (a verbatim user drops
-  // git's help lines above it, or they are committed: R1260ah).
-  const dropHelp = (msg: string) => ({ GIT_EDITOR: `f() { { printf '%s\\n' '${msg}'; awk 'k || /^# -+ >8 -+$/ { k = 1; print }' "$1"; } > "$1.n" && mv "$1.n" "$1"; }; f` });
+  // git's help lines above it, or they are committed: R1260ah). A shell loop, not awk: on Alpine awk is busybox, which
+  // test/isolate.js stands in for, so the editor failed there (R1260aj D2).
+  const dropHelp = (msg: string) => ({ GIT_EDITOR: `f() { { printf '%s\\n' '${msg}'; k=; while IFS= read -r l; do [ "$l" = '# ------------------------ >8 ------------------------' ] && k=1; [ -z "$k" ] || printf '%s\\n' "$l"; done < "$1"; } > "$1.n" && mv "$1.n" "$1"; }; f` });
+  // An editor that types the message on line 1 and rewrites git's two help lines to other text, as a translated locale
+  // writes them (R1260aj D1: de_DE's lines; a shell loop, as above).
+  const translated = (msg: string) => ({ GIT_EDITOR: `f() { { printf '%s' '${msg}'; while IFS= read -r l; do case "$l" in '# Do not modify or remove the line above.') l='# Ändern oder entfernen Sie nicht die obige Zeile.';; '# Everything below it will be ignored.') l='# Alles unterhalb von ihr wird ignoriert.';; esac; printf '%s\\n' "$l"; done < "$1"; } > "$1.n" && mv "$1.n" "$1"; }; f` });
   const run = (cfg: Record<string, string>, staged: Buffer, msg: string, args: string[], ed = editor) => {
     const a = repo();
     const b = repo();
@@ -411,6 +415,12 @@ test("git commit -v (on the command line or by commit.verbose) is recognised by 
     if (want === 'hook=pass gate=pass') assert.equal(r.stored.trim(), 'Add a thing', 'git committed the one line');
   }
   assert.equal(run({ 'commit.verbose': '1' }, text, 'Add a thing', []).verdict, 'hook=pass gate=pass', 'commit.verbose as a count');
+  // R1260aj D1: in a translated locale git's help lines aren't English; under commit.verbose, in an edited message, the
+  // scissors line and two comment lines count as git's block in any language.
+  for (const [cleanup, want] of [[null, 'hook=pass gate=pass'], ['verbatim', 'hook=refuse gate=refuse']] as const) {
+    const r = run({ 'commit.verbose': 'true', ...(cleanup ? { 'commit.cleanup': cleanup } : {}) }, text, 'Add a thing', [], translated);
+    assert.equal(r.verdict, want, `commit.verbose, translated help lines, cleanup ${cleanup ?? 'default'}: ${r.hook}`);
+  }
   // AF2: a diff below the cut that isn't UTF-8, or holds a noncharacter: git drops it, and so does the hook.
   for (const [what, staged] of [['Latin-1 bytes', latin1], ['a noncharacter', nonchar]] as const) {
     const r = run({ 'commit.verbose': 'true' }, staged, 'Add a thing\n\nWhy it is added.', []);
@@ -440,6 +450,14 @@ test("git commit -v (on the command line or by commit.verbose) is recognised by 
   // The hook can't tell this from --no-verbose (R1260ag D2), so one of the two is a stated case.
   const typedOnly = run({ 'commit.verbose': 'true' }, text, '', ['-m', `Add a thing\n${scissorsLine}\nline two`]);
   assert.equal(typedOnly.verdict, 'hook=refuse gate=pass', 'commit.verbose, a typed scissors line and no git block: the stated refusal');
+  // R1260aj D1 keeps that case as it was: with -m (GIT_EDITOR=':') git writes no block, so the any-language route is off,
+  // and a typed scissors line with two comment lines under it is judged as before.
+  const typedTwo = run({ 'commit.verbose': 'true' }, text, '', ['-m', `Add a thing\n${scissorsLine}\n# one\n# two\nline two`]);
+  assert.equal(typedTwo.verdict, 'hook=refuse gate=pass', 'commit.verbose, -m, a typed scissors line and two comment lines: as before');
+  // Its stated cost: commit.verbose with --no-verbose in the editor, and the scissors line typed with two comment lines
+  // under it, read as git's block: the hook cuts there, git doesn't, and the gate refuses the line below as line 2.
+  const typedNoVerbose = run({ 'commit.verbose': 'true' }, text, `Add a thing\n${scissorsLine}\n# one\n# two\nline two\n`, ['--no-verbose']);
+  assert.equal(typedNoVerbose.verdict, 'hook=pass gate=refuse', 'commit.verbose, --no-verbose, a typed scissors line and two comment lines: the stated residual');
   // The stated residual: the same three lines typed by hand into a commit made without -v read as verbose: the hook cuts
   // there, git doesn't, and the gate refuses the line below them as line 2.
   const block = '# ------------------------ >8 ------------------------\n# Do not modify or remove the line above.\n# Everything below it will be ignored.';

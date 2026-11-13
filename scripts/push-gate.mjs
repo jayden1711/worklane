@@ -334,13 +334,25 @@ const cutReadings = (mode, verbose = false) => (verbose || mode === 'scissors' ?
  * verbose and edits the message (`-v`, or `commit.verbose`), and then cuts at its first scissors line in every cleanup
  * mode, verbatim included (`verbose || scissors`), so only the cut reading is judged. Nothing else counts as verbose:
  * `commit.verbose` with `--no-verbose` on the command line writes no block and git doesn't cut, so both readings are
- * judged (R1260ag D2). A locale that translates the two lines isn't recognised (both readings: it may refuse). A copy
- * typed by hand into a commit made without -v reads as verbose too: the stated residual (the hook passes, git doesn't
- * cut, the gate may refuse).
+ * judged (R1260ag D2). A locale translates the two help lines (R1260aj D1): when `commit.verbose` is set and the
+ * message is edited (GIT_EDITOR isn't ':'), the scissors line followed by two lines of the comment prefix and a space
+ * counts as git's block in any language. Not the translations' own text: git's .po files are GPL. With -m, -F or -C git
+ * writes no block, so this route is off there and the -m residual (MORNING 37) is as narrow as before. A copy typed by
+ * hand reads as verbose too: git's English lines in a commit made without -v, or, with `commit.verbose` and
+ * `--no-verbose` in the editor, the scissors line and any two comment lines under it: the stated residual (the hook
+ * cuts, git doesn't, the gate may refuse).
  */
-function gitVerboseBlock(bytes, prefixes) {
+function gitVerboseBlock(bytes, prefixes, env = process.env) {
   const lines = bytes.split('\n');
-  return prefixes.some((c) => c !== null && lines.some((l, i) => l === scissors(c) && lines[i + 1] === `${c} Do not modify or remove the line above.` && lines[i + 2] === `${c} Everything below it will be ignored.`));
+  const anyLanguage = env.GIT_EDITOR !== ':' && verboseByConfig();
+  const help = (c, l, english) => (anyLanguage ? typeof l === 'string' && l.startsWith(`${c} `) && l.length > c.length + 1 : l === `${c} ${english}`);
+  return prefixes.some((c) => c !== null && lines.some((l, i) => l === scissors(c) && help(c, lines[i + 1], 'Do not modify or remove the line above.') && help(c, lines[i + 2], 'Everything below it will be ignored.')));
+}
+
+/** Whether `commit.verbose` asks for verbose (git reads it bool-or-int: true, or a count above 0). */
+function verboseByConfig() {
+  const v = configRead(['--type=bool-or-int', '--get', 'commit.verbose'])?.toString('utf8').trim() ?? null;
+  return v === 'true' || (/^\d+$/.test(v ?? '') && Number(v) > 0);
 }
 
 /**
