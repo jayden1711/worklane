@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync, type SpawnSyncReturns } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, posix } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -499,6 +499,21 @@ test("setup-hooks installs into a repository's shared hooks only origin's defaul
       noInstall(r, join(up, '.git', 'hooks'), `remote upstream, ${what}`);
       assert.match(r.stderr, cantFind);
     }
+    // R1283h D1: the bytes checked are the bytes installed: an installer whose own directory holds a changed launcher,
+    // beside a scripts/ of main's files, and the same run through a symlink: refused, nothing installed.
+    const evil = join(base, 'evil');
+    cpSync(join(work.dir, 'scripts'), join(evil, 'scripts'), { recursive: true });
+    cpSync(join(work.dir, 'scripts'), join(evil, 'tools'), { recursive: true });
+    writeFileSync(join(evil, 'tools', 'push-gate-hook.mjs'), `${readFileSync(join(evil, 'tools', 'push-gate-hook.mjs'), 'utf8')}// beside the installer\n`);
+    mkdirSync(join(base, 'sym', 'scripts'), { recursive: true });
+    symlinkSync(join(evil, 'tools', 'setup-hooks.mjs'), join(base, 'sym', 'scripts', 'setup-hooks.mjs'));
+    rmSync(join(hooks, 'pre-push'), { force: true });
+    rmSync(join(hooks, 'push-gate-hook.mjs'), { force: true });
+    for (const [what, installer] of [['a separate scripts/ beside the installer', join(evil, 'tools', 'setup-hooks.mjs')], ['through a symlink', join(base, 'sym', 'scripts', 'setup-hooks.mjs')]] as const) {
+      const r = spawnSync('node', [installer], { cwd: work.dir, encoding: 'utf8' });
+      noInstall(r, hooks, what);
+      assert.match(r.stderr, /refused: the files it would copy aren't origin\/main's[\s\S]*evil\/tools\/push-gate-hook\.mjs/, what);
+    }
     // R1283d D1: a dangling origin/HEAD, and one naming a branch without the gate: origin/main still decides.
     rmSync(join(hooks, 'pre-push'), { force: true });
     rmSync(join(hooks, 'push-gate-hook.mjs'), { force: true });
@@ -523,8 +538,10 @@ test("setup-hooks installs into a repository's shared hooks only origin's defaul
     const unfetchedBare = installFrom(join(base, 'bwt-main'));
     noInstall(unfetchedBare, bhooks, 'a bare clone with nothing fetched, its main worktree');
     assert.match(unfetchedBare.stderr, cantFind);
-    execFileSync('git', ['-C', bareRepo, 'config', 'remote.origin.fetch', '+refs/heads/*:refs/remotes/origin/*']);
-    execFileSync('git', ['-C', bareRepo, 'fetch', '-q', 'origin']);
+    // R1283g D1, R1283h D2: the remedy it prints is one that works for a bare clone; run as printed, then it installs.
+    const remedy = /: (git config remote\.origin\.fetch '\+refs\/heads\/\*:refs\/remotes\/origin\/\*' && git fetch origin) /.exec(unfetchedBare.stderr)?.[1];
+    assert.ok(remedy, `the bare clone's remedy: ${unfetchedBare.stderr}`);
+    execFileSync('sh', ['-c', remedy!], { cwd: join(base, 'bwt-main'), stdio: 'ignore' });
     noInstall(installFrom(join(base, 'bwt-feat')), bhooks, 'a bare clone, fetched, its branch worktree');
     const bareMain = installFrom(join(base, 'bwt-main'));
     assert.equal(bareMain.status, 0, bareMain.stderr);

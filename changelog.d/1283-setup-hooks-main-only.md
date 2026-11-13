@@ -4,7 +4,8 @@
   Every worktree of a repository shares one hooks dir, so a branch's copy installed there runs for every worktree and
   every push. In a repository that holds the gate anywhere (its HEAD, a branch or a remote-tracking ref), every file
   it would copy (`scripts/setup-hooks.mjs`, `scripts/push-gate-hook.mjs`, `scripts/lib/git.cjs`) must be origin's
-  default branch's, byte for byte (`git hash-object --no-filters` against that commit's tree), wherever the installer
+  default branch's, byte for byte (the bytes it copies, hashed with `git hash-object --no-filters`, against that
+  commit's tree), wherever the installer
   runs from: a branch's worktree, another clone or a copy outside git. Origin's default is `origin/HEAD`'s branch
   when it resolves and holds the gate, else `origin/main`, as fetched into `refs/remotes/origin`; only a bare
   repository with no remote (the origin itself) uses its own HEAD's branch and `main` under `refs/heads`. A bare
