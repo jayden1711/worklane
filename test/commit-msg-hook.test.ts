@@ -373,12 +373,15 @@ test("every ASCII byte and the non-ASCII spaces: the hook and the gate give the 
   assert.deepEqual(differ, [], 'the same verdict for every byte, spot and mode');
 });
 
-test("git commit -v by config: a one-line message, and a diff git drops that isn't UTF-8, pass hook and gate alike; -v on the command line is the stated residual (#1260 R1260af AF1, AF2)", { skip: !hasGitleaks && 'gitleaks not installed', timeout: 300_000 }, () => {
+test("git commit -v (on the command line or by commit.verbose) is recognised by git's own verbose block, in every cleanup mode, verbatim included; --no-verbose writes none, so both readings are judged; a typed copy of the block without -v is the stated residual (#1260 R1260af AF1, AF2, R1260ag, R1260ah", { skip: !hasGitleaks && 'gitleaks not installed', timeout: 300_000 }, () => {
   const env = { ...process.env, GIT_AUTHOR_NAME: 'Ada', GIT_AUTHOR_EMAIL: 'ada@example.com', GIT_COMMITTER_NAME: 'Ada', GIT_COMMITTER_EMAIL: 'ada@example.com' };
   delete (env as Record<string, string | undefined>).GIT_DIR;
   // An editor that types the message on git's line 1 and leaves the rest (help, scissors line, diff), as a person does.
   const editor = (msg: string) => ({ GIT_EDITOR: `f() { printf '%s' '${msg}' | cat - "$1" > "$1.n" && mv "$1.n" "$1"; }; f` });
-  const run = (cfg: Record<string, string>, staged: Buffer, msg: string, args: string[]) => {
+  // An editor that writes the message, then keeps git's buffer only from its scissors line down (a verbatim user drops
+  // git's help lines above it, or they are committed: R1260ah).
+  const dropHelp = (msg: string) => ({ GIT_EDITOR: `f() { { printf '%s\\n' '${msg}'; awk 'k || /^# -+ >8 -+$/ { k = 1; print }' "$1"; } > "$1.n" && mv "$1.n" "$1"; }; f` });
+  const run = (cfg: Record<string, string>, staged: Buffer, msg: string, args: string[], ed = editor) => {
     const a = repo();
     const b = repo();
     for (const [k, v] of Object.entries(cfg)) for (const r of [a, b]) r.git('config', k, v);
@@ -387,7 +390,7 @@ test("git commit -v by config: a one-line message, and a diff git drops that isn
       writeFileSync(join(r.dir, 'f.txt'), staged);
       r.git('add', 'f.txt');
     }
-    const e = { ...env, ...editor(msg) };
+    const e = { ...env, ...ed(msg) };
     const hook = spawnSync('git', ['commit', '-q', ...args], { cwd: a.dir, encoding: 'utf8', env: e });
     const made = spawnSync('git', ['commit', '-q', '--no-verify', ...args], { cwd: b.dir, encoding: 'utf8', env: e });
     assert.equal(made.status, 0, `git made the commit: ${made.stderr}`);
@@ -419,6 +422,24 @@ test("git commit -v by config: a one-line message, and a diff git drops that isn
   assert.equal(cli.verdict, 'hook=pass gate=pass', `command-line -v, a one-line message: ${cli.hook}`);
   assert.equal(cli.stored.trim(), 'Add a thing');
   assert.equal(run({}, latin1, 'Add a thing\n\nWhy it is added.', ['-v']).verdict, 'hook=pass gate=pass', 'command-line -v, a Latin-1 diff');
+  // R1260ah D1: commit.cleanup=verbatim with -v or commit.verbose: git still cuts at its scissors line, and so does the
+  // hook; without either, git writes no scissors line and the message is its own.
+  for (const [what, cfg, args] of [['-v', { 'commit.cleanup': 'verbatim' }, ['-v']], ['commit.verbose', { 'commit.cleanup': 'verbatim', 'commit.verbose': 'true' }, []], ['neither', { 'commit.cleanup': 'verbatim' }, []]] as const) {
+    const r = run(cfg, text, 'Add a thing', [...args], dropHelp);
+    assert.equal(r.verdict, 'hook=pass gate=pass', `verbatim, ${what}: ${r.hook}`);
+    assert.equal(r.stored.trim(), 'Add a thing', `verbatim, ${what}: git committed the one line`);
+  }
+  assert.equal(run({ 'commit.cleanup': 'verbatim' }, latin1, 'Add a thing\n\nWhy it is added.', ['-v'], dropHelp).verdict, 'hook=pass gate=pass', 'verbatim, -v, a Latin-1 diff');
+  // R1260ag D2: commit.verbose with --no-verbose writes no block and git doesn't cut: a typed scissors line is a comment,
+  // so the line after it is line 2, for the hook as for the gate.
+  const scissorsLine = '# ------------------------ >8 ------------------------';
+  const noVerbose = run({ 'commit.verbose': 'true' }, text, `Add a thing\n${scissorsLine}\nline two`, ['--no-verbose']);
+  assert.equal(noVerbose.verdict, 'hook=refuse gate=refuse', `commit.verbose with --no-verbose and a typed scissors line: they agree (${noVerbose.hook})`);
+  // The converse, stated: commit.verbose and a scissors line typed where git's block isn't (an editor that replaced git's
+  // buffer, or -m): git cuts there and the gate passes, but the hook, seeing no block, judges both readings and refuses.
+  // The hook can't tell this from --no-verbose (R1260ag D2), so one of the two is a stated case.
+  const typedOnly = run({ 'commit.verbose': 'true' }, text, '', ['-m', `Add a thing\n${scissorsLine}\nline two`]);
+  assert.equal(typedOnly.verdict, 'hook=refuse gate=pass', 'commit.verbose, a typed scissors line and no git block: the stated refusal');
   // The stated residual: the same three lines typed by hand into a commit made without -v read as verbose: the hook cuts
   // there, git doesn't, and the gate refuses the line below them as line 2.
   const block = '# ------------------------ >8 ------------------------\n# Do not modify or remove the line above.\n# Everything below it will be ignored.';

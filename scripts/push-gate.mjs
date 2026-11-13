@@ -329,26 +329,18 @@ function commentPrefixes(text, setting) {
 const cutReadings = (mode, verbose = false) => (verbose || mode === 'scissors' ? ['first'] : mode === 'strip' ? ['none', 'first'] : ['none']);
 
 /**
- * Whether git commit runs verbose by config (R1260af AF1): `commit.verbose`, read as git reads it (bool-or-int: true or
- * a count above 0). Then git always cuts an edited message at its scissors line (`verbose || scissors` in
- * builtin/commit.c), so only the cut reading is judged. `-v` on the command line isn't visible to a hook.
- */
-/**
- * Whether the message holds git's own verbose block (owner's call pending, MORNING 33): its exact scissors line, then
- * git's two fixed help lines (wt_status_add_cut_line), with a comment prefix git may use. `git commit -v` on the
- * command line writes it, which no hook can see otherwise; git then cuts at its first scissors line, so only the cut
- * reading is judged. A locale that translates the two lines isn't recognised (the hook judges both readings: it may
- * refuse). A copy typed by hand into a commit made without -v reads as verbose too: the stated residual (the hook
- * passes, git doesn't cut, the gate may refuse).
+ * Whether the message holds git's own verbose block (owner, MORNING 33: "recognise"): its exact scissors line, then
+ * git's two fixed help lines (wt_status_add_cut_line), with a comment prefix git may use. git writes it whenever it runs
+ * verbose and edits the message (`-v`, or `commit.verbose`), and then cuts at its first scissors line in every cleanup
+ * mode, verbatim included (`verbose || scissors`), so only the cut reading is judged. Nothing else counts as verbose:
+ * `commit.verbose` with `--no-verbose` on the command line writes no block and git doesn't cut, so both readings are
+ * judged (R1260ag D2). A locale that translates the two lines isn't recognised (both readings: it may refuse). A copy
+ * typed by hand into a commit made without -v reads as verbose too: the stated residual (the hook passes, git doesn't
+ * cut, the gate may refuse).
  */
 function gitVerboseBlock(bytes, prefixes) {
   const lines = bytes.split('\n');
   return prefixes.some((c) => c !== null && lines.some((l, i) => l === scissors(c) && lines[i + 1] === `${c} Do not modify or remove the line above.` && lines[i + 2] === `${c} Everything below it will be ignored.`));
-}
-
-function verboseByConfig() {
-  const v = configRead(['--type=bool-or-int', '--get', 'commit.verbose'])?.toString('utf8').trim() ?? null;
-  return v === 'true' || (/^\d+$/.test(v ?? '') && Number(v) > 0);
 }
 
 /**
@@ -361,14 +353,14 @@ function verboseByConfig() {
  * strips and cuts nothing (one of `auto`'s two readings).
  */
 function asCommitted(text, mode = 'strip', comment = '#', cutAt = mode === 'scissors' ? 'first' : 'none') {
-  if (mode === 'verbatim') return text;
   let lines = text.split('\n');
   if (cutAt !== 'none' && comment !== null) {
     // git's cut line ends in a newline (wt_status_locate_end): the file's last line, with none after it, isn't one
-    // (R1260i D2).
+    // (R1260i D2). git cuts before any cleanup, verbatim too (cleanup_message: `verbose || scissors`: R1260ah D1).
     const cut = lines.indexOf(scissors(comment));
-    if (cut !== -1 && cut < lines.length - 1) lines = lines.slice(0, cut);
+    if (cut !== -1 && cut < lines.length - 1) lines = [...lines.slice(0, cut), ''];
   }
+  if (mode === 'verbatim') return lines.join('\n');
   if (mode === 'strip' && comment !== null) lines = lines.filter((l) => !l.startsWith(comment));
   const out = [];
   for (const l of lines.map((x) => x.replace(GIT_TRAILING_SPACE, ''))) {
@@ -477,7 +469,7 @@ if (process.argv[2] === '--commit-msg' && installedCopy && process.argv.length =
     const bytes = raw.toString('latin1');
     const mode = cleanupMode();
     const prefixes = commentPrefixes(bytes, commentSetting());
-    const verbose = verboseByConfig() || gitVerboseBlock(bytes, prefixes);
+    const verbose = gitVerboseBlock(bytes, prefixes);
     const kept = prefixes.flatMap((c) => cutReadings(mode, verbose).map((cut) => asCommitted(bytes, mode, c, cut)));
     const readings = kept.map((r) => {
       let text;
