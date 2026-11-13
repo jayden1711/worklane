@@ -337,14 +337,16 @@ const cutReadings = (mode, verbose = false) => (verbose || mode === 'scissors' ?
  * judged (R1260ag D2). A locale translates the two help lines (R1260aj D1): when `commit.verbose` is set and the
  * message is edited (GIT_EDITOR isn't ':'), the scissors line followed by two lines of the comment prefix and a space
  * counts as git's block in any language. Not the translations' own text: git's .po files are GPL. With -m, -F or -C git
- * writes no block, so this route is off there and the -m residual (MORNING 37) is as narrow as before. A copy typed by
+ * writes no block, so this route is off there and the -m residual (MORNING 37) is as narrow as before. Only `git
+ * commit`'s own file, COMMIT_EDITMSG, can hold the block (R1260ak/al D1): `git merge --edit` and `git pull --edit` run
+ * the hook on MERGE_MSG, edited, but never write one or cut, so the route is off there too. A copy typed by
  * hand reads as verbose too: git's English lines in a commit made without -v, or, with `commit.verbose` and
  * `--no-verbose` in the editor, the scissors line and any two comment lines under it: the stated residual (the hook
  * cuts, git doesn't, the gate may refuse).
  */
 function gitVerboseBlock(bytes, prefixes, env = process.env) {
   const lines = bytes.split('\n');
-  const anyLanguage = env.GIT_EDITOR !== ':' && verboseByConfig();
+  const anyLanguage = env.GIT_EDITOR !== ':' && basename(env.PUSH_GATE_COMMIT_MSG ?? '') === 'COMMIT_EDITMSG' && verboseByConfig();
   const help = (c, l, english) => (anyLanguage ? typeof l === 'string' && l.startsWith(`${c} `) && l.length > c.length + 1 : l === `${c} ${english}`);
   return prefixes.some((c) => c !== null && lines.some((l, i) => l === scissors(c) && help(c, lines[i + 1], 'Do not modify or remove the line above.') && help(c, lines[i + 2], 'Everything below it will be ignored.')));
 }
