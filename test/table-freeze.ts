@@ -76,7 +76,10 @@ export const load: Load = async (url, context, next) => {
   } catch {
     // Moved aside or never there: by its path as written.
   }
-  const was = SNAPSHOT.get(mapped) ?? SNAPSHOT.get(lexical) ?? SNAPSHOT.get(real);
+  // By `has`, not `??`: a path gone at the start is held as null, which `??` would pass over.
+  const at = [mapped, lexical, real].find((k) => SNAPSHOT.has(k));
+  const was = at === undefined ? undefined : SNAPSHOT.get(at);
+  if (was === null) throw new Error(`${url}: gone when this hook read the test modules, so not loaded (test/table-freeze.ts, #941)`);
   if (was !== undefined && source !== was) throw new Error(`${url}: a table module loaded from a source other than the one at the start (test/table-freeze.ts, #941, R1184at)`);
   const frozen = withFreezes(source, url);
   return frozen === null ? out : { ...out, source: frozen };

@@ -140,12 +140,15 @@ syncBuiltinESMExports();
   const guarded = function (this: unknown, ...args: unknown[]) {
     const content = args[0];
     const filename = args[1];
-    if (typeof filename === 'string') {
+    // Node's own pseudo-filenames (`[eval]`, `[eval]-wrapper`, `[worker eval]`) name no file, and no helper's instance:
+    // a `node -e` run with its working directory in here resolved one under this directory, then failed to read it.
+    if (typeof filename === 'string' && !(apply(startsWith, filename, ['[']) as boolean)) {
       const key = keyOf(filename);
       if (key !== null) {
         // A snapshotted module compiles only from its text as it was at this preload; any other module here only from
         // its file's text on disk (a missing file throws, so the compile is refused).
-        const expected = apply(mapGet, snapshot, [key]) as string | undefined;
+        const expected = apply(mapGet, snapshot, [key]) as string | null | undefined;
+        if (expected === null) throw new TypeErrorC(`${filename}: gone when this process's preload read the test modules, so not loaded (test/isolate.ts, #941)`);
         if (content !== (expected !== undefined ? expected : readText(filename, 'utf8'))) throw new TypeErrorC(`${filename} compiled from a source other than its file's (test/isolate.ts, #941, R1184as, R1184at)`);
       }
     }

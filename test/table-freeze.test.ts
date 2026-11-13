@@ -272,3 +272,22 @@ console.log(JSON.stringify({ viaRequire, viaWorker }));
   assert.notEqual(bare.status, 0, 'loaded without the preload');
   assert.match(bare.stderr, /__worklaneTestFreezeTable is not defined/);
 });
+
+test("the snapshot keeps a module listed but gone before its read as gone, so a process doesn't stop on another test's temporary file, and a load of it is refused (#941, R1184's node 22 CI)", async () => {
+  const { mkdtempSync, rmSync, symlinkSync, writeFileSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const { tmpdir } = await import('node:os');
+  const { realpathSync } = await import('node:fs');
+  const { tableModuleSnapshot } = await import('./table-snapshot.js');
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'snap-')));
+  try {
+    writeFileSync(join(dir, 'kept.js'), "// check-table: never-grow\nexport const T = ['a'];\n");
+    writeFileSync(join(dir, 'plain.js'), 'export const x = 1;\n');
+    // Listed by the directory read, gone by the file read: what a removed temporary module looks like mid-scan.
+    symlinkSync(join(dir, 'no-such-file.js'), join(dir, 'gone.js'));
+    const snap = tableModuleSnapshot(dir);
+    assert.deepEqual([...snap.entries()].sort(), [[join(dir, 'gone.js'), null], [join(dir, 'kept.js'), "// check-table: never-grow\nexport const T = ['a'];\n"]]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
