@@ -1026,8 +1026,10 @@ test('a later change that narrows one of these rules waits for the owner: this f
  * 19) and the weakening module. Not a local helper such as test/helpers.ts, which no hold covers; and not
  * `node:module`, `node:vm` or `node:child_process`, which could load one.
  */
+// A plain list, read only by `.includes`: the suite's preload freezes it right after its line (test/table-freeze.ts),
+// and main's systemd-acceptance rule reads a list of module names written so as data (#1169).
 // check-table: never-grow
-const MAY_IMPORT = Object.freeze(['node:test', 'node:assert/strict', 'node:fs', 'node:os', 'node:path', 'node:url', 'yaml', 'typescript', '../src/merge-policy-weakening.js']);
+const MAY_IMPORT = ['node:test', 'node:assert/strict', 'node:fs', 'node:os', 'node:path', 'node:url', 'yaml', 'typescript', '../src/merge-policy-weakening.js'];
 
 /**
  * The packages this backstop, its preload and their modules load, each with its lockfile entry pinned to this
