@@ -1312,7 +1312,7 @@ const CASE_ARGUMENT = [
     'coproc', 'for', 'select', 'in', '[[', ']]'].map((w) => `echo ${w} case x`),
   'grep -c -w \\\n  case "$f"', 'echo then case', 'w=(case when); echo "${w[0]}"', 'w=(\n  case select\n); echo "${w[0]}"',
   '[[ $k =~ ^(case|switch)$ ]] && echo y', '[[ $k =~ ^(case x)$ ]] && echo y', 'echo found\\| case closed',
-  'echo \\( case x \\)', 'find . -name x -exec true {} \; case x', 'echo $(date +%F) case notes', 'echo `date +%F` case notes',
+  'echo \\( case x \\)', 'find . -name x -exec true {} \\; case x', 'echo $(date +%F) case notes', 'echo `date +%F` case notes',
   'printf "%s %s" $(id -u) case x', 'x=1 case y', '>/dev/null case y', 'grep -c esac x', 'case y in case) :;; esac',
   'time echo case x', 'case y in y) grep -c esac x;; *) echo "a";; esac', 'coproc echo case x', 'function g { echo case x; }; g', 'echo a; echo case x', 'cat <<<case',
 ];
