@@ -230,10 +230,14 @@ test('every pager reads on past a full page whose total_count is missing or wron
     let clock = Date.parse('2026-10-18T12:00:00Z');
     const fetchJson = async (url: string) => {
       calls.push(url.replace(API, ''));
-      if (url.startsWith(`${API}/commits/${SHA}/check-runs`)) return { total_count: 1, check_runs: [checkRun({ name, suite: 2 }, 0)] };
-      if (url.startsWith(`${API}/actions/runs?head_sha=${SHA}`)) return url.includes('page=2') ? { workflow_runs: [] } : { workflow_runs: [...legit, ...Array.from({ length: 98 }, (_, i) => workflowRun(100 + i, '.github/workflows/other.yml'))] };
-      if (url.startsWith(`${API}/commits/${SHA}/status?`)) return url.includes('page=2') ? { total_count: total, statuses: [{ context: name, state: 'failure' }] } : { ...(total === undefined ? {} : { total_count: total }), statuses: filler(100, 'other') };
-      return null;
+      // One return (R1169ak/al: no early return in a function inside a sign test), the same answers in the same order.
+      return url.startsWith(`${API}/commits/${SHA}/check-runs`)
+        ? { total_count: 1, check_runs: [checkRun({ name, suite: 2 }, 0)] }
+        : url.startsWith(`${API}/actions/runs?head_sha=${SHA}`)
+          ? url.includes('page=2') ? { workflow_runs: [] } : { workflow_runs: [...legit, ...Array.from({ length: 98 }, (_, i) => workflowRun(100 + i, '.github/workflows/other.yml'))] }
+          : url.startsWith(`${API}/commits/${SHA}/status?`)
+            ? url.includes('page=2') ? { total_count: total, statuses: [{ context: name, state: 'failure' }] } : { ...(total === undefined ? {} : { total_count: total }), statuses: filler(100, 'other') }
+            : null;
     };
     const deps = { pinChecks: true, fetchJson, now: () => clock, sleep: async (ms: number) => void (clock += ms) };
     const r = await u.chooseCommit(deps, { branch: 'main', required_checks: [name] }, API, [{ sha: SHA, date: '2026-10-18T09:00:00Z' }], null);
@@ -244,12 +248,15 @@ test('every pager reads on past a full page whose total_count is missing or wron
   // Check runs: a full page whose total_count says 100, a failing check on page 2: refused (it used to stop at page 1).
   let clock = Date.parse('2026-10-18T12:00:00Z');
   const runsOn = (page: number) => (page === 1 ? Array.from({ length: 100 }, (_, i) => checkRun({ name: i === 0 ? name : `other-${i}`, suite: 2 }, i)) : [checkRun({ name: 'lint', suite: 2, conclusion: 'failure' }, 500)]);
-  const fetchJson = async (url: string) => {
-    if (url.startsWith(`${API}/commits/${SHA}/check-runs`)) return { total_count: 100, check_runs: runsOn(url.includes('page=2') ? 2 : 1) };
-    if (url.startsWith(`${API}/actions/runs?head_sha=${SHA}`)) return { workflow_runs: legit };
-    if (url.startsWith(`${API}/commits/${SHA}/status?`)) return { total_count: 0, statuses: [] };
-    return null;
-  };
+  // One return (R1169ak/al), the same answers in the same order.
+  const fetchJson = async (url: string) =>
+    url.startsWith(`${API}/commits/${SHA}/check-runs`)
+      ? { total_count: 100, check_runs: runsOn(url.includes('page=2') ? 2 : 1) }
+      : url.startsWith(`${API}/actions/runs?head_sha=${SHA}`)
+        ? { workflow_runs: legit }
+        : url.startsWith(`${API}/commits/${SHA}/status?`)
+          ? { total_count: 0, statuses: [] }
+          : null;
   const r = await u.chooseCommit({ pinChecks: true, fetchJson, now: () => clock, sleep: async (ms: number) => void (clock += ms) }, { branch: 'main', required_checks: [name] }, API, [{ sha: SHA, date: '2026-10-18T09:00:00Z' }], null);
   assert.equal(r.chosen, undefined);
   assert.match(r.skipped[0]?.reason ?? r.reason ?? '', /check "lint" ended failure/);
@@ -260,12 +267,15 @@ test('check runs still full past CHECK_PAGES_MAX pages wait while pins are judge
   const verdict = async (failOn: number) => {
     let clock = Date.parse('2026-10-18T12:00:00Z');
     const page = (n: number) => (n === 1 ? [checkRun({ name, suite: 2 }, 0), ...Array.from({ length: 99 }, (_, i) => checkRun({ name: `other-${i}`, suite: 2 }, 1 + i))] : n < failOn ? Array.from({ length: 100 }, (_, i) => checkRun({ name: `other-${n}-${i}`, suite: 2 }, n * 1000 + i)) : [checkRun({ name, suite: 8, app: 4242, conclusion: 'failure' }, 99_999)]);
-    const fetchJson = async (url: string) => {
-      if (url.startsWith(`${API}/commits/${SHA}/check-runs`)) return { total_count: 1100, check_runs: page(Number(new URL(url).searchParams.get('page') ?? '1')) };
-      if (url.startsWith(`${API}/actions/runs?head_sha=${SHA}`)) return { workflow_runs: legit };
-      if (url.startsWith(`${API}/commits/${SHA}/status?`)) return { total_count: 0, statuses: [] };
-      return null;
-    };
+    // One return (R1169ak/al), the same answers in the same order.
+    const fetchJson = async (url: string) =>
+      url.startsWith(`${API}/commits/${SHA}/check-runs`)
+        ? { total_count: 1100, check_runs: page(Number(new URL(url).searchParams.get('page') ?? '1')) }
+        : url.startsWith(`${API}/actions/runs?head_sha=${SHA}`)
+          ? { workflow_runs: legit }
+          : url.startsWith(`${API}/commits/${SHA}/status?`)
+            ? { total_count: 0, statuses: [] }
+            : null;
     const r = await u.chooseCommit({ pinChecks: true, fetchJson, now: () => clock, sleep: async (ms: number) => void (clock += ms) }, { branch: 'main', required_checks: [name] }, API, [{ sha: SHA, date: '2026-10-18T11:59:00Z' }], null);
     return r.chosen ? 'installs' : `${r.wait ? 'waits' : 'refused'}: ${r.reason ?? r.skipped[0]?.reason ?? ''}`;
   };

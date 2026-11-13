@@ -1,0 +1,374 @@
+{
+  "//": "Review round r1169n of #1169: each case is one attack on scripts/ci/systemd-acceptance.mjs (README.md).",
+  "cases": {
+    "r1169n-f1-describe-name": {
+      "exit": 0,
+      "reason": "^$",
+      "files": {
+        "F1-describe-name.test.ts.txt": [
+          "import { describe, test } from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "describe('systemd unit text', () => {",
+          "  test('has a Restart line', () => { assert.ok(true); });",
+          "});",
+          ""
+        ],
+        "base.test.ts.txt": "@base1"
+      }
+    },
+    "r1169n-f2-body-with-skip-data": {
+      "exit": 0,
+      "reason": "^$",
+      "listed": "test/F2-body-with-skip-data\\.test\\.ts:\\d+: a step list keeps its order",
+      "files": {
+        "F2-body-with-skip-data.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "test('a step list keeps its order', () => {",
+          "  const steps = [{ run: 'systemctl --user daemon-reload', skip: false }];",
+          "  assert.equal(steps[0].run.split(' ')[0], 'systemctl');",
+          "});",
+          ""
+        ],
+        "base.test.ts.txt": "@base1"
+      }
+    },
+    "r1169n-f3-before-hook": {
+      "exit": 2,
+      "reason": "test/F3-before-hook\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside",
+      "files": {
+        "F3-before-hook.test.ts.txt": [
+          "import { before, test } from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "let tool = '';",
+          "before(() => { tool = 'systemctl'; });",
+          "test('a stand-in on PATH', () => { assert.ok(tool); });",
+          ""
+        ],
+        "base.test.ts.txt": "@base1"
+      }
+    },
+    "r1169n-f4-table": {
+      "exit": 2,
+      "reason": "test/F4-table\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside",
+      "files": {
+        "F4-table.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "const cases = [['systemctl show', true], ['ls', false]] as const;",
+          "for (const [cmd, want] of cases) test(`classifies ${cmd}`, () => { assert.equal(cmd.startsWith('sys'), want); });",
+          ""
+        ],
+        "base.test.ts.txt": "@base1"
+      }
+    },
+    "r1169n-n01-scripts-ci-mjs": {
+      "exit": 2,
+      "reason": "a skip reads \\?: \\*, which carries",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "scripts/ci/host-probe.mjs.root": [
+          "// A host probe shared by CI scripts and tests (outside tsconfig's include, so the sign rule never reads it).",
+          "import { existsSync } from 'node:fs';",
+          "export const booted = () => existsSync('/run/systemd/system');",
+          ""
+        ],
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { join } from 'node:path';",
+          "import { pathToFileURL } from 'node:url';",
+          "const probe = await import(pathToFileURL(join(process.cwd(), 'scripts', 'ci', 'host-probe.mjs')).href);",
+          "test('y: a user unit starts and stops', { skip: !probe.booted() && 'needs a booted service manager' }, () => {});",
+          ""
+        ]
+      }
+    },
+    "r1169n-n02-json-table": {
+      "exit": 2,
+      "reason": "a skip reads test/y\\.test\\.ts: booted, which carries",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "fixtures/host-paths.json.txt": [
+          "{ \"unitDir\": \"/run/systemd/system\", \"ctl\": \"systemctl\" }",
+          ""
+        ],
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { existsSync, readFileSync } from 'node:fs';",
+          "const paths = JSON.parse(readFileSync('test/fixtures/host-paths.json', 'utf8'));",
+          "const booted = existsSync(paths.unitDir);",
+          "test('y: a user unit starts and stops', { skip: !booted && 'needs a booted service manager' }, () => {});",
+          ""
+        ]
+      }
+    },
+    "r1169n-n03-sudo-proxy": {
+      "exit": 2,
+      "reason": "'s throw leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { spawnSync } from 'node:child_process';",
+          "const canSudo = spawnSync('sudo', ['-n', 'true']).status === 0;",
+          "test('acceptance: the engine unit restarts after a crash', { skip: !canSudo && 'needs passwordless sudo' }, () => {",
+          "  const r = spawnSync('sudo', ['-n', 'systemctl', 'restart', 'worklane.service'], { encoding: 'utf8' });",
+          "  if (r.status !== 0) throw new Error(r.stderr);",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169n-n04-root-cgroup": {
+      "exit": 0,
+      "reason": "^$",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { existsSync } from 'node:fs';",
+          "const unitsHere = process.getuid?.() === 0 && existsSync('/sys/fs/cgroup/system.slice');",
+          "test('y: a transient unit gets its own slice', { skip: !unitsHere && 'needs root and a system slice' }, () => {});",
+          ""
+        ]
+      }
+    },
+    "r1169n-n05-env-binary": {
+      "exit": 2,
+      "reason": "test/y\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { spawnSync } from 'node:child_process';",
+          "const ctl = process.env.WORKLANE_JOURNAL_BIN ?? 'journalctl';",
+          "const hasJournal = spawnSync(ctl, ['--version']).status === 0;",
+          "test('y: the engine logs to the journal', { skip: !hasJournal && 'needs the journal' }, () => {});",
+          ""
+        ]
+      }
+    },
+    "r1169n-n06-word-edge": {
+      "exit": 2,
+      "reason": "test/y\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { spawnSync } from 'node:child_process';",
+          "const underManager = Boolean(process.env.SYSTEMD_EXEC_PID) || spawnSync('busctl', ['status', 'org.freedesktop.systemd1']).status === 0;",
+          "test('y: the unit sees its exec pid', { skip: !underManager && 'needs a service manager' }, () => {});",
+          ""
+        ]
+      }
+    },
+    "r1169n-n07-early-return": {
+      "exit": 2,
+      "reason": "'s return leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { existsSync } from 'node:fs';",
+          "import { spawnSync } from 'node:child_process';",
+          "test('acceptance: the engine unit restarts after a crash', () => {",
+          "  // An early return the run never takes (R1169ab D2: one it takes, it fails as checking less; r1169ab-a2 holds that).",
+          "  // The sign's operand first: block coverage judges it by its own range, and an operand never evaluated never ran.",
+          "  if (!existsSync('/run/systemd/system') && process.env.FIXTURE_NEVER) return;",
+          "  // In the repo's fixture the real work is a no-op that passes, so its exit doesn't depend on the host: what's",
+          "  // measured is that this test is listed and run here (R1169n N07: on GitHub's runner it ran sudo systemctl for real).",
+          "  const r = spawnSync(process.execPath, ['-e', ''], { encoding: 'utf8' });",
+          "  if (r.status !== 0) throw new Error(r.stderr);",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169n-n08-t-todo": {
+      "exit": 2,
+      "reason": "'s return leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { existsSync } from 'node:fs';",
+          "test('acceptance: the engine unit restarts after a crash', (t) => {",
+          "  if (!(existsSync('/run/systemd/system') && process.env.NEVER === '1')) {",
+          "    t.todo('needs systemd');",
+          "    return;",
+          "  }",
+          "  throw new Error('would really run here');",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169n-n09-skip-helper": {
+      "exit": 2,
+      "reason": "'s return leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "helpers/when.ts.txt": [
+          "/** Skips `t` with `why` unless `ok`: one place for the suite's host checks. */",
+          "export function unless(t, ok, why) {",
+          "  if (!ok) t.skip(why);",
+          "  return !ok;",
+          "}",
+          ""
+        ],
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { existsSync } from 'node:fs';",
+          "import { unless } from './helpers/when.js';",
+          "test('acceptance: the engine unit restarts after a crash', (t) => {",
+          "  if (unless(t, (existsSync('/run/systemd/system') && process.env.NEVER === '1'), 'needs systemd')) return;",
+          "  throw new Error('would really run here');",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169n-n10-describe-proxy": {
+      "exit": 2,
+      "reason": "'s throw leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { describe, test } from 'node:test';",
+          "import { spawnSync } from 'node:child_process';",
+          "const canSudo = spawnSync('sudo', ['-n', 'true']).status === 0;",
+          "describe('the engine unit', { skip: !canSudo && 'needs passwordless sudo' }, () => {",
+          "  test('restarts after a crash', () => {",
+          "    const r = spawnSync('sudo', ['-n', 'systemctl', 'restart', 'worklane.service'], { encoding: 'utf8' });",
+          "    if (r.status !== 0) throw new Error(r.stderr);",
+          "  });",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169n-n11-conditional-reg": {
+      "exit": 2,
+      "reason": "'s throw leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { spawnSync } from 'node:child_process';",
+          "const canSudo = spawnSync('sudo', ['-n', 'true']).status === 0;",
+          "if (canSudo) {",
+          "  test('acceptance: the engine unit restarts after a crash', () => {",
+          "    const r = spawnSync('sudo', ['-n', 'systemctl', 'restart', 'worklane.service'], { encoding: 'utf8' });",
+          "    if (r.status !== 0) throw new Error(r.stderr);",
+          "  });",
+          "}",
+          ""
+        ]
+      }
+    },
+    "r1169n-n12-test-skip-method": {
+      "exit": 2,
+      "reason": "'s throw leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { spawnSync } from 'node:child_process';",
+          "test.skip('acceptance: the engine unit restarts after a crash', () => {",
+          "  const r = spawnSync('sudo', ['-n', 'systemctl', 'restart', 'worklane.service'], { encoding: 'utf8' });",
+          "  if (r.status !== 0) throw new Error(r.stderr);",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169n-n13-subtest-todo": {
+      "exit": 2,
+      "reason": "a skip reads test/y\\.test\\.ts: booted, which carries",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { existsSync } from 'node:fs';",
+          "test('the engine unit', async (t) => {",
+          "  const booted = existsSync('/run/systemd/system');",
+          "  await t.test('restarts after a crash', { todo: !booted && 'needs systemd' }, () => {",
+          "    if (!booted) throw new Error('no systemd here');",
+          "  });",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169n-n14-bracket-skip": {
+      "exit": 2,
+      "reason": "'s return leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { existsSync } from 'node:fs';",
+          "test('acceptance: the engine unit restarts after a crash', (t) => {",
+          "  if (!(existsSync('/run/systemd/system') && process.env.NEVER === '1')) return t['skip']('needs systemd');",
+          "  throw new Error('would really run here');",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169n-n15-unicode-escape": {
+      "exit": 2,
+      "reason": "a skip reads test/y\\.test\\.ts: booted, which carries",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { existsSync } from 'node:fs';",
+          "const booted = existsSync('/run/syst\\u0065md/system');",
+          "test('y: a user unit starts', { skip: !booted && 'needs a booted service manager' }, () => {});",
+          ""
+        ]
+      }
+    },
+    "r1169n-n16-allowlist-swap": {
+      "exit": 2,
+      "reason": "names aren't there any more",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "scripts/ci/systemd-acceptance-allow.json.root": [
+          "{ \"uses\": { \"test/y.test.ts\": { \"why\": \"a stand-in program's name put on PATH (before the edit: const STAND_IN = 'systemctl')\", \"uses\": [\"systemctl: const STAND_IN = 'systemctl';\"] } }, \"skipImports\": {} }",
+          ""
+        ],
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { existsSync } from 'node:fs';",
+          "// Before this edit the file's one allowlisted use was `const STAND_IN = 'systemctl';` (stand-in data). The edit",
+          "// moved that name into the test's own function (an allowed place) and added a detector: still 1 use.",
+          "const booted = existsSync('/run/systemd/system');",
+          "test('stand-in on PATH', () => { const STAND_IN = 'systemctl'; if (!STAND_IN) throw new Error(); });",
+          "test('acceptance: the engine unit restarts after a crash', { skip: !booted && 'needs a booted service manager' }, () => {",
+          "  throw new Error('would really run here');",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169n-n17-tsconfig-exclude": {
+      "exit": 2,
+      "reason": "ENOENT",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "test/slow/z.test.ts.root": [
+          "import { test } from 'node:test';",
+          "const systemCi = true;",
+          "test('slow gate', { skip: !systemCi && 'needs systemd' }, (t) => { t.plan(1); t.assert.ok(true); });",
+          ""
+        ],
+        "tsconfig.json.root": [
+          "{ \"compilerOptions\": { \"outDir\": \"dist\", \"rootDir\": \".\" }, \"include\": [\"src/**/*.ts\", \"test/**/*.ts\"], \"exclude\": [\"test/slow/**\"] }",
+          ""
+        ]
+      }
+    }
+  }
+}
