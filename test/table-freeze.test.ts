@@ -156,6 +156,11 @@ test('a helper imported before a table module can neither replace the freeze, un
     // exact pseudo-names are skipped).
     ['AY1a a module named [x]...js, compiled stripped by its relative name, then import()', "import M from 'node:module';\nimport { readFileSync } from 'node:fs';\nimport { fileURLToPath } from 'node:url';\nconst f = fileURLToPath(new URL('./__COPY__', import.meta.url));\nprocess.chdir(fileURLToPath(new URL('.', import.meta.url)));\nconst m = new M(f);\nm.paths = [];\nm._compile(readFileSync(f, 'utf8').split('\\n').filter((l) => !l.startsWith('__worklaneTestFreezeTable(')).join('\\n'), '__COPY__', 'module');\n", './__COPY__', 'import', '[x]-{tag}.js'],
     ['AY1b a module named [eval]x...js, the same', "import M from 'node:module';\nimport { readFileSync } from 'node:fs';\nimport { fileURLToPath } from 'node:url';\nconst f = fileURLToPath(new URL('./__COPY__', import.meta.url));\nprocess.chdir(fileURLToPath(new URL('.', import.meta.url)));\nconst m = new M(f);\nm.paths = [];\nm._compile(readFileSync(f, 'utf8').split('\\n').filter((l) => !l.startsWith('__worklaneTestFreezeTable(')).join('\\n'), '__COPY__', 'module');\n", './__COPY__', 'import', '[eval]x-{tag}.js'],
+    // R1184ba D1: a pseudo-name the guard skips, with node:path's resolve answering the real module's path, so Node
+    // keys stripped text at the module's URL.
+    ['BA1a path.resolve patched for [eval], compiled, then import()', "import M from 'node:module';\nimport path from 'node:path';\nimport { readFileSync } from 'node:fs';\nimport { fileURLToPath } from 'node:url';\nconst f = fileURLToPath(new URL('./__COPY__', import.meta.url));\nconst real = path.resolve;\npath.resolve = (...a) => (a[0] === '[eval]' ? f : real(...a));\ntry { const m = new M(f); m.paths = []; m._compile(readFileSync(f, 'utf8').split('\\n').filter((l) => !l.startsWith('__worklaneTestFreezeTable(')).join('\\n'), '[eval]', 'module'); } finally { path.resolve = real; }\n", './__COPY__', 'import', true],
+    ['BA1b the same, then require()', "import M from 'node:module';\nimport path from 'node:path';\nimport { readFileSync } from 'node:fs';\nimport { fileURLToPath } from 'node:url';\nconst f = fileURLToPath(new URL('./__COPY__', import.meta.url));\nconst real = path.resolve;\npath.resolve = (...a) => (a[0] === '[eval]' ? f : real(...a));\ntry { const m = new M(f); m.paths = []; m._compile(readFileSync(f, 'utf8').split('\\n').filter((l) => !l.startsWith('__worklaneTestFreezeTable(')).join('\\n'), '[eval]', 'module'); } finally { path.resolve = real; }\n", './__COPY__', 'require', true],
+    ['BA1d path.posix replaced, [eval]-wrapper, then import()', "import M from 'node:module';\nimport path from 'node:path';\nimport { readFileSync } from 'node:fs';\nimport { fileURLToPath } from 'node:url';\nconst f = fileURLToPath(new URL('./__COPY__', import.meta.url));\nconst real = path.posix;\npath.posix = { ...real, resolve: (...a) => (a[0] === '[eval]-wrapper' ? f : real.resolve(...a)) };\ntry { const m = new M(f); m.paths = []; m._compile(readFileSync(f, 'utf8').split('\\n').filter((l) => !l.startsWith('__worklaneTestFreezeTable(')).join('\\n'), '[eval]-wrapper', 'module'); } finally { path.posix = real; }\n", './__COPY__', 'import', true],
     ['AT2a the build output rewritten without the self-freeze, then require()', "import { readFileSync, writeFileSync } from 'node:fs';\nimport { fileURLToPath } from 'node:url';\nconst f = fileURLToPath(new URL('./__COPY__', import.meta.url));\nwriteFileSync(f, readFileSync(f, 'utf8').split('\\n').filter((l) => !l.startsWith('__worklaneTestFreezeTable(')).join('\\n'));\n", './__COPY__', 'require', true],
     ['AT2b the build output rewritten without the marks, then import()', "import { readFileSync, writeFileSync } from 'node:fs';\nimport { fileURLToPath } from 'node:url';\nconst f = fileURLToPath(new URL('./__COPY__', import.meta.url));\nwriteFileSync(f, readFileSync(f, 'utf8').split('\\n').filter((l) => !l.startsWith('__worklaneTestFreezeTable(') && !l.startsWith('// check-table: ')).join('\\n'));\n", './__COPY__', 'import', true],
     ['AS1c _compile patched, then import()', "import M from 'node:module';\nimport { createRequire } from 'node:module';\nconst orig = M.prototype._compile;\nM.prototype._compile = function (c, f, ...r) { return orig.call(this, String(c).replace(/__worklaneTestFreezeTable\\(/g, 'void ('), f, ...r); };\ncreateRequire(import.meta.url)('./raw-check-reads.js');\n"],
@@ -181,9 +186,9 @@ test('a helper imported before a table module can neither replace the freeze, un
         continue;
       }
       // The compile step: a patch of it throws (it is read-only), and a compile from other text is refused.
-      if (/^A[SR]1|^A[TUVY]/.test(label)) {
+      if (/^A[SR]1|^A[TUVY]|^BA/.test(label)) {
         assert.notEqual(r.status, 0, `${label}: the module compiled: ${r.stdout}`);
-        assert.match(r.stderr, /compiled from a source other than its file's|a source other than the one at the start|read[- ]only|Cannot assign/, label);
+        assert.match(r.stderr, /compiled from a source other than its file's|a source other than the one at the start|read[- ]only|Cannot assign|Cannot redefine|not extensible/, label);
         continue;
       }
       assert.equal(r.status, 0, `${label}: ${r.stderr}`);
@@ -210,6 +215,10 @@ test("a test helper that registers tables freezes each one itself at its end, so
   // Each module under test/ that registers a table and isn't a test file (other tests import it) calls the freeze by its
   // bare name for each table, at top level. A test file's own tables guard its own run, under the preload.
   const files = execFileSync('git', ['grep', '-l', '// check-table: ', '--', 'test'], { cwd: repoRoot, encoding: 'utf8' }).trim().split('\n');
+  // A file under test/ that registers a table is a .ts file: the hook, the snapshot and this lock read .ts and its .js
+  // only (R1184ba D2: a .mts or .cts helper compiles to .mjs or .cjs, whose table loaded unfrozen while every lock passed).
+  const notTs = files.filter((f) => !/\.ts$/.test(f) && registrationsOf(readFileSync(join(repoRoot, f), 'utf8')).tables.length > 0);
+  assert.deepEqual(notTs, [], 'a file under test/ that registers a table and is not .ts');
   // Modules only (a fixture's data may hold the mark's text), and each with a table its marks register.
   const helpers = files.filter((f) => /\.ts$/.test(f) && !/\.(test|d)\.ts$/.test(f) && f !== 'test/isolate.ts' && registrationsOf(readFileSync(join(repoRoot, f), 'utf8')).tables.length > 0);
   assert.ok(helpers.length >= 3, `the helpers found: ${helpers.join(', ')}`);

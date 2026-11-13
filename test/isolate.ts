@@ -18,7 +18,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { accessSync, chmodSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import nodeModule, { register, syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import pathModule, { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify, types as utilTypes } from 'node:util';
 import { BRAND } from '../src/brand.js';
@@ -162,6 +162,12 @@ syncBuiltinESMExports();
   // compile: one function, fixed now (R1184av D2: a process.cwd answering one directory to the guard and another to
   // the compile). No test stubs it.
   defineProperty(process, 'cwd', { value: process.cwd, writable: false, configurable: false, enumerable: true });
+  // And what Node's pathToFileURL reads when the real compile keys a module's instance (R1184ba D1: path.resolve answering
+  // the real module's path for a pseudo-name, which the guard skips, keyed stripped text at the module's URL). No test
+  // assigns any of these.
+  for (const o of [pathModule, pathModule.posix, pathModule.win32] as unknown as Record<string, unknown>[]) {
+    for (const k of ['resolve', 'sep', 'posix', 'win32']) if (k in o) defineProperty(o, k, { value: o[k], writable: false, configurable: false, enumerable: true });
+  }
   // Each loader by extension too (R1184ar D1, AR1a: `_extensions['.js']` replaced), as it is now. A replaced
   // `Module._load` can only hand a test exports it made up: the owner-named open class of a re-pointed import.
   const ext = (nodeModule as unknown as { _extensions: Record<string, unknown> })._extensions;
