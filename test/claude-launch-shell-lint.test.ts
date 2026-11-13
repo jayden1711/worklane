@@ -251,6 +251,15 @@ function maskFile(text: string): { out: string; open: string | null } {
   const docs: { word: string; strip: boolean }[] = [];
   let unfinished: string | null = null;
   const wordAt = (k: number) => k === 0 || /[\s;&|()]/.test(text[k - 1]!);
+  // A command's first word (R1264ab D2): only blanks back to a newline, ;, &, |, (, ), a backtick, `{ ` (the
+  // reserved word needs a blank after it), or then/do/else/elif. There `case` is bash's reserved word, whatever its word is.
+  const cmdPos = (k: number) => {
+    let j = k;
+    while (j > 0 && (text[j - 1] === ' ' || text[j - 1] === '\t')) j--;
+    if (j === 0 || /[\n;&|()`]/.test(text[j - 1]!)) return true;
+    if (text[j - 1] === '{') return j < k && (j === 1 || /[\s;&|()`{]/.test(text[j - 2]!));
+    return /(?:^|[\s;&|()`])(?:then|do|else|elif)$/.test(text.slice(Math.max(0, j - 6), j));
+  };
   let out = '';
   for (let k = 0; k < text.length; ) {
     const c = text[k]!;
@@ -276,19 +285,19 @@ function maskFile(text: string): { out: string; open: string | null } {
       }
       continue;
     }
-    // ${…} (R1264z D2): bash's own quoting inside it, nested even within "…" ("${raw//'"'/}"); its braces nest; masked
-    // where it sits inside "…".
+    // ${…} (R1264z D2): bash's own quoting inside it, nested even within "…" ("${raw//'"'/}"); masked where it sits
+    // inside "…". bash closes it at the first unquoted `}`: a bare `{` doesn't nest (R1264aa/ab D1: ${y//{/}).
     if (t.q === 'brace') {
       const put = (x: string) => (out += t.masked ? x.replace(/[^\n]/g, ' ') : x);
-      if (c === '}' && t.depth === 0) { st.pop(); put('}'); k++; continue; }
+      if (c === '}') { st.pop(); put('}'); k++; continue; }
       if (c === '\\') { put(text.slice(k, k + 2)); k += 2; continue; }
       if (c === '$' && text[k + 1] === '{') { st.push({ q: 'brace', depth: 0, cases: 0, masked: t.masked === true }); put('${'); k += 2; continue; }
+      // $(( is arithmetic here too (R1264ab F1: "${s:$((i<<1)):2}").
+      if (c === '$' && text[k + 1] === '(' && text[k + 2] === '(') { st.push({ q: 'arith', depth: 0, cases: 0 }); put('$(('); k += 3; continue; }
       if (c === '$' && text[k + 1] === '(') { st.push({ q: 'sub', depth: 0, cases: 0 }); put('$('); k += 2; continue; }
       if (c === '`') { st.push({ q: 'bq', depth: 0, cases: 0 }); put(c); k++; continue; }
       if (c === '$' && text[k + 1] === "'") { st.push({ q: "$'", depth: 0, cases: 0 }); put("$'"); k += 2; continue; }
       if (c === "'" || c === '"') { st.push({ q: c, depth: 0, cases: 0 }); put(c); k++; continue; }
-      if (c === '{') t.depth++;
-      else if (c === '}') t.depth--;
       put(c);
       k++;
       continue;
@@ -318,8 +327,9 @@ function maskFile(text: string): { out: string; open: string | null } {
           continue;
         }
       }
-      // A case only in its own shape, `case WORD in` (R1264y/z D1: `grep -c case f` holds none).
-      if (wordAt(k) && /^case[ \t]+(?:"[^"\n]*"|'[^'\n]*'|[^\s;&|()]+)[ \t]+in(?=[\s;&|()]|$)/.test(text.slice(k, k + 200))) t.cases++;
+      // A case only where a command starts (R1264ab D2: its word may be any word, `case $(uname -s) in`); an argument
+      // word holds none (R1264y/z D1: `grep -c case f`).
+      if (cmdPos(k) && /^case(?=[\s;&|()]|$)/.test(text.slice(k, k + 5))) t.cases++;
       if (wordAt(k) && /^esac(?=[\s;&|()]|$)/.test(text.slice(k, k + 5))) t.cases = Math.max(0, t.cases - 1);
       if (c === '\\') { out += text.slice(k, k + 2); k += 2; continue; }
       if (c === '$' && text[k + 1] === '(' && text[k + 2] === '(') { st.push({ q: 'arith', depth: 0, cases: 0 }); out += '$(('; k += 3; continue; }
@@ -958,6 +968,12 @@ test('#1262: every way a script can start claude other than through claude_guard
   // check-table: never-shrink
   const MUST_FAIL = [
     'after-and',
+    'brace-cut-then-sudo',
+    'brace-default-then-read',
+    'brace-strip-fn-then-sudo',
+    'brace-strip-then-sudo',
+    'case-quoted-subst-word-then-sudo',
+    'case-subst-word-then-sudo',
     'case-array-arm-then-sudo',
     'case-posix-pattern-then-sudo',
     'case-regex-paren-then-sudo',
@@ -1117,7 +1133,7 @@ test('#1262: every way a script can start claude other than through claude_guard
     'xargs',
   ];
   // check-table: never-shrink
-  const CONTROLS = ['ok-api-key-helper', 'ok-auth-status', 'ok-case-label', 'ok-comment', 'ok-continued-guards', 'ok-for-list', 'ok-grep-regex', 'ok-guarded', 'ok-guarded-array', 'ok-install-path', 'ok-js-auth-status', 'ok-js-guarded', 'ok-other-tool', 'ok-prose', 'ok-spike-pin', 'ok-version', 'ok-workflow-block-guarded', 'ok-brackets-and-enable', 'ok-multiline-awk-node', 'ok-arith-herestring-controls', 'ok-case-word-and-subshells'];
+  const CONTROLS = ['ok-api-key-helper', 'ok-auth-status', 'ok-case-label', 'ok-comment', 'ok-continued-guards', 'ok-for-list', 'ok-grep-regex', 'ok-guarded', 'ok-guarded-array', 'ok-install-path', 'ok-js-auth-status', 'ok-js-guarded', 'ok-other-tool', 'ok-prose', 'ok-spike-pin', 'ok-version', 'ok-workflow-block-guarded', 'ok-brackets-and-enable', 'ok-multiline-awk-node', 'ok-arith-herestring-controls', 'ok-case-word-and-subshells', 'ok-brace-and-case-words', 'ok-brace-hash-is-text'];
   assert.deepEqual(all.map(nameOf).sort(), [...MUST_FAIL, ...CONTROLS].sort(), 'every fixture, by name');
   for (const f of all) {
     const n = nameOf(f);
