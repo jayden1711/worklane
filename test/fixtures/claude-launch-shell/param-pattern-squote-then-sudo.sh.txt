@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# R1264z D2 (q1): quotes inside a ${…} pattern within "…" are bash's own.
+clean="${raw//'"'/}"
+sudo() { command sudo -n "$@"; }
+# don't edit below

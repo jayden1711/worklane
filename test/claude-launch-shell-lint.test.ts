@@ -244,7 +244,7 @@ function globMatches(glob: string, name: string): boolean {
  * rest of it unseen.
  */
 function maskFile(text: string): { out: string; open: string | null } {
-  type Ctx = { q: Quote | 'sub' | 'bq' | 'arith'; depth: number; cases: number };
+  type Ctx = { q: Quote | 'sub' | 'bq' | 'arith' | 'brace'; depth: number; cases: number; masked?: boolean };
   const st: Ctx[] = [{ q: null, depth: 0, cases: 0 }];
   const top = () => st[st.length - 1]!;
   const plain = () => top().q === null || top().q === 'sub' || top().q === 'bq';
@@ -276,6 +276,23 @@ function maskFile(text: string): { out: string; open: string | null } {
       }
       continue;
     }
+    // ${…} (R1264z D2): bash's own quoting inside it, nested even within "…" ("${raw//'"'/}"); its braces nest; masked
+    // where it sits inside "…".
+    if (t.q === 'brace') {
+      const put = (x: string) => (out += t.masked ? x.replace(/[^\n]/g, ' ') : x);
+      if (c === '}' && t.depth === 0) { st.pop(); put('}'); k++; continue; }
+      if (c === '\\') { put(text.slice(k, k + 2)); k += 2; continue; }
+      if (c === '$' && text[k + 1] === '{') { st.push({ q: 'brace', depth: 0, cases: 0, masked: t.masked === true }); put('${'); k += 2; continue; }
+      if (c === '$' && text[k + 1] === '(') { st.push({ q: 'sub', depth: 0, cases: 0 }); put('$('); k += 2; continue; }
+      if (c === '`') { st.push({ q: 'bq', depth: 0, cases: 0 }); put(c); k++; continue; }
+      if (c === '$' && text[k + 1] === "'") { st.push({ q: "$'", depth: 0, cases: 0 }); put("$'"); k += 2; continue; }
+      if (c === "'" || c === '"') { st.push({ q: c, depth: 0, cases: 0 }); put(c); k++; continue; }
+      if (c === '{') t.depth++;
+      else if (c === '}') t.depth--;
+      put(c);
+      k++;
+      continue;
+    }
     if (t.q === 'arith') {
       if (c === ')' && text[k + 1] === ')' && t.depth === 0) { st.pop(); out += '))'; k += 2; continue; }
       if (c === '(') t.depth++;
@@ -301,15 +318,18 @@ function maskFile(text: string): { out: string; open: string | null } {
           continue;
         }
       }
-      if (wordAt(k) && /^case(?=[\s;&|()]|$)/.test(text.slice(k, k + 5))) t.cases++;
+      // A case only in its own shape, `case WORD in` (R1264y/z D1: `grep -c case f` holds none).
+      if (wordAt(k) && /^case[ \t]+(?:"[^"\n]*"|'[^'\n]*'|[^\s;&|()]+)[ \t]+in(?=[\s;&|()]|$)/.test(text.slice(k, k + 200))) t.cases++;
       if (wordAt(k) && /^esac(?=[\s;&|()]|$)/.test(text.slice(k, k + 5))) t.cases = Math.max(0, t.cases - 1);
       if (c === '\\') { out += text.slice(k, k + 2); k += 2; continue; }
       if (c === '$' && text[k + 1] === '(' && text[k + 2] === '(') { st.push({ q: 'arith', depth: 0, cases: 0 }); out += '$(('; k += 3; continue; }
       if (c === '(' && text[k + 1] === '(' && wordAt(k)) { st.push({ q: 'arith', depth: 0, cases: 0 }); out += '(('; k += 2; continue; }
+      if (c === '$' && text[k + 1] === '{') { st.push({ q: 'brace', depth: 0, cases: 0, masked: false }); out += '${'; k += 2; continue; }
       if (c === '$' && text[k + 1] === '(') { st.push({ q: 'sub', depth: 0, cases: 0 }); out += '$('; k += 2; continue; }
       if (c === '(' ) { t.depth++; out += c; k++; continue; }
-      // A `)` inside case … esac ends a pattern, not the substitution.
-      if (c === ')') { if (t.q === 'sub' && t.depth === 0 && t.cases === 0) st.pop(); else if (t.cases === 0) t.depth = Math.max(0, t.depth - 1); out += c; k++; continue; }
+      // Parens pair as in bash (a `(pattern)`, a subshell or an array in a case arm too, R1264z D1); at depth 0, a `)`
+      // inside case … esac ends a pattern, and otherwise closes the substitution.
+      if (c === ')') { if (t.depth > 0) t.depth--; else if (t.q === 'sub' && t.cases === 0) st.pop(); out += c; k++; continue; }
       if (c === '`') { if (t.q === 'bq') st.pop(); else st.push({ q: 'bq', depth: 0, cases: 0 }); out += c; k++; continue; }
       if (c === '$' && text[k + 1] === "'") { st.push({ q: "$'", depth: 0, cases: 0 }); out += "$'"; k += 2; continue; }
       if (c === "'" || c === '"') { st.push({ q: c, depth: 0, cases: 0 }); out += c; k++; continue; }
@@ -324,12 +344,13 @@ function maskFile(text: string): { out: string; open: string | null } {
     // "…": `$((`, `$(` and `` ` `` open an unquoted context.
     if (c === '"') { st.pop(); out += c; k++; continue; }
     if (c === '$' && text[k + 1] === '(' && text[k + 2] === '(') { st.push({ q: 'arith', depth: 0, cases: 0 }); out += '   '; k += 3; continue; }
+    if (c === '$' && text[k + 1] === '{') { st.push({ q: 'brace', depth: 0, cases: 0, masked: true }); out += '  '; k += 2; continue; }
     if (c === '$' && text[k + 1] === '(') { st.push({ q: 'sub', depth: 0, cases: 0 }); out += '  '; k += 2; continue; }
     if (c === '`') { st.push({ q: 'bq', depth: 0, cases: 0 }); out += ' '; k++; continue; }
     out += c === '\n' ? '\n' : ' ';
     k++;
   }
-  const names: Record<string, string> = { "'": "a '…' quote", "$'": "a $'…' quote", '"': 'a "…" quote', sub: 'a $(…)', bq: 'a `…`', arith: 'a ((…))' };
+  const names: Record<string, string> = { "'": "a '…' quote", "$'": "a $'…' quote", '"': 'a "…" quote', sub: 'a $(…)', bq: 'a `…`', arith: 'a ((…))', brace: 'a ${…}' };
   const open = unfinished ?? (docs.length ? `a heredoc to ${docs[0]!.word}` : st.length > 1 ? names[String(top().q)]! : null);
   return { out, open };
 }
@@ -937,6 +958,15 @@ test('#1262: every way a script can start claude other than through claude_guard
   // check-table: never-shrink
   const MUST_FAIL = [
     'after-and',
+    'case-array-arm-then-sudo',
+    'case-posix-pattern-then-sudo',
+    'case-regex-paren-then-sudo',
+    'case-resync-then-local',
+    'case-subshell-arm-then-sudo',
+    'grep-case-then-sudo',
+    'param-pattern-dquote-then-sudo',
+    'param-pattern-squote-then-sudo',
+    'param-pattern-suffix-then-local',
     'arith-dollar-shift-then-test',
     'arith-if-shift-then-sudo',
     'arith-shift-then-local',
@@ -1087,7 +1117,7 @@ test('#1262: every way a script can start claude other than through claude_guard
     'xargs',
   ];
   // check-table: never-shrink
-  const CONTROLS = ['ok-api-key-helper', 'ok-auth-status', 'ok-case-label', 'ok-comment', 'ok-continued-guards', 'ok-for-list', 'ok-grep-regex', 'ok-guarded', 'ok-guarded-array', 'ok-install-path', 'ok-js-auth-status', 'ok-js-guarded', 'ok-other-tool', 'ok-prose', 'ok-spike-pin', 'ok-version', 'ok-workflow-block-guarded', 'ok-brackets-and-enable', 'ok-multiline-awk-node', 'ok-arith-herestring-controls'];
+  const CONTROLS = ['ok-api-key-helper', 'ok-auth-status', 'ok-case-label', 'ok-comment', 'ok-continued-guards', 'ok-for-list', 'ok-grep-regex', 'ok-guarded', 'ok-guarded-array', 'ok-install-path', 'ok-js-auth-status', 'ok-js-guarded', 'ok-other-tool', 'ok-prose', 'ok-spike-pin', 'ok-version', 'ok-workflow-block-guarded', 'ok-brackets-and-enable', 'ok-multiline-awk-node', 'ok-arith-herestring-controls', 'ok-case-word-and-subshells'];
   assert.deepEqual(all.map(nameOf).sort(), [...MUST_FAIL, ...CONTROLS].sort(), 'every fixture, by name');
   for (const f of all) {
     const n = nameOf(f);
