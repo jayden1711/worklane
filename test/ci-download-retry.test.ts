@@ -149,26 +149,64 @@ const ansiC = (line: string, i: number): boolean => {
  * A `$(…)` inside double quotes: the parens and `case … esac` open inside it, innermost last (R1228bj D2; R1228bm D2: a
  * case inside a subshell or a nested `$(…)` is that level's, so its pattern's `)` closes nothing above it).
  */
-type Sub = { frames: ('(' | 'case')[] };
+type Sub = { frames: ('(' | '$(' | 'case')[]; starts: Set<number> };
+const newSub = (): Sub => ({ frames: [], starts: new Set() });
+/** bash's reserved words and prefixes after which a command starts: #1264's table (R1264ac D1, 57f30956). */
+const COMMAND_STARTERS: ReadonlySet<string> = new Set(['if', 'then', 'elif', 'else', 'while', 'until', 'do', '!', 'time', 'coproc', '{']);
 /**
- * The `case` or `esac` word starting at `i`, if any: a reserved word only in command position (R1228bl D1, R1228bm D1,
- * as #1264 reads it): only blanks back to the line's or the `$(`'s start, `;`, `&`, `|`, `(`, `)`, a backquote, `{`, or
- * `then`/`do`/`else`/`elif`; so `echo case` and `grep -cw case` are arguments. An `esac` closes only an open case.
+ * Whether a command starts at `k` in a logical line `text`, inside a double-quoted `$(…)` (R1228bo D2, as #1264 reads
+ * it): after blanks back to the line's start, `;`, `&`, `|`, a `(` that isn't an array's `=(`, a `)` that closed a
+ * subshell or a case pattern (`sub.starts`; not one that closed a `$(`, `<(` or `>(`: `echo $(date) case` is an
+ * argument), or a word of COMMAND_STARTERS (`time -p` too) that is itself where a command starts (`echo then case`
+ * holds no case). Never after a backquote, nor inside backquotes: logicalLines reads a backquoted span inside a `$(…)`
+ * as a quote, so shellCommands counts no case there either (backquotes inside a double quote are a stated limit).
  */
-const caseWord = (line: string, i: number, sub: Sub): 'case' | 'esac' | null => {
-  const m = /^(case|esac)(?=$|[\s;&|)])/.exec(line.slice(i));
-  if (!m) return null;
-  const before = line.slice(0, i).replace(/\s+$/, '');
-  const start = before === '' || /[;&|()`{]$/.test(before) || /(?:^|[\s;&|(){`])(?:then|do|else|elif)$/.test(before);
-  if (!start) return null;
-  if (m[1] === 'esac' && sub.frames[sub.frames.length - 1] !== 'case') return null;
-  return m[1] as 'case' | 'esac';
+const cmdPos = (text: string, k: number, sub: Sub): boolean => {
+  const blanksBack = (x: number) => {
+    while (x > 0 && (text[x - 1] === ' ' || text[x - 1] === '\t')) x--;
+    return x;
+  };
+  const j = blanksBack(k);
+  if (j === 0) return true;
+  const c = text[j - 1]!;
+  if (c === '(') return text[j - 2] !== '=';
+  if (c === ')') return sub.starts.has(j - 1);
+  if (/[;&|\n]/.test(c)) return true;
+  if (c === '`' || j === k) return false;
+  let i = j;
+  while (i > 0 && !/[\s;&|()`]/.test(text[i - 1]!)) i--;
+  const word = text.slice(i, j);
+  if (word === '-p') {
+    const h = blanksBack(i);
+    return h < i && text.slice(h - 4, h) === 'time' && (h === 4 || /[\s;&|()`]/.test(text[h - 5]!)) && cmdPos(text, h - 4, sub);
+  }
+  return COMMAND_STARTERS.has(word) && cmdPos(text, i, sub);
 };
-/** A `)` inside a `$(…)`: an inner paren's, a case pattern's (the innermost open is a `case`), or the `$(…)`'s own (true). */
-const closesSub = (sub: Sub): boolean => {
+/**
+ * The `case` or `esac` word starting at `k` of a logical line, if any: a reserved word only where a command starts
+ * (cmdPos; R1228bl D1, R1228bm D1, R1228bo D2), so `echo case` and `grep -cw case` are arguments; a `case` only with a
+ * blank and a word after it, as bash's grammar needs (#1264: a pattern named `case)` is no case). An `esac` closes only
+ * an open case. Both readers call it on the whole logical line so far (R1228bn D3: a joined line's `case`).
+ */
+const caseWord = (text: string, k: number, sub: Sub): 'case' | 'esac' | null => {
+  const rest = text.slice(k, k + 8);
+  const w = /^case[ \t]+[^\s;&|()<>]/.test(rest) ? 'case' : /^esac(?=$|[\s;&|)])/.test(rest) ? 'esac' : null;
+  if (!w || !cmdPos(text, k, sub)) return null;
+  if (w === 'esac' && sub.frames[sub.frames.length - 1] !== 'case') return null;
+  return w;
+};
+/** A `(` inside a `$(…)`: a substitution's (`$(`, `<(`, `>(`) or a subshell's (or a pattern's). */
+const opensParen = (sub: Sub, text: string, k: number) => sub.frames.push(/[$<>]/.test(text[k - 1] ?? '') ? '$(' : '(');
+/**
+ * A `)` at `k` inside a `$(…)`: an inner paren's, a case pattern's (the innermost open is a `case`), or the `$(…)`'s own
+ * (true). One that closed a subshell or a pattern is where a command may start (R1228bo D2).
+ */
+const closesSub = (sub: Sub, k: number): boolean => {
   const top = sub.frames[sub.frames.length - 1];
-  if (top === '(') sub.frames.pop();
-  return top === undefined;
+  if (top === undefined) return true;
+  if (top !== 'case') sub.frames.pop();
+  if (top !== '$(') sub.starts.add(k);
+  return false;
 };
 const logicalLines = (run: string): string[] => {
   const out: string[] = [];
@@ -184,6 +222,9 @@ const logicalLines = (run: string): string[] => {
     }
     let comment = false;
     let escapesNewline = false;
+    // R1228bn D3: the case rule reads the logical line so far, as shellCommands does.
+    const text = cur + line;
+    const at = cur.length;
     for (let i = 0; i < line.length && !comment; i++) {
       const ch = line[i]!;
       if (q === "'") {
@@ -207,7 +248,7 @@ const logicalLines = (run: string): string[] => {
         continue;
       }
       if (q === '"' && ch === '$' && line[i + 1] === '(') {
-        subs.push({ frames: [] });
+        subs.push(newSub());
         q = null;
         i++;
         continue;
@@ -217,7 +258,7 @@ const logicalLines = (run: string): string[] => {
         continue;
       }
       if (subs.length) {
-        const w = caseWord(line, i, subs[subs.length - 1]!);
+        const w = caseWord(text, at + i, subs[subs.length - 1]!);
         if (w) {
           if (w === 'case') subs[subs.length - 1]!.frames.push('case');
           else subs[subs.length - 1]!.frames.pop();
@@ -226,11 +267,11 @@ const logicalLines = (run: string): string[] => {
         }
       }
       if (subs.length && ch === '(') {
-        subs[subs.length - 1]!.frames.push('(');
+        opensParen(subs[subs.length - 1]!, text, at + i);
         continue;
       }
       if (subs.length && ch === ')') {
-        if (closesSub(subs[subs.length - 1]!)) {
+        if (closesSub(subs[subs.length - 1]!, at + i)) {
           subs.pop();
           q = '"';
         }
@@ -279,7 +320,7 @@ export function shellCommands(line: string): Cmd[] {
     if (q === '"' && c === '$' && line[i + 1] === '(') {
       cur += '$(';
       i++;
-      subs.push({ frames: [] });
+      subs.push(newSub());
       q = null;
       continue;
     }
@@ -308,8 +349,8 @@ export function shellCommands(line: string): Cmd[] {
         continue;
       }
       cur += c;
-      if (c === '(') subs[subs.length - 1]!.frames.push('(');
-      else if (c === ')' && closesSub(subs[subs.length - 1]!)) {
+      if (c === '(') opensParen(subs[subs.length - 1]!, line, i);
+      else if (c === ')' && closesSub(subs[subs.length - 1]!, i)) {
         subs.pop();
         q = '"';
       }
@@ -381,11 +422,13 @@ export const curlUrls = (cmd: string): string[] =>
 
 function transfersOutput(t: readonly string[]): 'file' | 'stdout' | 'none' {
   // R1228bk D3, R1228bm D3, R1228bl L7: -V/--version, -h/--help or -M/--manual (a short bundle too: `-sV`) makes curl
-  // print and exit with no transfer, URL or not, unless it is another option's value (`-A --version`: a user agent).
+  // print and exit with no transfer, URL or not, unless it is another option's value (`-A --version`, or glued: `-AMyBot`, a user agent).
   const takesValue = (x: string) =>
     /^-[a-zA-Z]*[AbcCdDeEFHKmoPQrtTuUwxXyYz]$/.test(x) ||
     (/^--[a-z0-9-]+$/.test(x) && !/^--(?:silent|show-error|fail|fail-with-body|location|compressed|insecure|verbose|include|head|remote-name|remote-name-all|create-dirs|retry-all-errors|retry-connrefused|http1\.1|http2|globoff|no-progress-meter|progress-bar|ipv4|ipv6|version|help|manual|no-buffer|ssl-reqd|tlsv1\.2)$/.test(x));
-  const ask = (x: string, k: number) => /^(?:--version|--help|--manual|-[a-zA-Z]*[VhM][a-zA-Z]*)$/.test(x) && !(k > 0 && takesValue(t[k - 1]!));
+  // R1228bn D1, R1228bo D1: in a short bundle a letter that takes a value takes the rest of it (`-fsSLohelm`: -o helm;
+  // `-AMyBot`: a user agent), so V, h or M is an ask only before any such letter.
+  const ask = (x: string, k: number) => /^(?:--version|--help|--manual|-[^-AbcCdDeEFHKmoPQrtTuUwxXyYz]*[VhM][a-zA-Z]*)$/.test(x) && !(k > 0 && takesValue(t[k - 1]!));
   if (t.some(ask)) return 'none';
   let file = false;
   let stdout = false;
@@ -402,8 +445,15 @@ function transfersOutput(t: readonly string[]): 'file' | 'stdout' | 'none' {
     else if (tok.startsWith('--output=')) target = tok.slice('--output='.length);
     else if (tok === '--remote-name' || tok === '--remote-name-all') file = named = true;
     else if (/^-[a-zA-Z]+$/.test(tok)) {
-      if (tok.includes('O')) file = named = true;
-      if (tok.endsWith('o')) target = t[++i];
+      // R1228bn D2, R1228bo D1: the first letter that takes a value takes the rest of the bundle, or the next word when
+      // none is left (`-fsSLopkg`: -o pkg; `-Ao`: a user agent "o"); only the letters before it are flags.
+      const v = tok.slice(1).search(/[AbcCdDeEFHKmoPQrtTuUwxXyYz]/);
+      if ((v < 0 ? tok.slice(1) : tok.slice(1, v + 1)).includes('O')) file = named = true;
+      if (v >= 0) {
+        const rest = tok.slice(v + 2);
+        const val = rest === '' ? t[++i] : rest;
+        if (tok[v + 1] === 'o') target = val;
+      }
     } else if (/^-o\S/.test(tok)) target = tok.slice(2);
     if (target !== undefined) { named = true; if (target !== '/dev/null') file = true; }
   }
@@ -2057,6 +2107,31 @@ test('R1228bl D1-D3, R1228bm D1-D3: `case` only in command position, a case one 
   assert.ok(kept('curl -fsSL -A --version -o t.tgz "$URL"\n').some((p) => /retry/.test(p)), 'refused: C2a');
   // Stated (bl D3): backquotes inside a double quote aren't split.
   assert.deepEqual(unread('echo "`true; source .claude/hooks/get.sh`"\n'), [], 'stated: L3a');
+});
+
+test('R1228bn D1-D3, R1228bo D1, D2: a short bundle\'s value-taking letter takes the rest of it; a joined line opening with case; case only after a starter, a separator or a ) that closed a subshell or a pattern', () => {
+  const kept = (text: string) => fileDownloadProblems('scripts/ci/zz-get.sh', text).problems;
+  const unread = (text: string) => fileDownloadProblems('scripts/ci/zz-a.sh', text).problems;
+  // bn D1, D2, bo D1: real curl writes each of these files (bn realcurl_bn.out, bo realcurl.out).
+  for (const text of ['curl -fsSLohelm "$URL"', 'curl -fsSLohugo "$URL"', 'curl -sSLoMain "$URL"', 'curl -fsSL -oshfmt "$URL"', 'curl -fsSLopkg "$URL"', 'curl -opkg "$URL"', 'curl -fsSL -ojq "$URL"', 'curl -fsSLohadolint "$URL"', 'curl -fsSL -Amyhost -o t.tgz "$URL"', 'curl -fsSL -AMyBot -o t.tgz "$URL"', 'curl -fsSL -eMyRef -o t.tgz "$URL"', 'curl -fsSL -Ao -o t.tgz "$URL"']) {
+    assert.ok(kept(`${text}\n`).some((p) => /retry/.test(p)), `refused: ${text}`);
+  }
+  for (const text of ['curl -sV | head -1', 'curl -Vs 2>&1', 'curl --version | head -1', 'curl -fsSL --retry 5 -ohelm "$URL"', 'wget --version | head -1']) assert.deepEqual(kept(`${text}\n`), [], `kept: ${text}`);
+  // bn D3: a joined line's `case` is read on the logical line, by both readers.
+  assert.ok(kept('x="$(echo \\\ncase a)"; true # note \\\ncurl -fsSL -o t.tgz "$URL"\n').some((p) => /retry/.test(p)), 'refused: N3a');
+  assert.ok(unread('n="$(grep -c \\\ncase notes.txt)"; true # was: \\\nsource .claude/hooks/get.sh\n').length > 0, 'refused: N3b');
+  // bo D2: bash runs get.sh after each (bo sem.out); `case` here is an argument or a pattern, no case opens.
+  for (const text of ['x="$(echo $(date +%F) case)"', 'x="$(echo `date +%F` case)"', 'x="$(cat <(echo a) case)"', 'x="$(echo then case)"', 'x="$(case $1 in a) echo a;; case) echo c;; esac)"', 'x="$(echo x case)"', 'x="$(echo $(date +%F) word)"',
+    // The same with a word after `case`, as a real case has: each rule of cmdPos decides these.
+    'x="$(echo $(date +%F) case x)"', 'x="$(echo `date +%F` case x)"', 'x="$(cat <(echo a) case x)"', 'x="$(echo then case x)"', 'x="$(echo time -p case x)"']) {
+    assert.ok(unread(`${text}; source .claude/hooks/get.sh\n`).length > 0, `refused: ${text}`);
+  }
+  // Controls: a real case after a starter, a separator, or a pattern's `)`, still read as one.
+  for (const text of ['x="$(case a in a) case b in b) echo y;; esac;; esac)"', 'x="$(if case a in a) true;; esac; then :; fi)"', 'x="$( (true) ; case a in a) :;; esac)"', 'x="$(time -p case a in a) :;; esac)"', 'x="$(echo `case a in a) echo y;; esac`)"',
+    // A missed case closes the `$(…)` at its pattern's `)`, and a `"` in a single quote in the arm then hides what follows.
+    'x="$(time -p case a in a) echo \'q"q\';; esac)"', 'x="$(if case a in a) echo \'q"q\';; esac; then :; fi)"']) {
+    assert.ok(unread(`${text}; source .claude/hooks/get.sh\n`).length > 0, `refused: ${text}`);
+  }
 });
 
 // Limits (owner decision (c): stated, not closed; the helper's digest check holds for each download it handles):
