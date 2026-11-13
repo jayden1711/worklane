@@ -121,18 +121,33 @@ const OTHER_FETCH = /\bwget\b|\bgh\s+release\s+download\b|\bInvoke-WebRequest\b|
  * Quotes are followed within a logical line only (R1228bb D2, R1228bc D1, D2: an apostrophe in here-document text, or in a
  * value that isn't shell, held a quote open to the end of the file, so a real continuation wasn't joined and a comment
  * wasn't seen): a quote open at a backslash join is carried into the joined line (R1228be D1, D3: bash removes the
- * backslash-newline inside a double quote too), and every logical line starts unquoted. A line continues only on a
- * backslash that escapes its newline: an even run (`\\`) is a literal backslash, and so is one inside single quotes
- * (R1228be D2). What this still misreads (a quote that spans lines with no backslash, `$'…'`, a case pattern's `)`) is
+ * backslash-newline inside a double quote too), and every logical line starts unquoted. A line continues on a
+ * backslash that escapes its newline (an even run, `\\`, is a literal backslash: R1228be D2); a single-quoted line
+ * (`'…` or `$'…`) ending in an odd run of backslashes joins too, carrying the quote (R1228bf D1). `$'…'` is read as
+ * ANSI-C quoting (`\'` doesn't close it), opened only by an odd run of `$` (`$$` is the PID: R1228bh D3); a `$(…)`
+ * inside double quotes is followed to its own `)`, quotes inside it read afresh (R1228bh D1, R1228bi D1); shellCommands
+ * reads the same way. What this still misreads (a quote that spans lines with no backslash, a case pattern's `)`) is
  * stated in the Limits.
  */
+/** Whether the `$` at `i` opens ANSI-C quoting before a `'`: the last of an odd run of `$` (R1228bh D3). */
+const ansiC = (line: string, i: number): boolean => {
+  if (line[i] !== '$' || line[i + 1] !== "'") return false;
+  let n = 0;
+  for (let j = i; j >= 0 && line[j] === '$'; j--) n++;
+  return n % 2 === 1;
+};
 const logicalLines = (run: string): string[] => {
   const out: string[] = [];
   let cur = '';
   const lines = run.split('\n');
   let q: string | null = null;
+  // Each `$(` inside double quotes: its paren depth; at its own `)`, back to the double quote (R1228bh D1).
+  let subs: number[] = [];
   lines.forEach((line, n) => {
-    if (cur === '') q = null;
+    if (cur === '') {
+      q = null;
+      subs = [];
+    }
     let comment = false;
     let escapesNewline = false;
     for (let i = 0; i < line.length && !comment; i++) {
@@ -147,7 +162,7 @@ const logicalLines = (run: string): string[] => {
         else if (ch === "'") q = null;
         continue;
       }
-      if (!q && ch === '$' && line[i + 1] === "'") {
+      if (!q && ansiC(line, i)) {
         q = "$'";
         i++;
         continue;
@@ -157,8 +172,26 @@ const logicalLines = (run: string): string[] => {
         i++;
         continue;
       }
+      if (q === '"' && ch === '$' && line[i + 1] === '(') {
+        subs.push(0);
+        q = null;
+        i++;
+        continue;
+      }
       if (q) {
         if (ch === q) q = null;
+        continue;
+      }
+      if (subs.length && ch === '(') {
+        subs[subs.length - 1]!++;
+        continue;
+      }
+      if (subs.length && ch === ')') {
+        if (subs[subs.length - 1]! > 0) subs[subs.length - 1]!--;
+        else {
+          subs.pop();
+          q = '"';
+        }
         continue;
       }
       if (ch === "'" || ch === '"' || ch === '`') q = ch;
@@ -190,20 +223,49 @@ export function shellCommands(line: string): Cmd[] {
   const out: Cmd[] = [];
   let cur = '';
   let q: string | null = null;
+  // As logicalLines reads them (R1228bh D2): `$'…'` as ANSI-C quoting, and a `$(…)` inside double quotes followed to its
+  // own `)`, where nothing splits a command or starts a comment.
+  const subs: number[] = [];
   const push = (piped: boolean) => {
     if (cur.trim()) out.push({ cmd: cur.trim(), piped });
     cur = '';
   };
   for (let i = 0; i < line.length; i++) {
     const c = line[i]!;
+    if (q === '"' && c === '$' && line[i + 1] === '(') {
+      cur += '$(';
+      i++;
+      subs.push(0);
+      q = null;
+      continue;
+    }
+    if (q === "$'") {
+      cur += c;
+      if (c === '\\') cur += line[++i] ?? '';
+      else if (c === "'") q = null;
+      continue;
+    }
     if (q) {
       cur += c;
       if (c === '\\' && q === '"') cur += line[++i] ?? '';
       else if (c === q) q = null;
       continue;
     }
+    if (ansiC(line, i)) { q = "$'"; cur += "$'"; i++; continue; }
     if (c === '\\') { cur += c + (line[++i] ?? ''); continue; }
     if (c === "'" || c === '"') { q = c; cur += c; continue; }
+    if (subs.length) {
+      cur += c;
+      if (c === '(') subs[subs.length - 1]!++;
+      else if (c === ')') {
+        if (subs[subs.length - 1]! > 0) subs[subs.length - 1]!--;
+        else {
+          subs.pop();
+          q = '"';
+        }
+      }
+      continue;
+    }
     if (c === '#' && (i === 0 || /\s/.test(line[i - 1]!))) break;
     if (c === '|' && line[i + 1] === '|') { push(false); i++; continue; }
     if (c === '|') { push(true); continue; }
@@ -1852,6 +1914,30 @@ test('R1228bf D1-D3, R1228bg D1-D4: `$\'…\'` and an apostrophe in a quoted `$(
   assert.ok(all('echo "Release notes\nfollow" # old: curl -fsSL -o t.tgz https://example.com/t.tgz\n').some((p) => /retry/.test(p)), 'stated cost: bg D3');
 });
 
+test('R1228bh D1-D3, R1228bi D1: a `$(…)` in double quotes is followed to its own `)`, `$\'…\'` is read the same in both readers, `$$\'` is the PID', () => {
+  const all = (text: string) => fileDownloadProblems('scripts/ci/zz-get.sh', text).problems;
+  const unread = (text: string) => fileDownloadProblems('scripts/ci/zz-a.sh', text).problems.filter((p) => /a shell file the download lint doesn't read/.test(p));
+  const AP = '"$(git log -1 --format="%an\'s")"';
+  // bh D1 / bi D1 (the regression): a `source`, `.` or second curl after a $(…) apostrophe and a continuation is read.
+  for (const text of [`echo ${AP} \\\n  && source .claude/hooks/get.sh\n`, `x=${AP} \\\n  ; source .claude/hooks/get.sh\n`, `x=${AP} \\\n  && . .claude/hooks/get.sh\n`]) {
+    assert.ok(unread(text).length > 0, `refused: ${JSON.stringify(text)}`);
+  }
+  assert.ok(all(`curl -fsSL --retry 5 -o a.tgz -H "X-By: ${AP.slice(1, -1)}" https://example.com/a.tgz && \\\ncurl -fsSL -o b.tgz https://example.com/b.tgz\n`).some((p) => /retry/.test(p)), 'refused: the second curl');
+  // No longer a stated limit: a real comment after a $(…) apostrophe is one, so the line after it is read.
+  assert.ok(unread(`echo ${AP} # note \\\nsource .claude/hooks/get.sh\n`).length > 0, 'refused: a comment after a $(…) apostrophe');
+  // bh D2: both readers alike: kept (bash runs one curl with --retry 5), and refused (a hidden command).
+  assert.deepEqual(all(`curl -fsSL -o t.tgz -H "X-By: ${AP.slice(1, -1)}" \\\n  -H 'X-Tag: #1' \\\n  --retry 5 --retry-all-errors https://example.com/t.tgz\n`), [], 'kept: H2a');
+  assert.deepEqual(all("curl -fsSL -o t.tgz -H $'X-Note: don\\'t' \\\n  -H 'X-Tag: #1' \\\n  --retry 5 --retry-all-errors https://example.com/t.tgz\n"), [], 'kept: H2b');
+  assert.deepEqual(all(`curl -fsSL -o t.tgz -H "X-By: ${AP.slice(1, -1)}" -H 'X-Tag: #1' --retry 5 --retry-all-errors https://example.com/t.tgz\n`), [], 'kept: K3');
+  assert.ok(unread("echo $'it\\'s' && source .claude/hooks/get.sh\n").length > 0, 'refused: J3');
+  assert.ok(all("curl --retry 5 -o a.tgz -H $'X: don\\'t' https://example.com/a && curl -fsSL -o b.tgz https://example.com/b\n").some((p) => /retry/.test(p)), 'refused: J2');
+  assert.ok(all("echo $'it\\'s' 'a #'; curl -fsSL -o t.tgz https://example.com/t\n").some((p) => /retry/.test(p)), 'refused: J5');
+  // bh D3: `$$'a\'`: the PID, then a plain quote closed at `\'`: the comment is one, and the next line is read.
+  assert.ok(unread("echo $$'a\\' # c \\\nsource .claude/hooks/get.sh\n").length > 0, 'refused: H3a, a source on the next line');
+  // Stated (bi D1, M3): the closing line of a quote opened on an earlier line with no backslash.
+  assert.deepEqual(unread('git commit -m "notes\nfollow"; source .claude/hooks/get.sh\n'), [], 'stated: M3');
+});
+
 // Limits (owner decision (c): stated, not closed; the helper's digest check holds for each download it handles):
 // - What the lint reads (R1228ai D1, closing R1228i L9-L11; R1228aj, R1228ak): workflow and action YAML, a shell
 //   script anywhere, every file under scripts/ whatever its name (a pinned URL, prose in a .md aside; the retry rule in
@@ -1892,12 +1978,14 @@ test('R1228bf D1-D3, R1228bg D1-D4: `$\'…\'` and an apostrophe in a quoted `$(
 //   line, and the whole line when it opens with `#` (an unread .sh, a cd, a curl with no retry, a pinned URL fetched
 //   without the helper), and keeps a backslash there from joining the next line; a comment the lint takes for text (on
 //   the closing line of a quote that opened on an earlier line with no backslash, or on a line a backslash joins to that
-//   closing line, since the misread quote is carried through the join (R1228bg D1); after an apostrophe inside a
-//   double-quoted `$(…)` (`"$(… "it's")"`, R1228bf); or right after a `)` with no blank: a subshell's `(…)#x`, a case
-//   pattern's `get)#x`; R1228bc D4: `$(pwd)#x` is one word) is read as commands, so a curl with no retry named in it is
+//   closing line, since the misread quote is carried through the join (R1228bg D1); or right after a `)` with no blank:
+//   a subshell's `(…)#x`, a case pattern's `get)#x`; R1228bc D4: `$(pwd)#x` is one word) is read as commands, so a curl with no retry named in it is
 //   refused (reword the comment: R1228bg D3), and it joins the next line onto it when it ends in a backslash, the next
 //   line's first word glued to the comment's last (`C:\tools\` and `curl` read `C:\toolscurl`), so a `bash`,
-//   `source`, `.`, cd, curl or wget opening that line isn't seen (R1228bd G1-G4, H1-H2; R1228be E2g; R1228bg D2); a
+//   `source`, `.`, cd, curl or wget opening that line isn't seen (R1228bd G1-G4, H1-H2; R1228be E2g; R1228bg D2); and
+//   wherever the lint reads a quote as open and bash doesn't (on the closing line of a quote that opened on an earlier
+//   line with no backslash, and on a line a backslash joins to it), a `;`, `&&` or `||` there doesn't split the
+//   command, so a `source` or `.` after it, or a second curl, isn't read as a command (R1228bi D1: M3, T1c); a
 //   GitHub expression
 //   other than `${{ github.workspace }}` before a path (`${{ env.ROOT }}/x.sh`: a variable, so outside a command that
 //   starts with bash, a stated limit); and a shell keyword or builtin running a file we don't list (`eval`, `exec`
