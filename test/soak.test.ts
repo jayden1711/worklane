@@ -892,18 +892,24 @@ export function cgroupProcsUnder(dir: string): Set<number> {
  * both that the reader didn't report fails (dropped), unless `explain` names why by its relation to this test. And the
  * spawned pid is reported. `problems` is empty when the read is consistent; `explained` names every pid let through.
  */
-export function cgroupReadProblems(o: { count: number | null; reported: number[]; before: Set<number>; after: Set<number>; spawned: number; explain?: (pid: number) => string | null }): { problems: string[]; explained: string[] } {
+export function cgroupReadProblems(o: { count: number | null; reported: number[]; before: Set<number>; after: Set<number>; spawned: number; explain?: (pid: number) => string | null }): { problems: string[]; explained: string[]; hidden: number } {
   const problems: string[] = [];
   const explained: string[] = [];
   if (o.count !== o.reported.length) problems.push(`the count ${o.count} is not the ${o.reported.length} pid(s) listed`);
-  const twice = [...new Set(o.reported.filter((p, i) => o.reported.indexOf(p) !== i))];
+  // R1181ar B1: a process outside this pid namespace (a pid namespace with no cgroup namespace, as the project sandbox
+  // runs tests) is listed as 0: unreadable, so it is counted and left out of both directions, never "listed twice".
+  const hidden = o.reported.filter((p) => p === 0).length;
+  const seen = o.reported.filter((p) => p !== 0);
+  const before = new Set([...o.before].filter((p) => p !== 0));
+  const after = new Set([...o.after].filter((p) => p !== 0));
+  const twice = [...new Set(seen.filter((p, i) => seen.indexOf(p) !== i))];
   if (twice.length) problems.push(`pid(s) listed twice: ${twice.join(', ')}`);
-  const reported = new Set(o.reported);
-  const foreign = [...reported].filter((p) => !o.before.has(p) && !o.after.has(p));
+  const reported = new Set(seen);
+  const foreign = [...reported].filter((p) => !before.has(p) && !after.has(p));
   if (foreign.length) problems.push(`pid(s) reported that no cgroup.procs lists: ${foreign.join(', ')}`);
-  for (const p of [...new Set([...o.before, ...o.after])].filter((x) => !reported.has(x))) {
-    if (!(o.before.has(p) && o.after.has(p))) {
-      explained.push(`${p} (in one independent read only: ${o.before.has(p) ? 'exited' : 'started'} mid-read)`);
+  for (const p of [...new Set([...before, ...after])].filter((x) => !reported.has(x))) {
+    if (!(before.has(p) && after.has(p))) {
+      explained.push(`${p} (in one independent read only: ${before.has(p) ? 'exited' : 'started'} mid-read)`);
       continue;
     }
     const why = o.explain?.(p) ?? null;
@@ -911,7 +917,7 @@ export function cgroupReadProblems(o: { count: number | null; reported: number[]
     else problems.push(`pid ${p} is in cgroup.procs before and after the read, and wasn't reported`);
   }
   if (!reported.has(o.spawned)) problems.push(`the new session (pid ${o.spawned}) wasn't reported`);
-  return { problems, explained };
+  return { problems, explained, hidden };
 }
 
 /** Bytes queued in this network namespace's netlink sockets (/proc/net/netlink Rmem + Wmem), or null (R1181z D1). */
@@ -2042,6 +2048,10 @@ test("soak driver: the cgroup reader's pids are checked against cgroup.procs: a 
   assert.match(cgroupReadProblems({ ...ok, count: 4 }).problems.join(), /the count 4 is not the 3 pid\(s\) listed/);
   // The new session not reported; an extra explained by relation is named, not failed.
   assert.match(cgroupReadProblems({ ...ok, spawned: 50 }).problems.join(), /the new session \(pid 50\) wasn't reported/);
+  // R1181ar B1: processes outside this pid namespace are listed as 0, many times: counted, not "listed twice".
+  const ns = cgroupReadProblems({ count: 3, reported: [0, 0, 7], before: set(0, 7), after: set(0, 7), spawned: 7 });
+  assert.deepEqual([ns.problems, ns.hidden], [[], 2], 'pid 0, twice: counted as hidden');
+  assert.match(cgroupReadProblems({ count: 4, reported: [0, 0, 7, 7], before: set(0, 7), after: set(0, 7), spawned: 7 }).problems.join(), /pid\(s\) listed twice: 7/, 'a real pid twice still fails');
   const why = cgroupReadProblems({ ...ok, count: 2, reported: [10, 12], explain: (p) => (p === 11 ? "this test's own child" : null) });
   assert.deepEqual([why.problems, why.explained], [[], ["11 (this test's own child)"]]);
 });
@@ -2070,7 +2080,7 @@ test("soak driver (Linux, R1181t D1, D4): the job's cgroup is read: a process st
         return null;
       }
     };
-    let last: ReturnType<typeof cgroupReadProblems> = { problems: ['not read'], explained: [] };
+    let last: ReturnType<typeof cgroupReadProblems> = { problems: ['not read'], explained: [], hidden: 0 };
     for (let i = 0; i < 10 && last.problems.length; i++) {
       if (i) await new Promise((r) => setTimeout(r, 100));
       const before = cgroupProcsUnder(dir);
@@ -2079,6 +2089,7 @@ test("soak driver (Linux, R1181t D1, D4): the job's cgroup is read: a process st
       last = cgroupReadProblems({ count: levels.procs, reported, before, after: cgroupProcsUnder(dir), spawned: pid, explain });
     }
     if (last.explained.length) t.diagnostic(`not reported, explained: ${last.explained.join('; ')}`);
+    if (last.hidden) t.diagnostic(`${last.hidden} process(es) listed as pid 0 (outside this pid namespace): counted, not checked`);
     assert.deepEqual(last.problems, [], `the reader's pids agree with cgroup.procs (pid ${pid} started)`);
     if (before.kernelBytes === null) t.diagnostic('no memory controller on this cgroup: the kernel level reads null here');
     else assert.ok(before.kernelBytes > 0, 'its unreclaimable kernel memory is read');
