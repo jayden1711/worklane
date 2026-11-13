@@ -373,7 +373,7 @@ test("every ASCII byte and the non-ASCII spaces: the hook and the gate give the 
   assert.deepEqual(differ, [], 'the same verdict for every byte, spot and mode');
 });
 
-test("git commit -v (on the command line or by commit.verbose) is recognised by git's own verbose block, in every cleanup mode, verbatim included; --no-verbose writes none, so both readings are judged; a translated block counts under commit.verbose, in git commit's own file only (not merge or pull --edit, which cut only under commit.cleanup=scissors); a typed copy of the block without -v is the stated residual (#1260 R1260af AF1, AF2, R1260ag, R1260ah, R1260aj D1, D2, R1260ak/al D1, R1260an D1)", { skip: !hasGitleaks && 'gitleaks not installed', timeout: 300_000 }, () => {
+test("git commit -v (on the command line or by commit.verbose) is recognised by git's own verbose block, in every cleanup mode, verbatim included; --no-verbose writes none, so both readings are judged; a translated block counts under commit.verbose, in git commit's own file only (not merge or pull --edit, which cut only in scissors cleanup: commit.cleanup or --cleanup=scissors); a typed copy of the block without -v is the stated residual (#1260 R1260af AF1, AF2, R1260ag, R1260ah, R1260aj D1, D2, R1260ak/al D1, R1260an D1, R1260ao D1)", { skip: !hasGitleaks && 'gitleaks not installed', timeout: 300_000 }, () => {
   const env = { ...process.env, GIT_AUTHOR_NAME: 'Ada', GIT_AUTHOR_EMAIL: 'ada@example.com', GIT_COMMITTER_NAME: 'Ada', GIT_COMMITTER_EMAIL: 'ada@example.com' };
   delete (env as Record<string, string | undefined>).GIT_DIR;
   // An editor that types the message on git's line 1 and leaves the rest (help, scissors line, diff), as a person does.
@@ -461,7 +461,7 @@ test("git commit -v (on the command line or by commit.verbose) is recognised by 
   // R1260ak/al D1: `git merge --edit` and `git pull --edit` run the hook on MERGE_MSG, edited, but never run verbose,
   // whatever commit.verbose says: a typed scissors line with two comment lines under it is no block there. Under
   // commit.cleanup=scissors they write git's cut line and cut at the first scissors line, and the hook cuts too (R1260an D1).
-  const merge = (cfg: Record<string, string>, msg: string, how: 'merge' | 'pull') => {
+  const merge = (cfg: Record<string, string>, msg: string, how: 'merge' | 'pull', extra: string[] = []) => {
     const a = repo();
     const b = repo();
     for (const [k, v] of Object.entries(cfg)) for (const r of [a, b]) r.git('config', k, v);
@@ -478,7 +478,7 @@ test("git commit -v (on the command line or by commit.verbose) is recognised by 
     }
     // An editor that replaces git's buffer with the message.
     const e = { ...env, GIT_EDITOR: `f() { printf '%s' '${msg}' > "$1"; }; f` };
-    const args = how === 'merge' ? ['merge', '-q', '--no-ff', '--edit', 'side'] : ['pull', '-q', '--no-rebase', '--edit', '.', 'side'];
+    const args = how === 'merge' ? ['merge', '-q', '--no-ff', '--edit', ...extra, 'side'] : ['pull', '-q', '--no-rebase', '--edit', ...extra, '.', 'side'];
     const hook = spawnSync('git', args, { cwd: a.dir, encoding: 'utf8', env: e });
     const made = spawnSync('git', [...args.slice(0, 1), '--no-verify', ...args.slice(1)], { cwd: b.dir, encoding: 'utf8', env: e });
     assert.equal(made.status, 0, `git made the merge: ${made.stderr}`);
@@ -494,6 +494,9 @@ test("git commit -v (on the command line or by commit.verbose) is recognised by 
     for (const [what, cfg] of [['commit.cleanup=scissors', { 'commit.cleanup': 'scissors' }], ['commit.cleanup=scissors and commit.verbose', { 'commit.cleanup': 'scissors', 'commit.verbose': 'true' }]] as const) {
       assert.equal(merge(cfg, `Merge side\n${scissorsLine}\nline two\n`, how), 'hook=pass gate=pass', `${how} --edit, ${what}, a typed scissors line`);
     }
+    // R1260ao D1: --cleanup=scissors on the command line: git cuts there too, but a hook can't see the flag, so it judges by
+    // strip (both readings) and refuses what the gate passes: the stated `--cleanup=` case, pinned.
+    assert.equal(merge({}, `Merge side\n${scissorsLine}\nline two\n`, how, ['--cleanup=scissors']), 'hook=refuse gate=pass', `${how} --edit --cleanup=scissors, a typed scissors line: the stated --cleanup= case`);
   }
   // The stated residual: the same three lines typed by hand into a commit made without -v read as verbose: the hook cuts
   // there, git doesn't, and the gate refuses the line below them as line 2.
