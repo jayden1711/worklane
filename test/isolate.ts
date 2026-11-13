@@ -34,6 +34,28 @@ import { SYSTEMD_MARKERS, SYSTEM_ROOT_VAR, TEST_MACHINE_VAR, TEST_MARK_FILE, TES
  * table of RegExps or typed arrays is held only by the line reader. The src/ and scripts/ tables are data
  * (src/check-tables.ts), which has neither gap.
  */
+/**
+ * Every live read on Node's keying path for a CommonJS compile of an ES module, between the guard's decision and the
+ * instance's key (R1184bb: read in Node 22.23.3, 24.21.0 and 26.7.0's own lib/, posix; docs/design.md lists the source
+ * lines). `Module.prototype._compile` → `loadESMFromCJS` → `ModuleLoader.importSyncForRequire`:
+ * `const url = pathToFileURL(filename).href`, then `loadCache.get(url)`. Each is locked from the preload on, and the
+ * lock test walks this list: a read missed here shows as a missing row, not as a new review round.
+ * Not here because not reachable from test code: Node's primordials (`StringPrototype*`, `SafeMap` under `loadCache`,
+ * copied at startup), its internal `URL` class binding and its private fields and methods, the native URL binding, the
+ * frozen null-prototype `kEmptyObject`, and the loader object. An `import()` resolves on the hooks thread (this
+ * preload's `register`), a realm test code can't reach; the main thread keys by the `url` string it returns (read in
+ * 22.23.3, 24.21.0 and 26.7.0).
+ */
+export const KEYING_READS: readonly (readonly [owner: string, key: string, where: string])[] = [
+  ['process', 'cwd', "lib/path.js posixCwd: `return () => process.cwd();` (posix.resolve, for a relative filename)"],
+  ['node:path', 'posix', 'lib/internal/url.js pathToFileURL: `path.posix.resolve(filepath)`'],
+  ['node:path.posix', 'resolve', 'lib/internal/url.js pathToFileURL: `path.posix.resolve(filepath)`'],
+  ['node:path', 'resolve', 'the same function as posix.resolve on posix; the guard\'s own resolve'],
+  ['node:path', 'sep', 'lib/internal/url.js pathToFileURL: `resolved[resolved.length - 1] !== path.sep`'],
+  ['node:path.posix', 'sep', 'path.sep on posix'],
+  ['URL.prototype', 'href', 'lib/internal/modules/esm/loader.js importSyncForRequire: `pathToFileURL(filename).href`'],
+];
+
 /** The global names the freeze and the frozen-check are set under, for the loader's calls and the lock test. */
 export const [FREEZE_GLOBAL, DEEP_FROZEN_GLOBAL] = ['__worklaneTestFreezeTable', '__worklaneTestDeepFrozen'] as const;
 
@@ -168,6 +190,9 @@ syncBuiltinESMExports();
   for (const o of [pathModule, pathModule.posix, pathModule.win32] as unknown as Record<string, unknown>[]) {
     for (const k of ['resolve', 'sep', 'posix', 'win32']) if (k in o) defineProperty(o, k, { value: o[k], writable: false, configurable: false, enumerable: true });
   }
+  // And the getter that hands Node the key itself (R1184bb D1): `pathToFileURL(filename).href`.
+  const hrefDesc = Object.getOwnPropertyDescriptor(URL.prototype, 'href')!;
+  defineProperty(URL.prototype, 'href', { get: hrefDesc.get!, set: hrefDesc.set!, configurable: false, enumerable: true });
   // Each loader by extension too (R1184ar D1, AR1a: `_extensions['.js']` replaced), as it is now. A replaced
   // `Module._load` can only hand a test exports it made up: the owner-named open class of a re-pointed import.
   const ext = (nodeModule as unknown as { _extensions: Record<string, unknown> })._extensions;

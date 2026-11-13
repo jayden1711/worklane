@@ -161,6 +161,10 @@ test('a helper imported before a table module can neither replace the freeze, un
     ['BA1a path.resolve patched for [eval], compiled, then import()', "import M from 'node:module';\nimport path from 'node:path';\nimport { readFileSync } from 'node:fs';\nimport { fileURLToPath } from 'node:url';\nconst f = fileURLToPath(new URL('./__COPY__', import.meta.url));\nconst real = path.resolve;\npath.resolve = (...a) => (a[0] === '[eval]' ? f : real(...a));\ntry { const m = new M(f); m.paths = []; m._compile(readFileSync(f, 'utf8').split('\\n').filter((l) => !l.startsWith('__worklaneTestFreezeTable(')).join('\\n'), '[eval]', 'module'); } finally { path.resolve = real; }\n", './__COPY__', 'import', true],
     ['BA1b the same, then require()', "import M from 'node:module';\nimport path from 'node:path';\nimport { readFileSync } from 'node:fs';\nimport { fileURLToPath } from 'node:url';\nconst f = fileURLToPath(new URL('./__COPY__', import.meta.url));\nconst real = path.resolve;\npath.resolve = (...a) => (a[0] === '[eval]' ? f : real(...a));\ntry { const m = new M(f); m.paths = []; m._compile(readFileSync(f, 'utf8').split('\\n').filter((l) => !l.startsWith('__worklaneTestFreezeTable(')).join('\\n'), '[eval]', 'module'); } finally { path.resolve = real; }\n", './__COPY__', 'require', true],
     ['BA1d path.posix replaced, [eval]-wrapper, then import()', "import M from 'node:module';\nimport path from 'node:path';\nimport { readFileSync } from 'node:fs';\nimport { fileURLToPath } from 'node:url';\nconst f = fileURLToPath(new URL('./__COPY__', import.meta.url));\nconst real = path.posix;\npath.posix = { ...real, resolve: (...a) => (a[0] === '[eval]-wrapper' ? f : real.resolve(...a)) };\ntry { const m = new M(f); m.paths = []; m._compile(readFileSync(f, 'utf8').split('\\n').filter((l) => !l.startsWith('__worklaneTestFreezeTable(')).join('\\n'), '[eval]-wrapper', 'module'); } finally { path.posix = real; }\n", './__COPY__', 'import', true],
+    // R1184bb D1: URL.prototype.href, the getter that hands Node the key, answering the module's URL for a pseudo-name,
+    // or for any name outside dist/test the guard passes.
+    ['BB1a href patched for [eval], compiled, then import()', "import M from 'node:module';\nimport { readFileSync } from 'node:fs';\nimport { fileURLToPath, pathToFileURL } from 'node:url';\nconst f = fileURLToPath(new URL('./__COPY__', import.meta.url));\nconst target = pathToFileURL(f).href;\nconst d = Object.getOwnPropertyDescriptor(URL.prototype, 'href');\nObject.defineProperty(URL.prototype, 'href', { get() { const h = d.get.call(this); return h.endsWith('/%5Beval%5D') ? target : h; }, set: d.set, configurable: true, enumerable: true });\ntry { const m = new M(f); m.paths = []; m._compile(readFileSync(f, 'utf8').split('\\n').filter((l) => !l.startsWith('__worklaneTestFreezeTable(')).join('\\n'), '[eval]', 'module'); } finally { Object.defineProperty(URL.prototype, 'href', d); }\n", './__COPY__', 'import', true],
+    ['BB1f href patched for a name outside dist/test, then import()', "import M from 'node:module';\nimport { readFileSync } from 'node:fs';\nimport { fileURLToPath, pathToFileURL } from 'node:url';\nconst f = fileURLToPath(new URL('./__COPY__', import.meta.url));\nconst target = pathToFileURL(f).href;\nconst d = Object.getOwnPropertyDescriptor(URL.prototype, 'href');\nObject.defineProperty(URL.prototype, 'href', { get() { const h = d.get.call(this); return h.endsWith('/zz-outside-bb.js') ? target : h; }, set: d.set, configurable: true, enumerable: true });\ntry { const m = new M(f); m.paths = []; m._compile(readFileSync(f, 'utf8').split('\\n').filter((l) => !l.startsWith('__worklaneTestFreezeTable(')).join('\\n'), '/zz-outside-bb.js', 'module'); } finally { Object.defineProperty(URL.prototype, 'href', d); }\n", './__COPY__', 'import', true],
     ['AT2a the build output rewritten without the self-freeze, then require()', "import { readFileSync, writeFileSync } from 'node:fs';\nimport { fileURLToPath } from 'node:url';\nconst f = fileURLToPath(new URL('./__COPY__', import.meta.url));\nwriteFileSync(f, readFileSync(f, 'utf8').split('\\n').filter((l) => !l.startsWith('__worklaneTestFreezeTable(')).join('\\n'));\n", './__COPY__', 'require', true],
     ['AT2b the build output rewritten without the marks, then import()', "import { readFileSync, writeFileSync } from 'node:fs';\nimport { fileURLToPath } from 'node:url';\nconst f = fileURLToPath(new URL('./__COPY__', import.meta.url));\nwriteFileSync(f, readFileSync(f, 'utf8').split('\\n').filter((l) => !l.startsWith('__worklaneTestFreezeTable(') && !l.startsWith('// check-table: ')).join('\\n'));\n", './__COPY__', 'import', true],
     ['AS1c _compile patched, then import()', "import M from 'node:module';\nimport { createRequire } from 'node:module';\nconst orig = M.prototype._compile;\nM.prototype._compile = function (c, f, ...r) { return orig.call(this, String(c).replace(/__worklaneTestFreezeTable\\(/g, 'void ('), f, ...r); };\ncreateRequire(import.meta.url)('./raw-check-reads.js');\n"],
@@ -186,7 +190,7 @@ test('a helper imported before a table module can neither replace the freeze, un
         continue;
       }
       // The compile step: a patch of it throws (it is read-only), and a compile from other text is refused.
-      if (/^A[SR]1|^A[TUVY]|^BA/.test(label)) {
+      if (/^A[SR]1|^A[TUVY]|^B[AB]/.test(label)) {
         assert.notEqual(r.status, 0, `${label}: the module compiled: ${r.stdout}`);
         assert.match(r.stderr, /compiled from a source other than its file's|a source other than the one at the start|read[- ]only|Cannot assign|Cannot redefine|not extensible/, label);
         continue;
@@ -330,5 +334,20 @@ test("a table module gone when the preload read the build output is refused when
     } finally {
       for (const f of [link, target, main]) rmSync(f, { force: true });
     }
+  }
+});
+
+test("every live read on Node's keying path is locked after the preload: one row per read, so a missed one is a missing row (#941, R1184bb)", async () => {
+  const { KEYING_READS } = await import('./isolate.js');
+  const nodePath = (await import('node:path')).default;
+  const owners: Record<string, object> = { process, 'node:path': nodePath, 'node:path.posix': nodePath.posix, 'URL.prototype': URL.prototype };
+  assert.ok(KEYING_READS.length >= 7, 'the list read');
+  for (const [owner, key] of KEYING_READS) {
+    const o = owners[owner];
+    assert.ok(o, `${owner}: a known owner`);
+    const d = Object.getOwnPropertyDescriptor(o, key);
+    assert.ok(d, `${owner}.${key}: an own property`);
+    assert.equal(d.configurable, false, `${owner}.${key}: not configurable`);
+    if ('value' in d) assert.equal(d.writable, false, `${owner}.${key}: not writable`);
   }
 });
