@@ -160,7 +160,8 @@ const COMMAND_STARTERS: ReadonlySet<string> = new Set(['if', 'then', 'elif', 'el
  * argument), or a word of COMMAND_STARTERS (`time -p` too) that is itself where a command starts (`echo then case`
  * holds no case), or a `{` that opens `function NAME {`'s body when `function` is where a command starts (R1228bp D2).
  * Never right after a backquote; inside a `$(…)` both readers skip a backquoted span whole, as a quote, so no case,
- * paren or `esac` in it counts (R1228bq D2; backquotes directly inside a double quote are a stated limit).
+ * paren or `esac` in it counts (R1228bq D2). A backquoted span directly inside a double quote also runs to its own
+ * closing backquote, so a `"` in it doesn't end the quote (R1228bs D2); nothing splits inside it (a stated limit, R1228bl D3).
  */
 const cmdPos = (text: string, k: number, sub: Sub): boolean => {
   const blanksBack = (x: number) => {
@@ -177,15 +178,21 @@ const cmdPos = (text: string, k: number, sub: Sub): boolean => {
   let i = j;
   while (i > 0 && !/[\s;&|()`]/.test(text[i - 1]!)) i--;
   const word = text.slice(i, j);
-  if (word === '-p') {
-    const h = blanksBack(i);
+  if (word === '-p' || word === '--') {
+    // R1228bs D1: `time --` and `time -p --` too (bash 5.2 reads `--` after time's options).
+    let h = blanksBack(i);
+    if (word === '--' && text.slice(h - 2, h) === '-p' && /[ \t]/.test(text[h - 3] ?? '')) h = blanksBack(h - 2);
     return h < i && text.slice(h - 4, h) === 'time' && (h === 4 || /[\s;&|()`]/.test(text[h - 5]!)) && cmdPos(text, h - 4, sub);
   }
-  // R1228bp D2: a `{` after `function NAME` opens the function's body, where a command starts.
+  // R1228bp D2: a `{` after `function NAME` opens the function's body, where a command starts; R1228bs D1: after
+  // `coproc NAME` too.
   if (word === '{') {
-    const f = /(?:^|[\s;&|()`])function[ \t]+[^\s;&|()<>`]+[ \t]*$/.exec(text.slice(0, blanksBack(i)));
-    if (f) return cmdPos(text, f.index + f[0].indexOf('function'), sub);
+    const f = /(?:^|[\s;&|()`])(?:function|coproc)[ \t]+[^\s;&|()<>`]+[ \t]*$/.exec(text.slice(0, blanksBack(i)));
+    if (f) return cmdPos(text, f.index + f[0].search(/function|coproc/), sub);
   }
+  // R1228bs D1: any compound body after `function NAME` (`function f case … esac`).
+  const fn = /(?:^|[\s;&|()`])function[ \t]+$/.exec(text.slice(0, i));
+  if (fn) return cmdPos(text, fn.index + fn[0].indexOf('function'), sub);
   return COMMAND_STARTERS.has(word) && cmdPos(text, i, sub);
 };
 /**
@@ -197,7 +204,7 @@ const cmdPos = (text: string, k: number, sub: Sub): boolean => {
 const caseWord = (text: string, k: number, sub: Sub): 'case' | 'esac' | null => {
   // R1228bq D3: any run of blanks before the word, not a fixed window.
   const rest = text.slice(k);
-  const w = /^case[ \t]+[^\s;&|()<>]/.test(rest) ? 'case' : /^esac(?=$|[\s;&|)])/.test(rest) ? 'esac' : null;
+  const w = /^case[ \t]+[^\s;&|()<>]/.test(rest) ? 'case' : /^esac(?=$|[\s;&|)<>])/.test(rest) ? 'esac' : null;
   if (!w || !cmdPos(text, k, sub)) return null;
   if (w === 'esac' && sub.frames[sub.frames.length - 1] !== 'case') return null;
   return w;
@@ -258,6 +265,14 @@ const logicalLines = (run: string): string[] => {
         subs.push(newSub());
         q = null;
         i++;
+        continue;
+      }
+      // R1228bs D2: a backquoted span inside a double quote runs to its own closing backquote, as bash reads it: a `"` in
+      // it doesn't end the double quote.
+      if (q === '"' && ch === '`') {
+        let j = i + 1;
+        while (j < line.length && line[j] !== '`') j += line[j] === '\\' ? 2 : 1;
+        i = j;
         continue;
       }
       if (q) {
@@ -335,6 +350,14 @@ export function shellCommands(line: string): Cmd[] {
       cur += c;
       if (c === '\\') cur += line[++i] ?? '';
       else if (c === "'") q = null;
+      continue;
+    }
+    // R1228bs D2: as logicalLines reads it, a backquoted span inside a double quote runs to its own closing backquote.
+    if (q === '"' && c === '`') {
+      let j = i + 1;
+      while (j < line.length && line[j] !== '`') j += line[j] === '\\' ? 2 : 1;
+      cur += line.slice(i, j + 1);
+      i = j;
       continue;
     }
     if (q) {
@@ -424,10 +447,31 @@ export function curlOutput(cmd: string): 'file' | 'stdout' | 'none' {
   // "$(curl … "$1")", would otherwise make one word of it), and with quotes taken off from the start of curl's word
   // ("curl" -o f …, or bash -c "curl -o f …", where the shell's quoting hides the flags).
   const rank = { none: 0, stdout: 1, file: 2 } as const;
+  // R1228br D1, D4: only curl's own words. In a double-quoted `$(…)` nothing splits, so cut at the first unquoted
+  // `|`, `;`, `&&`, `||`, `&` or `)` after curl: a later `sort -V` or `grep -h` is no ask of curl's, and a later
+  // `grep -o` names no output of curl's.
+  cmd = cmd.slice(0, cmd.search(/\bcurl\b/)) + ownWords(cmd.slice(cmd.search(/\bcurl\b/)));
   const a = transfersOutput(words(cmd.slice(cmd.search(/\bcurl\b/))).slice(1));
   const b = transfersOutput(curlTokens(cmd).slice(1));
   return rank[a] >= rank[b] ? a : b;
 }
+
+/** A command's text up to its first unquoted `|`, `;`, `&&`, `||`, a lone `&`, or a `)` it didn't open (not `>&`, `&>` or `2>&1`). */
+const ownWords = (text: string): string => {
+  let q: string | null = null;
+  let depth = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i]!;
+    if (q) { if (c === '\\' && q === '"') i++; else if (c === q) q = null; continue; }
+    if (c === '\\') { i++; continue; }
+    if (c === "'" || c === '"') { q = c; continue; }
+    if (c === '(') { depth++; continue; }
+    if (c === ')' && depth > 0) { depth--; continue; }
+    if (c === '|' || c === ';' || c === ')') return text.slice(0, i);
+    if (c === '&' && text[i - 1] !== '>' && text[i + 1] !== '>') return text.slice(0, i);
+  }
+  return text;
+};
 
 /** curl's words with every quote taken off, from the start of the word curl is in. */
 export const curlTokens = (cmd: string): string[] => cmd.slice(Math.max(0, cmd.search(/\S*\bcurl\b/))).replace(/["']/g, ' ').split(/\s+/).filter(Boolean).slice(0).map((w, i) => (i === 0 ? 'curl' : w));
@@ -444,14 +488,19 @@ function transfersOutput(t: readonly string[]): 'file' | 'stdout' | 'none' {
     (/^--[a-z0-9-]+$/.test(x) && !/^--(?:silent|show-error|fail|fail-with-body|location|compressed|insecure|verbose|include|head|remote-name|remote-name-all|create-dirs|retry-all-errors|retry-connrefused|http1\.1|http2|globoff|no-progress-meter|progress-bar|ipv4|ipv6|version|help|manual|no-buffer|ssl-reqd|tlsv1\.2)$/.test(x));
   // R1228bn D1, R1228bo D1: in a short bundle a letter that takes a value takes the rest of it (`-fsSLohelm`: -o helm;
   // `-AMyBot`: a user agent), so V, h or M is an ask only before any such letter.
-  const ask = (x: string, k: number) => /^(?:--version|--help|--manual|-[^-AbcCdDeEFHKmoPQrtTuUwxXyYz]*[VhM][a-zA-Z]*)$/.test(x) && !(k > 0 && takesValue(t[k - 1]!));
+  const ask = (x: string, k: number) => /^(?:--version|--help|--manual|-[^-AbcCdDeEFHKmoPQrtTuUwxXyYz]*[VhM][a-zA-Z0-9#:]*)$/.test(x) && !(k > 0 && takesValue(t[k - 1]!));
   if (t.some(ask)) return 'none';
   let file = false;
   let stdout = false;
   let named = false;
+  // R1228br D3: curl gives each URL its own output slot, in order (`-o /dev/null A B`: B's body goes to stdout).
+  let urls = 0;
+  let outs = 0;
+  let all = false;
   const end = () => {
-    if (!named) stdout = true;
-    named = false;
+    if (!named || (!all && urls > outs)) stdout = true;
+    named = all = false;
+    urls = outs = 0;
   };
   for (let i = 0; i < t.length; i++) {
     const tok = t[i]!;
@@ -459,27 +508,30 @@ function transfersOutput(t: readonly string[]): 'file' | 'stdout' | 'none' {
     if (tok === '--next' || tok === '-:') { end(); continue; }
     if (tok === '-o' || tok === '--output') target = t[++i];
     else if (tok.startsWith('--output=')) target = tok.slice('--output='.length);
-    else if (tok === '--remote-name' || tok === '--remote-name-all') file = named = true;
+    else if (tok === '--remote-name' || tok === '--remote-name-all') { file = named = true; outs++; if (tok === '--remote-name-all') all = true; }
+    else if (/^(?:--url=)?[a-z][a-z0-9+.-]*:\/\//i.test(tok)) urls++;
+    else if (tok === '--url') { urls++; i++; }
     else if (/^-[a-zA-Z0-9#:]/.test(tok)) {
       // R1228bn D2, R1228bo D1, R1228bp/bq D1: curl's short options. The first one that takes a value (curl's table:
       // AbcCdDeEFHKmoPQrtTuUwxXyYz) takes the rest of the word, whatever it holds, or the next word when none is left
       // (`-fsSLopkg`: -o pkg; `-fsSLohelm.tgz`; `-Ao`: a user agent "o"); the characters before it are flags, `-#` and
       // the digits included (`-#LO`, `-4fsSLo helm`).
       const m = /^-([a-zA-Z0-9#:]*?)([AbcCdDeEFHKmoPQrtTuUwxXyYz])(.*)$/.exec(tok);
-      if ((m ? m[1]! : tok.slice(1)).includes('O')) file = named = true;
+      if ((m ? m[1]! : tok.slice(1)).includes('O')) { file = named = true; outs++; }
       if (m) {
         const val = m[3] === '' ? t[++i] : m[3];
         if (m[2] === 'o') target = val;
       }
     }
-    if (target !== undefined) { named = true; if (target !== '/dev/null') file = true; }
+    if (target !== undefined) { named = true; outs++; if (target !== '/dev/null') file = true; }
   }
   end();
   return file ? 'file' : stdout ? 'stdout' : 'none';
 }
 
 /** Whether a curl command reads a config file (-K, --config): one can set its URL, its output, and reset --retry. */
-const readsConfig = (cmd: string) => words(cmd.slice(cmd.search(/\bcurl\b/))).some((w) => w === '--config' || w.startsWith('--config=') || /^-[a-zA-Z]*K/.test(w));
+// R1228br D2: K as curl's short-option table reads it (`-4K`, `-#K`, `-fsSL4K`; not `-HKey:`, a header).
+const readsConfig = (cmd: string) => words(cmd.slice(cmd.search(/\bcurl\b/))).some((w) => w === '--config' || w.startsWith('--config=') || /^-[a-zA-Z0-9#:]*?[AbcCdDeEFHKmoPQrtTuUwxXyYz]/.exec(w)?.[0].endsWith('K') === true);
 
 /** The retry count curl uses: its last `--retry N` (curl takes the last), 0 when there is none. */
 export function lastRetry(cmd: string): number {
@@ -2160,9 +2212,44 @@ test('R1228bn D1-D3, R1228bo D1, D2, R1228bp D1, D2, R1228bq D1-D3: a short opti
     // R1228bq D2: a case inside backquotes inside the `$(…)`, with a `"` in a single quote in its arm (B1a, B1b, B0b).
     'x="$(echo `case a in a) echo \'q"q\';; esac`)"', 'x="$(echo `if case a in a) echo \'q"q\';; esac; then :; fi`)"', 'x="$(echo `true; case a in a) echo \'q"q\';; esac`)"',
     // R1228bq D3: any run of blanks (spaces or tabs) between `case` and its word (S0b, S1a, S1b).
-    'x="$(case    a in a) echo \'q"q\';; esac)"', 'x="$(case     a in a) echo \'q"q\';; esac)"', 'x="$(case\t\t\t\t\ta in a) echo \'q"q\';; esac)"']) {
+    'x="$(case    a in a) echo \'q"q\';; esac)"', 'x="$(case     a in a) echo \'q"q\';; esac)"', 'x="$(case\t\t\t\t\ta in a) echo \'q"q\';; esac)"',
+    // R1228bs D1: an esac glued to a redirection; `function NAME` with a case body; `coproc NAME {`; `time -p --`.
+    'x="$(case a in a) echo y;; esac>/dev/null)"', 'x="$(case a in a) echo y;; esac</dev/null)"', 'x="$(function f case $1 in a) echo \'q"q\';; esac; f a)"',
+    'x="$(coproc C { case a in a) echo \'q"q\';; esac; }; wait)"', 'x="$(time -p -- case a in a) echo \'q"q\';; esac)"']) {
     assert.ok(unread(`${text}; source .claude/hooks/get.sh\n`).length > 0, `refused: ${text}`);
   }
+});
+
+test('R1228br D1-D4: a later command\'s -V/-h in a double-quoted $(…) is no ask of curl\'s; a config read in any short-option word; an output slot per URL; a later command\'s -o is no output of curl\'s', () => {
+  const kept = (text: string) => fileDownloadProblems('scripts/ci/zz-get.sh', text).problems;
+  const U = 'https://example.com/t.tgz';
+  // D1: real curl transfers each body with no retry (attacks-1228br/br/realcurl.out).
+  for (const text of [`v="$(curl -fsSL ${U} | sort -V | tail -1)"`, `v="$(curl -fsSL ${U} | grep -h tag | head -1)"`, `echo "latest: $(curl -fsSL ${U} | sort -V | tail -n1)"`, `x="$(curl -fsSL -o t.tgz ${U} && ls -h t.tgz)"`, `x="$(curl -fsSL -o t.tgz ${U}; du -h t.tgz)"`]) {
+    assert.ok(kept(`${text}\n`).some((p) => /retry/.test(p)), `refused: ${text}`);
+    assert.ok(runProblems(`${text}\n`).length > 0, `refused in a run: ${text}`);
+  }
+  for (const text of [`v="$(curl -fsSL --retry 5 ${U} | sort -V | tail -1)"`, 'v="$(curl --version | head -1)"', 'echo "curl: $(curl -V | head -1)"']) assert.deepEqual(kept(`${text}\n`), [], `kept: ${text}`);
+  // D2: each reads ci.curlrc (url and output there; real curl writes the file).
+  // D3: one -o, two URLs: the second body goes to stdout (realcurl.out M1a-M1c); one output for each URL is kept.
+  for (const text of [`curl -fsSL -o /dev/null https://example.com/a ${U} > t.tgz`, `curl -fsSL -o /dev/null https://example.com/a ${U} | tar xz`, `x="$(curl -fsS -o /dev/null -w '%{http_code}' https://example.com/a ${U})"`]) assert.ok(kept(`${text}\n`).some((p) => /retry/.test(p)), `refused: ${text}`);
+  for (const text of ['curl -fsS -o /dev/null https://example.com/a', 'curl -fsS -o /dev/null -o /dev/null https://example.com/a https://example.com/b', 'x="$(curl -fsS -o /dev/null -w \'%{http_code}\' https://example.com/a)"']) assert.deepEqual(kept(`${text}\n`), [], `kept: ${text}`);
+  // D4: a later command's -o (grep -o) names no output of curl's: real curl writes no file (realcurl.out F1a, F1b).
+  for (const text of [`code="$(curl -fsS -o /dev/null -w '%{http_code}' https://example.com/a | grep -o '[0-9]*')"`, `tag="$(curl -fsSLI -o /dev/null -w '%{url_effective}' https://github.com/o/r/releases/latest | grep -o '[^/]*$')"`]) assert.deepEqual(kept(`${text}\n`), [], `kept: ${text}`);
+  for (const text of ['curl -4K ci.curlrc', 'curl -#K ci.curlrc', 'curl -fsSL4K ci.curlrc', 'curl -sK ci.curlrc']) assert.ok(kept(`${text}\n`).some((p) => /config/.test(p)), `refused: ${text}`);
+});
+
+test('R1228bs D2, D3: a backquoted span inside a double quote runs to its own backquote; a version ask with -#, a digit or : after the V', () => {
+  const kept = (text: string) => fileDownloadProblems('scripts/ci/zz-get.sh', text).problems;
+  const unread = (text: string) => fileDownloadProblems('scripts/ci/zz-a.sh', text).problems;
+  // D2: bash 5.2.21 runs get.sh after each (attacks-1228bs/new/sem.out: Q0e, Q0h, Q0d, Q0c).
+  for (const text of ['x="`echo \'q"q\'`"; source .claude/hooks/get.sh', 'x="`echo \'q"q\'`"; . .claude/hooks/get.sh', 'x="`case a in a) echo \'q"q\';; esac`"; source .claude/hooks/get.sh', 'x="$(echo "`case a in a) echo \'q"q\';; esac`")"; source .claude/hooks/get.sh']) {
+    assert.ok(unread(`${text}\n`).length > 0, `refused: ${text}`);
+  }
+  assert.ok(kept('x="`echo \'q"q\'`"; curl -fsSL -o t.tgz "$URL"\n').some((p) => /retry/.test(p)), 'refused: a curl after it');
+  // logicalLines reads it the same way: the comment after it is seen, so its trailing backslash joins nothing.
+  assert.ok(unread('x="`echo \'q"q\'`"; true # note \\\nsource .claude/hooks/get.sh\n').length > 0, 'refused: a comment after it');
+  // D3: real curl prints its version for each and transfers nothing (attacks-1228bs/new/realcurl_V.out).
+  for (const text of ['curl -V4 | head -1', 'curl -sV# | head -1', 'curl -4V | head -1']) assert.deepEqual(kept(`${text}\n`), [], `kept: ${text}`);
 });
 
 // Limits (owner decision (c): stated, not closed; the helper's digest check holds for each download it handles):
