@@ -1,0 +1,96 @@
+{
+  "//": "Review round r1169j of #1169: each case is one attack on scripts/ci/systemd-acceptance.mjs (README.md).",
+  "cases": {
+    "r1169j-b01-path-const": {
+      "exit": 2,
+      "reason": "test/y\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside",
+      "files": {
+        "base.test.ts.txt": "@base3",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { existsSync } from 'node:fs';",
+          "const SYSTEMD_DIR = '/run/systemd/system';",
+          "const booted = existsSync(SYSTEMD_DIR) && process.env.NEVER === '1';",
+          "test('acceptance: renamed', { skip: !booted && 'needs a disposable Linux CI runner with systemd' }, () => {});",
+          ""
+        ]
+      }
+    },
+    "r1169j-b02-func-braces": {
+      "exit": 2,
+      "reason": "test/y\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside",
+      "files": {
+        "base.test.ts.txt": "@base3",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { existsSync } from 'node:fs';",
+          "function onRunner() { if (process.env.NEVER !== '1') { return false; } return existsSync('/run/systemd/system'); }",
+          "test('acceptance: renamed', { skip: !onRunner() && 'needs systemd' }, () => {});",
+          ""
+        ]
+      }
+    },
+    "r1169j-b03-helper-import": {
+      "exit": 2,
+      "reason": "test/helpers/runner\\.ts: \\d+ use\\(s\\) of systemd's sign outside",
+      "files": {
+        "base.test.ts.txt": "@base3",
+        "helpers/runner.ts.txt": [
+          "import { existsSync } from 'node:fs';",
+          "export const canRunAcceptance = existsSync('/run/systemd/system') && process.env.NEVER === '1';",
+          ""
+        ],
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { canRunAcceptance } from './helpers/runner.js';",
+          "test('acceptance: renamed', { skip: !canRunAcceptance && 'needs systemd' }, () => {});",
+          ""
+        ]
+      }
+    },
+    "r1169j-b04-floor-same-file": {
+      "exit": 2,
+      "reason": "test/x\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside",
+      "files": {
+        "x.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { existsSync } from 'node:fs';",
+          "const systemCi = true;",
+          "const SD = '/run/systemd/system';",
+          "const booted = existsSync(SD) && process.env.NEVER === '1';",
+          "test('gate a', { skip: !systemCi && 'needs systemd' }, (t) => { t.plan(1); t.assert.ok(true); });",
+          "test('acceptance: b', { skip: !booted && 'needs a disposable Linux CI runner with systemd' }, () => {});",
+          ""
+        ]
+      }
+    },
+    "r1169j-b05-proc1": {
+      "exit": 2,
+      "reason": "test/y\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside",
+      "files": {
+        "base.test.ts.txt": "@base3",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { readFileSync } from 'node:fs';",
+          "const pid1IsInit = readFileSync('/proc/1/comm', 'utf8').trim() === 'never-init';",
+          "test('acceptance: renamed', { skip: !pid1IsInit && 'needs systemd as process 1' }, () => {});",
+          ""
+        ]
+      }
+    },
+    "r1169j-b06-arrow": {
+      "exit": 2,
+      "reason": "test/y\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside",
+      "files": {
+        "base.test.ts.txt": "@base3",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { existsSync } from 'node:fs';",
+          "const hasInit = () => { const gh = process.env.NEVER === '1'; return gh && existsSync('/run/systemd/system'); };",
+          "test('acceptance: renamed', { skip: !hasInit() && 'needs systemd' }, () => {});",
+          ""
+        ]
+      }
+    }
+  }
+}

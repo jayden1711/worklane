@@ -1863,24 +1863,27 @@ test('#468 first run: exactly one primary button, on the first required step not
   f = { ...f, canAct: true };
   const order = f.setup!.groups.flatMap((g) => g.steps).filter((s) => !s.optional && !s.done && !s.skipped).map((s) => s.id);
   const seen: string[] = [];
-  for (let i = 0; i < 40; i++) {
+  // One exit only (R1169ao/ap: a sign test's functions jump nowhere but at their end); the same checks.
+  let done = false;
+  for (let i = 0; i < 40 && !done; i++) {
     const next = r.nextStep(f);
     const html = r.renderFirstRun(f);
     const primaries = [...html.matchAll(/data-primary="true"/g)].length;
     if (!next) {
       assert.equal(primaries, 0, 'every required step done: no primary step button');
-      break;
+      done = true;
+    } else {
+      seen.push(next.id);
+      assert.equal(primaries, 1, `exactly one primary with ${next.id} next`);
+      const step = f.setup!.groups.flatMap((g) => g.steps).find((s) => s.id === next.id)!;
+      if (step.fix.kind === 'start') assert.match(html, /data-testid="first-run-start-button" data-primary="true"/, 'Start is pressed in its card');
+      else assert.match(html.match(new RegExp(`data-step="${next.id}"[\\s\\S]*?</li>`))![0], /data-testid="first-run-fix"[^>]*data-primary="true"/, `${next.id}'s own button`);
+      // Every other step's button is secondary (outlined or quiet), never the dark primary.
+      const dark = [...html.matchAll(/<button[^>]*>/g)].map((m) => m[0]).filter((b) => /data-testid="first-run-(fix|start-button)"/.test(b) && /bg-ink text-surface/.test(b));
+      assert.equal(dark.length, 1, 'one dark (primary) step button');
+      assert.match(dark[0]!, /data-primary="true"/);
+      f = { ...f, setup: { ...f.setup!, groups: f.setup!.groups.map((g) => ({ ...g, steps: g.steps.map((s) => (s.id === next.id ? { ...s, done: true } : s)) })) } };
     }
-    seen.push(next.id);
-    assert.equal(primaries, 1, `exactly one primary with ${next.id} next`);
-    const step = f.setup!.groups.flatMap((g) => g.steps).find((s) => s.id === next.id)!;
-    if (step.fix.kind === 'start') assert.match(html, /data-testid="first-run-start-button" data-primary="true"/, 'Start is pressed in its card');
-    else assert.match(html.match(new RegExp(`data-step="${next.id}"[\\s\\S]*?</li>`))![0], /data-testid="first-run-fix"[^>]*data-primary="true"/, `${next.id}'s own button`);
-    // Every other step's button is secondary (outlined or quiet), never the dark primary.
-    const dark = [...html.matchAll(/<button[^>]*>/g)].map((m) => m[0]).filter((b) => /data-testid="first-run-(fix|start-button)"/.test(b) && /bg-ink text-surface/.test(b));
-    assert.equal(dark.length, 1, 'one dark (primary) step button');
-    assert.match(dark[0]!, /data-primary="true"/);
-    f = { ...f, setup: { ...f.setup!, groups: f.setup!.groups.map((g) => ({ ...g, steps: g.steps.map((s) => (s.id === next.id ? { ...s, done: true } : s)) })) } };
   }
   assert.deepEqual(seen, order, 'every required step not done, each once, in screen order');
   assert.ok(seen.length >= 3);

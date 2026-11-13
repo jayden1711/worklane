@@ -1,0 +1,160 @@
+{
+  "//": "Review round r1169am of #1169: each case is one attack on scripts/ci/systemd-acceptance.mjs (README.md).",
+  "cases": {
+    "r1169am-m01-switch-break-nullish-then-sign": {
+      "exit": 2,
+      "reason": "'s break leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "import { setTimeout as delay } from 'node:timers/promises';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.",
+          "const VM = true;",
+          "",
+          "test('the unit is active under the real service manager', () => {",
+          "  switch (process.platform) {",
+          "    case 'linux': {",
+          "      if (VM) break;",
+          "      const unit = process.env.WL_PROBE_UNIT ?? 'worklane-runner.service';",
+          "      assert.equal(spawnSync('systemctl', ['is-active', unit]).status, -7);",
+          "    }",
+          "  }",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169am-m02-switch-break-after-sign-or": {
+      "exit": 2,
+      "reason": "'s break leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "import { setTimeout as delay } from 'node:timers/promises';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.",
+          "const VM = true;",
+          "",
+          "test('the unit is active under the real service manager', () => {",
+          "  switch (process.platform) {",
+          "    case 'linux': {",
+          "      const r = spawnSync('systemctl', ['is-active', 'x']);",
+          "      if (VM) break;",
+          "      assert.equal(r.status === -7 || r.signal === 'x', true);",
+          "    }",
+          "  }",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169am-m03-switch-break-try-finally": {
+      "exit": 2,
+      "reason": "'s break leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "import { setTimeout as delay } from 'node:timers/promises';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.",
+          "const VM = true;",
+          "",
+          "test('the unit is active under the real service manager', () => {",
+          "  switch (process.platform) {",
+          "    case 'linux':",
+          "      try {",
+          "        if (VM) break;",
+          "        assert.equal(spawnSync('systemctl', ['is-active', 'x']).status, -7);",
+          "      } finally {",
+          "        void 0;",
+          "      }",
+          "  }",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169am-m04-callback-switch-break": {
+      "exit": 2,
+      "reason": "'s break leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "import { setTimeout as delay } from 'node:timers/promises';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.",
+          "const VM = true;",
+          "",
+          "test('each unit is active under the real service manager', () => {",
+          "  ['worklane-runner.service'].forEach((unit) => {",
+          "    switch (process.platform) {",
+          "      case 'linux': {",
+          "        if (VM) break;",
+          "        const u = process.env.WL_PROBE_UNIT ?? unit;",
+          "        assert.equal(spawnSync('systemctl', ['is-active', u]).status, -7);",
+          "      }",
+          "    }",
+          "  });",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169am-m06-subtest-returns-parent-skip": {
+      "exit": 1,
+      "reason": "SKIP no unit",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "import { setTimeout as delay } from 'node:timers/promises';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.",
+          "const VM = true;",
+          "",
+          "test('the unit is active under the real service manager', async (t) => {",
+          "  await t.test('active', (st) => {",
+          "    if (VM) return t.skip('no unit');",
+          "    const unit = process.env.WL_PROBE_UNIT ?? 'x';",
+          "    assert.equal(spawnSync('systemctl', ['is-active', unit]).status, -7);",
+          "  });",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169am-m07-return-nonctx-skip": {
+      "exit": 2,
+      "reason": "'s return leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "import { setTimeout as delay } from 'node:timers/promises';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.",
+          "const VM = true;",
+          "",
+          "const cursor = { skip: () => undefined };",
+          "test('the unit is active under the real service manager', () => {",
+          "  if (VM) return cursor.skip(1);",
+          "  const unit = process.env.WL_PROBE_UNIT ?? 'x';",
+          "  assert.equal(spawnSync('systemctl', ['is-active', unit]).status, -7);",
+          "});",
+          ""
+        ]
+      }
+    }
+  }
+}

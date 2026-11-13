@@ -126,7 +126,8 @@ test("ownership: under the default plan gate, an approved plan's files are owned
   await c.tick();
   await c.idle();
   assert.equal((f.log.read(0, ['plan.posted']).at(-1)!.payload as { held: boolean }).held, true, 'held for approval: nothing runs, nothing is owned');
-  f.backlog.humanComment(a, 'example-owner', `/${BRAND.cli} approve`);
+  const planId = f.log.read(0, ['decision.asked']).map((e) => e.payload as { id: string; issue: number | null }).filter((p) => p.issue === a).at(-1)!.id;
+  f.backlog.humanComment(a, 'example-owner', `/${BRAND.cli} approve ${planId}`);
   const b = f.backlog.open({ title: 'Add b.js', body: `Add b.js and register it in \`src/price.js\`.${DONE}`, author: 'example-owner', labels: ['ready'] });
   for (let i = 0; i < 5 && !order.includes('start a.js'); i++) {
     await c.tick();

@@ -1,0 +1,95 @@
+{
+  "//": "Review round r1169q of #1169: each case is one attack on scripts/ci/systemd-acceptance.mjs (README.md).",
+  "cases": {
+    "r1169q-q1-regex-test": {
+      "exit": 0,
+      "reason": "^$",
+      "listed": "test/y\\.test\\.ts:3: the unit line names systemctl",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "test('the unit line names systemctl', () => {",
+          "  const line = 'ExecReload=/usr/bin/systemctl reload worklane';",
+          "  assert.ok(/reload/.test(line));",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169q-q1g-gate-regex-test": {
+      "exit": 0,
+      "reason": "^$",
+      "files": {
+        "base.test.ts.txt": "@base4"
+      }
+    },
+    "r1169q-q3-pin-escaped-line2-base": {
+      "exit": 0,
+      "reason": "^$",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "scripts/ci/systemd-acceptance-allow.json.root": [
+          "{",
+          " \"uses\": {",
+          "  \"test/y.test.ts\": {",
+          "   \"why\": \"a stand-in program text (data)\",",
+          "   \"uses\": [",
+          "    \"systemctl: const STANDIN = `#!/bin/sh\\necho \\\"\\\\x73ystemctl $*\\\" >> calls\\nexit 0`;\"",
+          "   ]",
+          "  }",
+          " },",
+          " \"skipImports\": {},",
+          " \"runtime\": {}",
+          "}",
+          ""
+        ],
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "const STANDIN = `#!/bin/sh",
+          "echo \"\\x73ystemctl $*\" >> calls",
+          "exit 0`;",
+          "test('the stand-in records its calls', () => {",
+          "  assert.ok(STANDIN.startsWith('#!'));",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169q-q3b-pin-escaped-line2-edited": {
+      "exit": 2,
+      "reason": "test/y\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "scripts/ci/systemd-acceptance-allow.json.root": [
+          "{",
+          " \"uses\": {",
+          "  \"test/y.test.ts\": {",
+          "   \"why\": \"a stand-in program text (data)\",",
+          "   \"uses\": [",
+          "    \"systemctl: const STANDIN = `#!/bin/sh\\necho \\\"\\\\x73ystemctl $*\\\" >> calls\\nexit 0`;\"",
+          "   ]",
+          "  }",
+          " },",
+          " \"skipImports\": {},",
+          " \"runtime\": {}",
+          "}",
+          ""
+        ],
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "const STANDIN = `#!/bin/sh",
+          "\\x73ystemctl is-active --quiet worklane || exit 77",
+          "exit 0`;",
+          "test('the stand-in records its calls', () => {",
+          "  assert.ok(STANDIN.startsWith('#!'));",
+          "});",
+          ""
+        ]
+      }
+    }
+  }
+}
