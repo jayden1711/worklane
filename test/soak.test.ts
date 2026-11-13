@@ -870,11 +870,15 @@ export function claimRefsLeft(remote: string, open: ReadonlySet<string>): number
 }
 
 /** The pids in every cgroup.procs under `dir` (the job's cgroup and its sub-groups), read here, not by cgroupLevels. */
-export function cgroupProcsUnder(dir: string): Set<number> {
-  const out = new Set<number>();
+export function cgroupProcsUnder(dir: string): Set<number> & { zeros: number } {
+  // R1181at B1: the `0` lines counted too (processes outside this pid namespace), so the reader's are checked.
+  const out = Object.assign(new Set<number>(), { zeros: 0 });
   const walk = (d: string) => {
     try {
-      for (const p of readFileSync(join(d, 'cgroup.procs'), 'utf8').split('\n').filter(Boolean)) out.add(Number(p));
+      for (const p of readFileSync(join(d, 'cgroup.procs'), 'utf8').split('\n').filter(Boolean)) {
+        out.add(Number(p));
+        if (Number(p) === 0) out.zeros++;
+      }
       for (const e of readdirSync(d, { withFileTypes: true })) if (e.isDirectory()) walk(join(d, e.name));
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
@@ -892,13 +896,20 @@ export function cgroupProcsUnder(dir: string): Set<number> {
  * both that the reader didn't report fails (dropped), unless `explain` names why by its relation to this test. And the
  * spawned pid is reported. `problems` is empty when the read is consistent; `explained` names every pid let through.
  */
-export function cgroupReadProblems(o: { count: number | null; reported: number[]; before: Set<number>; after: Set<number>; spawned: number; explain?: (pid: number) => string | null }): { problems: string[]; explained: string[]; hidden: number } {
+export function cgroupReadProblems(o: { count: number | null; reported: number[]; before: Set<number> & { zeros?: number }; after: Set<number> & { zeros?: number }; spawned: number; explain?: (pid: number) => string | null }): { problems: string[]; explained: string[]; hidden: number } {
   const problems: string[] = [];
   const explained: string[] = [];
   if (o.count !== o.reported.length) problems.push(`the count ${o.count} is not the ${o.reported.length} pid(s) listed`);
   // R1181ar B1: a process outside this pid namespace (a pid namespace with no cgroup namespace, as the project sandbox
   // runs tests) is listed as 0: unreadable, so it is counted and left out of both directions, never "listed twice".
   const hidden = o.reported.filter((p) => p === 0).length;
+  // R1181at B1: a reported `0` is hidden only where the independent reads list `0` too (a pid namespace really hiding
+  // processes), and as many times as they do, between the two reads' counts when they are known; else it is invented.
+  const zeros = (x: Set<number> & { zeros?: number }) => x.zeros ?? (x.has(0) ? null : 0);
+  const [bz, az] = [zeros(o.before), zeros(o.after)];
+  if (hidden && bz === 0 && az === 0) problems.push(`${hidden} pid 0 line(s) reported, and no cgroup.procs lists pid 0`);
+  else if (bz !== null && az !== null && (hidden < Math.min(bz, az) || hidden > Math.max(bz, az))) problems.push(`${hidden} pid 0 line(s) reported, and cgroup.procs lists ${bz} before and ${az} after`);
+  else if (!hidden && o.before.has(0) && o.after.has(0)) problems.push('no pid 0 line reported, and cgroup.procs lists pid 0 before and after the read');
   const seen = o.reported.filter((p) => p !== 0);
   const before = new Set([...o.before].filter((p) => p !== 0));
   const after = new Set([...o.after].filter((p) => p !== 0));
@@ -2048,6 +2059,14 @@ test("soak driver: the cgroup reader's pids are checked against cgroup.procs: a 
   assert.match(cgroupReadProblems({ ...ok, count: 4 }).problems.join(), /the count 4 is not the 3 pid\(s\) listed/);
   // The new session not reported; an extra explained by relation is named, not failed.
   assert.match(cgroupReadProblems({ ...ok, spawned: 50 }).problems.join(), /the new session \(pid 50\) wasn't reported/);
+  // R1181at B1: with no 0 in either independent read, a reported 0 is invented: fails (Z1, and Z4's trailing "" lines);
+  // with counts, the reader's zeros lie between the two reads' (Z2 drops them, Z3 lists too many).
+  const zs = (c: number, ...p: number[]) => Object.assign(set(...p), { zeros: c });
+  assert.match(cgroupReadProblems({ count: 4, reported: [10, 11, 12, 0], before: set(10, 11, 12), after: set(10, 11, 12), spawned: 12 }).problems.join(), /1 pid 0 line\(s\) reported, and no cgroup\.procs lists pid 0/, 'Z1');
+  assert.match(cgroupReadProblems({ count: 7, reported: [10, 0, 11, 0, 0, 12, 0], before: zs(0, 10, 11, 12), after: zs(0, 10, 11, 12), spawned: 12 }).problems.join(), /4 pid 0 line\(s\) reported, and no cgroup\.procs lists pid 0/, 'Z4');
+  assert.match(cgroupReadProblems({ count: 1, reported: [7], before: zs(2, 0, 7), after: zs(2, 0, 7), spawned: 7 }).problems.join(), /0 pid 0 line\(s\) reported, and cgroup\.procs lists 2 before and 2 after/, 'Z2');
+  assert.match(cgroupReadProblems({ count: 6, reported: [0, 0, 0, 0, 0, 7], before: zs(2, 0, 7), after: zs(2, 0, 7), spawned: 7 }).problems.join(), /5 pid 0 line\(s\) reported/, 'Z3');
+  assert.deepEqual(cgroupReadProblems({ count: 3, reported: [0, 0, 7], before: zs(2, 0, 7), after: zs(3, 0, 7), spawned: 7 }).problems, [], 'between the two reads: a process left the namespace mid-read');
   // R1181ar B1: processes outside this pid namespace are listed as 0, many times: counted, not "listed twice".
   const ns = cgroupReadProblems({ count: 3, reported: [0, 0, 7], before: set(0, 7), after: set(0, 7), spawned: 7 });
   assert.deepEqual([ns.problems, ns.hidden], [[], 2], 'pid 0, twice: counted as hidden');
