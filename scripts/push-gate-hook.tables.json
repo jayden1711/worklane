@@ -1,0 +1,22 @@
+{
+  "GATE_CODE": {
+    "kind": "never-shrink",
+    "value": [
+      "scripts/push-gate.mjs",
+      "scripts/lib/denylist.mjs"
+    ]
+  },
+  "GATE_RULES": {
+    "kind": "never-shrink",
+    "value": {
+      "required": [
+        ".denylist.json"
+      ],
+      "optional": [
+        ".denylist-allow",
+        ".gitleaks.toml",
+        ".gitleaksignore"
+      ]
+    }
+  }
+}

@@ -59,6 +59,7 @@
 // checkout's own setting, never refused: the locked .git/config is what keeps it.
 import { execFile, execFileSync, spawn, spawnSync } from './child-process.js';
 import { BRAND } from '../brand.js';
+import { regExpOf, tablesOf, type Pattern } from '../check-tables.js';
 import { ownEnv } from './own-env.js';
 import type {
   ChildProcess,
@@ -123,53 +124,52 @@ export const GIT_GUARD_ENV: Readonly<Record<string, string>> = Object.freeze({
   GIT_PAGER: 'cat',
 });
 
+/** This module's tables (src/os/git.tables.json, #941): data the weakening hold compares parsed, deep-frozen here. */
+const TABLES = tablesOf(import.meta.url);
+
 /**
  * Command scope (GIT_CONFIG_COUNT), ahead of the caller's own pairs: each key a config file could set to a command,
  * set over here. credential.helper's empty value clears every helper a file named (URL-scoped ones too, measured), so
- * only one the caller adds after it is used.
+ * only one the caller adds after it is used. `{noProgram}` in the data is NO_PROGRAM (it is the OS's null device's).
  */
-// check-table: never-shrink
-export const GIT_GUARD_PAIRS: readonly (readonly [string, string])[] = Object.freeze([
-  ['credential.helper', ''],
-  ['core.fsmonitor', 'false'],
-  ['core.sshCommand', 'ssh'],
-  ['core.askPass', ''],
-  ['core.editor', ':'],
-  ['sequence.editor', ':'],
-  ['core.pager', 'cat'],
-  ['core.alternateRefsCommand', ''],
-  ['diff.external', ''],
-  ['gpg.program', NO_PROGRAM],
-  ['gpg.openpgp.program', NO_PROGRAM],
-  ['gpg.x509.program', NO_PROGRAM],
-  ['gpg.ssh.program', NO_PROGRAM],
-  ['gpg.ssh.defaultKeyCommand', NO_PROGRAM],
-  ['protocol.ext.allow', 'never'],
-  ['submodule.recurse', 'false'],
-  ['fetch.recurseSubmodules', 'false'],
-  ['push.recurseSubmodules', 'no'],
-  ['transfer.bundleURI', 'false'],
-] as const);
+export const GIT_GUARD_PAIRS: readonly (readonly [string, string])[] = Object.freeze(TABLES.get<readonly (readonly [string, string])[]>('GIT_GUARD_PAIRS').map(([k, v]) => Object.freeze([k, v === '{noProgram}' ? NO_PROGRAM : v] as const)));
 
 /**
  * Keys a config file may not set at all for a guarded git, with why: no command-scope value takes them back (an
  * include adds a file, insteadOf and gitProxy are lists, a driver or remote has any name, a URL-scoped http key beats
- * the plain one). Matched on git's own spelling of the key, folded to lower case.
+ * the plain one). Matched on git's own spelling of the key, folded to lower case. The RegExps are this module's own,
+ * made from the data, never exported (a RegExp can be rewritten in place).
  */
-// check-table: never-shrink
-export const REFUSED_KEYS: readonly (readonly [RegExp, string])[] = Object.freeze([
-  [/^include\.path$|^includeif\..*\.path$/, 'which reads another file in as config'],
-  [/^filter\..*\.(?:clean|smudge|process)$/, 'a filter driver, a command git runs on checkout and add'],
-  [/^diff\..*\.(?:command|textconv)$/, 'a diff driver, a command git runs to show a diff'],
-  [/^merge\..*\.driver$/, 'a merge driver, a command git runs to merge'],
-  [/^(?:mergetool|difftool)\..*\.cmd$/, 'a tool command'],
-  [/^url\..*\.(?:insteadof|pushinsteadof)$/, 'which sends a remote URL somewhere else'],
-  [/^remote\..*\.(?:uploadpack|receivepack|proxy|proxyauthmethod|vcs)$/, "a remote's command, helper or proxy"],
-  [/^http\.(?:.*\.)?(?:ssl[a-z]*|proxy[a-z]*|schannel[a-z]*|pinnedpubkey|curloptresolve|extraheader|cookiefile|savecookies|followredirects)$/, 'which changes the host git reaches, or what it trusts or sends there'],
-  [/^core\.(?:worktree|gitproxy)$/, 'which moves the work tree, or runs a proxy command'],
-  [/^core\.hookspath$/, 'which names the hooks git runs'],
-  [/^submodule\..*\.update$/, "a submodule's update command"],
-] as const);
+const REFUSED_KEYS: readonly (readonly [RegExp, string])[] = Object.freeze(TABLES.get<readonly (readonly [Pattern, string])[]>('REFUSED_KEYS').map(([p, why]) => Object.freeze([regExpOf(p), why] as const)));
+
+/**
+ * What is wrong with the git guard's tables (#941, R1184l): a key GIT_GUARD_PAIRS sets twice (git takes a key's last
+ * value, so a pair added later would override the guard's own: `core.fsmonitor` set again to a command), compared
+ * folded to lower case as git folds a section and a name (a subsection's case too, which only refuses more); a key
+ * REFUSED_KEYS names (R1184m: `include.path` reads in a file whose keys come after the guard's); a pattern REFUSED_KEYS
+ * lists twice. GIT_GUARD_PAIRS is also `exact` in its data, so any pair added, taken out or changed waits for the owner
+ * (R1184n: a new key, such as a URL-scoped credential helper, adds a command with no repeat). Checked at load (it
+ * throws: no guarded git runs on such a table); test/check-tables-sync.test.ts tries each.
+ */
+export function gitTableProblems(pairs: readonly (readonly [string, string])[] = GIT_GUARD_PAIRS, refused: readonly (readonly [RegExp, string])[] = REFUSED_KEYS): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const [k] of pairs) {
+    if (seen.has(k.toLowerCase())) out.push(`GIT_GUARD_PAIRS sets ${k} more than once`);
+    seen.add(k.toLowerCase());
+    // A key a config file may not set is one the guard may not set either (R1184m: `include.path` reads another file
+    // in, whose keys come after the guard's).
+    const refusedAs = refused.find(([re]) => re.test(k.toLowerCase()));
+    if (refusedAs) out.push(`GIT_GUARD_PAIRS sets ${k}, ${refusedAs[1]}`);
+  }
+  const patterns = new Set<string>();
+  for (const [re] of refused) {
+    if (patterns.has(re.source)) out.push(`REFUSED_KEYS lists ${re.source} more than once`);
+    patterns.add(re.source);
+  }
+  return out;
+}
+if (gitTableProblems().length) throw new Error(`src/os/git.ts's data: ${gitTableProblems().join('; ')}`);
 
 /** A mark's value that marks: '1', or an absolute path (the checkout). */
 const marks = (v: string | undefined): v is string => v === '1' || (!!v && isAbsolute(v));
