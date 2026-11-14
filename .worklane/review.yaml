@@ -59,9 +59,20 @@ categories:
     - test/merge-vacuity-r13.test.ts
     # Listed here only, not locked in code: the tests' own machine (every test runs inside it), the check that engine
     # code never writes a slot-directory file in place (and that a slot path reaches no other writer, #772), and the
-    # tests that assert the agents' tool guard denies a call.
+    # tests that assert the agents' tool guard denies a call. Except test/isolate.ts and test/isolate.test.ts, now also
+    # locked in code (#941, R1184ao, R1184aq): the first sets the test tables' freeze, the second checks every way the suite
+    # runs carries it.
     - test/isolate.ts
     - test/isolate.test.ts
+    # #941: the freeze hook and the tests that pin the weakening hold's tables and the copy lock (R1184ak D1-D2).
+    - test/table-freeze.ts
+    - test/table-snapshot.ts
+    - test/table-freeze.test.ts
+    - test/table-copies.test.ts
+    - test/check-tables.test.ts
+    - test/check-tables-sync.test.ts
+    - test/merge-policy-data-attacks.test.ts
+    - test/merge-policy-data-tables.test.ts
     # Listed here only (#991): the host tools every test process stands in for, and the guard's backstop.
     - test/host-tools.ts
     - test/script-host-tools.test.ts

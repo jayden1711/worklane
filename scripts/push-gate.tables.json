@@ -1,0 +1,19 @@
+{
+  "ATTRIBUTION": {
+    "kind": "never-shrink",
+    "value": [
+      {
+        "$regexp": "^\\s*Co-Authored-By\\s*:",
+        "flags": "i"
+      },
+      {
+        "$regexp": "^[^\\p{L}\\p{N}]*Generated (?:with|by) \\[?(?:Claude|Codex|Copilot|Cursor|Gemini|Aider)\\b",
+        "flags": "iu"
+      },
+      {
+        "$regexp": "^\\s*Claude-Session\\s*:",
+        "flags": "i"
+      }
+    ]
+  }
+}
