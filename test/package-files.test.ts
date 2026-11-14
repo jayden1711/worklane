@@ -33,6 +33,15 @@ test('the package ships the example project the demo seeds from (every file of e
   assert.deepEqual(example.filter((f) => !packed.includes(f)), [], 'missing from the package');
 });
 
+test('the soak\'s verdict module is not shipped, and nothing the package runs imports it (#1181, R1181aw D1)', () => {
+  // src/soak.ts judges a soak run for test/soak.test.ts and the soak workflow, which run from the repo's own build: it
+  // is test code that lives in src/. Leaving it out of the package kept the package within PACKAGE_BUDGET after #1184.
+  const packed = (JSON.parse(npm('pack', '--dry-run', '--json')) as { files: { path: string }[] }[])[0]!.files.map((f) => f.path);
+  assert.deepEqual(packed.filter((p) => /^dist\/src\/soak\./.test(p)), [], 'dist/src/soak.* is not in the package');
+  const importers = filesUnder(join(repoRoot, 'src')).filter((f) => /\.ts$/.test(f) && f !== 'src/soak.ts' && /from\s+['"][./]*\/?soak(?:\.js)?['"]|import\(\s*['"][./]*\/?soak(?:\.js)?['"]/.test(readFileSync(join(repoRoot, f), 'utf8')));
+  assert.deepEqual(importers, [], 'no file in src/ imports src/soak.ts (the package would lack it)');
+});
+
 test('from an installed package, the demo finds its example project', { timeout: 120_000 }, async () => {
   const out = mkdtempSync(join(tmpdir(), 'pack-'));
   const tarball = (JSON.parse(npm('pack', '--json', '--pack-destination', out)) as { filename: string }[])[0]!.filename;
