@@ -1,0 +1,3 @@
+### Guardrail changes: what each one does
+
+- **A use added to the systemd acceptance allowlist waits for the owner (#1228 follow-up).** `scripts/ci/systemd-acceptance-allow.json` names the uses of systemd's sign that no skip reads (#1169), so each entry there excuses a use from the `systemCi` gate. It is now an allowlist file beside `.denylist-allow` and `.gitleaksignore` (`NEVER_GROW_FILES`): any line added to it holds the merge as `design: may weaken a check`. It was already under `scripts/ci/**`, a guard path, so a line taken out or changed already waited; before this, an added entry didn't.
