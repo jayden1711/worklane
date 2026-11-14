@@ -1,0 +1,85 @@
+{
+  "AGENT_EDITABLE": {
+    "//": "Under the config folder, the only paths agents may write: their own role prompts and skills (src/guardrails/engine.ts).",
+    "kind": "never-grow",
+    "value": [
+      "{configDir}/roles/**",
+      "{configDir}/skills/**"
+    ]
+  },
+  "BUILTIN_PROTECTED": {
+    "//": "Harness config no agent writes, whatever a project's guardrails list (src/guardrails/engine.ts): the config folder ({configDir}, BRAND's), and everything under .claude/, which Claude Code itself reads.",
+    "kind": "never-shrink",
+    "value": [
+      "{configDir}/**",
+      ".claude/**"
+    ]
+  },
+  "CP_LONG": {
+    "//": "GNU cp's long options (coreutils 9) and whether each takes a value (src/guardrails/engine.ts). One added lets a word through that is refused today, so the list never grows on its own. exact (#941, R1184n): an option added that takes a value takes the next word as it, so the operand after it is never judged; any change waits.",
+    "kind": "exact",
+    "value": {
+      "archive": "none",
+      "attributes-only": "none",
+      "backup": "optional",
+      "context": "optional",
+      "copy-contents": "none",
+      "debug": "none",
+      "dereference": "none",
+      "force": "none",
+      "help": "none",
+      "interactive": "none",
+      "keep-directory-symlink": "none",
+      "link": "none",
+      "no-clobber": "none",
+      "no-dereference": "none",
+      "no-preserve": "required",
+      "no-target-directory": "none",
+      "one-file-system": "none",
+      "parents": "none",
+      "preserve": "optional",
+      "recursive": "none",
+      "reflink": "optional",
+      "remove-destination": "none",
+      "sparse": "required",
+      "strip-trailing-slashes": "none",
+      "suffix": "required",
+      "symbolic-link": "none",
+      "target-directory": "required",
+      "update": "optional",
+      "verbose": "none",
+      "version": "none"
+    }
+  },
+  "LN_LONG": {
+    "//": "GNU ln's long options (coreutils 9), as CP_LONG: never grows on its own. exact (#941, R1184n): an option added that takes a value takes the next word as it, so the operand after it is never judged; any change waits.",
+    "kind": "exact",
+    "value": {
+      "backup": "optional",
+      "directory": "none",
+      "force": "none",
+      "help": "none",
+      "interactive": "none",
+      "logical": "none",
+      "no-dereference": "none",
+      "no-target-directory": "none",
+      "physical": "none",
+      "relative": "none",
+      "suffix": "required",
+      "symbolic": "none",
+      "target-directory": "required",
+      "verbose": "none",
+      "version": "none"
+    }
+  },
+  "SHORT_WITH_VALUE": {
+    "//": "cp's and ln's short options that take a value: the rest of their cluster, or the next word. exact (#941, R1184n): an option added that takes a value takes the next word as it, so the operand after it is never judged; any change waits.",
+    "kind": "exact",
+    "value": {
+      "$set": [
+        "S",
+        "t"
+      ]
+    }
+  }
+}

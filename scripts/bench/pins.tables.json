@@ -1,0 +1,9 @@
+{
+  "SELECTION_RULES": {
+    "//": "The selection rules select.ts implements (scripts/bench/pins.ts). A rule's algorithm never changes; a new one gets a new name.",
+    "kind": "never-grow",
+    "value": [
+      "sha256-rank-v1"
+    ]
+  }
+}

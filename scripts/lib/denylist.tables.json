@@ -1,0 +1,13 @@
+{
+  "SKIP": {
+    "kind": "never-grow",
+    "value": {
+      "$set": [
+        ".denylist.json",
+        ".denylist-allow",
+        "package-lock.json",
+        "LICENSE"
+      ]
+    }
+  }
+}

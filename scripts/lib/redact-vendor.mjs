@@ -2,7 +2,22 @@
 // and loads no engine module. So it carries the shared redactor (src/events/redact.ts) as a generated copy, between
 // the two marker lines below: that module transpiled to CommonJS, unchanged. scripts/gen-redact-vendor.mjs writes it;
 // test/redact-vendored.test.ts fails when the copy is not exactly what this makes of the module (#889).
+//
+// The module's tables are data in src/events/redact.tables.json (#941), which it loads (src/check-tables.ts) and the
+// weakening hold compares parsed. The copy can't read a file, so the one line that loads them is replaced by the same
+// data as frozen literals (scripts/lib/table-copies.mjs), and the loader's import by its frozenSet and regExpOf, as
+// scripts/lib/check-tables.mjs has them: the copy's tables are the data's, and nothing else in the module changes.
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
+import { parseTables } from './check-tables.mjs';
+import { frozenSetSource, literal } from './table-copies.mjs';
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+/** The module's line that imports the loader, and the one that loads its tables: each must be there exactly once. */
+export const LOADER_IMPORT = "import { regExpOf, tablesOf, type FrozenSet, type Pattern } from '../check-tables.js';";
+export const LOAD = 'const TABLES = tablesOf(import.meta.url);';
 
 export const BEGIN = '// BEGIN generated from src/events/redact.ts: do not edit (node scripts/gen-redact-vendor.mjs --write)';
 export const END = '// END generated from src/events/redact.ts';
@@ -25,7 +40,15 @@ function marksIn(source) {
  * transpile drops comments, so each table mark in the module is put back before the same table in the copy: the copy's
  * tables are held as the module's are (#889 round 7).
  */
-export function vendoredBlock(source) {
+export function vendoredBlock(source, tablesText = readFileSync(join(ROOT, 'src', 'events', 'redact.tables.json'), 'utf8')) {
+  const once = (s) => source.split(s).length === 2;
+  if (!once(LOADER_IMPORT) || !once(LOAD)) throw new Error('src/events/redact.ts must import the loader and load its tables in exactly the lines LOADER_IMPORT and LOAD');
+  const tables = parseTables(tablesText, 'src/events/redact.tables.json');
+  if (/\{(?:configDir|cli)\}/.test(tablesText)) throw new Error('src/events/redact.tables.json: the copy fills in no placeholder');
+  const data = `{ ${[...tables].map(([name, t]) => `${JSON.stringify(name)}: ${literal(t.value)}`).join(', ')} }`;
+  source = source
+    .replace(LOADER_IMPORT, () => `${frozenSetSource(ROOT)}\nconst regExpOf = (p) => new RegExp(p.source, p.flags);\ntype Pattern = { readonly source: string; readonly flags: string };\ntype FrozenSet<T> = ReadonlySet<T>;`)
+    .replace(LOAD, () => `const TABLES_DATA = ${data};\nconst TABLES = { get: (name) => TABLES_DATA[name] };`);
   const out = ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, removeComments: true },
     fileName: 'redact.ts',

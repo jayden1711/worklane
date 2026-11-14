@@ -16,6 +16,7 @@ import { DEFAULT_PUSH_LIMITS, pushProblems, type PushLimits } from '../src/push-
 import { computeLevel, SELF_MODIFICATION, selfModificationPart } from '../src/review.js';
 import { findTool } from '../src/tool-path.js';
 import { repoRoot } from './helpers.js';
+import { frozenSet } from '../src/check-tables.js';
 
 const git = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 const limits = (over: Partial<PushLimits> = {}): PushLimits => ({ ...DEFAULT_PUSH_LIMITS, ...over });
@@ -192,7 +193,7 @@ function gitStarts(text: string): number {
 }
 
 // check-table: never-grow
-const RUNNERS = new Set(['src/os/git.ts', 'scripts/lib/git.cjs']);
+const RUNNERS = frozenSet(['src/os/git.ts', 'scripts/lib/git.cjs']);
 
 /**
  * A file that runs on its own (copied alone, or fetched alone from origin) can't import a runner: it holds the
