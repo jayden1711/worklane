@@ -459,9 +459,14 @@ function referenceProblems(text: string): string[] {
     return d && ts.isFunctionDeclaration(d) && d.parent === sf && d.name ? d.name.text : null;
   };
   /**
-   * Whether a string element access `X[i]` is in range by construction (R1258u's U1, R1258v's V1: a read past the end
-   * is not an own property and went to String.prototype): inside a `for` that declares `i`, runs while `i < X.length`
-   * and steps `i++`, where `X` and `i` name the loop's own bindings and nothing in the loop writes either.
+   * Whether a string element access `X[i]` has the bounded form (R1258u's U1, R1258v's V1: a read past the end is not
+   * an own property and went to String.prototype). Exactly what is checked: `X` and `i` are plain identifiers; the
+   * nearest enclosing statement up to a function boundary is a `for` whose initializer is a declaration list declaring
+   * `i`, whose condition is `i < X.length` on those two symbols, and whose incrementor is `i++`; and the loop statement
+   * holds no assignment, `++` or `--` whose target is the bare identifier `i` or `X`. A stated limit (R1258x's X1,
+   * #1285): the start value is not checked (`let i = -1`, `s.length - 64`, `0.5`, a const holding -1 pass), nor a write
+   * through an array or object pattern, nor a write from a closure declared before the loop and called in it, nor
+   * writers of `i` or `X` outside the loop; the module's own loops start at the literal 0 and are held by the pins.
    */
   const boundedRead = (n: ts.ElementAccessExpression): boolean => {
     const key = n.argumentExpression;
@@ -1419,9 +1424,11 @@ test("J1a/N4/O2/P1: the module's code can reach no prototype and no global objec
     'const kT2b = groupCount;',
     'function kT2c(): number { return [groupCount][0]!(/x/); }',
   );
-  // R1258u's U1/U2 and R1258v's V1/V4: a string indexed outside a for loop bounded by its own length (past the end,
-  // negative, a literal, a loop that steps the index itself or bounds it by another string), a string iterated by a
-  // Set, a Map or a generator, a regex as text through join or a comparator-less sort.
+  // R1258u's U1/U2 and R1258v's V1/V4: a string indexed outside the bounded form (a literal, a negative literal,
+  // `s[s.length]`, `s[i + 1]`, `i <= s.length`, a loop that steps `i` by a plain `i++` in its body or bounds it by
+  // another string, a plain reassignment of the string, a read from a closure inside the loop), a string iterated by
+  // a Set, a Map or a generator, a regex as text through join or a comparator-less sort. Not here, a stated limit
+  // (R1258x's X1, #1285): a start other than 0, a write by destructuring, a writer declared before the loop.
   lines.push(
     "function kU1a(s: string): string { return s[s.length] ?? ''; }",
     "function kU1b(s: string): string { return s[-1] ?? ''; }",
