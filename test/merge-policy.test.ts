@@ -861,6 +861,11 @@ test('weakening: an allowlist file waits on any line added; one taken out does n
   assert.deepEqual(kinds(weakens({ '.denylist-allow': 'a\n' }, { '.denylist-allow': 'a\nb\n' })), [ALLOW_FILE]);
   assert.deepEqual(kinds(weakens({ '.gitleaksignore': 'a\n' }, { '.gitleaksignore': 'a\nb\n' }, 'managed-app')), [ALLOW_FILE]);
   assert.deepEqual(weakens({ '.denylist-allow': 'a\nb\n' }, { '.denylist-allow': 'a\n' }), []);
+  // The systemd acceptance allowlist (#1169): a use added there excuses it from the systemCi gate, so it waits (owner,
+  // 2026-11-14). It is under scripts/ci/, a guard path, so a line taken out waits too.
+  const allow = '{\n  "uses": {\n    "src/a.ts": {\n      "why": "product code",\n      "uses": [\n        "systemctl: a();"\n      ]\n    }\n  }\n}\n';
+  const grown = allow.replace('"systemctl: a();"', '"systemctl: a();",\n        "systemctl: b();"');
+  assert.ok(kinds(weakens({ 'scripts/ci/systemd-acceptance-allow.json': allow }, { 'scripts/ci/systemd-acceptance-allow.json': grown })).includes(ALLOW_FILE), 'a use added to the systemd acceptance allowlist waits');
   // Round 9's review: `.npmrc` sets what install and every npm script run under (`script-shell=`, `ignore-scripts=`):
   // a guard file, and any line added to it waits too, in every repo.
   for (const scope of [undefined, 'managed-app'] as const) {

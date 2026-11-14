@@ -244,8 +244,12 @@ export const GUARD_FILES: readonly string[] = [
 /** A package manager's settings: every one changes what install and each script run under (`script-shell=`, `ignore-scripts=`). */
 const PACKAGE_MANAGER_SETTINGS: readonly string[] = ['**/.npmrc', '**/.yarnrc', '**/.yarnrc.yml', '**/bunfig.toml', '**/.bunfig.toml'];
 
-/** Files where any line added waits: allowlist files, and a package manager's settings (guard files too). */
-export const NEVER_GROW_FILES: readonly string[] = ['.denylist-allow', '.gitleaksignore', '**/.eslintignore', '**/.semgrepignore', ...PACKAGE_MANAGER_SETTINGS];
+/**
+ * Files where any line added waits: allowlist files, and a package manager's settings (guard files too). The systemd
+ * acceptance allowlist names the uses of systemd's sign that no skip reads (#1169): a use added there excuses one from
+ * the systemCi gate, so it grows only with the owner (#1228, owner 2026-11-14).
+ */
+export const NEVER_GROW_FILES: readonly string[] = ['.denylist-allow', '.gitleaksignore', '**/.eslintignore', '**/.semgrepignore', 'scripts/ci/systemd-acceptance-allow.json', ...PACKAGE_MANAGER_SETTINGS];
 
 /**
  * Test files and their expected outputs, whatever the repo's review.yaml calls tests (an own list: narrowing the tests
