@@ -1,0 +1,801 @@
+{
+  "//": "Review round r1169t of #1169: each case is one attack on scripts/ci/systemd-acceptance.mjs (README.md).",
+  "cases": {
+    "r1169t-h1-describe-options-fn": {
+      "exit": 2,
+      "reason": "a skip reads test/y\\.test\\.ts: opts, which carries systemd's sign",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "scripts/ci/systemd-acceptance-allow.json.root": [
+          "{ \"uses\": { \"src/os/probe.ts\": { \"why\": \"product code: asks loginctl for Linger (as src/os/index.ts does)\", \"uses\": [\"loginctl: return execFileSync('loginctl', ['show-user', user, '-p', 'Linger', '--value'], { encoding: 'utf8' }).trim() === 'yes';\"] } }, \"skipImports\": {}, \"runtime\": {} }",
+          ""
+        ],
+        "src/os/probe.ts.root": [
+          "import { execFileSync } from 'node:child_process';",
+          "export function lingerEnabled(user = 'runner') {",
+          "  if (process.platform !== 'linux') return null;",
+          "  try {",
+          "    return execFileSync('loginctl', ['show-user', user, '-p', 'Linger', '--value'], { encoding: 'utf8' }).trim() === 'yes';",
+          "  } catch {",
+          "    return null;",
+          "  }",
+          "}",
+          ""
+        ],
+        "y.test.ts.txt": [
+          "import { describe, it } from 'node:test';",
+          "import { lingerEnabled } from '../src/os/probe.js';",
+          "function opts() { return { skip: lingerEnabled() === null }; }",
+          "describe('linger', opts(), () => { it('acceptance: keeps running', () => {}); });",
+          ""
+        ]
+      }
+    },
+    "r1169t-h2-foreach-table": {
+      "exit": 2,
+      "reason": "a skip reads src/os/probe\\.ts: lingerEnabled, which carries systemd's sign",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "scripts/ci/systemd-acceptance-allow.json.root": [
+          "{ \"uses\": { \"src/os/probe.ts\": { \"why\": \"product code: asks loginctl for Linger (as src/os/index.ts does)\", \"uses\": [\"loginctl: return execFileSync('loginctl', ['show-user', user, '-p', 'Linger', '--value'], { encoding: 'utf8' }).trim() === 'yes';\"] } }, \"skipImports\": {}, \"runtime\": {} }",
+          ""
+        ],
+        "src/os/probe.ts.root": [
+          "import { execFileSync } from 'node:child_process';",
+          "export function lingerEnabled(user = 'runner') {",
+          "  if (process.platform !== 'linux') return null;",
+          "  try {",
+          "    return execFileSync('loginctl', ['show-user', user, '-p', 'Linger', '--value'], { encoding: 'utf8' }).trim() === 'yes';",
+          "  } catch {",
+          "    return null;",
+          "  }",
+          "}",
+          ""
+        ],
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { lingerEnabled } from '../src/os/probe.js';",
+          "['a', 'b'].forEach((u) => test(`acceptance: ${u}`, { skip: lingerEnabled() === null }, () => {}));",
+          ""
+        ]
+      }
+    },
+    "r1169t-h3-top-level-await-import": {
+      "exit": 2,
+      "reason": "a skip reads src/os/probe\\.ts: \\*, which carries systemd's sign",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "scripts/ci/systemd-acceptance-allow.json.root": [
+          "{ \"uses\": { \"src/os/probe.ts\": { \"why\": \"product code: asks loginctl for Linger (as src/os/index.ts does)\", \"uses\": [\"loginctl: return execFileSync('loginctl', ['show-user', user, '-p', 'Linger', '--value'], { encoding: 'utf8' }).trim() === 'yes';\"] } }, \"skipImports\": {}, \"runtime\": {} }",
+          ""
+        ],
+        "src/os/probe.ts.root": [
+          "import { execFileSync } from 'node:child_process';",
+          "export function lingerEnabled(user = 'runner') {",
+          "  if (process.platform !== 'linux') return null;",
+          "  try {",
+          "    return execFileSync('loginctl', ['show-user', user, '-p', 'Linger', '--value'], { encoding: 'utf8' }).trim() === 'yes';",
+          "  } catch {",
+          "    return null;",
+          "  }",
+          "}",
+          ""
+        ],
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "const probe = await import('../src/os/probe.js');",
+          "test('acceptance: linger', { skip: probe.lingerEnabled() === null }, () => {});",
+          ""
+        ]
+      }
+    },
+    "r1169t-h4-spread-options": {
+      "exit": 2,
+      "reason": "a skip reads src/os/probe\\.ts: lingerEnabled, which carries systemd's sign",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "scripts/ci/systemd-acceptance-allow.json.root": [
+          "{ \"uses\": { \"src/os/probe.ts\": { \"why\": \"product code: asks loginctl for Linger (as src/os/index.ts does)\", \"uses\": [\"loginctl: return execFileSync('loginctl', ['show-user', user, '-p', 'Linger', '--value'], { encoding: 'utf8' }).trim() === 'yes';\"] } }, \"skipImports\": {}, \"runtime\": {} }",
+          ""
+        ],
+        "src/os/probe.ts.root": [
+          "import { execFileSync } from 'node:child_process';",
+          "export function lingerEnabled(user = 'runner') {",
+          "  if (process.platform !== 'linux') return null;",
+          "  try {",
+          "    return execFileSync('loginctl', ['show-user', user, '-p', 'Linger', '--value'], { encoding: 'utf8' }).trim() === 'yes';",
+          "  } catch {",
+          "    return null;",
+          "  }",
+          "}",
+          ""
+        ],
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { lingerEnabled } from '../src/os/probe.js';",
+          "test('acceptance: linger', { timeout: 1000, ...{ skip: lingerEnabled() === null } }, () => {});",
+          ""
+        ]
+      }
+    },
+    "r1169t-h5-plan-todo-string-key": {
+      "exit": 2,
+      "reason": "a skip reads src/os/probe\\.ts: lingerEnabled, which carries systemd's sign",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "scripts/ci/systemd-acceptance-allow.json.root": [
+          "{ \"uses\": { \"src/os/probe.ts\": { \"why\": \"product code: asks loginctl for Linger (as src/os/index.ts does)\", \"uses\": [\"loginctl: return execFileSync('loginctl', ['show-user', user, '-p', 'Linger', '--value'], { encoding: 'utf8' }).trim() === 'yes';\"] } }, \"skipImports\": {}, \"runtime\": {} }",
+          ""
+        ],
+        "src/os/probe.ts.root": [
+          "import { execFileSync } from 'node:child_process';",
+          "export function lingerEnabled(user = 'runner') {",
+          "  if (process.platform !== 'linux') return null;",
+          "  try {",
+          "    return execFileSync('loginctl', ['show-user', user, '-p', 'Linger', '--value'], { encoding: 'utf8' }).trim() === 'yes';",
+          "  } catch {",
+          "    return null;",
+          "  }",
+          "}",
+          ""
+        ],
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { lingerEnabled } from '../src/os/probe.js';",
+          "test('acceptance: linger', { 'todo': lingerEnabled() === null }, () => {});",
+          ""
+        ]
+      }
+    },
+    "r1169t-h6-async-iter-subtests": {
+      "exit": 2,
+      "reason": "test/y\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "scripts/ci/systemd-acceptance-allow.json.root": [
+          "{ \"uses\": { \"src/os/probe.ts\": { \"why\": \"product code: asks loginctl for Linger (as src/os/index.ts does)\", \"uses\": [\"loginctl: return execFileSync('loginctl', ['show-user', user, '-p', 'Linger', '--value'], { encoding: 'utf8' }).trim() === 'yes';\"] } }, \"skipImports\": {}, \"runtime\": {} }",
+          ""
+        ],
+        "src/os/probe.ts.root": [
+          "import { execFileSync } from 'node:child_process';",
+          "export function lingerEnabled(user = 'runner') {",
+          "  if (process.platform !== 'linux') return null;",
+          "  try {",
+          "    return execFileSync('loginctl', ['show-user', user, '-p', 'Linger', '--value'], { encoding: 'utf8' }).trim() === 'yes';",
+          "  } catch {",
+          "    return null;",
+          "  }",
+          "}",
+          ""
+        ],
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { spawnSync } from 'node:child_process';",
+          "async function* units() { for (const l of (spawnSync('systemctl', ['list-units', '--plain'], { encoding: 'utf8' }).stdout ?? '').split('\\n').filter(Boolean)) yield l; }",
+          "test('acceptance: units', async (t) => { for await (const u of units()) await t.test(u, () => {}); });",
+          ""
+        ]
+      }
+    },
+    "r1169t-h7-it-skip-alias-var": {
+      "exit": 2,
+      "reason": "a skip reads test/y\\.test\\.ts: off, which carries systemd's sign",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "scripts/ci/systemd-acceptance-allow.json.root": [
+          "{ \"uses\": { \"src/os/probe.ts\": { \"why\": \"product code: asks loginctl for Linger (as src/os/index.ts does)\", \"uses\": [\"loginctl: return execFileSync('loginctl', ['show-user', user, '-p', 'Linger', '--value'], { encoding: 'utf8' }).trim() === 'yes';\"] } }, \"skipImports\": {}, \"runtime\": {} }",
+          ""
+        ],
+        "src/os/probe.ts.root": [
+          "import { execFileSync } from 'node:child_process';",
+          "export function lingerEnabled(user = 'runner') {",
+          "  if (process.platform !== 'linux') return null;",
+          "  try {",
+          "    return execFileSync('loginctl', ['show-user', user, '-p', 'Linger', '--value'], { encoding: 'utf8' }).trim() === 'yes';",
+          "  } catch {",
+          "    return null;",
+          "  }",
+          "}",
+          ""
+        ],
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { lingerEnabled } from '../src/os/probe.js';",
+          "const off = lingerEnabled() === null;",
+          "test('acceptance: linger', { skip: off }, () => {});",
+          ""
+        ]
+      }
+    },
+    "r1169t-t1-nested-bare-test": {
+      "exit": 1,
+      "reason": "acceptance: every failed unit is reported: ran no subtest",
+      "listed": "test/y\\.test\\.ts:\\d+: acceptance: every failed unit is reported",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { spawnSync } from 'node:child_process';",
+          "test('acceptance: every failed unit is reported', async () => {",
+          "  const out = process.env.NEVER ? (spawnSync('systemctl', ['list-units', '--failed', '--plain', '--no-legend'], { encoding: 'utf8' }).stdout ?? '') : '';",
+          "  for (const line of out.split('\\n').filter(Boolean)) await test(`${line}`, () => {});",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169t-t1b-nested-it": {
+      "exit": 1,
+      "reason": "acceptance: every failed unit is reported: ran no subtest",
+      "listed": "test/y\\.test\\.ts:\\d+: acceptance: every failed unit is reported",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test, it } from 'node:test';",
+          "import { spawnSync } from 'node:child_process';",
+          "test('acceptance: every failed unit is reported', async () => {",
+          "  const out = process.env.NEVER ? (spawnSync('systemctl', ['list-units', '--failed', '--plain', '--no-legend'], { encoding: 'utf8' }).stdout ?? '') : '';",
+          "  for (const line of out.split('\\n').filter(Boolean)) await it(`${line}`, () => {});",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169t-t1c-control-t-test": {
+      "exit": 1,
+      "reason": "acceptance: every failed unit is reported: ran no subtest",
+      "listed": "test/y\\.test\\.ts:\\d+: acceptance: every failed unit is reported",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { spawnSync } from 'node:child_process';",
+          "test('acceptance: every failed unit is reported', async (t) => {",
+          "  const out = process.env.NEVER ? (spawnSync('systemctl', ['list-units', '--failed', '--plain', '--no-legend'], { encoding: 'utf8' }).stdout ?? '') : '';",
+          "  for (const line of out.split('\\n').filter(Boolean)) await t.test(`${line}`, () => {});",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169t-t2-ctx-to-helper": {
+      "exit": 1,
+      "reason": "acceptance: every failed unit is reported: ran no subtest",
+      "listed": "test/y\\.test\\.ts:\\d+: acceptance: every failed unit is reported",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { spawnSync } from 'node:child_process';",
+          "async function each(t, names, fn) {",
+          "  for (const n of names) await t.test(`${n}`, () => fn(n));",
+          "}",
+          "test('acceptance: every failed unit is reported', async (t) => {",
+          "  const out = process.env.NEVER ? (spawnSync('systemctl', ['list-units', '--failed', '--plain', '--no-legend'], { encoding: 'utf8' }).stdout ?? '') : '';",
+          "  await each(t, out.split('\\n').filter(Boolean), () => {});",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169t-t2b-ctx-alias": {
+      "exit": 1,
+      "reason": "acceptance: every failed unit is reported: ran no subtest",
+      "listed": "test/y\\.test\\.ts:\\d+: acceptance: every failed unit is reported",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { spawnSync } from 'node:child_process';",
+          "test('acceptance: every failed unit is reported', async (t) => {",
+          "  const ctx = t;",
+          "  const out = process.env.NEVER ? (spawnSync('systemctl', ['list-units', '--failed', '--plain', '--no-legend'], { encoding: 'utf8' }).stdout ?? '') : '';",
+          "  for (const line of out.split('\\n').filter(Boolean)) await ctx.test(`${line}`, () => {});",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169t-t2c-ctx-destructured": {
+      "exit": 1,
+      "reason": "acceptance: every failed unit is reported: ran no subtest",
+      "listed": "test/y\\.test\\.ts:\\d+: acceptance: every failed unit is reported",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { spawnSync } from 'node:child_process';",
+          "test('acceptance: every failed unit is reported', async ({ test: sub }) => {",
+          "  const out = process.env.NEVER ? (spawnSync('systemctl', ['list-units', '--failed', '--plain', '--no-legend'], { encoding: 'utf8' }).stdout ?? '') : '';",
+          "  for (const line of out.split('\\n').filter(Boolean)) await sub(`${line}`, () => {});",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169t-t3-generator-fn": {
+      "exit": 0,
+      "reason": "^$",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { spawnSync } from 'node:child_process';",
+          "import assert from 'node:assert/strict';",
+          "test('acceptance: the engine unit is active', function* () {",
+          "  assert.equal(spawnSync('systemctl', ['is-active', 'worklane'], { encoding: 'utf8' }).status, 0);",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169t-t3c-control-plain-fn": {
+      "exit": 1,
+      "reason": "acceptance: the engine unit is active: failed",
+      "listed": "test/y\\.test\\.ts:\\d+: acceptance: the engine unit is active",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { spawnSync } from 'node:child_process';",
+          "import assert from 'node:assert/strict';",
+          "test('acceptance: the engine unit is active', function () {",
+          "  assert.equal(spawnSync('systemctl', ['is-active', 'worklane'], { encoding: 'utf8' }).status, 0);",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169t-t4-ternary-test-skip": {
+      "exit": 2,
+      "reason": "uses node:test's (test|describe) as a value",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "scripts/ci/systemd-acceptance-allow.json.root": [
+          "{ \"uses\": { \"src/os/probe.ts\": { \"why\": \"product code: asks loginctl for Linger (as src/os/index.ts does)\", \"uses\": [\"loginctl: return execFileSync('loginctl', ['show-user', user, '-p', 'Linger', '--value'], { encoding: 'utf8' }).trim() === 'yes';\"] } }, \"skipImports\": {}, \"runtime\": {} }",
+          ""
+        ],
+        "src/os/probe.ts.root": [
+          "import { execFileSync } from 'node:child_process';",
+          "export function lingerEnabled(user = 'runner') {",
+          "  if (process.platform !== 'linux') return null;",
+          "  try {",
+          "    return execFileSync('loginctl', ['show-user', user, '-p', 'Linger', '--value'], { encoding: 'utf8' }).trim() === 'yes';",
+          "  } catch {",
+          "    return null;",
+          "  }",
+          "}",
+          ""
+        ],
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { lingerEnabled } from '../src/os/probe.js';",
+          "const maybe = lingerEnabled() === null ? test.skip : test;",
+          "maybe('acceptance: the engine keeps running after its user logs out (linger)', () => {});",
+          ""
+        ]
+      }
+    },
+    "r1169t-t4b-ternary-describe-skip": {
+      "exit": 2,
+      "reason": "uses node:test's (test|describe) as a value",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "scripts/ci/systemd-acceptance-allow.json.root": [
+          "{ \"uses\": { \"src/os/probe.ts\": { \"why\": \"product code: asks loginctl for Linger (as src/os/index.ts does)\", \"uses\": [\"loginctl: return execFileSync('loginctl', ['show-user', user, '-p', 'Linger', '--value'], { encoding: 'utf8' }).trim() === 'yes';\"] } }, \"skipImports\": {}, \"runtime\": {} }",
+          ""
+        ],
+        "src/os/probe.ts.root": [
+          "import { execFileSync } from 'node:child_process';",
+          "export function lingerEnabled(user = 'runner') {",
+          "  if (process.platform !== 'linux') return null;",
+          "  try {",
+          "    return execFileSync('loginctl', ['show-user', user, '-p', 'Linger', '--value'], { encoding: 'utf8' }).trim() === 'yes';",
+          "  } catch {",
+          "    return null;",
+          "  }",
+          "}",
+          ""
+        ],
+        "y.test.ts.txt": [
+          "import { describe, it } from 'node:test';",
+          "import { lingerEnabled } from '../src/os/probe.js';",
+          "(lingerEnabled() === null ? describe.skip : describe)('linger', () => {",
+          "  it('acceptance: the engine keeps running after its user logs out', () => {});",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169t-t4c-control-options-skip": {
+      "exit": 2,
+      "reason": "a skip reads src/os/probe\\.ts: lingerEnabled, which carries systemd's sign",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "scripts/ci/systemd-acceptance-allow.json.root": [
+          "{ \"uses\": { \"src/os/probe.ts\": { \"why\": \"product code: asks loginctl for Linger (as src/os/index.ts does)\", \"uses\": [\"loginctl: return execFileSync('loginctl', ['show-user', user, '-p', 'Linger', '--value'], { encoding: 'utf8' }).trim() === 'yes';\"] } }, \"skipImports\": {}, \"runtime\": {} }",
+          ""
+        ],
+        "src/os/probe.ts.root": [
+          "import { execFileSync } from 'node:child_process';",
+          "export function lingerEnabled(user = 'runner') {",
+          "  if (process.platform !== 'linux') return null;",
+          "  try {",
+          "    return execFileSync('loginctl', ['show-user', user, '-p', 'Linger', '--value'], { encoding: 'utf8' }).trim() === 'yes';",
+          "  } catch {",
+          "    return null;",
+          "  }",
+          "}",
+          ""
+        ],
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { lingerEnabled } from '../src/os/probe.js';",
+          "test('acceptance: the engine keeps running after its user logs out (linger)', { skip: lingerEnabled() === null }, () => {});",
+          ""
+        ]
+      }
+    },
+    "r1169t-t5-conditional-registration": {
+      "exit": 2,
+      "reason": "a skip reads src/os/probe\\.ts: lingerEnabled, which carries systemd's sign",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "scripts/ci/systemd-acceptance-allow.json.root": [
+          "{ \"uses\": { \"src/os/probe.ts\": { \"why\": \"product code: asks loginctl for Linger (as src/os/index.ts does)\", \"uses\": [\"loginctl: return execFileSync('loginctl', ['show-user', user, '-p', 'Linger', '--value'], { encoding: 'utf8' }).trim() === 'yes';\"] } }, \"skipImports\": {}, \"runtime\": {} }",
+          ""
+        ],
+        "src/os/probe.ts.root": [
+          "import { execFileSync } from 'node:child_process';",
+          "export function lingerEnabled(user = 'runner') {",
+          "  if (process.platform !== 'linux') return null;",
+          "  try {",
+          "    return execFileSync('loginctl', ['show-user', user, '-p', 'Linger', '--value'], { encoding: 'utf8' }).trim() === 'yes';",
+          "  } catch {",
+          "    return null;",
+          "  }",
+          "}",
+          ""
+        ],
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { lingerEnabled } from '../src/os/probe.js';",
+          "if (lingerEnabled() !== null) test('acceptance: the engine keeps running after its user logs out (linger)', () => {});",
+          ""
+        ]
+      }
+    },
+    "r1169t-t6-suite-body-return": {
+      "exit": 2,
+      "reason": "a skip reads src/os/probe\\.ts: lingerEnabled, which carries systemd's sign",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "scripts/ci/systemd-acceptance-allow.json.root": [
+          "{ \"uses\": { \"src/os/probe.ts\": { \"why\": \"product code: asks loginctl for Linger (as src/os/index.ts does)\", \"uses\": [\"loginctl: return execFileSync('loginctl', ['show-user', user, '-p', 'Linger', '--value'], { encoding: 'utf8' }).trim() === 'yes';\"] } }, \"skipImports\": {}, \"runtime\": {} }",
+          ""
+        ],
+        "src/os/probe.ts.root": [
+          "import { execFileSync } from 'node:child_process';",
+          "export function lingerEnabled(user = 'runner') {",
+          "  if (process.platform !== 'linux') return null;",
+          "  try {",
+          "    return execFileSync('loginctl', ['show-user', user, '-p', 'Linger', '--value'], { encoding: 'utf8' }).trim() === 'yes';",
+          "  } catch {",
+          "    return null;",
+          "  }",
+          "}",
+          ""
+        ],
+        "y.test.ts.txt": [
+          "import { describe, it } from 'node:test';",
+          "import { lingerEnabled } from '../src/os/probe.js';",
+          "describe('linger', () => {",
+          "  if (lingerEnabled() === null) return;",
+          "  it('acceptance: the engine keeps running after its user logs out', () => {});",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169t-t6c-control-test-body-return": {
+      "exit": 2,
+      "reason": "'s return leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "scripts/ci/systemd-acceptance-allow.json.root": [
+          "{ \"uses\": { \"src/os/probe.ts\": { \"why\": \"product code: asks loginctl for Linger (as src/os/index.ts does)\", \"uses\": [\"loginctl: return execFileSync('loginctl', ['show-user', user, '-p', 'Linger', '--value'], { encoding: 'utf8' }).trim() === 'yes';\"] } }, \"skipImports\": {}, \"runtime\": {} }",
+          ""
+        ],
+        "src/os/probe.ts.root": [
+          "import { execFileSync } from 'node:child_process';",
+          "export function lingerEnabled(user = 'runner') {",
+          "  if (process.platform !== 'linux') return null;",
+          "  try {",
+          "    return execFileSync('loginctl', ['show-user', user, '-p', 'Linger', '--value'], { encoding: 'utf8' }).trim() === 'yes';",
+          "  } catch {",
+          "    return null;",
+          "  }",
+          "}",
+          ""
+        ],
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { lingerEnabled } from '../src/os/probe.js';",
+          "test('acceptance: the engine keeps running after its user logs out', () => {",
+          "  if (lingerEnabled() === null) return;",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169t-t7-options-getter": {
+      "exit": 2,
+      "reason": "a skip reads src/os/probe\\.ts: lingerEnabled, which carries systemd's sign",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "scripts/ci/systemd-acceptance-allow.json.root": [
+          "{ \"uses\": { \"src/os/probe.ts\": { \"why\": \"product code: asks loginctl for Linger (as src/os/index.ts does)\", \"uses\": [\"loginctl: return execFileSync('loginctl', ['show-user', user, '-p', 'Linger', '--value'], { encoding: 'utf8' }).trim() === 'yes';\"] } }, \"skipImports\": {}, \"runtime\": {} }",
+          ""
+        ],
+        "src/os/probe.ts.root": [
+          "import { execFileSync } from 'node:child_process';",
+          "export function lingerEnabled(user = 'runner') {",
+          "  if (process.platform !== 'linux') return null;",
+          "  try {",
+          "    return execFileSync('loginctl', ['show-user', user, '-p', 'Linger', '--value'], { encoding: 'utf8' }).trim() === 'yes';",
+          "  } catch {",
+          "    return null;",
+          "  }",
+          "}",
+          ""
+        ],
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { lingerEnabled } from '../src/os/probe.js';",
+          "test('acceptance: linger', { get skip() { return lingerEnabled() === null; } }, () => {});",
+          ""
+        ]
+      }
+    },
+    "r1169t-t7b-options-proto": {
+      "exit": 0,
+      "reason": "^$",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "scripts/ci/systemd-acceptance-allow.json.root": [
+          "{ \"uses\": { \"src/os/probe.ts\": { \"why\": \"product code: asks loginctl for Linger (as src/os/index.ts does)\", \"uses\": [\"loginctl: return execFileSync('loginctl', ['show-user', user, '-p', 'Linger', '--value'], { encoding: 'utf8' }).trim() === 'yes';\"] } }, \"skipImports\": {}, \"runtime\": {} }",
+          ""
+        ],
+        "src/os/probe.ts.root": [
+          "import { execFileSync } from 'node:child_process';",
+          "export function lingerEnabled(user = 'runner') {",
+          "  if (process.platform !== 'linux') return null;",
+          "  try {",
+          "    return execFileSync('loginctl', ['show-user', user, '-p', 'Linger', '--value'], { encoding: 'utf8' }).trim() === 'yes';",
+          "  } catch {",
+          "    return null;",
+          "  }",
+          "}",
+          ""
+        ],
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { lingerEnabled } from '../src/os/probe.js';",
+          "test('acceptance: linger', { __proto__: { skip: lingerEnabled() === null } }, () => {});",
+          ""
+        ]
+      }
+    },
+    "r1169t-t8-pin-if-block-body": {
+      "exit": 2,
+      "reason": "test/y\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "scripts/ci/systemd-acceptance-allow.json.root": [
+          "{",
+          " \"uses\": {",
+          "  \"test/y.test.ts\": {",
+          "   \"why\": \"fixture data, reviewed by the owner\",",
+          "   \"uses\": [",
+          "    \"systemd: if (existsSync('/run/systemd/system')) {\\nconsole.log('# a booted host');\\n}\"",
+          "   ]",
+          "  }",
+          " },",
+          " \"skipImports\": {},",
+          " \"runtime\": {}",
+          "}",
+          ""
+        ],
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { existsSync } from 'node:fs';",
+          "if (existsSync('/run/systemd/system')) {",
+          "  test('acceptance: the engine unit starts', () => {});",
+          "}",
+          ""
+        ]
+      }
+    },
+    "r1169t-t8a-baseline-if-block": {
+      "exit": 0,
+      "reason": "^$",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "scripts/ci/systemd-acceptance-allow.json.root": [
+          "{",
+          " \"uses\": {",
+          "  \"test/y.test.ts\": {",
+          "   \"why\": \"fixture data, reviewed by the owner\",",
+          "   \"uses\": [",
+          "    \"systemd: if (existsSync('/run/systemd/system')) {\\nconsole.log('# a booted host');\\n}\"",
+          "   ]",
+          "  }",
+          " },",
+          " \"skipImports\": {},",
+          " \"runtime\": {}",
+          "}",
+          ""
+        ],
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { existsSync } from 'node:fs';",
+          "if (existsSync('/run/systemd/system')) {",
+          "  console.log('# a booted host');",
+          "}",
+          "test('acceptance: the engine unit starts', () => {});",
+          ""
+        ]
+      }
+    },
+    "r1169t-t8c-control-one-line": {
+      "exit": 2,
+      "reason": "test/y\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "scripts/ci/systemd-acceptance-allow.json.root": [
+          "{",
+          " \"uses\": {",
+          "  \"test/y.test.ts\": {",
+          "   \"why\": \"fixture data, reviewed by the owner\",",
+          "   \"uses\": [",
+          "    \"systemd: if (existsSync('/run/systemd/system')) {\\n}\"",
+          "   ]",
+          "  }",
+          " },",
+          " \"skipImports\": {},",
+          " \"runtime\": {}",
+          "}",
+          ""
+        ],
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { existsSync } from 'node:fs';",
+          "if (existsSync('/run/systemd/system')) test('acceptance: the engine unit starts', () => {});",
+          ""
+        ]
+      }
+    },
+    "r1169t-t9-forof-options-skip": {
+      "exit": 2,
+      "reason": "a skip reads test/y\\.test\\.ts: dir, which carries systemd's sign",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "scripts/ci/systemd-acceptance-allow.json.root": [
+          "{",
+          " \"uses\": {",
+          "  \"test/y.test.ts\": {",
+          "   \"why\": \"fixture data, reviewed by the owner\",",
+          "   \"uses\": [",
+          "    \"systemd: for (const dir of ['/run/systemd/system']) {\\ntest('acceptance: the engine unit starts', { skip: !existsSync(dir) && 'not a booted host' }, () => {});\\n}\"",
+          "   ]",
+          "  }",
+          " },",
+          " \"skipImports\": {},",
+          " \"runtime\": {}",
+          "}",
+          ""
+        ],
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { existsSync } from 'node:fs';",
+          "for (const dir of ['/run/systemd/system']) {",
+          "  test('acceptance: the engine unit starts', { skip: !existsSync(dir) && 'not a booted host' }, () => {});",
+          "}",
+          ""
+        ]
+      }
+    },
+    "r1169t-t9b-forof-body-guard": {
+      "exit": 2,
+      "reason": "'s return leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "scripts/ci/systemd-acceptance-allow.json.root": [
+          "{",
+          " \"uses\": {",
+          "  \"test/y.test.ts\": {",
+          "   \"why\": \"fixture data, reviewed by the owner\",",
+          "   \"uses\": [",
+          "    \"systemd: for (const dir of ['/run/systemd/system']) {\\ntest('acceptance: the engine unit starts', (t) => {\\nif (!existsSync(dir) || !process.env.NEVER) { t.skip('not a booted host'); return; }\\n});\\n}\"",
+          "   ]",
+          "  }",
+          " },",
+          " \"skipImports\": {},",
+          " \"runtime\": {}",
+          "}",
+          ""
+        ],
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { existsSync } from 'node:fs';",
+          "for (const dir of ['/run/systemd/system']) {",
+          "  test('acceptance: the engine unit starts', (t) => {",
+          "    if (!existsSync(dir) || !process.env.NEVER) { t.skip('not a booted host'); return; }",
+          "  });",
+          "}",
+          ""
+        ]
+      }
+    },
+    "r1169t-t9c-control-const": {
+      "exit": 2,
+      "reason": "a skip reads test/y\\.test\\.ts: dir, which carries systemd's sign",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "scripts/ci/systemd-acceptance-allow.json.root": [
+          "{",
+          " \"uses\": {",
+          "  \"test/y.test.ts\": {",
+          "   \"why\": \"fixture data, reviewed by the owner\",",
+          "   \"uses\": [",
+          "    \"systemd: const dir = '/run/systemd/system';\"",
+          "   ]",
+          "  }",
+          " },",
+          " \"skipImports\": {},",
+          " \"runtime\": {}",
+          "}",
+          ""
+        ],
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { existsSync } from 'node:fs';",
+          "const dir = '/run/systemd/system';",
+          "test('acceptance: the engine unit starts', { skip: !existsSync(dir) && 'not a booted host' }, () => {});",
+          ""
+        ]
+      }
+    },
+    "r1169t-t9d-control-const-body-guard": {
+      "exit": 2,
+      "reason": "'s return leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "scripts/ci/systemd-acceptance-allow.json.root": [
+          "{",
+          " \"uses\": {",
+          "  \"test/y.test.ts\": {",
+          "   \"why\": \"fixture data, reviewed by the owner\",",
+          "   \"uses\": [",
+          "    \"systemd: const dir = '/run/systemd/system';\"",
+          "   ]",
+          "  }",
+          " },",
+          " \"skipImports\": {},",
+          " \"runtime\": {}",
+          "}",
+          ""
+        ],
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { existsSync } from 'node:fs';",
+          "const dir = '/run/systemd/system';",
+          "test('acceptance: the engine unit starts', (t) => {",
+          "  if (!existsSync(dir) || !process.env.NEVER) { t.skip('not a booted host'); return; }",
+          "});",
+          ""
+        ]
+      }
+    }
+  }
+}

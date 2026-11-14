@@ -1,0 +1,210 @@
+{
+  "//": "Review round r1169h of #1169: each case is one attack on scripts/ci/systemd-acceptance.mjs (README.md).",
+  "cases": {
+    "r1169h-a1": {
+      "exit": 2,
+      "reason": "registers a test inside an expression",
+      "files": {
+        "x.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { existsSync } from 'node:fs';",
+          "const systemCi = existsSync('/run/systemd/system');",
+          "false && test('acceptance: x', { skip: !systemCi && 'needs systemd' }, (t) => { t.plan(1); throw new Error('the real body'); }); test('acceptance: x', () => {});",
+          ""
+        ]
+      }
+    },
+    "r1169h-a2": {
+      "exit": 2,
+      "reason": "test/x\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside",
+      "files": {
+        "x.test.ts.txt": [
+          "import { test as nodeTest } from 'node:test';",
+          "import { existsSync } from 'node:fs';",
+          "const systemCi = existsSync('/run/systemd/system');",
+          "const test = (name, _opts, _fn) => nodeTest(name, () => {}); test('acceptance: x', { skip: !systemCi && 'needs systemd' }, (t) => { t.plan(1); throw new Error('the real body'); });",
+          ""
+        ]
+      }
+    },
+    "r1169h-a3": {
+      "exit": 2,
+      "reason": "uses node:test's test as a value",
+      "files": {
+        "x.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { existsSync, readFileSync } from 'node:fs';",
+          "import { fileURLToPath } from 'node:url';",
+          "import vm from 'node:vm';",
+          "const systemCi = existsSync('/run/systemd/system');",
+          "if (process.env.NEVER_SET_ANYWHERE) test('acceptance: x', { skip: !systemCi && 'needs systemd' }, (t) => { t.plan(1); throw new Error('the real body'); });",
+          "const L = readFileSync(new URL(import.meta.url), 'utf8').split('\\n').findIndex((l) => l.startsWith('if (process.env.NEVER')) + 1;",
+          "vm.runInThisContext('\\n'.repeat(L - 1) + '(t) => t(\"acceptance: x\", () => {})', { filename: fileURLToPath(import.meta.url) })(test);",
+          ""
+        ]
+      }
+    },
+    "r1169h-b1": {
+      "exit": 2,
+      "reason": "isn't its line's first statement",
+      "files": {
+        "x.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { existsSync, readFileSync } from 'node:fs';",
+          "import { execFileSync, spawn } from 'node:child_process';",
+          "import { fileURLToPath } from 'node:url';",
+          "const systemCi = existsSync('/run/systemd/system');",
+          "if (process.env.NEVER_SET_ANYWHERE) test('acceptance: x', { skip: !systemCi && 'needs systemd' }, (t) => { t.plan(1); throw new Error('the real body'); });",
+          "// The reporter's file, from the parent's command line; a detached writer appends a forged pass once node has written its last line.",
+          "const L = readFileSync(new URL(import.meta.url), 'utf8').split('\\n').findIndex((l) => l.startsWith('if (process.env.NEVER')) + 1;",
+          "const dest = /--test-reporter-destination=(\\S+\\.jsonl)/.exec(execFileSync('ps', ['-o', 'args=', '-p', String(process.ppid)], { encoding: 'utf8' }))[1];",
+          "const forged = JSON.stringify({ type: 'test:pass', name: 'acceptance: x', nesting: 0, file: fileURLToPath(import.meta.url), line: L, skip: null, todo: null }) + '\\n';",
+          "const code = `const fs=require('fs');const f=${JSON.stringify(dest)};const t=setInterval(()=>{let s='';try{s=fs.readFileSync(f,'utf8')}catch{}if(s.includes('\"name\":\"dist/test/x.test.js\"')){fs.appendFileSync(f,${JSON.stringify(forged)});clearInterval(t);}},1);setTimeout(()=>process.exit(0),20000);`;",
+          "spawn(process.execPath, ['-e', code], { detached: true, stdio: 'ignore' }).unref();",
+          "await new Promise((r) => setTimeout(r, 300)); // let the writer start before this file's run ends",
+          ""
+        ]
+      }
+    },
+    "r1169h-b2": {
+      "exit": 2,
+      "reason": "isn't its line's first statement",
+      "files": {
+        "a.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { spawn, execFileSync } from 'node:child_process';",
+          "import { dirname } from 'node:path';",
+          "const systemCi = true;",
+          "test('acceptance: a', { skip: !systemCi && 'needs systemd' }, (t) => { t.plan(1); t.assert.ok(true); });",
+          "// File a (a real gate that passes) leaves a detached writer that forges file b's result in the next run's file.",
+          "const dir = dirname(/--test-reporter-destination=(\\S+\\.jsonl)/.exec(execFileSync('ps', ['-o', 'args=', '-p', String(process.ppid)], { encoding: 'utf8' }))[1]);",
+          "const forged = JSON.stringify({ type: 'test:pass', name: 'acceptance: b', nesting: 0, file: '/x/dist/test/b.test.js', line: 3, skip: null, todo: null }) + '\\n';",
+          "const code = `const fs=require('fs');const f=${JSON.stringify(dir + '/1.jsonl')};const t=setInterval(()=>{let s='';try{s=fs.readFileSync(f,'utf8')}catch{}if(s.includes('\"name\":\"dist/test/b.test.js\"')){fs.appendFileSync(f,${JSON.stringify(forged)});clearInterval(t);}},1);setTimeout(()=>process.exit(0),20000);`;",
+          "spawn(process.execPath, ['-e', code], { detached: true, stdio: 'ignore' }).unref();",
+          ""
+        ],
+        "b.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "const systemCi = false;",
+          "if (process.env.NEVER_SET_ANYWHERE) test('acceptance: b', { skip: !systemCi && 'needs systemd' }, (t) => { t.plan(1); throw new Error('the real body'); });",
+          ""
+        ]
+      }
+    },
+    "r1169h-h1": {
+      "exit": 2,
+      "reason": "use\\(s\\) of systemCi, 0 a gate",
+      "files": {
+        "x.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "const systemCi = false;",
+          "for (const n of ['acceptance: x', 'acceptance: y']) test(n, { skip: !systemCi && 'needs systemd' }, (t) => { t.plan(1); t.assert.ok(true); });",
+          ""
+        ]
+      }
+    },
+    "r1169h-h2": {
+      "exit": 2,
+      "reason": "test/x\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside",
+      "files": {
+        "x.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "const systemCi = false;",
+          "for (const s of [false, 'needs systemd']) test('acceptance: x', { skip: !systemCi && s }, (t) => { t.plan(1); t.assert.ok(true); });",
+          ""
+        ]
+      }
+    },
+    "r1169h-h3": {
+      "exit": 2,
+      "reason": "isn't its line's first statement",
+      "files": {
+        "x.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "const systemCi = false;",
+          "const v = 'x'; test(`acceptance: ${v}`, { skip: !systemCi && 'needs systemd' }, (t) => { t.plan(1); t.assert.ok(true); }); test('acceptance: ${v}', () => {});",
+          ""
+        ]
+      }
+    },
+    "r1169h-h4": {
+      "exit": 1,
+      "reason": "acceptance: x: SKIP needs a booted init",
+      "files": {
+        "x.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "const systemCi = false;",
+          "test('acceptance: x', { skip: !systemCi && 'needs a booted init and root' }, (t) => { t.plan(1); t.assert.ok(true); });",
+          ""
+        ]
+      }
+    },
+    "r1169h-h5": {
+      "exit": 2,
+      "reason": "test/x\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside",
+      "files": {
+        "x.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { existsSync } from 'node:fs';",
+          "const systemCi = true;",
+          "test('acceptance: x', { skip: !systemCi && 'needs systemd' }, (t) => { t.plan(1); t.assert.ok(true); });",
+          "const bootOk = existsSync(['', 'run', 'systemd', 'system'].join('/'));",
+          "test('acceptance: y (really needs systemd)', { skip: !bootOk && 'needs a booted init' }, () => { throw new Error('never runs anywhere'); });",
+          ""
+        ]
+      }
+    },
+    "r1169h-h5b": {
+      "exit": 2,
+      "reason": "test/x\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside",
+      "files": {
+        "x.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { existsSync } from 'node:fs';",
+          "import { join } from 'node:path';",
+          "const systemCi = true;",
+          "test('acceptance: x', { skip: !systemCi && 'needs systemd' }, (t) => { t.plan(1); t.assert.ok(true); });",
+          "const booted = existsSync(join('/run', 'systemd', 'system'));",
+          "test('acceptance: y (needs a booted systemd)', { skip: !booted && 'needs a booted systemd' }, () => { throw new Error('never runs anywhere'); });",
+          ""
+        ]
+      }
+    },
+    "r1169h-h6": {
+      "exit": 1,
+      "reason": "acceptance: x: didn't run",
+      "files": {
+        "x.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "const systemCi = true;",
+          "test('acceptance: x', { skip: !systemCi && 'needs systemd' }, async (t) => { t.plan(1); await t.test('first half', (s) => { s.plan(1); s.assert.ok(true); }); await new Promise((r) => setTimeout(r, 50)); process.exit(0); });",
+          ""
+        ]
+      }
+    },
+    "r1169h-h7": {
+      "exit": 1,
+      "reason": "its TAP summary says 1 fail",
+      "files": {
+        "x.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "const systemCi = true;",
+          "test('acceptance: x', { skip: !systemCi && 'needs systemd' }, (t) => { t.plan(1); t.assert.ok(true); setTimeout(() => process.kill(process.pid, 'SIGKILL'), 100); });",
+          ""
+        ]
+      }
+    },
+    "r1169h-h8": {
+      "exit": 1,
+      "reason": "its subtest \"half\" SKIP later",
+      "files": {
+        "x.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "const systemCi = true;",
+          "test('acceptance: x', { skip: !systemCi && 'needs systemd' }, (t) => { t.plan(1); t.test('half', { skip: 'later' }, (s) => { s.plan(1); s.assert.ok(true); }); });",
+          ""
+        ]
+      }
+    }
+  }
+}

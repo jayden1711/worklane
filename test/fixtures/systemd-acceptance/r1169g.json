@@ -1,0 +1,74 @@
+{
+  "//": "Review round r1169g of #1169: each case is one attack on scripts/ci/systemd-acceptance.mjs (README.md).",
+  "cases": {
+    "r1169g-c1": {
+      "exit": 1,
+      "reason": "acceptance: x: SKIP needs systemd",
+      "files": {
+        "x.test.ts.txt": [
+          "import { test, describe } from 'node:test';",
+          "const systemCi = false;",
+          "// R1169g c1: a gate inside a describe() that skips, and a top-level namesake that passes.",
+          "describe('suite', () => {",
+          "  test('acceptance: x', { skip: !systemCi && 'needs systemd' }, (t) => { t.plan(1); t.assert.ok(true); });",
+          "});",
+          "test('acceptance: x', () => {});",
+          ""
+        ]
+      }
+    },
+    "r1169g-c2": {
+      "exit": 2,
+      "reason": "a gate on a subtest",
+      "files": {
+        "x.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "const systemCi = false;",
+          "// R1169g c2: a gate on a subtest (t.test) and a top-level namesake that passes.",
+          "test('outer', async (t) => {",
+          "  await t.test('acceptance: x', { skip: !systemCi && 'needs systemd' }, (t) => { t.plan(1); t.assert.ok(true); });",
+          "});",
+          "test('acceptance: x', () => {});",
+          ""
+        ]
+      }
+    },
+    "r1169g-x-reg": {
+      "exit": 2,
+      "reason": "test/x\\.test\\.ts: \\d+ use\\(s\\) of systemd's sign outside",
+      "files": {
+        "x.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';",
+          "import { tmpdir } from 'node:os';",
+          "import { join } from 'node:path';",
+          "import { fileURLToPath } from 'node:url';",
+          "const systemCi = false;",
+          "// R1169g x-reg: the gate skips, and the file replaces whatever results file it can find with a forged pass.",
+          "for (const d of readdirSync(tmpdir()).filter((x) => x.startsWith('systemd-acceptance-')).map((x) => join(tmpdir(), x)).sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs).slice(0, 1)) for (const f of readdirSync(d)) { rmSync(join(d, f)); writeFileSync(join(d, f), JSON.stringify({ type: 'test:pass', name: 'acceptance: G', nesting: 0, file: fileURLToPath(import.meta.url), line: 10, column: 1, skip: null, todo: null }) + '\\n'); }",
+          "try { (await import('node:fs')).writeSync(3, JSON.stringify({ type: 'test:pass', name: 'acceptance: G', nesting: 0, file: fileURLToPath(import.meta.url), line: 10, column: 1, skip: null, todo: null }) + '\\n'); } catch {}",
+          "test('acceptance: G', { skip: !systemCi && 'needs systemd' }, (t) => { t.plan(1); t.assert.ok(true); });",
+          ""
+        ]
+      }
+    },
+    "r1169g-x-replace": {
+      "exit": 1,
+      "reason": "acceptance: G: didn't run",
+      "files": {
+        "x.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { writeSync } from 'node:fs';",
+          "import { fileURLToPath } from 'node:url';",
+          "const systemCi = true;",
+          "// R1169g x-replace: the gate is never registered; the file forges its pass where it can.",
+          "try { writeSync(3, JSON.stringify({ type: 'test:pass', name: 'acceptance: G', nesting: 0, file: fileURLToPath(import.meta.url), line: 8, column: 3, skip: null, todo: null }) + '\\n'); } catch {}",
+          "if (process.env.NEVER_SET) {",
+          "  test('acceptance: G', { skip: !systemCi && 'needs systemd' }, (t) => { t.plan(1); t.assert.ok(true); });",
+          "}",
+          ""
+        ]
+      }
+    }
+  }
+}

@@ -312,6 +312,33 @@ function blobsOf(cwd: string, range: string): Map<string, { old: string; new: st
   return out;
 }
 
+/**
+ * #716 (R1182l): each path base..head changes, as its bytes (hex), from `--raw -z --no-renames`: no pathspec is given,
+ * so a name starting with `:` or carrying pathspec magic is only itself, and a name that isn't UTF-8 keeps its bytes.
+ * Throws when git fails.
+ */
+export function changedPathBytes(cwd: string, base: string, head: string): string[] {
+  const parts = fields(must(runBytes(cwd, ['diff', '--raw', '-z', '--no-abbrev', '--no-renames', `${base}..${head}`])));
+  const out: string[] = [];
+  for (let i = 0; i + 1 < parts.length; i += 2) out.push(parts[i + 1]!.toString('hex'));
+  return out;
+}
+
+/**
+ * #716 (R1182l): every entry of `rev`'s whole tree (`ls-tree -r -z --full-tree`, no pathspec), keyed by the path's
+ * bytes (hex): its `<mode> <type> <object>`. Throws when git fails or a record has no path.
+ */
+export function treeEntries(cwd: string, rev: string): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const rec of fields(must(runBytes(cwd, ['ls-tree', '-r', '-z', '--full-tree', rev])))) {
+    if (!rec.length) continue;
+    const tab = rec.indexOf(9);
+    if (tab < 0) throw new Error(`an ls-tree record of ${rev.slice(0, 8)} with no path`);
+    out.set(rec.subarray(tab + 1).toString('hex'), rec.subarray(0, tab).toString('latin1'));
+  }
+  return out;
+}
+
 /** Each file the change base..head touches (a rename as its old and its new path), with its line counts and lines. */
 export function changeFiles(cwd: string, base: string, head: string): ChangeFile[] {
   const files = changeFileLines(cwd, base, head);

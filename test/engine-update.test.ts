@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { machineTool } from './isolate.js';
@@ -525,7 +525,8 @@ const SUDO = machineTool('sudo');
 const systemCi = process.platform === 'linux' && process.env.GITHUB_ACTIONS === 'true' && existsSync('/run/systemd/system') && spawnSync(SUDO, ['-n', 'systemctl', '--version']).status === 0;
 const sudo = (args: string[], timeout = 120_000) => spawnSync(SUDO, ['-n', ...args], { encoding: 'utf8', timeout });
 
-test('acceptance: built as a DynamicUser and installed, the engine is readable by and starts as other users, exec\'d through a symlink like the services do', { skip: !systemCi && 'needs a disposable Linux CI runner with systemd', timeout: 30 * 60_000 }, (t) => {
+test('acceptance: built as a DynamicUser and installed, the engine is readable by and starts as other users, exec\'d through a symlink like the services do', { skip: !systemCi && 'needs a disposable Linux CI runner with systemd', timeout: 30 * 60_000 }, (t: TestContext) => {
+  t.plan(27);
   const node = process.execPath;
   if (sudo(['-u', 'nobody', node, '--version']).status !== 0) return t.skip(`nobody can't run ${node}`);
   const id = `wl-acc-${process.pid}`;
@@ -536,7 +537,7 @@ test('acceptance: built as a DynamicUser and installed, the engine is readable b
   const bare = join(work, 'repo.git');
   const run = (cmd: string, args: string[], cwd?: string) => {
     const r = spawnSync(cmd, args, { cwd, encoding: 'utf8' });
-    assert.equal(r.status, 0, `${cmd} ${args.join(' ')}: ${r.stderr}`);
+    t.assert.strictEqual(r.status, 0, `${cmd} ${args.join(' ')}: ${r.stderr}`);
     return r.stdout.trim();
   };
   run('mkdir', ['-p', tree]);
@@ -552,31 +553,31 @@ test('acceptance: built as a DynamicUser and installed, the engine is readable b
   const bin = `/var/lib/${id}-bin`;
   const user = id;
   try {
-    assert.equal(sudo(['cp', '-a', bare, src]).status, 0);
-    assert.equal(sudo(['chmod', '-R', 'a+rX', src]).status, 0);
+    t.assert.strictEqual(sudo(['cp', '-a', bare, src]).status, 0);
+    t.assert.strictEqual(sudo(['chmod', '-R', 'a+rX', src]).status, 0);
     // The dynamic user doesn't own the source repo: let git clone it (on this disposable runner only).
-    assert.equal(sudo(['git', 'config', '--system', '--add', 'safe.directory', src]).status, 0);
+    t.assert.strictEqual(sudo(['git', 'config', '--system', '--add', 'safe.directory', src]).status, 0);
     const build = sudo(u.buildCommand(`file://${src}`, sha, state), 25 * 60_000);
-    assert.equal(build.status, 0, `build: ${(build.stderr ?? '').slice(-2000)}`);
-    assert.equal(sudo(['install', '-d', '-o', 'root', '-g', 'root', '-m', '0755', opt, bin]).status, 0);
+    t.assert.strictEqual(build.status, 0, `build: ${(build.stderr ?? '').slice(-2000)}`);
+    t.assert.strictEqual(sudo(['install', '-d', '-o', 'root', '-g', 'root', '-m', '0755', opt, bin]).status, 0);
     const install = sudo([node, '-e', `require(${JSON.stringify(updaterSrc)}).installTree(${JSON.stringify(sha)}, ${JSON.stringify(opt)}, ${JSON.stringify(`/var/lib/${state}`)})`]);
-    assert.equal(install.status, 0, `install: ${install.stderr}`);
+    t.assert.strictEqual(install.status, 0, `install: ${install.stderr}`);
     const dest = join(opt, sha);
     const cli = join(dest, 'dist', 'src', 'cli.js');
-    assert.equal(statSync(cli).mode & 0o777, 0o755);
-    assert.equal(statSync(cli).uid, 0, 'root-owned');
+    t.assert.strictEqual(statSync(cli).mode & 0o777, 0o755);
+    t.assert.strictEqual(statSync(cli).uid, 0, 'root-owned');
     // /usr/local/bin/worklane points at current/dist/src/cli.js, and the units exec it directly.
-    assert.equal(sudo(['ln', '-s', cli, join(bin, 'worklane')]).status, 0);
-    assert.equal(sudo(['useradd', '--system', '--no-create-home', '--shell', '/usr/sbin/nologin', user]).status, 0);
+    t.assert.strictEqual(sudo(['ln', '-s', cli, join(bin, 'worklane')]).status, 0);
+    t.assert.strictEqual(sudo(['useradd', '--system', '--no-create-home', '--shell', '/usr/sbin/nologin', user]).status, 0);
     for (const who of ['nobody', user]) {
       const unreadable = sudo(['-u', who, 'find', join(dest, 'dist'), join(dest, 'node_modules'), join(dest, 'package.json'), '(', '-type', 'd', '!', '-executable', '-o', '!', '-readable', ')', '-print']);
-      assert.equal(unreadable.status, 0, unreadable.stderr);
-      assert.equal(unreadable.stdout.trim(), '', `${who} can't read: ${unreadable.stdout.slice(0, 500)}`);
-      assert.equal(sudo(['-u', who, 'test', '-x', join(bin, 'worklane')]).status, 0, `${who}: test -x`);
+      t.assert.strictEqual(unreadable.status, 0, unreadable.stderr);
+      t.assert.strictEqual(unreadable.stdout.trim(), '', `${who} can't read: ${unreadable.stdout.slice(0, 500)}`);
+      t.assert.strictEqual(sudo(['-u', who, 'test', '-x', join(bin, 'worklane')]).status, 0, `${who}: test -x`);
       const help = sudo(['-u', who, 'env', `PATH=${dirname(node)}:/usr/bin:/bin`, join(bin, 'worklane'), '--help']);
-      assert.equal(help.status, 0, `${who}: exec through the symlink: ${help.stderr}`);
+      t.assert.strictEqual(help.status, 0, `${who}: exec through the symlink: ${help.stderr}`);
       const imp = sudo(['-u', who, node, '-e', 'import(process.argv[1]).then(() => process.exit(0), (e) => { console.error(e); process.exit(1); })', join(dest, 'dist', 'src', 'service.js')]);
-      assert.equal(imp.status, 0, `${who}: import service.js: ${imp.stderr}`);
+      t.assert.strictEqual(imp.status, 0, `${who}: import service.js: ${imp.stderr}`);
     }
   } finally {
     sudo(['git', 'config', '--system', '--unset-all', 'safe.directory', src]);

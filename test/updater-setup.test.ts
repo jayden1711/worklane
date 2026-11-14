@@ -627,10 +627,14 @@ test('guard, signature: with updates on and every check green, a release whose s
       verifyRelease: (_url: string, tag: string, file: string) => u.verifyRelease(o.dir, tag, file, exec, join(mkdtempSync(join(tmpdir(), 'verify-')), 'v.git')),
       exec: (file: string, args: string[]) => {
         calls.push([file, ...args].join(' ').slice(0, 40));
-        if (file === 'git') return exec('git', ['ls-remote', '--tags', o.dir, 'refs/tags/v*']);
-        if (file === 'systemctl' && args[0] === 'list-units') return 'worklane-x.service loaded active running x\n';
-        if (file === 'systemctl' && args[0] === 'show') return 'ActiveState=active\nSubState=running\nNRestarts=0\nResult=success\n';
-        return '';
+        // One return (R1169ak/al: no early return in a function holding the sign), the same answers in the same order.
+        return file === 'git'
+          ? exec('git', ['ls-remote', '--tags', o.dir, 'refs/tags/v*'])
+          : file === 'systemctl' && args[0] === 'list-units'
+            ? 'worklane-x.service loaded active running x\n'
+            : file === 'systemctl' && args[0] === 'show'
+              ? 'ActiveState=active\nSubState=running\nNRestarts=0\nResult=success\n'
+              : '';
       },
       fetchJson: async () => ({ check_runs: [{ name: 'test', status: 'completed', conclusion: 'success', started_at: '1', id: 1 }] }),
       slots: () => [],

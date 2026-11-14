@@ -1,0 +1,140 @@
+{
+  "//": "Review round r1169ac of #1169: each case is one attack on scripts/ci/systemd-acceptance.mjs (README.md).",
+  "cases": {
+    "r1169ac-aliased-subtest": {
+      "exit": 2,
+      "reason": "'s return leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "test('unit states, an alias', async (t) => {",
+          "  const sub = t.test.bind(t);",
+          "  await sub('the service manager answers', () => {",
+          "    if (!process.env.FIXTURE_NEVER) return;",
+          "    spawnSync('systemctl', ['--version']);",
+          "  });",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169ac-aliased-subtest-control": {
+      "exit": 2,
+      "reason": "'s return leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "test('unit states, an alias', async (t) => {",
+          "  const sub = t.test.bind(t);",
+          "  await sub('the service manager answers', () => {",
+          "    if (process.env.FIXTURE_NEVER) return;",
+          "    spawnSync('systemctl', ['--version']);",
+          "  });",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169ac-element-access-subtest": {
+      "exit": 2,
+      "reason": "'s return leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "test('unit states, t[test]', async (t) => {",
+          "  await t['test']('the service manager answers', () => {",
+          "    if (!process.env.FIXTURE_NEVER) return;",
+          "    spawnSync('systemctl', ['--version']);",
+          "  });",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169ac-element-access-subtest-control": {
+      "exit": 2,
+      "reason": "'s return leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "test('unit states, t[test]', async (t) => {",
+          "  await t['test']('the service manager answers', () => {",
+          "    if (process.env.FIXTURE_NEVER) return;",
+          "    spawnSync('systemctl', ['--version']);",
+          "  });",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169ac-named-function": {
+      "exit": 2,
+      "reason": "'s return leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "function body(t) {",
+          "  void t;",
+          "  if (!process.env.FIXTURE_NEVER) return;",
+          "  assert.ok(true);",
+          "}",
+          "test('the systemctl unit, by name', body);",
+          ""
+        ]
+      }
+    },
+    "r1169ac-named-function-control": {
+      "exit": 2,
+      "reason": "'s return leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "function body(t) {",
+          "  void t;",
+          "  if (process.env.FIXTURE_NEVER) return;",
+          "  assert.ok(true);",
+          "}",
+          "test('the systemctl unit, by name', body);",
+          ""
+        ]
+      }
+    },
+    "r1169ac-named-function-elsewhere": {
+      "exit": 2,
+      "reason": "test/y\\.test\\.ts:\\d+: `test\\('the systemctl unit restarts', body\\)` registers a test whose function isn't one this file defines",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "helper.ts.txt": [
+          "export function body() {",
+          "  return;",
+          "}",
+          ""
+        ],
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "import { body } from './helper.js';",
+          "test('the systemctl unit restarts', body);",
+          ""
+        ]
+      }
+    }
+  }
+}

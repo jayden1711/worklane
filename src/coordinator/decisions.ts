@@ -1,6 +1,6 @@
 // Decisions: held plans, refused hosts, and the owner's answers on issues.
 import { gitSpawnSync } from '../os/git.js';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { BRAND } from '../brand.js';
@@ -9,6 +9,7 @@ import { type DoneWhenList, type Issue } from '../backlog/types.js';
 import { claim, release } from '../claims.js';
 import type { EventPayload } from '../events/types.js';
 import { mayAnswerKind, type Role } from '../dashboard-auth.js';
+import { readReply, secondLook } from '../decision-reply.js';
 import { defaultRolePrompt, issueBrief } from '../roles.js';
 import { checkedPush } from '../push-check.js';
 import { domainDecision, withAllowedHost, type DomainAnswer, type RefusedRequest } from '../domain-requests.js';
@@ -143,14 +144,15 @@ export abstract class Decisions extends Recovery {
     const n = q.issue!;
     if (this.d.log.read(askedId, ['plan.decided']).some((e) => (e.payload as { decision: string }).decision === q.id)) return;
     let a = this.d.log.read(askedId, ['decision.answered']).map((e) => e.payload as EventPayload<'decision.answered'>).find((x) => x.id === q.id);
-    let body = '';
+    // R1182af: the note is the answering line's own (decision-reply.ts), never re-read from the whole comment.
+    let note = '';
     if (!a) {
       const reply = await this.commentAnswer(n, q, writers, cmd);
       if (!reply) return;
-      body = reply.body;
+      note = reply.note;
       a = this.emit('decision.answered', { id: q.id, by: reply.by, answer: reply.answer, role: reply.role }).payload;
     }
-    const act = planAnswer(a.answer, body);
+    const act = planAnswer(a.answer, note);
     const answer = a.answer as PlanAnswer;
     this.emit('plan.decided', { issue: n, decision: q.id, answer, by: a.by, note: act.act === 'replan' ? act.note.slice(0, 2000) : '' });
     await this.d.backlog.removeLabel(n, 'needs:decision');
@@ -235,19 +237,93 @@ export abstract class Decisions extends Recovery {
   }
 
   /**
-   * The latest `/<cli> <option>` reply to decision `q` on issue `n` from someone who may answer it (#715): a listed
+   * The latest `/<cli> <option> <id>` reply to decision `q` on issue `n` from someone who may answer it (#715): a listed
    * writer whose role on the repo passes the one rule every surface uses (mayAnswerKind), with review.yaml's
    * `approvals` as the default branch has it. A reply from anyone else answers nothing: a writer's `approve` of a
    * high-risk merge (`land`) or a held plan waits for an owner, as on the dashboard.
+   *
+   * The owner's decisions: a reply answers a decision only by naming its id (2026-11-09; #1248), and only as the whole
+   * comment, one line (the allowlist, #1182; src/decision-reply.ts):
+   * - The comment is `/<cli> <option> <id> [note]`, the note in letters, digits, spaces and `. , : ; -`, and nothing else:
+   *   no other line, no other character, judged on the typed text ("1182 fv: b"). The note may not name an open decision
+   *   ("1182 dword: b": a word like `d-day` is fine). GitHub's own rendering (body_text), when given, is read only for an
+   *   open decision's id or a second command it shows and the line doesn't hold (secondLook).
+   * - The id must be a decision here and the option one of its options. The latest reply that answers wins.
+   * - A comment starting with `[<cli>]` is the coordinator's own and is never a reply.
+   * A writer's comment that names the command or an open decision here but answers nothing says why once (one note per
+   * comment), with the open ids to use.
    */
-  private async commentAnswer(n: number, q: EventPayload<'decision.asked'>, writers: Set<string>, cmd: RegExp): Promise<{ by: string; body: string; answer: string; role: 'owner' | 'writer' } | null> {
-    const replies = (await this.d.backlog.comments(n))
-      .filter((c) => writers.has(c.author.toLowerCase()))
-      .map((c) => ({ by: c.author, body: c.body, m: c.body.match(cmd) }))
-      .filter((x) => x.m && q.options.includes(x.m[1]!));
-    for (const r of replies.reverse()) {
-      const role = await this.commenterRole(r.by);
-      if (mayAnswerKind(q.kind, role, this.approvals())) return { by: r.by, body: r.body, answer: r.m![1]!, role: role === 'owner' ? 'owner' : 'writer' };
+  private async commentAnswer(n: number, q: EventPayload<'decision.asked'>, writers: Set<string>, _cmd: RegExp): Promise<{ by: string; body: string; answer: string; note: string; role: 'owner' | 'writer' } | null> {
+    const comments = await this.d.backlog.comments(n);
+    const asked = this.d.log.read(0, ['decision.asked']).map((e) => e.payload as EventPayload<'decision.asked'>).filter((p) => p.issue === n);
+    const answered = new Set(this.d.log.read(0, ['decision.answered']).map((e) => (e.payload as EventPayload<'decision.answered'>).id));
+    const byId = new Map(asked.map((p) => [p.id.toLowerCase(), p]));
+    const open = asked.filter((p) => !answered.has(p.id)).map((p) => p.id);
+    const replies = comments.filter((c) => writers.has(c.author.toLowerCase()) && !c.body.trimStart().startsWith(`[${BRAND.cli}]`));
+    const parsed = replies.map((c) => ({ c, r: readReply(c.body, c.text) })); // c.text: the tracker's rendering (GitHub body_text), or null
+    // At most one note per comment, keyed by the comment; the notes already written are read once. A comment with a
+    // note is void for good, for every decision (R1182ax AX1): with "1182 dword: b" a second id voids only while its
+    // decision is open, so without this a comment voided for naming an open decision answered once that one closed.
+    const keyOf = (c: (typeof replies)[number]) => `#${n}: reply ${c.id ?? createHash('sha256').update(`${c.author}\n${c.at ?? ''}\n${c.body}`).digest('hex').slice(0, 12)}`;
+    // Each note ends with the hash of the body it was written for, so an edit made after it is seen (R1182az AZ1): an
+    // edited comment is not read (it stays void), and one more note says so, once per comment.
+    const bodyHash = (c: (typeof replies)[number]) => createHash('sha256').update(c.body).digest('hex').slice(0, 8);
+    const said = new Set<string>();
+    const noted = new Map<string, string>();
+    const toldEdited = new Set<string>();
+    for (const e of this.d.log.read(0, ['coordinator.error'])) {
+      const message = (e.payload as { message: string }).message;
+      const m = /^(#\d+: reply \S+):/.exec(message);
+      if (m) {
+        said.add(m[1]!);
+        const h = /\[body ([0-9a-f]{8})\]$/.exec(message);
+        if (h && !noted.has(m[1]!)) noted.set(m[1]!, h[1]!);
+      }
+      const ed = /^(#\d+: reply \S+) edited:/.exec(message);
+      if (ed) toldEdited.add(ed[1]!);
+    }
+    // The allowlist (#1182): a reply is the comment's one line, `/<cli> <option> <id> [note]`, in letters, digits, spaces
+    // and `. , : ; -` (src/decision-reply.ts). A writer's comment that names the command or an open decision here but
+    // isn't one says why, once; discussion that names neither stays quiet.
+    const live = new Set(open.map((x) => x.toLowerCase()));
+    for (const { c, r } of parsed) {
+      const key = keyOf(c);
+      if (said.has(key)) {
+        // Already void (it has a note). Edited since: not read, whatever it says now; told once.
+        const was = noted.get(key);
+        if (was && was !== bodyHash(c) && !toldEdited.has(key)) {
+          toldEdited.add(key);
+          this.emit('coordinator.error', { instance: this.d.instance, where: 'decision reply', kind: 'reply_edited', message: `${key} edited: by ${c.author}. Edited comments aren't read. Post the one-line reply as a new comment.` });
+        }
+        continue;
+      }
+      const cmd = r.command;
+      const unknown = cmd && !byId.has(cmd.id) ? cmd : null;
+      const badOption = cmd && byId.has(cmd.id) && !byId.get(cmd.id)!.options.includes(cmd.option) ? cmd : null;
+      const looks = r.mentions.command || r.mentions.ids.some((x) => live.has(x));
+      const second = secondLook(r, live);
+      const kind = r.refused ? (looks ? r.refused.kind : null) : unknown ? 'reply_unknown_id' : badOption ? 'reply_unknown_option' : second;
+      if (!kind) continue;
+      said.add(key);
+      const why = {
+        reply_not_plain: `has a character a reply can't hold (${r.refused?.code} on line ${r.refused?.line}; a reply holds only letters, digits, spaces and . , : ; - after the command, so no quote, apostrophe, link, code, HTML, emoji or other symbol)`,
+        reply_not_one_line: 'has more than one line (a reply is the comment\'s one line and nothing else)',
+        reply_shape: `isn't \`/${BRAND.cli} <option> <id> [note]\` (the option, then the id right after it)`,
+        reply_several_ids: `names an open decision's id in its note (${r.noteIds.join(', ')}; a reply names one decision, once)`,
+        reply_rendering_shows_more: "shows an open decision's id, or a second command, in GitHub's rendering of it that the line doesn't hold",
+        reply_unknown_id: `names ${unknown?.id}, which isn't a decision on this issue`,
+        reply_unknown_option: `answers ${badOption?.id} with \`${badOption?.option}\`, which isn't one of its options (${badOption ? byId.get(badOption.id)!.options.join(', ') : ''})`,
+      }[kind];
+      const ids = open.length ? `open here: ${open.slice(0, 10).join(', ')}${open.length > 10 ? ` and ${open.length - 10} more` : ''}` : 'none is open here';
+      this.emit('coordinator.error', { instance: this.d.instance, where: 'decision reply', kind, message: `${key}: by ${c.author} ${why}, so it answers nothing; a reply is a comment of one line, \`/${BRAND.cli} <option> <id>\` and an optional note in letters, digits, spaces and . , : ; -; ${ids}; an edit to this comment isn't read [body ${bodyHash(c)}]` });
+    }
+    const id = q.id.toLowerCase();
+    const picks = parsed
+      .map(({ c, r }) => ({ c, line: r.command && !said.has(keyOf(c)) && secondLook(r, live) === null && r.command.id === id && q.options.includes(r.command.option) ? r.command : undefined }))
+      .filter((x) => x.line !== undefined);
+    for (const r of picks.reverse()) {
+      const role = await this.commenterRole(r.c.author);
+      if (mayAnswerKind(q.kind, role, this.approvals())) return { by: r.c.author, body: r.c.body, answer: r.line!.option, note: r.line!.note, role: role === 'owner' ? 'owner' : 'writer' };
     }
     return null;
   }

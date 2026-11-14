@@ -15,6 +15,7 @@
 // planner gives none. Every plan has a Decisions section (src/plan-decisions.ts): refused without it
 // or with a citation that isn't recorded, and reviewed against what it cites before it is posted.
 import { BRAND } from './brand.js';
+import { DECISION_ID } from './decision-reply.js';
 import type { DoneWhenList } from './backlog/types.js';
 import type { ReviewConfig } from './config/schema.js';
 import { riskAndDesignReasons, waitCategoriesOf } from './merge-policy.js';
@@ -234,19 +235,19 @@ export function planDecision(reasons: string[], acceptance: string[] = []) {
       ...reasons.map((r) => `holds because ${r}`),
       ...acceptance.map((a) => `${ACCEPTANCE_RECEIPT}${a}`),
       'approve: the build starts with this plan',
-      `revise: the plan is written again with your note (reply \`/${BRAND.cli} revise <note>\`)`,
+      `revise: the plan is written again with your note (comment the one line \`/${BRAND.cli} revise ${DECISION_ID} <note>\` and nothing else, the note in letters, digits, spaces and . , : ; - only)`,
       'reject: the task stops; nothing is built',
     ],
   };
 }
 
-/** What an answer to a held plan does: build with it, plan again with a note, or stop. */
-export function planAnswer(answer: string, comment = ''): { act: 'build' } | { act: 'replan'; note: string } | { act: 'stop' } {
+/**
+ * What an answer to a held plan does: build with it, plan again with a note, or stop. `note`: what they wrote with a `revise`, the rest of the reply's first
+ * line without its id (src/decision-reply.ts); never re-read from the comment (R1182af).
+ */
+export function planAnswer(answer: string, note = ''): { act: 'build' } | { act: 'replan'; note: string } | { act: 'stop' } {
   if (answer === 'approve') return { act: 'build' };
-  if (answer === 'revise') {
-    const m = new RegExp(`/${BRAND.cli}\\s+revise\\b\\s*([\\s\\S]*)$`, 'im').exec(comment);
-    return { act: 'replan', note: (m?.[1] ?? '').trim() || 'no note given; plan it again with the risks in mind' };
-  }
+  if (answer === 'revise') return { act: 'replan', note: note.trim() || 'no note given; plan it again with the risks in mind' };
   return { act: 'stop' };
 }
 

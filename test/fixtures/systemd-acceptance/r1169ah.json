@@ -1,0 +1,873 @@
+{
+  "//": "Review round r1169ah of #1169: each case is one attack on scripts/ci/systemd-acceptance.mjs (README.md).",
+  "cases": {
+    "r1169ah-block-s01-caller-try": {
+      "exit": 2,
+      "reason": "'s throw leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { readFileSync } from 'node:fs';",
+          "import { spawnSync } from 'node:child_process';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM), true here; F fails whenever it runs.",
+          "const sandboxed = true;",
+          "",
+          "test('the watchdog reads unit states from the real service manager', async (t) => {",
+          "  const check = () => {",
+          "    readFileSync('/nonexistent/x');",
+          "    assert.equal(spawnSync('systemctl', ['is-active', 'x']).status, -7);",
+          "  };",
+          "  try {",
+          "    check();",
+          "  } catch (e) {",
+          "    if (e instanceof assert.AssertionError) throw e;",
+          "  }",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169ah-block-s02-promise-catch": {
+      "exit": 2,
+      "reason": "'s throw leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { readFileSync } from 'node:fs';",
+          "import { spawnSync } from 'node:child_process';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM), true here; F fails whenever it runs.",
+          "const sandboxed = true;",
+          "",
+          "test('the watchdog reads unit states from the real service manager', async (t) => {",
+          "  await Promise.resolve().then(() => {",
+          "    readFileSync('/nonexistent/x');",
+          "    assert.equal(spawnSync('systemctl', ['is-active', 'x']).status, -7);",
+          "  }).catch((e) => {",
+          "    if (e instanceof assert.AssertionError) throw e;",
+          "  });",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169ah-block-s03-allsettled": {
+      "exit": 2,
+      "reason": "'s throw leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { readFileSync } from 'node:fs';",
+          "import { spawnSync } from 'node:child_process';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM), true here; F fails whenever it runs.",
+          "const sandboxed = true;",
+          "",
+          "test('the watchdog reads unit states from the real service manager', async (t) => {",
+          "  const rs = await Promise.allSettled(['x'].map(async (u) => {",
+          "    readFileSync('/nonexistent/' + u);",
+          "    assert.equal(spawnSync('systemctl', ['is-active', 'x']).status, -7);",
+          "  }));",
+          "  for (const r of rs) if (r.status === 'rejected' && r.reason instanceof assert.AssertionError) throw r.reason;",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169ah-block-s04-assert-throws": {
+      "exit": 0,
+      "reason": "^$",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { readFileSync } from 'node:fs';",
+          "import { spawnSync } from 'node:child_process';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM), true here; F fails whenever it runs.",
+          "const sandboxed = true;",
+          "",
+          "test('the watchdog reads unit states from the real service manager', async (t) => {",
+          "  assert.throws(() => {",
+          "    readFileSync('/nonexistent/x');",
+          "    assert.equal(spawnSync('systemctl', ['is-active', 'x']).status, -7);",
+          "  }, (e) => !(e instanceof assert.AssertionError));",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169ah-block-s05-assert-rejects": {
+      "exit": 0,
+      "reason": "^$",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { readFileSync } from 'node:fs';",
+          "import { spawnSync } from 'node:child_process';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM), true here; F fails whenever it runs.",
+          "const sandboxed = true;",
+          "",
+          "test('the watchdog reads unit states from the real service manager', async (t) => {",
+          "  await assert.rejects(async () => {",
+          "    readFileSync('/nonexistent/x');",
+          "    assert.equal(spawnSync('systemctl', ['is-active', 'x']).status, -7);",
+          "  }, (e) => !(e instanceof assert.AssertionError));",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169ah-block-s06-finally-return": {
+      "exit": 2,
+      "reason": "'s return leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { readFileSync } from 'node:fs';",
+          "import { spawnSync } from 'node:child_process';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM), true here; F fails whenever it runs.",
+          "const sandboxed = true;",
+          "",
+          "test('the watchdog reads unit states from the real service manager', async (t) => {",
+          "  const f = () => {",
+          "    try {",
+          "      readFileSync('/nonexistent/x');",
+          "      assert.equal(spawnSync('systemctl', ['is-active', 'x']).status, -7);",
+          "    } finally {",
+          "      return 1;",
+          "    }",
+          "  };",
+          "  t.assert.equal(f(), 1);",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169ah-block-s07-try-catch-around-sign": {
+      "exit": 2,
+      "reason": "in a try whose catch would take a throw before it",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { readFileSync } from 'node:fs';",
+          "import { spawnSync } from 'node:child_process';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM), true here; F fails whenever it runs.",
+          "const sandboxed = true;",
+          "",
+          "test('the watchdog reads unit states from the real service manager', async (t) => {",
+          "  try {",
+          "    readFileSync('/nonexistent/x');",
+          "    assert.equal(spawnSync('systemctl', ['is-active', 'x']).status, -7);",
+          "  } catch (e) {",
+          "    if (e instanceof assert.AssertionError) throw e;",
+          "  }",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169ah-block-s08-await-rejects-before-sign": {
+      "exit": 2,
+      "reason": "'s throw leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { readFileSync } from 'node:fs';",
+          "import { spawnSync } from 'node:child_process';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM), true here; F fails whenever it runs.",
+          "const sandboxed = true;",
+          "",
+          "test('the watchdog reads unit states from the real service manager', async (t) => {",
+          "  await Promise.resolve().then(async () => {",
+          "    await Promise.reject(new Error('x'));",
+          "    assert.equal(spawnSync('systemctl', ['is-active', 'x']).status, -7);",
+          "  }).catch((e) => {",
+          "    if (e instanceof assert.AssertionError) throw e;",
+          "  });",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169ah-block-s09-throw-statement-before-sign": {
+      "exit": 2,
+      "reason": "'s throw leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { readFileSync } from 'node:fs';",
+          "import { spawnSync } from 'node:child_process';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM), true here; F fails whenever it runs.",
+          "const sandboxed = true;",
+          "",
+          "test('the watchdog reads unit states from the real service manager', async (t) => {",
+          "  assert.throws(() => {",
+          "    if (sandboxed) throw new Error('sandboxed');",
+          "    assert.equal(spawnSync('systemctl', ['is-active', 'x']).status, -7);",
+          "  }, (e) => !(e instanceof assert.AssertionError));",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169ah-block-s10-generator-not-iterated": {
+      "exit": 0,
+      "reason": "^$",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { readFileSync } from 'node:fs';",
+          "import { spawnSync } from 'node:child_process';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM), true here; F fails whenever it runs.",
+          "const sandboxed = true;",
+          "",
+          "test('the watchdog reads unit states from the real service manager', async (t) => {",
+          "  function* g() {",
+          "    assert.equal(spawnSync('systemctl', ['is-active', 'x']).status, -7);",
+          "  }",
+          "  t.assert.ok(g());",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169ah-block-s11-async-generator-not-iterated": {
+      "exit": 0,
+      "reason": "^$",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { readFileSync } from 'node:fs';",
+          "import { spawnSync } from 'node:child_process';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM), true here; F fails whenever it runs.",
+          "const sandboxed = true;",
+          "",
+          "test('the watchdog reads unit states from the real service manager', async (t) => {",
+          "  async function* g() {",
+          "    assert.equal(spawnSync('systemctl', ['is-active', 'x']).status, -7);",
+          "  }",
+          "  t.assert.ok(g());",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169ah-block-s12-generator-iterated-control": {
+      "exit": 1,
+      "reason": "the watchdog reads unit states from the real service manager: failed",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { readFileSync } from 'node:fs';",
+          "import { spawnSync } from 'node:child_process';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM), true here; F fails whenever it runs.",
+          "const sandboxed = true;",
+          "",
+          "test('the watchdog reads unit states from the real service manager', async (t) => {",
+          "  function* g() {",
+          "    if (!sandboxed) yield 1;",
+          "    assert.equal(spawnSync('systemctl', ['is-active', 'x']).status, -7);",
+          "  }",
+          "  t.assert.ok([...g()]);",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169ah-block-s13-nullish-assign": {
+      "exit": 2,
+      "reason": "in the right side of `\\?\\?=`, `\\|\\|=` or `&&=`, where V8 keeps no count of its own",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { readFileSync } from 'node:fs';",
+          "import { spawnSync } from 'node:child_process';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM), true here; F fails whenever it runs.",
+          "const sandboxed = true;",
+          "",
+          "test('the watchdog reads unit states from the real service manager', async (t) => {",
+          "  let s = sandboxed ? 0 : undefined;",
+          "  s ??=",
+          "    assert.equal(spawnSync('systemctl', ['is-active', 'x']).status, -7);",
+          "  t.assert.equal(s, 0);",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169ah-block-s14-or-assign": {
+      "exit": 2,
+      "reason": "in the right side of `\\?\\?=`, `\\|\\|=` or `&&=`, where V8 keeps no count of its own",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { readFileSync } from 'node:fs';",
+          "import { spawnSync } from 'node:child_process';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM), true here; F fails whenever it runs.",
+          "const sandboxed = true;",
+          "",
+          "test('the watchdog reads unit states from the real service manager', async (t) => {",
+          "  let s = sandboxed ? 1 : 0;",
+          "  s ||=",
+          "    assert.equal(spawnSync('systemctl', ['is-active', 'x']).status, -7);",
+          "  t.assert.equal(s, 1);",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169ah-block-s15-and-assign": {
+      "exit": 2,
+      "reason": "in the right side of `\\?\\?=`, `\\|\\|=` or `&&=`, where V8 keeps no count of its own",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { readFileSync } from 'node:fs';",
+          "import { spawnSync } from 'node:child_process';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM), true here; F fails whenever it runs.",
+          "const sandboxed = true;",
+          "",
+          "test('the watchdog reads unit states from the real service manager', async (t) => {",
+          "  let s = sandboxed ? 0 : 1;",
+          "  s &&=",
+          "    assert.equal(spawnSync('systemctl', ['is-active', 'x']).status, -7);",
+          "  t.assert.equal(s, 0);",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169ah-block-s16-default-param": {
+      "exit": 2,
+      "reason": "in a parameter's default value, where V8 keeps no count of its own",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { readFileSync } from 'node:fs';",
+          "import { spawnSync } from 'node:child_process';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM), true here; F fails whenever it runs.",
+          "const sandboxed = true;",
+          "",
+          "test('the watchdog reads unit states from the real service manager', async (t) => {",
+          "  function u(r =",
+          "    assert.equal(spawnSync('systemctl', ['is-active', 'x']).status, -7)) {",
+          "    return r;",
+          "  }",
+          "  t.assert.equal(u(1), 1);",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169ah-block-s17-ternary-operand": {
+      "exit": 1,
+      "reason": "the watchdog reads unit states from the real service manager: line \\d+, holding systemd's sign, never ran",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { readFileSync } from 'node:fs';",
+          "import { spawnSync } from 'node:child_process';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM), true here; F fails whenever it runs.",
+          "const sandboxed = true;",
+          "",
+          "test('the watchdog reads unit states from the real service manager', async (t) => {",
+          "  const v = sandboxed",
+          "    ? 1",
+          "    : assert.equal(spawnSync('systemctl', ['is-active', 'x']).status, -7);",
+          "  t.assert.equal(v, 1);",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169ah-block-s18-and-operand": {
+      "exit": 1,
+      "reason": "the watchdog reads unit states from the real service manager: line \\d+, holding systemd's sign, never ran",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { readFileSync } from 'node:fs';",
+          "import { spawnSync } from 'node:child_process';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM), true here; F fails whenever it runs.",
+          "const sandboxed = true;",
+          "",
+          "test('the watchdog reads unit states from the real service manager', async (t) => {",
+          "  const v = !sandboxed &&",
+          "    assert.equal(spawnSync('systemctl', ['is-active', 'x']).status, -7);",
+          "  t.assert.equal(v, false);",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169ah-block-s19-or-operand": {
+      "exit": 1,
+      "reason": "the watchdog reads unit states from the real service manager: line \\d+, holding systemd's sign, never ran",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { readFileSync } from 'node:fs';",
+          "import { spawnSync } from 'node:child_process';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM), true here; F fails whenever it runs.",
+          "const sandboxed = true;",
+          "",
+          "test('the watchdog reads unit states from the real service manager', async (t) => {",
+          "  const v = sandboxed ||",
+          "    assert.equal(spawnSync('systemctl', ['is-active', 'x']).status, -7);",
+          "  t.assert.equal(v, true);",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169ah-block-s20-nullish-operand": {
+      "exit": 1,
+      "reason": "the watchdog reads unit states from the real service manager: line \\d+, holding systemd's sign, never ran",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { readFileSync } from 'node:fs';",
+          "import { spawnSync } from 'node:child_process';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM), true here; F fails whenever it runs.",
+          "const sandboxed = true;",
+          "",
+          "test('the watchdog reads unit states from the real service manager', async (t) => {",
+          "  const v = (sandboxed ? 1 : null) ??",
+          "    assert.equal(spawnSync('systemctl', ['is-active', 'x']).status, -7);",
+          "  t.assert.equal(v, 1);",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169ah-block-s21-ternary-same-line": {
+      "exit": 1,
+      "reason": "the watchdog reads unit states from the real service manager: line \\d+, holding systemd's sign, never ran",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { readFileSync } from 'node:fs';",
+          "import { spawnSync } from 'node:child_process';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM), true here; F fails whenever it runs.",
+          "const sandboxed = true;",
+          "",
+          "test('the watchdog reads unit states from the real service manager', async (t) => {",
+          "  const v = sandboxed ? 1 : assert.equal(spawnSync('systemctl', ['is-active', 'x']).status, -7);",
+          "  t.assert.equal(v, 1);",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169ah-block-s22-and-same-line": {
+      "exit": 1,
+      "reason": "the watchdog reads unit states from the real service manager: line \\d+, holding systemd's sign, never ran",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { readFileSync } from 'node:fs';",
+          "import { spawnSync } from 'node:child_process';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM), true here; F fails whenever it runs.",
+          "const sandboxed = true;",
+          "",
+          "test('the watchdog reads unit states from the real service manager', async (t) => {",
+          "  const v = !sandboxed && assert.equal(spawnSync('systemctl', ['is-active', 'x']).status, -7);",
+          "  t.assert.equal(v, false);",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169ah-block-s23-optional-call-arg": {
+      "exit": 2,
+      "reason": "in an optional call's arguments",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { readFileSync } from 'node:fs';",
+          "import { spawnSync } from 'node:child_process';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM), true here; F fails whenever it runs.",
+          "const sandboxed = true;",
+          "",
+          "test('the watchdog reads unit states from the real service manager', async (t) => {",
+          "  const o = sandboxed ? undefined : { f: () => 0 };",
+          "  o?.f(",
+          "    assert.equal(spawnSync('systemctl', ['is-active', 'x']).status, -7),",
+          "  );",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169ah-block-s24-braceless-if": {
+      "exit": 1,
+      "reason": "the watchdog reads unit states from the real service manager: line \\d+, holding systemd's sign, never ran",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { readFileSync } from 'node:fs';",
+          "import { spawnSync } from 'node:child_process';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM), true here; F fails whenever it runs.",
+          "const sandboxed = true;",
+          "",
+          "test('the watchdog reads unit states from the real service manager', async (t) => {",
+          "  if (!sandboxed)",
+          "    assert.equal(spawnSync('systemctl', ['is-active', 'x']).status, -7);",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169ah-block-s25-braceless-for": {
+      "exit": 1,
+      "reason": "the watchdog reads unit states from the real service manager: line \\d+, holding systemd's sign, never ran",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { readFileSync } from 'node:fs';",
+          "import { spawnSync } from 'node:child_process';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM), true here; F fails whenever it runs.",
+          "const sandboxed = true;",
+          "",
+          "test('the watchdog reads unit states from the real service manager', async (t) => {",
+          "  for (const u of sandboxed ? [] : ['x'])",
+          "    assert.equal(spawnSync('systemctl', ['is-active', 'x']).status, -7);",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169ah-block-s26-braceless-while": {
+      "exit": 1,
+      "reason": "the watchdog reads unit states from the real service manager: line \\d+, holding systemd's sign, never ran",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { readFileSync } from 'node:fs';",
+          "import { spawnSync } from 'node:child_process';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM), true here; F fails whenever it runs.",
+          "const sandboxed = true;",
+          "",
+          "test('the watchdog reads unit states from the real service manager', async (t) => {",
+          "  let i = sandboxed ? 0 : 1;",
+          "  while (i-- > 0)",
+          "    assert.equal(spawnSync('systemctl', ['is-active', 'x']).status, -7);",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169ah-block-s27-one-line-loop": {
+      "exit": 1,
+      "reason": "the watchdog reads unit states from the real service manager: line \\d+, holding systemd's sign, never ran",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { readFileSync } from 'node:fs';",
+          "import { spawnSync } from 'node:child_process';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM), true here; F fails whenever it runs.",
+          "const sandboxed = true;",
+          "",
+          "test('the watchdog reads unit states from the real service manager', async (t) => {",
+          "  for (const u of sandboxed ? [] : ['x']) assert.equal(spawnSync('systemctl', ['is-active', 'x']).status, -7);",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169ah-block-s28-one-line-if": {
+      "exit": 1,
+      "reason": "the watchdog reads unit states from the real service manager: line \\d+, holding systemd's sign, never ran",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { readFileSync } from 'node:fs';",
+          "import { spawnSync } from 'node:child_process';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM), true here; F fails whenever it runs.",
+          "const sandboxed = true;",
+          "",
+          "test('the watchdog reads unit states from the real service manager', async (t) => {",
+          "  if (!sandboxed) assert.equal(spawnSync('systemctl', ['is-active', 'x']).status, -7);",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169ah-block-s29-same-line-return": {
+      "exit": 2,
+      "reason": "'s return leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { readFileSync } from 'node:fs';",
+          "import { spawnSync } from 'node:child_process';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM), true here; F fails whenever it runs.",
+          "const sandboxed = true;",
+          "",
+          "test('the watchdog reads unit states from the real service manager', async (t) => {",
+          "  if (sandboxed) return; assert.equal(spawnSync('systemctl', ['is-active', 'x']).status, -7);",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169ah-block-s30-early-return": {
+      "exit": 2,
+      "reason": "'s return leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { readFileSync } from 'node:fs';",
+          "import { spawnSync } from 'node:child_process';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM), true here; F fails whenever it runs.",
+          "const sandboxed = true;",
+          "",
+          "test('the watchdog reads unit states from the real service manager', async (t) => {",
+          "  if (sandboxed) return;",
+          "  assert.equal(spawnSync('systemctl', ['is-active', 'x']).status, -7);",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169ah-block-s31-callback-same-line-never-called": {
+      "exit": 1,
+      "reason": "the watchdog reads unit states from the real service manager: line \\d+, holding systemd's sign, never ran",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { readFileSync } from 'node:fs';",
+          "import { spawnSync } from 'node:child_process';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM), true here; F fails whenever it runs.",
+          "const sandboxed = true;",
+          "",
+          "test('the watchdog reads unit states from the real service manager', async (t) => {",
+          "  (sandboxed ? [] : ['x']).forEach((u) => assert.equal(spawnSync('systemctl', ['is-active', 'x']).status, -7));",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169ah-block-s32-nested-fn-never-called": {
+      "exit": 1,
+      "reason": "the watchdog reads unit states from the real service manager: line \\d+, holding systemd's sign, never ran",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { readFileSync } from 'node:fs';",
+          "import { spawnSync } from 'node:child_process';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM), true here; F fails whenever it runs.",
+          "const sandboxed = true;",
+          "",
+          "test('the watchdog reads unit states from the real service manager', async (t) => {",
+          "  const run = () => {",
+          "    assert.equal(spawnSync('systemctl', ['is-active', 'x']).status, -7);",
+          "  };",
+          "  if (!sandboxed) run();",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169ah-block-s33-switch-default": {
+      "exit": 2,
+      "reason": "'s break leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { readFileSync } from 'node:fs';",
+          "import { spawnSync } from 'node:child_process';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM), true here; F fails whenever it runs.",
+          "const sandboxed = true;",
+          "",
+          "test('the watchdog reads unit states from the real service manager', async (t) => {",
+          "  switch (sandboxed ? 'a' : 'b') {",
+          "    case 'a':",
+          "      break;",
+          "    default:",
+          "      assert.equal(spawnSync('systemctl', ['is-active', 'x']).status, -7);",
+          "  }",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169ah-block-s34-labeled-break": {
+      "exit": 2,
+      "reason": "'s break leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { readFileSync } from 'node:fs';",
+          "import { spawnSync } from 'node:child_process';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM), true here; F fails whenever it runs.",
+          "const sandboxed = true;",
+          "",
+          "test('the watchdog reads unit states from the real service manager', async (t) => {",
+          "  out: {",
+          "    if (sandboxed) break out;",
+          "    assert.equal(spawnSync('systemctl', ['is-active', 'x']).status, -7);",
+          "  }",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169ah-block-s35-continue": {
+      "exit": 2,
+      "reason": "'s continue leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { readFileSync } from 'node:fs';",
+          "import { spawnSync } from 'node:child_process';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM), true here; F fails whenever it runs.",
+          "const sandboxed = true;",
+          "",
+          "test('the watchdog reads unit states from the real service manager', async (t) => {",
+          "  for (const u of ['x']) {",
+          "    if (sandboxed) continue;",
+          "    assert.equal(spawnSync('systemctl', ['is-active', 'x']).status, -7);",
+          "  }",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169ah-block-s36-some-short-circuit": {
+      "exit": 2,
+      "reason": "'s return leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { readFileSync } from 'node:fs';",
+          "import { spawnSync } from 'node:child_process';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM), true here; F fails whenever it runs.",
+          "const sandboxed = true;",
+          "",
+          "test('the watchdog reads unit states from the real service manager', async (t) => {",
+          "  [1, 2].some((n) => {",
+          "    if (sandboxed) return true;",
+          "    assert.equal(spawnSync('systemctl', ['is-active', 'x']).status, -7);",
+          "    return false;",
+          "  });",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169ah-block-s37-unawaited-promise": {
+      "exit": 0,
+      "reason": "^$",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { readFileSync } from 'node:fs';",
+          "import { spawnSync } from 'node:child_process';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM), true here; F fails whenever it runs.",
+          "const sandboxed = true;",
+          "",
+          "test('the watchdog reads unit states from the real service manager', async (t) => {",
+          "  void Promise.resolve().then(() => {",
+          "    readFileSync('/nonexistent/x');",
+          "    assert.equal(spawnSync('systemctl', ['is-active', 'x']).status, -7);",
+          "  }).catch(() => {});",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169ah-block-s38-ran-control": {
+      "exit": 2,
+      "reason": "'s return leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { readFileSync } from 'node:fs';",
+          "import { spawnSync } from 'node:child_process';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM), true here; F fails whenever it runs.",
+          "const sandboxed = true;",
+          "",
+          "test('the watchdog reads unit states from the real service manager', async (t) => {",
+          "  if (!sandboxed) return;",
+          "  assert.equal(spawnSync('systemctl', ['is-active', 'x']).status, -7);",
+          "});",
+          ""
+        ]
+      }
+    }
+  }
+}

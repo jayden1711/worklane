@@ -254,10 +254,12 @@ test('round 2: the held-out store fails on a linked parent (made or not) and on 
     const held = benchLayout(join(k.home, 'bench')).heldOut;
     mkdirSync(held, { recursive: true, mode: 0o700 });
     chmodSync(held, mode);
-    if ((lstatSync(held).mode & 0o7777) !== mode) continue;
-    const r = await run(k);
-    assert.equal(statusOf(r.text, 'held-out store'), 'FAIL', `0${mode.toString(8)}\n${r.text}`);
-    chmodSync(held, 0o700);
+    // One exit only (R1169ao/ap: a sign test's functions jump nowhere but at their end); the same checks.
+    if ((lstatSync(held).mode & 0o7777) === mode) {
+      const r = await run(k);
+      assert.equal(statusOf(r.text, 'held-out store'), 'FAIL', `0${mode.toString(8)}\n${r.text}`);
+      chmodSync(held, 0o700);
+    }
   }
 });
 
@@ -360,18 +362,20 @@ test('the bench command: help, an unknown command, and the compiled script refus
   assert.equal(main(['launch-everything'], { out: (l: string) => bad.push(l) }), 2);
   assert.match(bad.join('\n'), /unknown command/);
   assert.equal(main([], { out: () => {} }), 2, 'no command: usage');
-  if (currentUser() === 'wl-bench') return;
-  // The real script, as a process: PATH holds only recording stand-ins (exit 1) for every tool it could call.
-  const m = machine();
-  const fake = join(m.base, 'fake-bin');
-  mkdirSync(fake);
-  const log = join(m.base, 'tools.log');
-  for (const tool of ['claude', 'srt', 'docker', 'sudo', 'id', 'systemctl', 'git']) standIn(join(fake, tool), log, ['process.exit(1);']);
-  const script = fileURLToPath(new URL('../scripts/bench/cli.js', import.meta.url));
-  const env: NodeJS.ProcessEnv = { ...m.env, PATH: fake };
-  delete env[BENCH_USER_ENV];
-  const r = spawnSync(process.execPath, [script, 'preflight'], { env, encoding: 'utf8', timeout: 60_000 });
-  assert.equal(r.status, 1, r.stdout + r.stderr);
-  assert.match(r.stdout, /FAIL\s+bench user.*runs as wl-bench only/);
-  assert.equal(readLog(log).length, 0, 'no tool ran');
+  // As any user but the bench user itself (R1169ak/al: no early return before a test's end; the rest is conditional).
+  if (currentUser() !== 'wl-bench') {
+    // The real script, as a process: PATH holds only recording stand-ins (exit 1) for every tool it could call.
+    const m = machine();
+    const fake = join(m.base, 'fake-bin');
+    mkdirSync(fake);
+    const log = join(m.base, 'tools.log');
+    for (const tool of ['claude', 'srt', 'docker', 'sudo', 'id', 'systemctl', 'git']) standIn(join(fake, tool), log, ['process.exit(1);']);
+    const script = fileURLToPath(new URL('../scripts/bench/cli.js', import.meta.url));
+    const env: NodeJS.ProcessEnv = { ...m.env, PATH: fake };
+    delete env[BENCH_USER_ENV];
+    const r = spawnSync(process.execPath, [script, 'preflight'], { env, encoding: 'utf8', timeout: 60_000 });
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.match(r.stdout, /FAIL\s+bench user.*runs as wl-bench only/);
+    assert.equal(readLog(log).length, 0, 'no tool ran');
+  }
 });

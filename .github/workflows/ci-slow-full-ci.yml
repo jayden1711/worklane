@@ -11,6 +11,9 @@ on:
     types: [labeled]
 permissions:
   contents: read
+  # A called workflow's jobs get at most what this grants: ci-slow.yml's test-run sandbox job reads its own step
+  # timings (#1266). Without it the whole called run fails at startup.
+  actions: read
 jobs:
   full-ci:
     if: github.event.label.name == 'full-ci'

@@ -1,0 +1,203 @@
+{
+  "//": "Review round r1169ad of #1169: each case is one attack on scripts/ci/systemd-acceptance.mjs (README.md).",
+  "cases": {
+    "r1169ad-empty-loop": {
+      "exit": 1,
+      "reason": "test/y\\.test\\.ts: unit states, empty-loop: line \\d+, holding systemd's sign, never ran",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "test('unit states, empty-loop', () => {",
+          "  for (const u of [].filter(Boolean)) {",
+          "    spawnSync('systemctl', ['is-active', String(u)]);",
+          "  }",
+          "  assert.ok(true);",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169ad-empty-loop-control": {
+      "exit": 0,
+      "reason": "^$",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "test('unit states, empty-loop', () => {",
+          "  for (const u of ['a.service'].filter(Boolean)) {",
+          "    spawnSync('systemctl', ['is-active', String(u)]);",
+          "  }",
+          "  assert.ok(true);",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169ad-gate-catch": {
+      "exit": 2,
+      "reason": "test/x\\.test\\.ts: base: a t\\.assert inside a try with a catch",
+      "files": {
+        "x.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "const systemCi = true;",
+          "test('base', { skip: !systemCi && 'needs systemd' }, (t) => { t.plan(1); try { t.assert.ok(process.env.FIXTURE_NEVER); } catch { /* swallowed */ } });",
+          ""
+        ]
+      }
+    },
+    "r1169ad-gate-catch-control": {
+      "exit": 0,
+      "reason": "^$",
+      "files": {
+        "x.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "const systemCi = true;",
+          "test('base', { skip: !systemCi && 'needs systemd' }, (t) => { t.plan(1); try { void 0; } catch { /* nothing to check here */ } t.assert.ok(true); });",
+          ""
+        ]
+      }
+    },
+    "r1169ad-gate-subtest-no-plan": {
+      "exit": 2,
+      "reason": "test/x\\.test\\.ts: base: the subtest at line \\d+ doesn't open with its own",
+      "files": {
+        "x.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "const systemCi = true;",
+          "test('base', { skip: !systemCi && 'needs systemd' }, async (t) => { t.plan(1); await t.test('s', (s) => { if (!process.env.FIXTURE_NEVER) return; s.assert.ok(true); }); });",
+          ""
+        ]
+      }
+    },
+    "r1169ad-if-else": {
+      "exit": 1,
+      "reason": "test/y\\.test\\.ts: unit states, if-else: line \\d+, holding systemd's sign, never ran",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "test('unit states, if-else', () => {",
+          "  if (process.env.FIXTURE_NEVER) {",
+          "    spawnSync('systemctl', ['--version']);",
+          "  } else {",
+          "    assert.ok(true);",
+          "  }",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169ad-if-else-control": {
+      "exit": 0,
+      "reason": "^$",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "test('unit states, if-else', () => {",
+          "  if (!process.env.FIXTURE_NEVER) {",
+          "    spawnSync('systemctl', ['--version']);",
+          "  } else {",
+          "    assert.ok(true);",
+          "  }",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169ad-subtest-early-return": {
+      "exit": 2,
+      "reason": "'s return leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "test('unit states, in a subtest', async (t) => {",
+          "  await t.test('the service manager answers', () => {",
+          "    if (!process.env.FIXTURE_NEVER) return;",
+          "    spawnSync('systemctl', ['--version']);",
+          "  });",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169ad-subtest-early-return-control": {
+      "exit": 2,
+      "reason": "'s return leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "test('unit states, in a subtest', async (t) => {",
+          "  await t.test('the service manager answers', () => {",
+          "    if (process.env.FIXTURE_NEVER) return;",
+          "    spawnSync('systemctl', ['--version']);",
+          "  });",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169ad-swallowing-catch": {
+      "exit": 2,
+      "reason": "test/y\\.test\\.ts: unit states, swallowing-catch: line \\d+ holds systemd's sign in a try whose catch",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "test('unit states, swallowing-catch', () => {",
+          "  try {",
+          "    if (!process.env.FIXTURE_NEVER) throw new Error('no bus');",
+          "    spawnSync('systemctl', ['--version']);",
+          "  } catch {",
+          "    // swallowed",
+          "  }",
+          "  assert.ok(true);",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169ad-swallowing-catch-control": {
+      "exit": 2,
+      "reason": "'s throw leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "test('unit states, swallowing-catch', () => {",
+          "  // What may throw sits in its own try; the systemd work is outside it, so a run that skipped it shows.",
+          "  let name = 'a.service';",
+          "  try {",
+          "    if (process.env.FIXTURE_NEVER) throw new Error('no bus');",
+          "  } catch {",
+          "    name = 'b.service';",
+          "  }",
+          "  spawnSync('systemctl', ['is-active', name]);",
+          "  assert.ok(true);",
+          "});",
+          ""
+        ]
+      }
+    }
+  }
+}

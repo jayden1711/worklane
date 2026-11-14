@@ -837,15 +837,16 @@ test('one helper is the only way src/ lists changed names or counts; scripts/ on
   const seen = new Set<string>();
   for (const f of files) {
     const rel = relative(repoRoot, f).split('\\').join('/');
-    if (rel === HELPER) continue;
-    const text = readFileSync(f, 'utf8');
+    // One exit only (R1169ao/ap: a sign test's functions jump nowhere but at their end); the same checks.
+    const text = rel === HELPER ? '' : readFileSync(f, 'utf8');
     const words = Object.fromEntries(Object.entries(READER_WORDS).map(([w, re]) => [w, text.match(re)?.length ?? 0]).filter(([, n]) => n));
-    if (!Object.keys(words).length) continue;
-    seen.add(rel);
-    const allowed = OUTSIDE_THE_HELPER[rel];
-    if (!allowed) bad.push(`${rel}: ${JSON.stringify(words)} (not on the list)`);
-    else if (!isDeepStrictEqual(words, allowed.words)) bad.push(`${rel}: ${JSON.stringify(words)}, listed ${JSON.stringify(allowed.words)}`);
-    else for (const re of allowed.must ?? []) if (!re.test(text)) bad.push(`${rel}: no ${re}`);
+    if (Object.keys(words).length) {
+      seen.add(rel);
+      const allowed = OUTSIDE_THE_HELPER[rel];
+      if (!allowed) bad.push(`${rel}: ${JSON.stringify(words)} (not on the list)`);
+      else if (!isDeepStrictEqual(words, allowed.words)) bad.push(`${rel}: ${JSON.stringify(words)}, listed ${JSON.stringify(allowed.words)}`);
+      else for (const re of allowed.must ?? []) if (!re.test(text)) bad.push(`${rel}: no ${re}`);
+    }
   }
   for (const rel of Object.keys(OUTSIDE_THE_HELPER)) if (!seen.has(rel)) bad.push(`${rel}: listed, but holds none of the words any more (take it off the list)`);
   assert.deepEqual(bad, [], `list changed names or counts through ${HELPER} (changedNames, changedStatuses, changeFiles, ...)`);

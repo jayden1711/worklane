@@ -1,0 +1,308 @@
+{
+  "//": "Review round r1169aj of #1169: each case is one attack on scripts/ci/systemd-acceptance.mjs (README.md).",
+  "cases": {
+    "r1169aj-j02-helper-registers-twice": {
+      "exit": 2,
+      "reason": "'s return leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "import { setTimeout as delay } from 'node:timers/promises';",
+          "import { once, EventEmitter } from 'node:events';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.",
+          "const VM = true;",
+          "",
+          "function unitTest(kind) {",
+          "  test(`the watchdog reads ${kind} unit states from the real service manager`, async () => {",
+          "    if (kind === 'user' && VM) return;",
+          "    const r = spawnSync('systemctl', [`--${kind}`, '--version']);",
+          "    assert.ok(r);",
+          "  });",
+          "}",
+          "unitTest('system');",
+          "unitTest('user');",
+          ""
+        ]
+      }
+    },
+    "r1169aj-j04-shared-subtest-fn": {
+      "exit": 2,
+      "reason": "'s return leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "const VM = true;",
+          "",
+          "test('the watchdog reads unit states from the real service manager', async (t) => {",
+          "  const unit = async (s) => {",
+          "    s.plan(1);",
+          "    if (s.name === 'user' && VM) return void s.assert.ok(true);",
+          "    s.assert.ok(spawnSync('systemctl', [`--${s.name}`, '--version']));",
+          "  };",
+          "  await t.test('system', unit);",
+          "  await t.test('user', unit);",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169aj-j05-trailing-hoisted-helper": {
+      "exit": 2,
+      "reason": "'s return leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "import { setTimeout as delay } from 'node:timers/promises';",
+          "import { once, EventEmitter } from 'node:events';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.",
+          "const VM = true;",
+          "",
+          "test('the watchdog reads unit states from the real service manager', async () => {",
+          "  const r = state('x');",
+          "  if (VM) return;",
+          "  assert.equal(r.status, -7);",
+          "  function state(u) {",
+          "    return spawnSync('systemctl', ['is-active', u]);",
+          "  }",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169aj-j05e-trailing-uncalled-helper": {
+      "exit": 0,
+      "reason": "^$",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "",
+          "test('the watchdog reads unit states from the real service manager', async () => {",
+          "  assert.ok(spawnSync('systemctl', ['--version']));",
+          "  function unused() {}",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169aj-j05f-trailing-helper-subtest": {
+      "exit": 2,
+      "reason": "'s return leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "const VM = true;",
+          "",
+          "test('the watchdog reads unit states from the real service manager', async (t) => {",
+          "  await t.test('is-active', async () => {",
+          "    const r = state('x');",
+          "    if (VM) return;",
+          "    assert.equal(r.status, -7);",
+          "    function state(u) {",
+          "      return spawnSync('systemctl', ['is-active', u]);",
+          "    }",
+          "  });",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169aj-j16-trailing-async-helper": {
+      "exit": 2,
+      "reason": "'s return leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "const VM = true;",
+          "",
+          "test('the watchdog reads unit states from the real service manager', async () => {",
+          "  const r = await state('x');",
+          "  if (VM && r.status !== 0) return;",
+          "  assert.equal(r.status, -7);",
+          "  async function state(u) {",
+          "    return spawnSync('systemctl', ['is-active', u]);",
+          "  }",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169aj-j17b-return-in-later-iteration-last": {
+      "exit": 2,
+      "reason": "'s return leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "const VM = true;",
+          "",
+          "test('the watchdog reads unit states from the real service manager', async () => {",
+          "  for (const u of ['worklane.service', 'worklane-update.timer']) {",
+          "    const r = spawnSync('systemctl', ['is-active', u]);",
+          "    if (u.endsWith('.timer') && VM) return;",
+          "    assert.equal(r.status, u.endsWith('.timer') ? -7 : r.status);",
+          "  }",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169aj-j17d-legit-loop-last-control": {
+      "exit": 2,
+      "reason": "'s continue leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "",
+          "test('the watchdog reads unit states from the real service manager', async () => {",
+          "  for (const u of ['worklane.service', 'worklane-update.timer']) {",
+          "    const r = spawnSync('systemctl', ['is-active', u]);",
+          "    if (u.endsWith('.timer')) continue;",
+          "    assert.ok(r);",
+          "  }",
+          "});",
+          "test('if last, not taken', async () => {",
+          "  const r = spawnSync('systemctl', ['--version']);",
+          "  if (r.status === 12345) {",
+          "    assert.fail('x');",
+          "  }",
+          "});",
+          "test('try last', async () => {",
+          "  try {",
+          "    assert.ok(spawnSync('systemctl', ['--version']));",
+          "  } finally {",
+          "    assert.ok(true);",
+          "  }",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169aj-j19-object-destructuring-default": {
+      "exit": 2,
+      "reason": "holds systemd's sign in a destructuring default, where V8 keeps no count of its own",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "// The VM-only condition: true in the probe, false in its control.",
+          "const VM = true;",
+          "",
+          "test('the watchdog reads unit states from the real service manager', async () => {",
+          "  const cached = VM ? { status: 0 } : {};",
+          "  const { status = assert.equal(spawnSync('systemctl', ['is-active', 'x']).status, -7) } = cached;",
+          "  assert.ok(status !== 1);",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169aj-j19b-array-destructuring-default": {
+      "exit": 2,
+      "reason": "holds systemd's sign in a destructuring default, where V8 keeps no count of its own",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "// The VM-only condition: true in the probe, false in its control.",
+          "const VM = true;",
+          "",
+          "test('the watchdog reads unit states from the real service manager', async () => {",
+          "  const [r = assert.equal(spawnSync('systemctl', ['is-active', 'x']).status, -7)] = VM ? ['cached'] : [];",
+          "  assert.ok(r !== 1);",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169aj-j19c-for-of-destructuring-default": {
+      "exit": 2,
+      "reason": "holds systemd's sign in a destructuring default, where V8 keeps no count of its own",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "// The VM-only condition: true in the probe, false in its control.",
+          "const VM = true;",
+          "",
+          "test('the watchdog reads unit states from the real service manager', async () => {",
+          "  for (const { state = assert.equal(spawnSync('systemctl', ['is-active', 'x']).status, -7) } of [VM ? { state: 'active' } : {}]) {",
+          "    assert.ok(state !== 1);",
+          "  }",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169aj-j19d-assignment-destructuring-default": {
+      "exit": 2,
+      "reason": "holds systemd's sign in a destructuring default, where V8 keeps no count of its own",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "// The VM-only condition: true in the probe, false in its control.",
+          "const VM = true;",
+          "",
+          "test('the watchdog reads unit states from the real service manager', async () => {",
+          "  let state;",
+          "  ({ state = assert.equal(spawnSync('systemctl', ['is-active', 'x']).status, -7) } = VM ? { state: 'active' } : {});",
+          "  assert.ok(state !== 1);",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169aj-j20-for-update": {
+      "exit": 2,
+      "reason": "holds systemd's sign in a for loop's update, where V8 keeps no count of its own",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "// The VM-only condition: true in the probe, false in its control.",
+          "const VM = true;",
+          "",
+          "test('the watchdog reads unit states from the real service manager', async () => {",
+          "  for (let i = VM ? 1 : 0; i < 1; i++, assert.equal(spawnSync('systemctl', ['is-active', 'x']).status, -7)) {",
+          "    assert.ok(true);",
+          "  }",
+          "});",
+          ""
+        ]
+      }
+    }
+  }
+}

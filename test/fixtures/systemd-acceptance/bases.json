@@ -1,0 +1,34 @@
+{
+  "//": "Base test files many cases share, by id: a case names one as \"@<id>\" for base.test.ts.txt.",
+  "bases": {
+    "base1": [
+      "import { test } from 'node:test';",
+      "const systemCi = true;",
+      "test('base', { skip: !systemCi && 'needs systemd' }, (t) => { t.plan(1); t.assert.ok(true); });",
+      ""
+    ],
+    "base2": [
+      "import { test } from 'node:test';",
+      "const systemCi = true;",
+      "test('gate a', { skip: !systemCi && 'x' }, (t) => { t.plan(1); t.assert.ok(true); });",
+      ""
+    ],
+    "base3": [
+      "import { test } from 'node:test';",
+      "import { existsSync, readFileSync } from 'node:fs';",
+      "const systemCi = true;",
+      "test('gate a', { skip: !systemCi && 'x' }, (t) => { t.plan(1); t.assert.ok(true); });",
+      ""
+    ],
+    "base4": [
+      "import { test } from 'node:test';",
+      "import assert from 'node:assert/strict';",
+      "const systemCi = true;",
+      "test('acceptance: each instance gets its own /tmp', { skip: !systemCi && 'needs systemd' }, (t) => {",
+      "  t.plan(1);",
+      "  t.assert.ok(/^PrivateTmp=/.test('PrivateTmp=yes'));",
+      "});",
+      ""
+    ]
+  }
+}

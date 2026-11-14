@@ -210,15 +210,18 @@ test('ci-batch.yml: it looks when ci.yml ends on a push to main, never for a pul
   const ci = parse(read('ci.yml')) as { name: string; on: { push: { branches: string[] }; workflow_dispatch?: unknown } };
   assert.deepEqual(wf.on.workflow_run, { workflows: [(parse(read('ci-slow.yml')) as { name: string }).name, ci.name], types: ['completed'] });
   assert.deepEqual(ci.on.push.branches, ['main'], 'ci.yml runs on every push to main');
-  assert.ok(!('workflow_dispatch' in ci.on), 'the workflow_dispatch clause below can only be a ci-slow.yml batch or bisect run');
+  // ci.yml can be run by hand on a branch (#1169), so the dispatch clause below names ci-slow.yml's runs alone: a
+  // manual ci.yml run on a pull request's branch never steps a batch.
+  assert.ok('workflow_dispatch' in ci.on, 'ci.yml runs by hand too (the systemd acceptance job, once on a PR head)');
   assert.deepEqual(wf.on.schedule, [{ cron: '*/30 * * * *' }], 'the schedule stays, as a backstop');
   // The guard, clause by clause: anything a pull request's run could match is absent.
   const clauses = wf.jobs.batch.if.replace(/\s+/g, ' ').trim();
   assert.equal(
     clauses,
-    "github.event_name != 'workflow_run' || github.event.workflow_run.event == 'workflow_dispatch' || (github.event.workflow_run.name == 'ci' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == github.event.repository.default_branch && github.event.workflow_run.head_repository.full_name == github.repository)",
+    "github.event_name != 'workflow_run' || (github.event.workflow_run.name == 'ci slow' && github.event.workflow_run.event == 'workflow_dispatch') || (github.event.workflow_run.name == 'ci' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == github.event.repository.default_branch && github.event.workflow_run.head_repository.full_name == github.repository)",
   );
   assert.equal(ci.name, 'ci', 'the name the guard compares');
+  assert.equal((parse(read('ci-slow.yml')) as { name: string }).name, 'ci slow', "the dispatch clause's name: ci-slow.yml's");
   // Its code is the default branch's, with no credentials left behind; the triggering run's ref or sha is never used.
   const text = read('ci-batch.yml').replace(/^\s*#.*$/gm, '');
   const checkouts = wf.jobs.batch.steps.filter((x) => (x.uses ?? '').startsWith('actions/checkout@'));

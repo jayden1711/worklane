@@ -49,7 +49,7 @@ export class GitHubBacklog implements Backlog {
    * `raw`: the response body as text (a log), not JSON. Everything sent is redacted first (events/redact.ts): a
    * comment, issue or pull request can carry command output, and on a public repo it's public.
    */
-  private async req<T>(method: string, path: string, body?: unknown, raw = false): Promise<T> {
+  private async req<T>(method: string, path: string, body?: unknown, raw = false, accept = 'application/vnd.github+json'): Promise<T> {
     body = body === undefined ? body : redact(body);
     // The machine's shared budget for this token (src/github/budget.ts): it decides when the call runs, never what it does.
     const token = await this.token();
@@ -65,7 +65,7 @@ export class GitHubBacklog implements Backlog {
       method,
       headers: {
         authorization: `Bearer ${token}`,
-        accept: 'application/vnd.github+json',
+        accept,
         'x-github-api-version': '2022-11-28',
         ...(body ? { 'content-type': 'application/json' } : {}),
       },
@@ -167,8 +167,10 @@ export class GitHubBacklog implements Backlog {
   }
 
   async comments(n: number) {
-    const list = await this.req<{ user: { login: string } | null; body: string; created_at?: string }[]>('GET', `/repos/${this.repo}/issues/${n}/comments?per_page=100`);
-    return list.map((c) => ({ author: c.user?.login ?? '', body: c.body ?? '', ...(c.created_at ? { at: c.created_at } : {}) }));
+    // `full+json`: each comment's body, and body_text, GitHub's own rendering of it as text (what the page shows), which
+    // the reply reader checks too (src/decision-reply.ts; #1182). body_text missing or not a string: unknown (null).
+    const list = await this.req<{ id?: number; user: { login: string } | null; body: string; body_text?: unknown; created_at?: string }[]>('GET', `/repos/${this.repo}/issues/${n}/comments?per_page=100`, undefined, false, 'application/vnd.github.full+json');
+    return list.map((c) => ({ ...(c.id !== undefined ? { id: String(c.id) } : {}), author: c.user?.login ?? '', body: c.body ?? '', ...(c.created_at ? { at: c.created_at } : {}), text: typeof c.body_text === 'string' ? c.body_text : null }));
   }
 
   async close(n: number) {
