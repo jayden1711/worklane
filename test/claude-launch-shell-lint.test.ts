@@ -188,9 +188,12 @@ function quoteStep(t: string, k: number, q: Quote): { q: Quote; n: number } {
 /**
  * Joins continued lines and drops comments and blank lines, as the mask reads them (R1264aj D1): a line continues
  * only where the mask consumed a backslash-newline (not a comment's `\`, not the second of an escaped `\\`), and a
- * `#` cuts only where the mask opened a comment (not at a line's start inside a multi-line string), and a string's
- * lines stay one logical line, joined by their newlines, as bash reads them. The text is the
- * raw slice. A heredoc body's lines, which the mask doesn't read as shell, keep the per-line reading (a trailing `\`
+ * `#` cuts only where the mask opened a comment (not at a line's start inside a multi-line string), and a newline
+ * directly inside a `"…"`, `'…'` or `$'…'` string joins its lines, by that newline, into one logical line. A newline
+ * inside a `$(…)`, backtick, `${…}` or `$((…))` nested in the quotes joins nothing, so the line that closes such a
+ * string starts mid-string for the judge, and a call after the close goes unread (R1264ak/al, #1292). And a claude
+ * line inside a joined string is quoted text, not a command: a multi-line script string run by `eval`, `bash -c`, a
+ * herestring, a pipe or a trap passes, as its one-line spelling does (R1264al D2, #1292). The text is the raw slice. A heredoc body's lines, which the mask doesn't read as shell, keep the per-line reading (a trailing `\`
  * joins, a `#` at a word's start outside quotes cuts).
  */
 let linesCache: { text: string; lines: { line: number; end: number; text: string }[] } | null = null;
@@ -225,8 +228,10 @@ function logicalLines(text: string): { line: number; end: number; text: string }
         while (ci < comments.length && comments[ci]! < s0) ci++;
         if (ci < comments.length && comments[ci]! < e0) { l += raw[i]!.slice(0, comments[ci]! - s0); break; }
         if (joined.has(e0) && i + 1 < raw.length) { l += raw[i]!.slice(0, -1) + ' '; i++; continue; }
-        // A newline inside a quote ends no command: the string's lines are one logical line, so its next line is no
-        // comment when it starts with `#`, and the rules read the command after the string's close (R1264aj D1 b3).
+        // A newline directly inside a quote ends no command: the string's lines are one logical line, so its next line
+        // is no comment when it starts with `#`, and the rules read the command after the string's close (R1264aj D1
+        // b3). Only the quote's own newlines: one inside a `$(…)`, backtick, `${…}` or `$((…))` nested in it isn't
+        // recorded here (R1264ak/al, #1292).
         if (inQuote.has(e0) && i + 1 < raw.length) { l += raw[i]! + '\n'; i++; continue; }
         l += raw[i]!;
         break;
