@@ -57,6 +57,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { parse } from 'yaml';
+import { frozenSet } from '../src/check-tables.js';
 import { repoRoot } from './helpers.js';
 
 /** The claude binary as a word: its name, a path to it, its package (with a version), or its cli.js. */
@@ -74,7 +75,7 @@ const isClaudeToken = (u: string) => CLAUDE_WORD.test(u) && ENDS_CLAUDE.test(u);
 const VALUE_CLAUDE = (v: string) => isClaudeToken(v.split(/\s+/)[0] ?? '') || /\$\{\w+:?[-=](?:[^}\s]*\/)?claude\}|\$\((?:command -v|which|type -P) claude\)/.test(v);
 /** Commands that name claude without starting it: their words are data. */
 // check-table: never-grow
-const NON_LAUNCHERS = new Set([
+const NON_LAUNCHERS = frozenSet([
   'command',
   'which',
   'type',
@@ -154,7 +155,7 @@ const SHADOWED = new Set('sudo env timeout command builtin exec claude printenv 
 
 /** Words that open a command without being it. */
 // check-table: never-grow
-const KEYWORDS = new Set([
+const KEYWORDS = frozenSet([
   'if',
   'then',
   'elif',
