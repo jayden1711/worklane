@@ -184,28 +184,57 @@ function quoteStep(t: string, k: number, q: Quote): { q: Quote; n: number } {
   return { q: null, n: 1 };
 }
 
-/** Joins continued lines and drops comments (a `#` at a word's start outside quotes) and blank lines. */
+/**
+ * Joins continued lines and drops comments and blank lines, as the mask reads them (R1264aj D1): a line continues
+ * only where the mask consumed a backslash-newline (not a comment's `\`, not the second of an escaped `\\`), and a
+ * `#` cuts only where the mask opened a comment (not at a line's start inside a multi-line string), and a string's
+ * lines stay one logical line, joined by their newlines, as bash reads them. The text is the
+ * raw slice. A heredoc body's lines, which the mask doesn't read as shell, keep the per-line reading (a trailing `\`
+ * joins, a `#` at a word's start outside quotes cuts).
+ */
+let linesCache: { text: string; lines: { line: number; end: number; text: string }[] } | null = null;
 function logicalLines(text: string): { line: number; end: number; text: string }[] {
-  const out: { line: number; end: number; text: string }[] = [];
+  if (linesCache?.text === text) return linesCache.lines;
+  const { comments, joins, quoted, docs } = maskFile(text);
+  const joined = new Set(joins);
+  const inQuote = new Set(quoted);
   const raw = text.split('\n');
+  const starts: number[] = [];
+  for (let i = 0, o = 0; i < raw.length; i++) { starts.push(o); o += raw[i]!.length + 1; }
+  const inDoc = (i: number) => docs.some(([a, b]) => starts[i]! >= a && starts[i]! < b);
+  const out: { line: number; end: number; text: string }[] = [];
+  let ci = 0;
   for (let i = 0; i < raw.length; i++) {
     const start = i;
-    let l = raw[i]!;
-    while (/\\\s*$/.test(l) && i + 1 < raw.length) l = l.replace(/\\\s*$/, ' ') + raw[++i];
-    let q: Quote = null;
-    let cut = l.length;
-    for (let k = 0; k < l.length; ) {
-      if (!q && l[k] === '#' && (k === 0 || /\s/.test(l[k - 1]!))) {
-        cut = k;
+    let l: string;
+    if (inDoc(i)) {
+      l = raw[i]!;
+      while (/\\\s*$/.test(l) && i + 1 < raw.length && inDoc(i + 1)) l = l.replace(/\\\s*$/, ' ') + raw[++i];
+      let q: Quote = null;
+      for (let k = 0; k < l.length; ) {
+        if (!q && l[k] === '#' && (k === 0 || /\s/.test(l[k - 1]!))) { l = l.slice(0, k); break; }
+        const r = quoteStep(l, k, q);
+        q = r.q;
+        k += r.n;
+      }
+    } else {
+      l = '';
+      for (;;) {
+        const s0 = starts[i]!, e0 = s0 + raw[i]!.length;
+        while (ci < comments.length && comments[ci]! < s0) ci++;
+        if (ci < comments.length && comments[ci]! < e0) { l += raw[i]!.slice(0, comments[ci]! - s0); break; }
+        if (joined.has(e0) && i + 1 < raw.length) { l += raw[i]!.slice(0, -1) + ' '; i++; continue; }
+        // A newline inside a quote ends no command: the string's lines are one logical line, so its next line is no
+        // comment when it starts with `#`, and the rules read the command after the string's close (R1264aj D1 b3).
+        if (inQuote.has(e0) && i + 1 < raw.length) { l += raw[i]! + '\n'; i++; continue; }
+        l += raw[i]!;
         break;
       }
-      const r = quoteStep(l, k, q);
-      q = r.q;
-      k += r.n;
     }
-    const t = l.slice(0, cut).trim();
+    const t = l.trim();
     if (t) out.push({ line: start + 1, end: i + 1, text: t });
   }
+  linesCache = { text, lines: out };
   return out;
 }
 
@@ -262,8 +291,8 @@ const REDIRECTS: ReadonlySet<string> = new Set(['<', '>', '>>', '<<<', '<>', '<&
  * substitution, an unfinished heredoc), so a reader that lost sync with bash refuses the file rather than masking the
  * rest of it unseen.
  */
-function maskFile(text: string): { out: string; open: string | null } {
-  type Paren = { kind: 'grp' | 'arr' | 'proc' | 'fn' | 'case' | 'cparen' | 'pparen'; ret: Walk };
+function maskFile(text: string): { out: string; open: string | null; comments: number[]; joins: number[]; quoted: number[]; docs: [number, number][] } {
+  type Paren = { kind: 'grp' | 'arr' | 'xglob' | 'proc' | 'fn' | 'case' | 'cparen' | 'pparen'; ret: Walk };
   type Ctx = { q: Quote | 'sub' | 'bq' | 'arith' | 'brace'; depth: number; masked?: boolean; w?: Walk; ws?: Paren[]; wb?: boolean; skip?: number; redir?: boolean };
   const st: Ctx[] = [{ q: null, depth: 0 }];
   const top = () => st[st.length - 1]!;
@@ -271,6 +300,12 @@ function maskFile(text: string): { out: string; open: string | null } {
   const docs: { word: string; strip: boolean }[] = [];
   let unfinished: string | null = null;
   let forArithAt = -1;
+  // Where the mask opened a comment, the newlines a backslash joined, and the heredoc bodies (R1264aj D1: the line
+  // reader follows these, not its own reading of the raw text).
+  const comments: number[] = [];
+  const joins: number[] = [];
+  const quoted: number[] = [];
+  const bodies: [number, number][] = [];
   const wordAt = (k: number) => k === 0 || /[\s;&|()]/.test(text[k - 1]!);
   // The state a command's first word leads to.
   const first = (t: Ctx, word: string | null): Walk => {
@@ -333,20 +368,22 @@ function maskFile(text: string): { out: string; open: string | null } {
       else t.w = 'cmd';
       return false;
     }
-    // Inside an argument's group (an array, an extglob `@(x|case)`), operators separate nothing (R1264ag D1).
-    if (ws.at(-1)?.kind === 'arr' && op !== '(' && op !== ')') return false;
+    // Inside an argument's extglob group (`@(x|case)`) operators separate nothing (R1264ag D1); an array or a process
+    // substitution keeps its operators (R1264ai D1: `a=(<(…) <(…))`).
+    if (ws.at(-1)?.kind === 'xglob' && op !== '(' && op !== ')') return false;
     if (REDIRECTS.has(op) || op === '<<' || op === '<<-') {
       t.redir = op !== '<<' && op !== '<<-';
       if (w === 'cmd' || w === 'time') t.w = 'arg';
       return false;
     }
-    if (op === '<(' || op === '>(') { ws.push({ kind: 'proc', ret: w === 'cmd' ? 'arg' : w }); t.w = 'cmd'; return false; }
+    // Its first word is a command, not the target of a redirection before it (R1264ai/aj D2: `done < <(case …)`).
+    if (op === '<(' || op === '>(') { t.redir = false; ws.push({ kind: 'proc', ret: w === 'cmd' ? 'arg' : w }); t.w = 'cmd'; return false; }
     if (op === '((') { t.w = w === 'for' ? 'forArith' : 'after'; return false; }
     if (op === '(') {
       // `()` is a function's (`g()`, `function g()`): an empty subshell isn't bash.
       if (/^\([ \t]*\)/.test(text.slice(k, k + 40)) && !/[@!*+?=]/.test(text[k - 1] ?? '')) ws.push({ kind: 'fn', ret: 'cmd' });
       else if (['cmd', 'time', 'fnNamed', 'coproc', 'coprocNamed'].includes(w)) { ws.push({ kind: 'grp', ret: 'after' }); t.w = 'cmd'; }
-      else { ws.push({ kind: 'arr', ret: w }); t.w = 'arg'; }
+      else { ws.push({ kind: /[@!*+?]/.test(text[k - 1] ?? '') ? 'xglob' : 'arr', ret: w }); t.w = 'arg'; }
       return false;
     }
     if (op === ')') {
@@ -402,6 +439,7 @@ function maskFile(text: string): { out: string; open: string | null } {
       walk(t, k);
       out += '\n';
       k++;
+      const bodyStart = k;
       // Heredoc bodies, one after another, masked to each delimiter line.
       while (docs.length) {
         const d = docs.shift()!;
@@ -418,6 +456,7 @@ function maskFile(text: string): { out: string; open: string | null } {
         }
         if (!found) unfinished = `a heredoc to ${d.word}`;
       }
+      bodies.push([bodyStart, k]);
       continue;
     }
     // ${…} (R1264z D2): bash's own quoting inside it, nested even within "…" ("${raw//'"'/}"); masked where it sits
@@ -447,6 +486,7 @@ function maskFile(text: string): { out: string; open: string | null } {
     }
     if (plain()) {
       if (c === '#' && wordAt(k)) {
+        comments.push(k);
         const e = text.indexOf('\n', k) < 0 ? text.length : text.indexOf('\n', k);
         out += ' '.repeat(e - k);
         k = e;
@@ -463,7 +503,7 @@ function maskFile(text: string): { out: string; open: string | null } {
           continue;
         }
       }
-      if (c === '\\') { out += text.slice(k, k + 2); k += 2; continue; }
+      if (c === '\\') { if (text[k + 1] === '\n') joins.push(k + 1); out += text.slice(k, k + 2); k += 2; continue; }
       if (c === '$' && text[k + 1] === '(' && text[k + 2] === '(') { st.push({ q: 'arith', depth: 0 }); out += '$(('; k += 3; continue; }
       if (c === '(' && text[k + 1] === '(' && (wordAt(k) || forArithAt === k)) { st.push({ q: 'arith', depth: 0 }); out += '(('; k += 2; continue; }
       if (c === '$' && text[k + 1] === '{') { st.push({ q: 'brace', depth: 0, masked: false }); out += '${'; k += 2; continue; }
@@ -479,8 +519,9 @@ function maskFile(text: string): { out: string; open: string | null } {
       continue;
     }
     // Inside a quote.
+    if (c === '\n') quoted.push(k);
     if (t.q === "'") { if (c === "'") { st.pop(); out += c; } else out += c === '\n' ? '\n' : ' '; k++; continue; }
-    if (c === '\\') { out += text.slice(k, k + 2).replace(/[^\n]/g, ' '); k += 2; continue; }
+    if (c === '\\') { if (t.q === '"' && text[k + 1] === '\n') joins.push(k + 1); out += text.slice(k, k + 2).replace(/[^\n]/g, ' '); k += 2; continue; }
     if (t.q === "$'") { if (c === "'") { st.pop(); out += c; } else out += c === '\n' ? '\n' : ' '; k++; continue; }
     // "…": `$((`, `$(` and `` ` `` open an unquoted context.
     if (c === '"') { st.pop(); out += c; k++; continue; }
@@ -493,7 +534,7 @@ function maskFile(text: string): { out: string; open: string | null } {
   }
   const names: Record<string, string> = { "'": "a '…' quote", "$'": "a $'…' quote", '"': 'a "…" quote', sub: 'a $(…)', bq: 'a `…`', arith: 'a ((…))', brace: 'a ${…}' };
   const open = unfinished ?? (docs.length ? `a heredoc to ${docs[0]!.word}` : st.length > 1 ? names[String(top().q)]! : null);
-  return { out, open };
+  return { out, open, comments, joins, quoted, docs: bodies };
 }
 
 /** A substitution's text that looks the binary up: its output is the binary. */
@@ -1099,6 +1140,13 @@ test('#1262: every way a script can start claude other than through claude_guard
   // check-table: never-shrink
   const MUST_FAIL = [
     'after-and',
+    // R1264aj D1: the line reader follows the mask (a comment's `\`, an escaped `\\`, a string's `#` line).
+    'comment-backslash-then-claude',
+    'comment-backslash-then-sudo',
+    'escaped-backslash-then-claude',
+    'string-hash-line-then-sudo',
+    'string-hash-line-then-claude',
+    'continued-separator-then-claude',
     'case-bang-quote-arm-then-sudo',
     'case-continued-argument-then-sudo',
     'case-if-multiline-then-sudo',
@@ -1330,7 +1378,11 @@ const CASE_KEYWORD_AFTER: readonly (readonly [string, string])[] = [
   ['case y in (esac) ', ';; esac'], ['case y in fi|esac) ', ';; esac'], ['case y in (done|esac) ', ';; esac'],
   ['for ((i = 0; i < 1; i++)) { ', '; }'], ['for((i = 0; i < 1; i++)) do ', '; done'], ['for((i = 0; i < 1; i++)) { ', '; }'],
   ['for((i = 0; i < 1; i++)); do ', '; done'], ['for ((i = 0; i < 1; i++))\n  do ', '; done'],
-  ['cat <(', ')'], ['cat <<EOF\nx\nEOF\n  ', ''], ['cat <<-EOF\n\tx\n\tEOF\n  ', ''], ['cat <<\'EOF\'; :\nx\nEOF\n  ', ''], ['echo "$(', ')"'], ['echo `', '`'], ['exec 3>&1; ', ''], [':>/dev/null; ', ''],
+  ['cat <(', ')'],
+  // R1264ai/aj D2: a process substitution that is a redirection's target starts a command list.
+  ['while read -r l; do :; done < <(', ')'], ['read -r x < <(', ')'], ['exec 3< <(', ')'], ['echo x | tee > >(', ')'],
+  ['echo x > >(', ')'], ['cat < <(', ')'], ['exec 2> >(', ')'],
+  ['cat <<EOF\nx\nEOF\n  ', ''], ['cat <<-EOF\n\tx\n\tEOF\n  ', ''], ['cat <<\'EOF\'; :\nx\nEOF\n  ', ''], ['echo "$(', ')"'], ['echo `', '`'], ['exec 3>&1; ', ''], [':>/dev/null; ', ''],
 ];
 // check-table: never-shrink
 const CASE_ARGUMENT = [
@@ -1341,6 +1393,8 @@ const CASE_ARGUMENT = [
   'echo \\( case x \\)', 'find . -name x -exec true {} \\; case x', 'echo $(date +%F) case notes', 'echo `date +%F` case notes',
   'printf "%s %s" $(id -u) case x', 'x=1 case y', '>/dev/null case y', 'grep -c esac x', 'case y in case) :;; esac',
   'time echo case x', 'case y in y) grep -c esac x;; *) echo "a";; esac', 'function g { echo case x; }; g', 'echo a; echo case x', 'cat <<<case', 'ls -d @(x|case) 2>/dev/null', 'echo +(case|x) !(case)',
+  // R1264ai D1: a process substitution inside an array.
+  'w=(<(echo case) <(echo x)); cat "${w[0]}"', 'w=(); w+=(<(echo case)); cat "${w[0]}"',
 ];
 test('#1262 (R1264ae/af): case after every command start is the reserved word, and in every argument position is not', () => {
   const bash4 = Number(execFileSync('bash', ['-c', 'echo "${BASH_VERSINFO[0]}"'], { encoding: 'utf8' }).trim()) >= 4;
