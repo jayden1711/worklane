@@ -1174,8 +1174,8 @@ test('weakening backstop (#941): src/ and scripts/ register no table by a mark (
   // The 43 registered tables of src/ and scripts/ before #941: 35 here, and the root updater's 8, which were its
   // generated copy of src/events/redact.ts's and still are (scripts/lib/redact-vendor.mjs).
   // #1185: src/claude-launch.ts's LAUNCH_ENV_KEEP and LAUNCH_ENV_PASS, and scripts/ci/claude-commands.mjs's
-  // DARWIN_ARM64_COMMANDS, moved to data when main's #941 merged in.
-  assert.equal(dataTables().length, 38, 'the 38 tables files entries of src/ and scripts/ (#941), each with its module');
+  // DARWIN_ARM64_COMMANDS, moved to data when main's #941 merged in; LINUX_X64_COMMANDS, the owner's Linux probe.
+  assert.equal(dataTables().length, 39, 'the 39 tables files entries of src/ and scripts/ (#941), each with its module');
   assert.deepEqual(dataTables().filter((d) => d.module.endsWith('(no module)')).map((d) => d.file), []);
   // A tables file is locked with its module: the same self-modification part, or neither locked.
   const part = (path: string) => SELF_MODIFICATION_PARTS.find((p) => p.globs.some((g) => globToRegExp(g).test(path)))?.what ?? 'not locked';
