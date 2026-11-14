@@ -494,8 +494,9 @@ test("git commit -v (on the command line or by commit.verbose) is recognised by 
     for (const [what, cfg] of [['commit.cleanup=scissors', { 'commit.cleanup': 'scissors' }], ['commit.cleanup=scissors and commit.verbose', { 'commit.cleanup': 'scissors', 'commit.verbose': 'true' }]] as const) {
       assert.equal(merge(cfg, `Merge side\n${scissorsLine}\nline two\n`, how), 'hook=pass gate=pass', `${how} --edit, ${what}, a typed scissors line`);
     }
-    // R1260ao D1: --cleanup=scissors on the command line: git cuts there too, but a hook can't see the flag, so it judges by
-    // strip (both readings) and refuses what the gate passes: the stated `--cleanup=` case, pinned.
+    // R1260ao D1: this row, `commit.cleanup` unset and --cleanup=scissors on the command line: git cuts there too, but a
+    // hook can't see the flag, so here it judges by strip (both readings) and refuses what the gate passes: the stated
+    // `--cleanup=` case, pinned (R1260as N1: for this row only).
     assert.equal(merge({}, `Merge side\n${scissorsLine}\nline two\n`, how, ['--cleanup=scissors']), 'hook=refuse gate=pass', `${how} --edit --cleanup=scissors, a typed scissors line: the stated --cleanup= case`);
   }
   // The stated residual: the same three lines typed by hand into a commit made without -v read as verbose: the hook cuts

@@ -339,8 +339,10 @@ const cutReadings = (mode, verbose = false) => (verbose || mode === 'scissors' ?
  * counts as git's block in any language. Not the translations' own text: git's .po files are GPL. With -m, -F or -C git
  * writes no block, so this route is off there and the -m residual (MORNING 37) is as narrow as before. Only `git
  * commit`'s own file, COMMIT_EDITMSG, takes this route (R1260ak/al D1); for `git merge --edit` and `git pull --edit`
- * (MERGE_MSG) it is off, and what the hook and git do there under each cleanup setting is pinned row by row in test 6
- * of test/commit-msg-hook.test.ts, the source of truth (R1260an, R1260ao, R1260ar). A copy typed by hand reads as
+ * (MERGE_MSG) it is off, and what the hook and git do there is pinned row by row in test 6 of
+ * test/commit-msg-hook.test.ts, the source of truth, for `commit.cleanup` unset or `scissors` and for
+ * `--cleanup=scissors` on the command line with `commit.cleanup` unset; other settings aren't pinned (R1260an,
+ * R1260ao, R1260ar, R1260as). A copy typed by hand reads as
  * verbose too: git's English lines in a commit made without -v, or, with `commit.verbose` and
  * `--no-verbose` in the editor, the scissors line and any two comment lines under it: the stated residual (the hook
  * cuts, git doesn't, the gate may refuse).
