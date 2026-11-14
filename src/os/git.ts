@@ -50,11 +50,16 @@
 // owner's own commands) keep their git as it was: the owner's own config is theirs to trust.
 // LIMIT: the read and the run are two processes, but both are pinned to the same dirs, so a link rewritten between
 // them changes nothing; a file in those dirs edited in between is read by the run: the checkout's .git/ is the
-// coordinator's alone (scripts/setup/checkout.sh, git-dir-lock.ts), and an agent-writable worktree admin dir holds no
-// config git reads unless the checkout's own config turns extensions.worktreeConfig on. remote.<name>.url is the
+// coordinator's alone (scripts/setup/checkout.sh, git-dir-lock.ts). An agent-writable worktree admin dir holds no
+// config file git reads unless the checkout's own config turns extensions.worktreeConfig on, but its `commondir` names
+// which repository (config, hooks, refs) git uses: a guarded git is pinned to the checkout's (GIT_GUARD_VAR). An
+// agent's commit is refused, when the guard decides, if it names a repository other than the one its admin dir sits
+// in, or one holding a link under refs/ or directly under objects/ (src/scan/secrets.ts repositoryElsewhere, R1124s,
+// R1124t); a rewrite after the decision isn't seen. remote.<name>.url is the
 // checkout's own setting, never refused: the locked .git/config is what keeps it.
 import { execFile, execFileSync, spawn, spawnSync } from './child-process.js';
 import { BRAND } from '../brand.js';
+import { regExpOf, tablesOf, type Pattern } from '../check-tables.js';
 import { ownEnv } from './own-env.js';
 import type {
   ChildProcess,
@@ -119,59 +124,72 @@ export const GIT_GUARD_ENV: Readonly<Record<string, string>> = Object.freeze({
   GIT_PAGER: 'cat',
 });
 
+/** This module's tables (src/os/git.tables.json, #941): data the weakening hold compares parsed, deep-frozen here. */
+const TABLES = tablesOf(import.meta.url);
+
 /**
  * Command scope (GIT_CONFIG_COUNT), ahead of the caller's own pairs: each key a config file could set to a command,
  * set over here. credential.helper's empty value clears every helper a file named (URL-scoped ones too, measured), so
- * only one the caller adds after it is used.
+ * only one the caller adds after it is used. `{noProgram}` in the data is NO_PROGRAM (it is the OS's null device's).
  */
-// check-table: never-shrink
-export const GIT_GUARD_PAIRS: readonly (readonly [string, string])[] = Object.freeze([
-  ['credential.helper', ''],
-  ['core.fsmonitor', 'false'],
-  ['core.sshCommand', 'ssh'],
-  ['core.askPass', ''],
-  ['core.editor', ':'],
-  ['sequence.editor', ':'],
-  ['core.pager', 'cat'],
-  ['core.alternateRefsCommand', ''],
-  ['diff.external', ''],
-  ['gpg.program', NO_PROGRAM],
-  ['gpg.openpgp.program', NO_PROGRAM],
-  ['gpg.x509.program', NO_PROGRAM],
-  ['gpg.ssh.program', NO_PROGRAM],
-  ['gpg.ssh.defaultKeyCommand', NO_PROGRAM],
-  ['protocol.ext.allow', 'never'],
-  ['submodule.recurse', 'false'],
-  ['fetch.recurseSubmodules', 'false'],
-  ['push.recurseSubmodules', 'no'],
-  ['transfer.bundleURI', 'false'],
-] as const);
+export const GIT_GUARD_PAIRS: readonly (readonly [string, string])[] = Object.freeze(TABLES.get<readonly (readonly [string, string])[]>('GIT_GUARD_PAIRS').map(([k, v]) => Object.freeze([k, v === '{noProgram}' ? NO_PROGRAM : v] as const)));
 
 /**
  * Keys a config file may not set at all for a guarded git, with why: no command-scope value takes them back (an
  * include adds a file, insteadOf and gitProxy are lists, a driver or remote has any name, a URL-scoped http key beats
- * the plain one). Matched on git's own spelling of the key, folded to lower case.
+ * the plain one). Matched on git's own spelling of the key, folded to lower case. The RegExps are this module's own,
+ * made from the data, never exported (a RegExp can be rewritten in place).
  */
-// check-table: never-shrink
-export const REFUSED_KEYS: readonly (readonly [RegExp, string])[] = Object.freeze([
-  [/^include\.path$|^includeif\..*\.path$/, 'which reads another file in as config'],
-  [/^filter\..*\.(?:clean|smudge|process)$/, 'a filter driver, a command git runs on checkout and add'],
-  [/^diff\..*\.(?:command|textconv)$/, 'a diff driver, a command git runs to show a diff'],
-  [/^merge\..*\.driver$/, 'a merge driver, a command git runs to merge'],
-  [/^(?:mergetool|difftool)\..*\.cmd$/, 'a tool command'],
-  [/^url\..*\.(?:insteadof|pushinsteadof)$/, 'which sends a remote URL somewhere else'],
-  [/^remote\..*\.(?:uploadpack|receivepack|proxy|proxyauthmethod|vcs)$/, "a remote's command, helper or proxy"],
-  [/^http\.(?:.*\.)?(?:ssl[a-z]*|proxy[a-z]*|schannel[a-z]*|pinnedpubkey|curloptresolve|extraheader|cookiefile|savecookies|followredirects)$/, 'which changes the host git reaches, or what it trusts or sends there'],
-  [/^core\.(?:worktree|gitproxy)$/, 'which moves the work tree, or runs a proxy command'],
-  [/^core\.hookspath$/, 'which names the hooks git runs'],
-  [/^submodule\..*\.update$/, "a submodule's update command"],
-] as const);
+const REFUSED_KEYS: readonly (readonly [RegExp, string])[] = Object.freeze(TABLES.get<readonly (readonly [Pattern, string])[]>('REFUSED_KEYS').map(([p, why]) => Object.freeze([regExpOf(p), why] as const)));
+
+/**
+ * What is wrong with the git guard's tables (#941, R1184l): a key GIT_GUARD_PAIRS sets twice (git takes a key's last
+ * value, so a pair added later would override the guard's own: `core.fsmonitor` set again to a command), compared
+ * folded to lower case as git folds a section and a name (a subsection's case too, which only refuses more); a key
+ * REFUSED_KEYS names (R1184m: `include.path` reads in a file whose keys come after the guard's); a pattern REFUSED_KEYS
+ * lists twice. GIT_GUARD_PAIRS is also `exact` in its data, so any pair added, taken out or changed waits for the owner
+ * (R1184n: a new key, such as a URL-scoped credential helper, adds a command with no repeat). Checked at load (it
+ * throws: no guarded git runs on such a table); test/check-tables-sync.test.ts tries each.
+ */
+export function gitTableProblems(pairs: readonly (readonly [string, string])[] = GIT_GUARD_PAIRS, refused: readonly (readonly [RegExp, string])[] = REFUSED_KEYS): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const [k] of pairs) {
+    if (seen.has(k.toLowerCase())) out.push(`GIT_GUARD_PAIRS sets ${k} more than once`);
+    seen.add(k.toLowerCase());
+    // A key a config file may not set is one the guard may not set either (R1184m: `include.path` reads another file
+    // in, whose keys come after the guard's).
+    const refusedAs = refused.find(([re]) => re.test(k.toLowerCase()));
+    if (refusedAs) out.push(`GIT_GUARD_PAIRS sets ${k}, ${refusedAs[1]}`);
+  }
+  const patterns = new Set<string>();
+  for (const [re] of refused) {
+    if (patterns.has(re.source)) out.push(`REFUSED_KEYS lists ${re.source} more than once`);
+    patterns.add(re.source);
+  }
+  return out;
+}
+if (gitTableProblems().length) throw new Error(`src/os/git.ts's data: ${gitTableProblems().join('; ')}`);
 
 /** A mark's value that marks: '1', or an absolute path (the checkout). */
 const marks = (v: string | undefined): v is string => v === '1' || (!!v && isAbsolute(v));
 
 /** Whether `env`, or this process, is marked as an instance's. Own variables only (#786). */
 const marked = (env: NodeJS.ProcessEnv): boolean => marks(ownEnv(env).get(GIT_GUARD_VAR)) || marks(ownEnv(process.env).get(GIT_GUARD_VAR));
+
+/**
+ * Whether a git run here through this runner is guarded (this process, or `env`, marked as an instance's): its git
+ * then reads no global config (GIT_GUARD_ENV), so it can't answer for a git that does, such as an agent's own commit.
+ */
+export const gitGuarded = (env: NodeJS.ProcessEnv = process.env): boolean => marked(env);
+
+/**
+ * A file name folded at least as far as any file system git or the scan may be on folds it (R1124h, R1124j): NFKC
+ * (the compatibility forms: ſ, µ, ϐ, ligatures, the Kelvin sign), then upper and lower case (as APFS's case folding
+ * pairs them), and final sigma as sigma. Folding further than a file system does only makes a check stricter. Here,
+ * not in a module of its own, so the agents' tool guard's import tree (src/hook-imports.ts, #785) stays as pinned.
+ */
+export const foldName = (p: string) => p.normalize('NFKC').toUpperCase().toLowerCase().replaceAll('ς', 'σ');
 
 /** The instance checkout a marked git is pinned to: this process's mark first (the coordinator's own), then the git's. */
 function markedRepo(env: NodeJS.ProcessEnv): string | null {
@@ -261,21 +279,24 @@ function globalOptions(args: readonly string[]): string[] {
 /**
  * What a `git config --list --show-scope --show-origin --includes -z` listing sets that a guarded git refuses, as a
  * reason; null when nothing. A key set at command scope is the engine's own; core.hooksPath in a file is fine when
- * the command scope sets it over (the coordinator's own hooks dir).
+ * the command scope sets it over (the coordinator's own hooks dir), and in the repository's own config when it names
+ * that repository's own hooks dir (`base`: the directory git ran in, which a relative origin is read from).
  */
-export function configRefusal(listing: string): string | null {
+export function configRefusal(listing: string, base?: string): string | null {
   const t = listing.split('\0');
   const ours = new Set<string>();
-  const files: [string, string, string][] = [];
+  const files: [string, string, string, string][] = [];
   for (let i = 0; i + 2 < t.length; i += 3) {
-    const key = (t[i + 2]!.split('\n', 1)[0] ?? '').toLowerCase();
+    const [k, ...v] = t[i + 2]!.split('\n');
+    const key = (k ?? '').toLowerCase();
     if (t[i] === 'command') ours.add(key);
-    else files.push([key, t[i + 1]!, t[i]!]);
+    else files.push([key, t[i + 1]!, t[i]!, v.join('\n')]);
   }
-  for (const [key, origin, scope] of files) {
+  for (const [key, origin, scope, value] of files) {
     // System config is root's (/etc/gitconfig), global is read as the null device: only a repo's own is suspect.
     if (scope === 'system' || scope === 'global') continue;
     if (key === 'core.hookspath' && ours.has(key)) continue;
+    if (key === 'core.hookspath' && base !== undefined && ownHooksPin(scope, origin, value, base)) continue;
     const hit = REFUSED_KEYS.find(([re]) => re.test(key));
     if (hit) return `the git config ${shown(origin.replace(/^file:/, ''))} sets ${shown(key)}, ${hit[1]}; an instance's coordinator runs nothing a checkout's config names. Take it out of that file`;
   }
@@ -298,7 +319,23 @@ function preflight(file: string, args: readonly string[], cwd: string | URL | un
   });
   if (r.error) return `its git config couldn't be read (${r.error.message})`;
   if (r.status !== 0) return `its git config couldn't be read (${(r.stderr || '').trim().split('\n').pop() || `exit ${r.status}`})`;
-  return configRefusal(r.stdout);
+  return configRefusal(r.stdout, startDir(args, cwd));
+}
+
+/**
+ * #983: whether a core.hooksPath row is the pin `install --git-hooks-only` writes (src/install.ts pinCheckoutHooks):
+ * in local scope, so in the repository's common config file, naming by absolute path the `hooks` dir beside that
+ * file, the dir git runs hooks from when nothing names one. It adds no hooks a guarded git wouldn't run anyway.
+ */
+function ownHooksPin(scope: string, origin: string, value: string, base: string): boolean {
+  if (scope !== 'local' || !origin.startsWith('file:') || !isAbsolute(value)) return false;
+  const file = resolve(base, origin.slice('file:'.length));
+  if (!file.endsWith('/config') && !file.endsWith('\\config')) return false;
+  try {
+    return realpathSync(value) === realpathSync(join(dirname(file), 'hooks'));
+  } catch {
+    return false;
+  }
 }
 
 /**

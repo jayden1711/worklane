@@ -78,11 +78,20 @@ test('vacuity: a test path the gate would have to quote is never put in a comman
   }
 });
 
-test('vacuity: what counts as changed app code: types-only and config, data, docs and assets do not; deleted files and tests do not; an unknown kind does', () => {
+test('vacuity: what counts as changed app code: types-only and config, data, docs and assets do not; tests do not; an unknown kind does; app code taken away holds (#1015)', () => {
   for (const p of ['src/types.d.ts', 'src/x.d.mts', 'src/config.json', 'src/a.yaml', 'src/a.yml', 'src/a.toml', 'src/README.md', 'src/style.css', 'src/logo.svg', 'src/a.png']) {
     assert.deepEqual(check({ files: { [p]: 'x' } }), { reasons: [] }, `${p}: nothing for a test to run`);
   }
-  assert.deepEqual(check({ files: { 'src/gone.js': null } }), { reasons: [] }, 'a deleted app file: nothing left to run');
+  // #1015: app code taken away with no app code left to measure holds; it used to merge with no test and no run.
+  const gone = (p: string) => `design: vacuity: it takes away app code (${p}: deleted, or renamed out of app code) and leaves no app code its tests could run, so nothing measured what that breaks`;
+  assert.deepEqual(check({ files: { 'src/gone.js': null } }).reasons, [gone('src/gone.js')], 'a deleted app file');
+  assert.deepEqual(check({ files: { 'src/gone.js': null, 'test/gone.test.js': ASSERTS } }).reasons, [gone('src/gone.js')], 'a deleted app file, with a test');
+  assert.deepEqual(check({ files: { 'src/a.js': null, 'src/a.json': '{}' } }).reasons, [gone('src/a.js')], 'renamed to a data name (the rename\'s old path is in the change)');
+  assert.deepEqual(check({ files: { 'src/a.js': null, 'test/a.test.js': ASSERTS } }).reasons, [gone('src/a.js')], 'renamed to a test path');
+  assert.deepEqual(check({ files: { 'src/a.js': null, 'lib/a.js': 'x' } }).reasons, [gone('src/a.js')], 'moved out of app_paths');
+  assert.deepEqual(check({ files: { 'src/types.d.ts': null, 'src/config.json': null, 'test/old.test.js': null } }), { reasons: [] }, 'taking away what has no runtime code, or a test, is not app code');
+  // Beside app code that is still there, the change is measured as before (per PR, #1015's second item).
+  assert.deepEqual(check({ files: { 'src/gone.js': null, 'src/a.js': 'x', 'test/a.test.js': ASSERTS } }).run?.app, ['src/a.js']);
   assert.deepEqual(check({ files: { 'docs/a.md': 'x', 'lib/a.js': 'x' } }), { reasons: [] }, 'outside app_paths');
   assert.deepEqual(check({ files: { 'src/a.test.js': ASSERTS } }).reasons, [`design: vacuity: it changes app code (src/a.test.js) ${NONE}`], 'no test glob matches it: app code');
   assert.deepEqual(check({ files: { 'src/a.test.js': ASSERTS }, cfg: { ...cfg, test_globs: ['src/**/*.test.js'] } }), { reasons: [] }, 'a test glob matches it: a test, not app code');
@@ -93,7 +102,11 @@ test('vacuity: what counts as changed app code: types-only and config, data, doc
 
 test('vacuity: no vacuity section in tests.yaml: changed code waits, naming the missing section; tests, docs and config alone do not (the owner\'s decision)', () => {
   assert.deepEqual(check({ files: { 'src/a.js': 'x', 'lib/b.py': 'y' }, cfg: undefined }).reasons, [`design: vacuity: tests.yaml has no vacuity section, so nothing shows its tests run the code it changes (src/a.js, lib/b.py); \`${BRAND.cli} doctor\` shows the section to add`]);
-  assert.deepEqual(check({ files: { 'test/a.test.js': 'x', 'src/a.test.ts': 'x', 'README.md': 'x', 'src/c.json': 'x', 'src/gone.js': null }, cfg: undefined }), { reasons: [] }, 'the tamper guard\'s own test globs, no-runtime files and deleted files');
+  assert.deepEqual(check({ files: { 'test/a.test.js': 'x', 'src/a.test.ts': 'x', 'README.md': 'x', 'src/c.json': 'x', 'src/gone.json': null }, cfg: undefined }), { reasons: [] }, "the tamper guard's own test globs, and no-runtime files, there or taken away");
+  // R1179d: code the head no longer has (deleted, or renamed to a data name, a test path or a .d.ts) holds too.
+  const GONE = (p: string) => [`design: vacuity: tests.yaml has no vacuity section, and it takes away code (${p}: deleted, or renamed out of code), so nothing measured what that breaks; \`${BRAND.cli} doctor\` shows the section to add`];
+  assert.deepEqual(check({ files: { 'src/gone.js': null }, cfg: undefined }).reasons, GONE('src/gone.js'), 'deleted');
+  for (const to of ['src/price.json', 'test/price.test.js', 'src/price.d.ts']) assert.deepEqual(check({ files: { 'src/price.js': null, [to]: 'x' }, cfg: undefined }).reasons, GONE('src/price.js'), `renamed to ${to}`);
 });
 
 test('vacuity: fail closed: a head it cannot read holds the PR, never reads as one with nothing to check', () => {

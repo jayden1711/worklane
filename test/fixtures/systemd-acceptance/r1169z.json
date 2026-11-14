@@ -1,0 +1,365 @@
+{
+  "//": "Review round r1169z of #1169: each case is one attack on scripts/ci/systemd-acceptance.mjs (README.md).",
+  "cases": {
+    "r1169z-q1-loader-named-includes": {
+      "exit": 2,
+      "reason": "has 'node:test' where this can't read what it does",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "scripts/ci/systemd-acceptance-allow.json.root": [
+          "{ \"uses\": { \"src/os/probe.ts\": { \"why\": \"product code: asks loginctl for Linger (as src/os/index.ts does)\", \"uses\": [\"loginctl: return execFileSync('loginctl', ['show-user', user, '-p', 'Linger', '--value'], { encoding: 'utf8' }).trim() === 'yes';\"] } }, \"skipImports\": {}, \"runtime\": {} }",
+          ""
+        ],
+        "src/os/probe.ts.root": [
+          "import { execFileSync } from 'node:child_process';",
+          "export function lingerEnabled(user = 'runner') {",
+          "  if (process.platform !== 'linux') return null;",
+          "  try {",
+          "    return execFileSync('loginctl', ['show-user', user, '-p', 'Linger', '--value'], { encoding: 'utf8' }).trim() === 'yes';",
+          "  } catch {",
+          "    return null;",
+          "  }",
+          "}",
+          ""
+        ],
+        "y.test.ts.txt": [
+          "import { lingerEnabled } from '../src/os/probe.js';",
+          "const o = { includes: process.getBuiltinModule };",
+          "const { test: check } = o.includes('node:test');",
+          "check('acceptance: linger', { skip: lingerEnabled() === null }, () => {});",
+          ""
+        ]
+      }
+    },
+    "r1169z-q2-tagged-template-loader": {
+      "exit": 2,
+      "reason": "has 'node:test' where this can't read what it does",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "scripts/ci/systemd-acceptance-allow.json.root": [
+          "{ \"uses\": { \"src/os/probe.ts\": { \"why\": \"product code: asks loginctl for Linger (as src/os/index.ts does)\", \"uses\": [\"loginctl: return execFileSync('loginctl', ['show-user', user, '-p', 'Linger', '--value'], { encoding: 'utf8' }).trim() === 'yes';\"] } }, \"skipImports\": {}, \"runtime\": {} }",
+          ""
+        ],
+        "src/os/probe.ts.root": [
+          "import { execFileSync } from 'node:child_process';",
+          "export function lingerEnabled(user = 'runner') {",
+          "  if (process.platform !== 'linux') return null;",
+          "  try {",
+          "    return execFileSync('loginctl', ['show-user', user, '-p', 'Linger', '--value'], { encoding: 'utf8' }).trim() === 'yes';",
+          "  } catch {",
+          "    return null;",
+          "  }",
+          "}",
+          ""
+        ],
+        "y.test.ts.txt": [
+          "import { lingerEnabled } from '../src/os/probe.js';",
+          "const load = (s) => process.getBuiltinModule(String(s));",
+          "const { test: check } = load`node:test`;",
+          "check('acceptance: linger', { skip: lingerEnabled() === null }, () => {});",
+          ""
+        ]
+      }
+    },
+    "r1169z-q3-wrapper-returns-runtime-load": {
+      "exit": 2,
+      "reason": "has 'node:test' where this can't read what it does",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "scripts/ci/systemd-acceptance-allow.json.root": [
+          "{ \"uses\": { \"src/os/probe.ts\": { \"why\": \"product code: asks loginctl for Linger (as src/os/index.ts does)\", \"uses\": [\"loginctl: return execFileSync('loginctl', ['show-user', user, '-p', 'Linger', '--value'], { encoding: 'utf8' }).trim() === 'yes';\"] } }, \"skipImports\": {}, \"runtime\": {} }",
+          ""
+        ],
+        "src/os/probe.ts.root": [
+          "import { execFileSync } from 'node:child_process';",
+          "export function lingerEnabled(user = 'runner') {",
+          "  if (process.platform !== 'linux') return null;",
+          "  try {",
+          "    return execFileSync('loginctl', ['show-user', user, '-p', 'Linger', '--value'], { encoding: 'utf8' }).trim() === 'yes';",
+          "  } catch {",
+          "    return null;",
+          "  }",
+          "}",
+          ""
+        ],
+        "y.test.ts.txt": [
+          "import { lingerEnabled } from '../src/os/probe.js';",
+          "const load = (s) => process.getBuiltinModule(s);",
+          "const spec = 'node:test';",
+          "const { test: check } = load(spec);",
+          "check('acceptance: linger', { skip: lingerEnabled() === null }, () => {});",
+          ""
+        ]
+      }
+    },
+    "r1169z-q4-new-loader": {
+      "exit": 2,
+      "reason": "has 'node:test' where this can't read what it does",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "scripts/ci/systemd-acceptance-allow.json.root": [
+          "{ \"uses\": { \"src/os/probe.ts\": { \"why\": \"product code: asks loginctl for Linger (as src/os/index.ts does)\", \"uses\": [\"loginctl: return execFileSync('loginctl', ['show-user', user, '-p', 'Linger', '--value'], { encoding: 'utf8' }).trim() === 'yes';\"] } }, \"skipImports\": {}, \"runtime\": {} }",
+          ""
+        ],
+        "src/os/probe.ts.root": [
+          "import { execFileSync } from 'node:child_process';",
+          "export function lingerEnabled(user = 'runner') {",
+          "  if (process.platform !== 'linux') return null;",
+          "  try {",
+          "    return execFileSync('loginctl', ['show-user', user, '-p', 'Linger', '--value'], { encoding: 'utf8' }).trim() === 'yes';",
+          "  } catch {",
+          "    return null;",
+          "  }",
+          "}",
+          ""
+        ],
+        "y.test.ts.txt": [
+          "import { lingerEnabled } from '../src/os/probe.js';",
+          "const { test: check } = Reflect.apply(process.getBuiltinModule, process, ['node:test']);",
+          "check('acceptance: linger', { skip: lingerEnabled() === null }, () => {});",
+          ""
+        ]
+      }
+    },
+    "r1169z-q5-control-direct": {
+      "exit": 2,
+      "reason": "a skip reads src/os/probe\\.ts: lingerEnabled, which carries systemd's sign",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "scripts/ci/systemd-acceptance-allow.json.root": [
+          "{ \"uses\": { \"src/os/probe.ts\": { \"why\": \"product code: asks loginctl for Linger (as src/os/index.ts does)\", \"uses\": [\"loginctl: return execFileSync('loginctl', ['show-user', user, '-p', 'Linger', '--value'], { encoding: 'utf8' }).trim() === 'yes';\"] } }, \"skipImports\": {}, \"runtime\": {} }",
+          ""
+        ],
+        "src/os/probe.ts.root": [
+          "import { execFileSync } from 'node:child_process';",
+          "export function lingerEnabled(user = 'runner') {",
+          "  if (process.platform !== 'linux') return null;",
+          "  try {",
+          "    return execFileSync('loginctl', ['show-user', user, '-p', 'Linger', '--value'], { encoding: 'utf8' }).trim() === 'yes';",
+          "  } catch {",
+          "    return null;",
+          "  }",
+          "}",
+          ""
+        ],
+        "y.test.ts.txt": [
+          "import { lingerEnabled } from '../src/os/probe.js';",
+          "const { test: check } = process.getBuiltinModule('node:test');",
+          "check('acceptance: linger', { skip: lingerEnabled() === null }, () => {});",
+          ""
+        ]
+      }
+    },
+    "r1169z-z1-let-no-init-helper": {
+      "exit": 1,
+      "reason": "acceptance: the engine unit starts: SKIP not a booted host",
+      "listed": "test/y\\.test\\.ts:\\d+: acceptance: the engine unit starts",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { existsSync } from 'node:fs';",
+          "let booted = false;",
+          "test('probe', () => { booted = existsSync('/run/systemd/system') && !!process.env.NEVER; });",
+          "let need;",
+          "need = (t) => { if (!booted) t.skip('not a booted host'); };",
+          "test('acceptance: the engine unit starts', (t) => { need(t); });",
+          ""
+        ]
+      }
+    },
+    "r1169z-z10-holder-reassigned-object": {
+      "exit": 1,
+      "reason": "acceptance: the engine unit starts: SKIP not a booted host",
+      "listed": "test/y\\.test\\.ts:\\d+: acceptance: the engine unit starts",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { existsSync } from 'node:fs';",
+          "let booted = false;",
+          "test('probe', () => { booted = existsSync('/run/systemd/system') && !!process.env.NEVER; });",
+          "let h = { need(t) {} };",
+          "h = { need(t) { if (!booted) t.skip('not a booted host'); } };",
+          "test('acceptance: the engine unit starts', (t) => { h.need(t); });",
+          ""
+        ]
+      }
+    },
+    "r1169z-z11-body-assign-in-expression": {
+      "exit": 2,
+      "reason": "registers a test whose function isn't one this file defines",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { existsSync } from 'node:fs';",
+          "let booted = false;",
+          "test('probe', () => { booted = existsSync('/run/systemd/system') && !!process.env.NEVER; });",
+          "let body = (t) => {};",
+          "Object.assign(globalThis, { x: (body = (t) => { if (!booted) { t.skip('not a booted host'); return; } }) });",
+          "test('acceptance: the engine unit starts', body);",
+          ""
+        ]
+      }
+    },
+    "r1169z-z2-helper-reassigned-to-name": {
+      "exit": 1,
+      "reason": "acceptance: the engine unit starts: SKIP not a booted host",
+      "listed": "test/y\\.test\\.ts:\\d+: acceptance: the engine unit starts",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { existsSync } from 'node:fs';",
+          "let booted = false;",
+          "test('probe', () => { booted = existsSync('/run/systemd/system') && !!process.env.NEVER; });",
+          "const other = (t) => { if (!booted) t.skip('not a booted host'); };",
+          "let need = (t) => {};",
+          "need = other;",
+          "test('acceptance: the engine unit starts', (t) => { need(t); });",
+          ""
+        ]
+      }
+    },
+    "r1169z-z3-body-destructuring-assign": {
+      "exit": 2,
+      "reason": "registers a test whose function isn't one this file defines",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { existsSync } from 'node:fs';",
+          "let booted = false;",
+          "test('probe', () => { booted = existsSync('/run/systemd/system') && !!process.env.NEVER; });",
+          "let body = (t) => {};",
+          "[body] = [(t) => { if (!booted) { t.skip('not a booted host'); return; } }];",
+          "test('acceptance: the engine unit starts', body);",
+          ""
+        ]
+      }
+    },
+    "r1169z-z4-body-for-of-assign": {
+      "exit": 2,
+      "reason": "registers a test whose function isn't one this file defines",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { existsSync } from 'node:fs';",
+          "let booted = false;",
+          "test('probe', () => { booted = existsSync('/run/systemd/system') && !!process.env.NEVER; });",
+          "let body = (t) => {};",
+          "for (body of [(t) => { if (!booted) { t.skip('not a booted host'); return; } }]);",
+          "test('acceptance: the engine unit starts', body);",
+          ""
+        ]
+      }
+    },
+    "r1169z-z5-function-decl-reassigned": {
+      "exit": 2,
+      "reason": "registers a test whose function isn't one this file defines",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { existsSync } from 'node:fs';",
+          "let booted = false;",
+          "test('probe', () => { booted = existsSync('/run/systemd/system') && !!process.env.NEVER; });",
+          "function body(t) {}",
+          "body = (t) => { if (!booted) { t.skip('not a booted host'); return; } };",
+          "test('acceptance: the engine unit starts', body);",
+          ""
+        ]
+      }
+    },
+    "r1169z-z6-var-redeclared": {
+      "exit": 2,
+      "reason": "registers a test whose function isn't one this file defines",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { existsSync } from 'node:fs';",
+          "let booted = false;",
+          "test('probe', () => { booted = existsSync('/run/systemd/system') && !!process.env.NEVER; });",
+          "var body = (t) => {};",
+          "var body = (t) => { if (!booted) { t.skip('not a booted host'); return; } };",
+          "test('acceptance: the engine unit starts', body);",
+          ""
+        ]
+      }
+    },
+    "r1169z-z6b-var-redeclared-after": {
+      "exit": 2,
+      "reason": "registers a test whose function isn't one this file defines",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { existsSync } from 'node:fs';",
+          "let booted = false;",
+          "test('probe', () => { booted = existsSync('/run/systemd/system') && !!process.env.NEVER; });",
+          "var body = (t) => { if (!booted) { t.skip('not a booted host'); return; } };",
+          "test('acceptance: the engine unit starts', body);",
+          "var body = (t) => {};",
+          ""
+        ]
+      }
+    },
+    "r1169z-z7-helper-destructuring-assign": {
+      "exit": 1,
+      "reason": "acceptance: the engine unit starts: SKIP not a booted host",
+      "listed": "test/y\\.test\\.ts:\\d+: acceptance: the engine unit starts",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { existsSync } from 'node:fs';",
+          "let booted = false;",
+          "test('probe', () => { booted = existsSync('/run/systemd/system') && !!process.env.NEVER; });",
+          "let need = (t) => {};",
+          "[need] = [(t) => { if (!booted) t.skip('not a booted host'); }];",
+          "test('acceptance: the engine unit starts', (t) => { need(t); });",
+          ""
+        ]
+      }
+    },
+    "r1169z-z8-function-decl-helper-reassigned": {
+      "exit": 1,
+      "reason": "acceptance: the engine unit starts: SKIP not a booted host",
+      "listed": "test/y\\.test\\.ts:\\d+: acceptance: the engine unit starts",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { existsSync } from 'node:fs';",
+          "let booted = false;",
+          "test('probe', () => { booted = existsSync('/run/systemd/system') && !!process.env.NEVER; });",
+          "function need(t) {}",
+          "need = (t) => { if (!booted) t.skip('not a booted host'); };",
+          "test('acceptance: the engine unit starts', (t) => { need(t); });",
+          ""
+        ]
+      }
+    },
+    "r1169z-z9-holder-property-assigned": {
+      "exit": 1,
+      "reason": "acceptance: the engine unit starts: SKIP not a booted host",
+      "listed": "test/y\\.test\\.ts:\\d+: acceptance: the engine unit starts",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import { existsSync } from 'node:fs';",
+          "let booted = false;",
+          "test('probe', () => { booted = existsSync('/run/systemd/system') && !!process.env.NEVER; });",
+          "const h = { need(t) {} };",
+          "h.need = (t) => { if (!booted) t.skip('not a booted host'); };",
+          "test('acceptance: the engine unit starts', (t) => { h.need(t); });",
+          ""
+        ]
+      }
+    }
+  }
+}

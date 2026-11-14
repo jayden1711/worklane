@@ -1,0 +1,55 @@
+{
+  "//": "Review round r1169ae of #1169: each case is one attack on scripts/ci/systemd-acceptance.mjs (README.md).",
+  "cases": {
+    "r1169ae-d1b-decoy-subtest": {
+      "exit": 2,
+      "reason": "test/y\\.test\\.ts: unit states under the real service manager: the subtest at line \\d+ is given a function this file doesn't declare once",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "y.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "test('a helper check', () => {",
+          "  const sub = () => { assert.ok(true); };",
+          "  sub();",
+          "});",
+          "test('unit states under the real service manager', async (t) => {",
+          "  const r = spawnSync('systemctl', ['--version'], { encoding: 'utf8' });",
+          "  assert.ok(r);",
+          "  const sub = () => {",
+          "    if (!process.env.FIXTURE_NEVER) return;",
+          "    assert.fail('the subtest checks ran');",
+          "  };",
+          "  await t.test('its unit', sub);",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169ae-d1g-gate-subtest-decoy": {
+      "exit": 2,
+      "reason": "test/x\\.test\\.ts: base: the subtest at line \\d+ doesn't open with its own",
+      "files": {
+        "x.test.ts.txt": [
+          "import { test } from 'node:test';",
+          "const systemCi = true;",
+          "test('a helper check', async (t) => {",
+          "  const sub = (q) => { q.plan(1); q.assert.ok(true); };",
+          "  await t.test('helper sub', sub);",
+          "});",
+          "test('base', { skip: !systemCi && 'needs systemd' }, async (t) => {",
+          "  t.plan(2);",
+          "  t.assert.ok(true);",
+          "  const sub = () => {",
+          "    if (!process.env.FIXTURE_NEVER) return;",
+          "    throw new Error('the subtest checks ran');",
+          "  };",
+          "  await t.test('the unit answers', sub);",
+          "});",
+          ""
+        ]
+      }
+    }
+  }
+}

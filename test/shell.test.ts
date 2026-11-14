@@ -40,7 +40,27 @@ test('finds files a command changes through its arguments: copies, moves, in-pla
   assert.deepEqual(w("sed -i 's/a/b/' f1"), ['f1']);
   assert.deepEqual(w("sed -n 's/a/b/p' f1"), [], 'not in place');
   assert.deepEqual(w('dd if=a of=b'), ['b']);
+  assert.deepEqual(w('chmod -x .git/hooks/pre-commit'), ['.git/hooks/pre-commit']);
+  assert.deepEqual(w('chmod u+x,go-w a b'), ['a', 'b'], 'a mode is not a file');
+  assert.deepEqual(w('chmod 0644 a'), ['a']);
   assert.deepEqual(w('cat a b'), []);
+});
+
+test('recurses into the command string a runner or find -exec gives a shell, and a runner\'s own (#983)', () => {
+  for (const [line, want] of [
+    ["setsid bash -c 'git push --no-verify'", 'git push --no-verify'],
+    ["nice -n 5 setsid sh -lc 'git commit -n'", 'git commit -n'],
+    ["flock /tmp/l -c 'git commit -n'", 'git commit -n'],
+    ["flock -w 5 /tmp/l --command 'git commit -n'", 'git commit -n'],
+    ["runuser -u me -- bash -c 'git commit -n'", 'git commit -n'],
+    ["runuser -u me --command='git commit -n'", 'git commit -n'],
+    ["runuser -u me -lc 'git commit -n'", 'git commit -n'],
+    ["find . -exec sh -c 'git commit -n' \\;", 'git commit -n'],
+    ["setsid flock /tmp/l -c 'git commit -n'", 'git commit -n'],
+  ] as const) assert.ok(argvs(line).includes(want), `${line}: ${JSON.stringify(argvs(line))}`);
+  // WHY: a runner's ordinary operands and a command it runs directly are not strings.
+  assert.deepEqual(argvs('flock /tmp/l make test'), ['flock /tmp/l make test']);
+  assert.deepEqual(argvs('setsid make -C vendor/git'), ['setsid make -C vendor/git']);
 });
 
 test('subshells and groups', () => {

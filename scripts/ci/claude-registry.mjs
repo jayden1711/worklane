@@ -13,7 +13,7 @@
 //   node scripts/ci/claude-registry.mjs --write <claude binary>   probe it and write scripts/ci/claude-commands.mjs
 //   node scripts/ci/claude-registry.mjs --probe <claude binary>   probe it and print the set, writing nothing
 import { createHash } from 'node:crypto';
-import { accessSync, constants, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { accessSync, constants, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { spawn, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { delimiter, join, resolve } from 'node:path';
@@ -50,10 +50,13 @@ export function readCache(text = readFileSync(CACHE, 'utf8')) {
   for (const m of text.matchAll(/^\/\/ platform: ([a-z0-9-]+)$/gm)) {
     const c = constName(m[1]);
     const one = (name) => new RegExp(`^export const ${c}_${name} = '([^']*)';$`, 'm').exec(text)?.[1];
-    const list = new RegExp(`^export const ${c}_COMMANDS = \\[\\n((?: {2}'[a-z][a-z0-9-]*',\\n)*)\\];$`, 'm').exec(text)?.[1];
+    // Its commands: the generated copy of its tables file (#941), one frozen JSON literal.
+    const list = new RegExp(`^const ${c}_COMMANDS = Object\\.freeze\\((\\[[^\\n]*\\])\\);$`, 'm').exec(text)?.[1];
     const sha256 = one('SHA256');
     if (!sha256 || list === undefined) throw new Error(`${CACHE}: ${m[1]} has no SHA256 or COMMANDS to read`);
-    out[m[1]] = { version: one('VERSION'), sha256, probedAt: one('PROBED_AT'), commands: [...list.matchAll(/'([a-z0-9-]+)'/g)].map((x) => x[1]) };
+    const commands = JSON.parse(list);
+    if (!Array.isArray(commands) || !commands.every((w) => typeof w === 'string' && /^[a-z][a-z0-9-]*$/.test(w))) throw new Error(`${CACHE}: ${m[1]}'s COMMANDS aren't command names`);
+    out[m[1]] = { version: one('VERSION'), sha256, probedAt: one('PROBED_AT'), commands };
   }
   if (!Object.keys(out).length) throw new Error(`${CACHE}: no platform entry to read`);
   return out;
@@ -80,39 +83,11 @@ export function cacheProblems(sha256, cache, listed, earlier, platform = platfor
   return out;
 }
 
-/** The mark the cache's lists carry (built, so this file's own text holds no mark without a table after it). */
-const TABLE_MARK = ['//', 'check-table: '].join(' ');
-
-/** The cache module's text holding these platform entries ({ [platform]: { version, sha256, probedAt, commands } }). */
-export function cacheText(entries) {
-  const head = `// The pinned claude CLI's top-level commands, one entry per platform build, each found by probing every word in that
-// binary's bytes (scripts/ci/claude-registry.mjs, R1185as). Written by \`node scripts/ci/claude-registry.mjs --write
-// <claude>\` on that platform: don't edit it by hand. CI checks the installed binary's sha256 against its platform's
-// entry and, while it matches, uses that entry's commands without probing again; a new pin fails there until each
-// platform's entry is written for it, in the PR that bumps the pin.
-export const PROBE_COMMAND = 'node scripts/ci/claude-registry.mjs --write <claude>';
-`;
-  return (
-    head +
-    Object.keys(entries)
-      .sort()
-      .map((k) => {
-        const e = entries[k];
-        const c = constName(k);
-        return `
-// platform: ${k}
-export const ${c}_VERSION = '${e.version}';
-export const ${c}_SHA256 = '${e.sha256}';
-export const ${c}_PROBED_AT = '${e.probedAt}';
-// A command gone from this list is a command the launch lint no longer catches: never-shrink.
-${TABLE_MARK}never-shrink
-export const ${c}_COMMANDS = [
-${e.commands.map((w) => `  '${w}',\n`).join('')}];
-`;
-      })
-      .join('')
-  );
-}
+/**
+ * The cache's lists are data (#941): scripts/ci/claude-commands-write.mjs writes them, with this module's text and its
+ * generated copy. That writer is apart from this file, which the probe loads (node:* only, R1185s S1).
+ */
+export const WRITER = join(import.meta.dirname, 'claude-commands-write.mjs');
 
 /** The launch lint's SUBCOMMANDS (and EARLIER_COMMANDS), read from test/claude-launch-lint.test.ts's text. */
 export function listedCommands(lintSource, name = 'SUBCOMMANDS') {
@@ -203,7 +178,11 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   }
   if (mode === '--write') {
     entries[platform] = { version, sha256, probedAt: new Date().toISOString().slice(0, 10), commands };
-    writeFileSync(CACHE, cacheText(entries));
+    const w = spawnSync(process.execPath, [WRITER, JSON.stringify(entries)], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] });
+    if (w.status !== 0) {
+      console.error(`${WRITER.slice(WRITER.indexOf('scripts/'))} failed (exit ${w.status ?? w.signal}): not written`);
+      process.exit(1);
+    }
     console.log(`wrote ${CACHE.slice(CACHE.indexOf('scripts/'))} (its ${platform} entry; ${Object.keys(entries).sort().join(', ')} in all)`);
   }
 }

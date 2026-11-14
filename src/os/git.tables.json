@@ -1,0 +1,167 @@
+{
+  "GIT_GUARD_PAIRS": {
+    "//": "Command scope (GIT_CONFIG_COUNT) on every guarded git, ahead of the caller's own pairs (src/os/git.ts): each key a config file could set to a command, set over here. {noProgram} is a program path that can't exist (the OS's null device's no-program): a signing or verifying git fails closed. exact (#941, R1184n): git takes a key's last value, so a pair added anywhere can override the guard's (a URL-scoped credential helper, include.path); any change waits.",
+    "kind": "exact",
+    "value": [
+      [
+        "credential.helper",
+        ""
+      ],
+      [
+        "core.fsmonitor",
+        "false"
+      ],
+      [
+        "core.sshCommand",
+        "ssh"
+      ],
+      [
+        "core.askPass",
+        ""
+      ],
+      [
+        "core.editor",
+        ":"
+      ],
+      [
+        "sequence.editor",
+        ":"
+      ],
+      [
+        "core.pager",
+        "cat"
+      ],
+      [
+        "core.alternateRefsCommand",
+        ""
+      ],
+      [
+        "diff.external",
+        ""
+      ],
+      [
+        "gpg.program",
+        "{noProgram}"
+      ],
+      [
+        "gpg.openpgp.program",
+        "{noProgram}"
+      ],
+      [
+        "gpg.x509.program",
+        "{noProgram}"
+      ],
+      [
+        "gpg.ssh.program",
+        "{noProgram}"
+      ],
+      [
+        "gpg.ssh.defaultKeyCommand",
+        "{noProgram}"
+      ],
+      [
+        "protocol.ext.allow",
+        "never"
+      ],
+      [
+        "submodule.recurse",
+        "false"
+      ],
+      [
+        "fetch.recurseSubmodules",
+        "false"
+      ],
+      [
+        "push.recurseSubmodules",
+        "no"
+      ],
+      [
+        "transfer.bundleURI",
+        "false"
+      ]
+    ]
+  },
+  "REFUSED_KEYS": {
+    "//": "Keys a config file may not set at all for a guarded git, each with why (src/os/git.ts): matched on git's own spelling of the key, folded to lower case.",
+    "kind": "never-shrink",
+    "value": [
+      [
+        {
+          "$regexp": "^include\\.path$|^includeif\\..*\\.path$",
+          "flags": ""
+        },
+        "which reads another file in as config"
+      ],
+      [
+        {
+          "$regexp": "^filter\\..*\\.(?:clean|smudge|process)$",
+          "flags": ""
+        },
+        "a filter driver, a command git runs on checkout and add"
+      ],
+      [
+        {
+          "$regexp": "^diff\\..*\\.(?:command|textconv)$",
+          "flags": ""
+        },
+        "a diff driver, a command git runs to show a diff"
+      ],
+      [
+        {
+          "$regexp": "^merge\\..*\\.driver$",
+          "flags": ""
+        },
+        "a merge driver, a command git runs to merge"
+      ],
+      [
+        {
+          "$regexp": "^(?:mergetool|difftool)\\..*\\.cmd$",
+          "flags": ""
+        },
+        "a tool command"
+      ],
+      [
+        {
+          "$regexp": "^url\\..*\\.(?:insteadof|pushinsteadof)$",
+          "flags": ""
+        },
+        "which sends a remote URL somewhere else"
+      ],
+      [
+        {
+          "$regexp": "^remote\\..*\\.(?:uploadpack|receivepack|proxy|proxyauthmethod|vcs)$",
+          "flags": ""
+        },
+        "a remote's command, helper or proxy"
+      ],
+      [
+        {
+          "$regexp": "^http\\.(?:.*\\.)?(?:ssl[a-z]*|proxy[a-z]*|schannel[a-z]*|pinnedpubkey|curloptresolve|extraheader|cookiefile|savecookies|followredirects)$",
+          "flags": ""
+        },
+        "which changes the host git reaches, or what it trusts or sends there"
+      ],
+      [
+        {
+          "$regexp": "^core\\.(?:worktree|gitproxy)$",
+          "flags": ""
+        },
+        "which moves the work tree, or runs a proxy command"
+      ],
+      [
+        {
+          "$regexp": "^core\\.hookspath$",
+          "flags": ""
+        },
+        "which names the hooks git runs"
+      ],
+      [
+        {
+          "$regexp": "^submodule\\..*\\.update$",
+          "flags": ""
+        },
+        "a submodule's update command"
+      ]
+    ]
+  }
+}

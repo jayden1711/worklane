@@ -115,8 +115,9 @@ const sharedRedact = (() => {
 const exports = {};
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.CUT_MARGIN = exports.UNSCANNABLE = exports.MAX_PASSES = exports.UNSCANNABLE_KIND = exports.TRACKER = exports.REDACTION_PATTERNS = exports.isDashboardKey = exports.DASHBOARD_KEY_PREFIX = void 0;
+exports.CUT_MARGIN = exports.UNSCANNABLE = exports.MAX_PASSES = exports.UNSCANNABLE_KIND = exports.TRACKER = exports.REDACTION_PATTERNS = exports.REPLACER_NAMES = exports.isDashboardKey = exports.DASHBOARD_KEY_PREFIX = void 0;
 exports.secretKinds = secretKinds;
+exports.redactTableProblems = redactTableProblems;
 exports.fixedPoint = fixedPoint;
 exports.redactString = redactString;
 exports.redactCut = redactCut;
@@ -124,6 +125,35 @@ exports.redactClip = redactClip;
 exports.readWindow = readWindow;
 exports.redactRecords = redactRecords;
 exports.redact = redact;
+const frozenSet = (values) => {
+    const store = new Set(values);
+    return Object.freeze({
+        get size() {
+            return store.size;
+        },
+        has: (v) => store.has(v),
+        forEach(f, self) {
+            for (const v of store)
+                f.call(self, v, v, this);
+        },
+        *entries() {
+            for (const v of store)
+                yield [v, v];
+        },
+        *keys() {
+            yield* store;
+        },
+        *values() {
+            yield* store;
+        },
+        *[Symbol.iterator]() {
+            yield* store;
+        },
+    });
+};
+const regExpOf = (p) => new RegExp(p.source, p.flags);
+const TABLES_DATA = { "CREDENTIAL_WORDS": frozenSet(["token", "secret", "secrets", "password", "passwd", "pwd", "pass", "passphrase", "jwt", "bearer", "credential", "credentials", "authorization"]), "CREDENTIAL_ENDINGS": Object.freeze(["token", "secret", "password", "passwd", "accesskey"]), "KEY_QUALIFIERS": frozenSet(["api", "access", "secret", "private", "signing", "encryption", "master", "client", "app", "auth", "account", "service", "license", "deploy", "admin", "webhook", "session", "ssh", "hmac", "consumer"]), "PATTERNS": Object.freeze([Object.freeze({ "re": Object.freeze({ source: "wld_[A-Za-z0-9_-]{32,}(?![A-Za-z0-9_-])", flags: "g" }), "rep": "wld_[REDACTED]", "kind": "dashboard key" }), Object.freeze({ "re": Object.freeze({ source: "gh[pousr]_[A-Za-z0-9]{30,}(?![A-Za-z0-9])", flags: "g" }), "rep": "gh*_[REDACTED]", "kind": "GitHub token" }), Object.freeze({ "re": Object.freeze({ source: "github_pat_[A-Za-z0-9_]{40,}", flags: "g" }), "rep": "github_pat_[REDACTED]", "kind": "GitHub token" }), Object.freeze({ "re": Object.freeze({ source: "sk-ant-[A-Za-z0-9_-]{20,}", flags: "g" }), "rep": "sk-[REDACTED]", "kind": "API key (sk-)" }), Object.freeze({ "re": Object.freeze({ source: "\\bsk-(?:ant-)?[A-Za-z0-9_-]{20,}\\b", flags: "g" }), "rep": "sk-[REDACTED]", "kind": "API key (sk-)" }), Object.freeze({ "re": Object.freeze({ source: "(^|[^A-Za-z0-9_])([sr]k)_(?:live|test)_([A-Za-z0-9]{16,})(?![A-Za-z0-9_])", flags: "g" }), "rep": Object.freeze({ "replacer": "stripe" }), "kind": "Stripe key" }), Object.freeze({ "re": Object.freeze({ source: "AIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])", flags: "g" }), "rep": "AIza[REDACTED]", "kind": "Google API key" }), Object.freeze({ "re": Object.freeze({ source: "(^|[^A-Za-z0-9_+/-])(?=([A-Za-z0-9_+/-]*?)eyJ)\\2eyJ(?=[A-Za-z0-9_+/-]{8})(?=([A-Za-z0-9_+/-]+))\\3=*\\.(?=[A-Za-z0-9_+/-]{8})(?=([A-Za-z0-9_+/-]+))\\4=*\\.[A-Za-z0-9_+/=-]*(?:\\.[A-Za-z0-9_+/=-]*)*", flags: "g" }), "rep": "$1$2[REDACTED JWT]", "kind": "JWT" }), Object.freeze({ "re": Object.freeze({ source: "(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Za-z0-9])", flags: "g" }), "rep": "AKIA[REDACTED]", "kind": "AWS access key" }), Object.freeze({ "re": Object.freeze({ source: "xoxe[.-][A-Za-z0-9.-]{10,}(?![A-Za-z0-9])", flags: "g" }), "rep": "xoxe-[REDACTED]", "kind": "Slack token" }), Object.freeze({ "re": Object.freeze({ source: "xox[abprs]-[A-Za-z0-9-]{10,}(?![A-Za-z0-9])", flags: "g" }), "rep": "xox-[REDACTED]", "kind": "Slack token" }), Object.freeze({ "re": Object.freeze({ source: "xapp-[A-Za-z0-9-]{10,}(?![A-Za-z0-9])", flags: "g" }), "rep": "xapp-[REDACTED]", "kind": "Slack app-level token" }), Object.freeze({ "re": Object.freeze({ source: "lin_(?:api|oauth)_[A-Za-z0-9]{20,}(?![A-Za-z0-9])", flags: "g" }), "rep": "lin_[REDACTED]", "kind": "Linear key" }), Object.freeze({ "re": Object.freeze({ source: "https:\\/\\/hooks\\.slack\\.com\\/services\\/[A-Za-z0-9/]+", flags: "g" }), "rep": "https://hooks.slack.com/services/[REDACTED]", "kind": "Slack webhook" }), Object.freeze({ "re": Object.freeze({ source: "tskey-[A-Za-z0-9_-]+", flags: "g" }), "rep": "tskey-[REDACTED]", "kind": "Tailscale key" }), Object.freeze({ "re": Object.freeze({ source: "-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----(?:[\\s\\S]*?-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----|[\\s\\S]*)", flags: "g" }), "rep": "[REDACTED PRIVATE KEY]", "kind": "private key" }), Object.freeze({ "re": Object.freeze({ source: "^[\\s\\S]*-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----", flags: "" }), "rep": Object.freeze({ "replacer": "orphanEnd" }), "kind": "private key" }), Object.freeze({ "re": Object.freeze({ source: "\\b(bearer)\\s+(?:[A-Za-z0-9._~+/-]|\\\\\\/){20,}=*", flags: "gi" }), "rep": "$1 [REDACTED]", "kind": "bearer token" }), Object.freeze({ "re": Object.freeze({ source: "\\b(basic)(\\s+)((?:[A-Za-z0-9+/]|\\\\\\/){8,}={0,2})", flags: "gi" }), "rep": Object.freeze({ "replacer": "basic" }), "kind": "Basic credential" }), Object.freeze({ "re": Object.freeze({ source: "([a-z0-9+.-]{1,32}:\\/\\/[^:/\\s@]+):[^@\\s/]+@", flags: "gi" }), "rep": "$1:[REDACTED]@", "kind": "password in a URL" }), Object.freeze({ "re": Object.freeze({ source: "\\b0x[0-9a-fA-F]{64}(?![A-Za-z0-9])", flags: "g" }), "rep": "0x[REDACTED-32-BYTES]", "kind": "32-byte hex key" }), Object.freeze({ "re": Object.freeze({ source: "(\\\\?\"|')([A-Za-z0-9_-]+)\\1(\\s*(?::|=>)\\s*)(\\\\?\"|')([A-Za-z0-9_\\-.+/=~]{16,})\\4", flags: "g" }), "rep": Object.freeze({ "replacer": "jsonKey" }), "kind": "secret under a JSON key" }), Object.freeze({ "re": Object.freeze({ source: "(^|[^A-Za-z0-9])[A-Za-z0-9_-]{23,28}\\.[A-Za-z0-9_-]{6,7}\\.[A-Za-z0-9_-]{27,}\\b", flags: "g" }), "rep": "$1[REDACTED]", "kind": "Discord bot token" })]), "BROAD": Object.freeze([Object.freeze({ "re": Object.freeze({ source: "(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{8,}", flags: "g" }), "mask": "{mask}", "kind": "GitHub token, cut short" }), Object.freeze({ "re": Object.freeze({ source: "sk-ant-[A-Za-z0-9_-]+", flags: "g" }), "mask": "{mask}", "kind": "Anthropic key, cut short" }), Object.freeze({ "re": Object.freeze({ source: "\\b(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-ant-[A-Za-z0-9_-]{10,}|xox[abprs]-[A-Za-z0-9-]{10,})", flags: "g" }), "mask": "{mask}", "kind": "the updater's token rule" }), Object.freeze({ "re": Object.freeze({ source: "xox[abprs]-[A-Za-z0-9_-]+", flags: "g" }), "mask": "{mask}", "kind": "Slack token, cut short" }), Object.freeze({ "re": Object.freeze({ source: "eyJ[A-Za-z0-9_-]{8,512}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*", flags: "g" }), "mask": "{mask}", "kind": "JWT after a hyphen" }), Object.freeze({ "re": Object.freeze({ source: "\\b(bearer)\\s+[A-Za-z0-9._~+/=-]{8,}", flags: "gi" }), "mask": "$1 {mask}", "kind": "short bearer token" }), Object.freeze({ "re": Object.freeze({ source: "([a-z0-9+.-]{1,32}:\\/\\/)[^\\s/@]+@", flags: "gi" }), "mask": "$1{mask}@", "kind": "user info in a URL" }), Object.freeze({ "re": Object.freeze({ source: "\\b([A-Za-z_]*(?:token|secret|password|passwd|api[_-]?key))(\\s*[=:]\\s*)(\"[^\"]*\"|'[^']*'|\\S+)", flags: "gi" }), "mask": "$1$2{mask}", "kind": "value after a secret name" })]), "BROAD_RULES": Object.freeze([Object.freeze({ "re": Object.freeze({ source: "wld_[A-Za-z0-9_-]{32,}(?![A-Za-z0-9_-])", flags: "g" }), "rep": "wld_[REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "gh[pousr]_[A-Za-z0-9]{30,}(?![A-Za-z0-9])", flags: "g" }), "rep": "gh*_[REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "github_pat_[A-Za-z0-9_]{40,}", flags: "g" }), "rep": "github_pat_[REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "sk-ant-[A-Za-z0-9_-]{20,}", flags: "g" }), "rep": "sk-[REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "\\bsk-(?:ant-)?[A-Za-z0-9_-]{20,}\\b", flags: "g" }), "rep": "sk-[REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "(^|[^A-Za-z0-9_])([sr]k)_(?:live|test)_([A-Za-z0-9]{16,})(?![A-Za-z0-9_])", flags: "g" }), "rep": Object.freeze({ "replacer": "stripe" }) }), Object.freeze({ "re": Object.freeze({ source: "AIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])", flags: "g" }), "rep": "AIza[REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "(^|[^A-Za-z0-9_+/-])(?=([A-Za-z0-9_+/-]*?)eyJ)\\2eyJ(?=[A-Za-z0-9_+/-]{8})(?=([A-Za-z0-9_+/-]+))\\3=*\\.(?=[A-Za-z0-9_+/-]{8})(?=([A-Za-z0-9_+/-]+))\\4=*\\.[A-Za-z0-9_+/=-]*(?:\\.[A-Za-z0-9_+/=-]*)*", flags: "g" }), "rep": "$1$2[REDACTED JWT]" }), Object.freeze({ "re": Object.freeze({ source: "(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Za-z0-9])", flags: "g" }), "rep": "AKIA[REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "xoxe[.-][A-Za-z0-9.-]{10,}(?![A-Za-z0-9])", flags: "g" }), "rep": "xoxe-[REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "xox[abprs]-[A-Za-z0-9-]{10,}(?![A-Za-z0-9])", flags: "g" }), "rep": "xox-[REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "xapp-[A-Za-z0-9-]{10,}(?![A-Za-z0-9])", flags: "g" }), "rep": "xapp-[REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "lin_(?:api|oauth)_[A-Za-z0-9]{20,}(?![A-Za-z0-9])", flags: "g" }), "rep": "lin_[REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "https:\\/\\/hooks\\.slack\\.com\\/services\\/[A-Za-z0-9/]+", flags: "g" }), "rep": "https://hooks.slack.com/services/[REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "tskey-[A-Za-z0-9_-]+", flags: "g" }), "rep": "tskey-[REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----(?:[\\s\\S]*?-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----|[\\s\\S]*)", flags: "g" }), "rep": "[REDACTED PRIVATE KEY]" }), Object.freeze({ "re": Object.freeze({ source: "^[\\s\\S]*-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----", flags: "" }), "rep": Object.freeze({ "replacer": "orphanEnd" }) }), Object.freeze({ "re": Object.freeze({ source: "\\b(bearer)\\s+(?:[A-Za-z0-9._~+/-]|\\\\\\/){20,}=*", flags: "gi" }), "rep": "$1 [REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "\\b(basic)(\\s+)((?:[A-Za-z0-9+/]|\\\\\\/){8,}={0,2})", flags: "gi" }), "rep": Object.freeze({ "replacer": "basic" }) }), Object.freeze({ "re": Object.freeze({ source: "([a-z0-9+.-]{1,32}:\\/\\/[^:/\\s@]+):[^@\\s/]+@", flags: "gi" }), "rep": "$1:[REDACTED]@" }), Object.freeze({ "re": Object.freeze({ source: "\\b0x[0-9a-fA-F]{64}(?![A-Za-z0-9])", flags: "g" }), "rep": "0x[REDACTED-32-BYTES]" }), Object.freeze({ "re": Object.freeze({ source: "(\\\\?\"|')([A-Za-z0-9_-]+)\\1(\\s*(?::|=>)\\s*)(\\\\?\"|')([A-Za-z0-9_\\-.+/=~]{16,})\\4", flags: "g" }), "rep": Object.freeze({ "replacer": "jsonKey" }) }), Object.freeze({ "re": Object.freeze({ source: "(^|[^A-Za-z0-9])[A-Za-z0-9_-]{23,28}\\.[A-Za-z0-9_-]{6,7}\\.[A-Za-z0-9_-]{27,}\\b", flags: "g" }), "rep": "$1[REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{8,}", flags: "g" }), "rep": "[REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "sk-ant-[A-Za-z0-9_-]+", flags: "g" }), "rep": "[REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "\\b(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-ant-[A-Za-z0-9_-]{10,}|xox[abprs]-[A-Za-z0-9-]{10,})", flags: "g" }), "rep": "[REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "xox[abprs]-[A-Za-z0-9_-]+", flags: "g" }), "rep": "[REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "eyJ[A-Za-z0-9_-]{8,512}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*", flags: "g" }), "rep": "[REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "\\b(bearer)\\s+[A-Za-z0-9._~+/=-]{8,}", flags: "gi" }), "rep": "$1 [REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "([a-z0-9+.-]{1,32}:\\/\\/)[^\\s/@]+@", flags: "gi" }), "rep": "$1[REDACTED]@" }), Object.freeze({ "re": Object.freeze({ source: "\\b([A-Za-z_]*(?:token|secret|password|passwd|api[_-]?key))(\\s*[=:]\\s*)(\"[^\"]*\"|'[^']*'|\\S+)", flags: "gi" }), "rep": "$1$2[REDACTED]" })]), "GLUED_PREFIXES": Object.freeze(["ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_", "sk-", "sk_live_", "sk_test_", "rk_live_", "rk_test_", "xoxa-", "xoxb-", "xoxe", "xoxp-", "xoxr-", "xoxs-", "xapp-", "lin_api_", "lin_oauth_", "AKIA", "ASIA", "AIza", "eyJ", "0x", "Bearer", "bearer", "BEARER", "Basic", "basic", "BASIC", "wld_"]), "GLUE_PARTS": Object.freeze(["(?:\\u001b|\\\\u001[bB]|\\\\x1[bB]|\\\\033|\\\\e|\\^\\[)(?:\\[[0-?]*[ -/]*[@-~]|[ -/]+[0-~]|[0-~])", "\\u009b[0-?]*[ -/]*[@-~]", "\\\\(?:u[0-9A-Fa-f]{4}|[nrtbf\"\\\\/])"]) };
+const TABLES = { get: (name) => TABLES_DATA[name] };
 const credentialShaped = (v) => (/[a-z]/.test(v) && /[A-Z]/.test(v) && /\d/.test(v)) || /^[0-9a-fA-F]{32,}$/.test(v);
 const basicShaped = (v) => /[0-9+/=]/.test(v) || (v.length >= 16 && v.length % 4 !== 1 && /[a-z]/.test(v) && /[A-Z]/.test(v)) || basicPair(v);
 function basicPair(v) {
@@ -136,13 +166,10 @@ function basicPair(v) {
     }
     return /^[\x20-\x7e]*:[\x20-\x7e]*$/.test(text);
 }
-// check-table: never-shrink
-const CREDENTIAL_WORDS = new Set(['token', 'secret', 'secrets', 'password', 'passwd', 'pwd', 'pass', 'passphrase', 'jwt', 'bearer', 'credential', 'credentials', 'authorization']);
-// check-table: never-shrink
-const CREDENTIAL_ENDINGS = ['token', 'secret', 'password', 'passwd', 'accesskey'];
+const CREDENTIAL_WORDS = TABLES.get('CREDENTIAL_WORDS');
+const CREDENTIAL_ENDINGS = TABLES.get('CREDENTIAL_ENDINGS');
 const credentialWord = (w) => CREDENTIAL_WORDS.has(w) || CREDENTIAL_ENDINGS.some((e) => w.endsWith(e));
-// check-table: never-shrink
-const KEY_QUALIFIERS = new Set(['api', 'access', 'secret', 'private', 'signing', 'encryption', 'master', 'client', 'app', 'auth', 'account', 'service', 'license', 'deploy', 'admin', 'webhook', 'session', 'ssh', 'hmac', 'consumer']);
+const KEY_QUALIFIERS = TABLES.get('KEY_QUALIFIERS');
 function credentialKey(k) {
     const words = k
         .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
@@ -176,51 +203,24 @@ function orphanEnd(m) {
     }
     return cut === -1 ? m : `[REDACTED PRIVATE KEY]${m.slice(cut)}`;
 }
-// check-table: never-shrink
-const PATTERNS = [
-    [new RegExp(`${exports.DASHBOARD_KEY_PREFIX}${DASHBOARD_KEY_BODY}(?![A-Za-z0-9_-])`, 'g'), `${exports.DASHBOARD_KEY_PREFIX}[REDACTED]`, 'dashboard key'],
-    [/gh[pousr]_[A-Za-z0-9]{30,}(?![A-Za-z0-9])/g, 'gh*_[REDACTED]', 'GitHub token'],
-    [/github_pat_[A-Za-z0-9_]{40,}/g, 'github_pat_[REDACTED]', 'GitHub token'],
-    [/sk-ant-[A-Za-z0-9_-]{20,}/g, 'sk-[REDACTED]', 'API key (sk-)'],
-    [/\bsk-(?:ant-)?[A-Za-z0-9_-]{20,}\b/g, 'sk-[REDACTED]', 'API key (sk-)'],
-    [/(^|[^A-Za-z0-9_])([sr]k)_(?:live|test)_([A-Za-z0-9]{16,})(?![A-Za-z0-9_])/g, (m, pre, k, v) => (/\d/.test(v) ? `${pre}${k}_[REDACTED]` : m), 'Stripe key'],
-    [/AIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])/g, 'AIza[REDACTED]', 'Google API key'],
-    [
-        /(^|[^A-Za-z0-9_+/-])(?=([A-Za-z0-9_+/-]*?)eyJ)\2eyJ(?=[A-Za-z0-9_+/-]{8})(?=([A-Za-z0-9_+/-]+))\3=*\.(?=[A-Za-z0-9_+/-]{8})(?=([A-Za-z0-9_+/-]+))\4=*\.[A-Za-z0-9_+/=-]*(?:\.[A-Za-z0-9_+/=-]*)*/g,
-        '$1$2[REDACTED JWT]',
-        'JWT',
-    ],
-    [/(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Za-z0-9])/g, 'AKIA[REDACTED]', 'AWS access key'],
-    [/xoxe[.-][A-Za-z0-9.-]{10,}(?![A-Za-z0-9])/g, 'xoxe-[REDACTED]', 'Slack token'],
-    [/xox[abprs]-[A-Za-z0-9-]{10,}(?![A-Za-z0-9])/g, 'xox-[REDACTED]', 'Slack token'],
-    [/xapp-[A-Za-z0-9-]{10,}(?![A-Za-z0-9])/g, 'xapp-[REDACTED]', 'Slack app-level token'],
-    [/lin_(?:api|oauth)_[A-Za-z0-9]{20,}(?![A-Za-z0-9])/g, 'lin_[REDACTED]', 'Linear key'],
-    [/https:\/\/hooks\.slack\.com\/services\/[A-Za-z0-9/]+/g, 'https://hooks.slack.com/services/[REDACTED]', 'Slack webhook'],
-    [/tskey-[A-Za-z0-9_-]+/g, 'tskey-[REDACTED]', 'Tailscale key'],
-    [/-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----(?:[\s\S]*?-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----|[\s\S]*)/g, '[REDACTED PRIVATE KEY]', 'private key'],
-    [/^[\s\S]*-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----/, orphanEnd, 'private key'],
-    [/\b(bearer)\s+(?:[A-Za-z0-9._~+/-]|\\\/){20,}=*/gi, '$1 [REDACTED]', 'bearer token'],
-    [/\b(basic)(\s+)((?:[A-Za-z0-9+/]|\\\/){8,}={0,2})/gi, (m, s, sp, v) => (basicShaped(v) ? `${s}${sp}[REDACTED]` : m), 'Basic credential'],
-    [/([a-z0-9+.-]{1,32}:\/\/[^:/\s@]+):[^@\s/]+@/gi, '$1:[REDACTED]@', 'password in a URL'],
-    [/\b0x[0-9a-fA-F]{64}(?![A-Za-z0-9])/g, '0x[REDACTED-32-BYTES]', '32-byte hex key'],
-    [
-        /(\\?"|')([A-Za-z0-9_-]+)\1(\s*(?::|=>)\s*)(\\?"|')([A-Za-z0-9_\-.+/=~]{16,})\4/g,
-        (m, q, k, sep, vq, v) => (credentialKey(k) && credentialShaped(v) ? `${q}${k}${q}${sep}${vq}[REDACTED]${vq}` : m),
-        'secret under a JSON key',
-    ],
-    [/(^|[^A-Za-z0-9])[A-Za-z0-9_-]{23,28}\.[A-Za-z0-9_-]{6,7}\.[A-Za-z0-9_-]{27,}\b/g, '$1[REDACTED]', 'Discord bot token'],
-];
-// check-table: never-shrink
-const BROAD = [
-    [/(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{8,}/g, (k) => k, 'GitHub token, cut short'],
-    [/sk-ant-[A-Za-z0-9_-]+/g, (k) => k, 'Anthropic key, cut short'],
-    [/\b(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-ant-[A-Za-z0-9_-]{10,}|xox[abprs]-[A-Za-z0-9-]{10,})/g, (k) => k, "the updater's token rule"],
-    [/xox[abprs]-[A-Za-z0-9_-]+/g, (k) => k, 'Slack token, cut short'],
-    [/eyJ[A-Za-z0-9_-]{8,512}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*/g, (k) => k, 'JWT after a hyphen'],
-    [/\b(bearer)\s+[A-Za-z0-9._~+/=-]{8,}/gi, (k) => `$1 ${k}`, 'short bearer token'],
-    [/([a-z0-9+.-]{1,32}:\/\/)[^\s/@]+@/gi, (k) => `$1${k}@`, 'user info in a URL'],
-    [/\b([A-Za-z_]*(?:token|secret|password|passwd|api[_-]?key))(\s*[=:]\s*)("[^"]*"|'[^']*'|\S+)/gi, (k) => `$1$2${k}`, 'value after a secret name'],
-];
+const REPLACERS = Object.freeze({
+    stripe: (m, pre, k, v) => (/\d/.test(v) ? `${pre}${k}_[REDACTED]` : m),
+    orphanEnd,
+    basic: (m, s, sp, v) => (basicShaped(v) ? `${s}${sp}[REDACTED]` : m),
+    jsonKey: (m, q, k, sep, vq, v) => (credentialKey(k) && credentialShaped(v) ? `${q}${k}${q}${sep}${vq}[REDACTED]${vq}` : m),
+});
+exports.REPLACER_NAMES = Object.freeze(Object.keys(REPLACERS));
+function replacementOf(rep) {
+    if (typeof rep === 'string')
+        return rep;
+    const f = REPLACERS[rep.replacer];
+    if (!f)
+        throw new Error(`src/events/redact.ts's data: no replacer ${rep.replacer}`);
+    return f;
+}
+const PATTERNS = Object.freeze(TABLES.get('PATTERNS').map((e) => Object.freeze([regExpOf(e.re), replacementOf(e.rep), e.kind])));
+const BROAD = Object.freeze(TABLES.get('BROAD').map((e) => Object.freeze([regExpOf(e.re), e.mask, e.kind])));
+const masked = (template, mask) => template.split('{mask}').join(mask);
 const CODE_HEADS = new Set(['this', 'self', 'super', 'opts', 'options', 'o', 'ctx', 'context', 'config', 'cfg', 'conf', 'settings', 'props', 'state', 'env', 'process', 'module', 'exports', 'window', 'document', 'globalThis', 'args', 'params', 'req', 'res', 'request', 'response', 'obj', 'result', 'item', 'e', 'err', 'x']);
 function internalHost(m, pre, name) {
     const lower = name.toLowerCase();
@@ -251,18 +251,12 @@ const IDENTIFIERS = [
     [/(^|[^\w:])f(?:[cd][0-9a-f]{2}|e[89ab][0-9a-f]):(?:[0-9a-f]{0,4}:){1,6}[0-9a-f]{0,4}(?![\w:])/gi, '$1[private-ip]', 'private IP'],
 ];
 exports.REDACTION_PATTERNS = [
-    ...PATTERNS.map(([re, rep, kind]) => ({ kind, re, rep, group: 'secret' })),
-    ...BROAD.map(([re, rep, kind]) => ({ kind, re, rep: rep('[REDACTED]'), group: 'broad' })),
-    ...IDENTIFIERS.map(([re, rep, kind]) => ({ kind, re, rep, group: 'identifier' })),
+    ...PATTERNS.map(([re, rep, kind]) => ({ kind, re: new RegExp(re), rep, group: 'secret' })),
+    ...BROAD.map(([re, rep, kind]) => ({ kind, re: new RegExp(re), rep: masked(rep, '[REDACTED]'), group: 'broad' })),
+    ...IDENTIFIERS.map(([re, rep, kind]) => ({ kind, re: new RegExp(re), rep, group: 'identifier' })),
 ];
-// check-table: never-shrink
-const GLUED_PREFIXES = ['ghp_', 'gho_', 'ghu_', 'ghs_', 'ghr_', 'github_pat_', 'sk-', 'sk_live_', 'sk_test_', 'rk_live_', 'rk_test_', 'xoxa-', 'xoxb-', 'xoxe', 'xoxp-', 'xoxr-', 'xoxs-', 'xapp-', 'lin_api_', 'lin_oauth_', 'AKIA', 'ASIA', 'AIza', 'eyJ', '0x', 'Bearer', 'bearer', 'BEARER', 'Basic', 'basic', 'BASIC', exports.DASHBOARD_KEY_PREFIX];
-// check-table: never-shrink
-const GLUE_PARTS = [
-    String.raw `(?:\u001b|\\u001[bB]|\\x1[bB]|\\033|\\e|\^\[)(?:\[[0-?]*[ -/]*[@-~]|[ -/]+[0-~]|[0-~])`,
-    String.raw `\u009b[0-?]*[ -/]*[@-~]`,
-    String.raw `\\(?:u[0-9A-Fa-f]{4}|[nrtbf"\\/])`,
-];
+const GLUED_PREFIXES = TABLES.get('GLUED_PREFIXES');
+const GLUE_PARTS = TABLES.get('GLUE_PARTS');
 const GLUE = new RegExp(GLUE_PARTS.join('|'), 'g');
 function gluePoints(s) {
     const cuts = [...s.matchAll(GLUE)].map((m) => m.index + m[0].length).filter((c) => /\w/.test(s[c - 1]));
@@ -370,8 +364,23 @@ function spansOf(t, re, rep, rank, out) {
     }
 }
 const SHAPE_RULES = PATTERNS.map(([re, rep]) => [re, rep]);
-// check-table: never-shrink
-const BROAD_RULES = [...SHAPE_RULES, ...BROAD.map(([re, rep]) => [re, rep('[REDACTED]')])];
+const BROAD_RULES = Object.freeze(TABLES.get('BROAD_RULES').map((e) => Object.freeze([regExpOf(e.re), replacementOf(e.rep)])));
+function redactTableProblems(patterns = TABLES.get('PATTERNS'), broad = TABLES.get('BROAD'), rules = TABLES.get('BROAD_RULES'), glued = GLUED_PREFIXES) {
+    const out = [];
+    const key = (re, rep) => JSON.stringify([re.source, re.flags, rep]);
+    const want = [...patterns.map((p) => key(p.re, p.rep)), ...broad.map((b) => key(b.re, masked(b.mask, '[REDACTED]')))];
+    const got = rules.map((r) => key(r.re, r.rep));
+    if (want.length !== got.length || want.some((w, k) => w !== got[k]))
+        out.push("BROAD_RULES isn't PATTERNS' rules then BROAD's");
+    const first = patterns[0]?.re;
+    if (first?.source !== `${exports.DASHBOARD_KEY_PREFIX}${DASHBOARD_KEY_BODY}(?![A-Za-z0-9_-])` || first.flags !== 'g')
+        out.push("PATTERNS' first isn't the dashboard key's");
+    if (glued.at(-1) !== exports.DASHBOARD_KEY_PREFIX)
+        out.push("GLUED_PREFIXES doesn't end with DASHBOARD_KEY_PREFIX");
+    return out;
+}
+if (redactTableProblems().length)
+    throw new Error(`src/events/redact.ts's data: ${redactTableProblems().join('; ')}`);
 function allSpans(s, rules) {
     const spans = [];
     rules.forEach(([re, rep], i) => spansOf(s, re, rep, i, spans));
@@ -888,6 +897,7 @@ const ENGINE_CHECK_SOURCES = Object.freeze({
   'push-gate': 'ci.yml',
   'test (ubuntu-latest, 22)': 'ci.yml',
   'test (ubuntu-latest, 24)': 'ci.yml',
+  'systemd acceptance (real systemd)': 'ci.yml',
   scan: 'gitleaks.yml',
   'Claude sign-in probe (real users)': 'ci-slow.yml',
   'add-project (real systemd)': 'ci-slow.yml',
@@ -898,7 +908,7 @@ const ENGINE_CHECK_SOURCES = Object.freeze({
   'test-run sandbox (real systemd)': 'ci-slow.yml',
   'wizard end to end (real systemd)': 'ci-slow.yml',
 });
-/** GitHub Actions' App id (its check runs' app.id): a pin to it is judged per workflow file. */
+/** GitHub Actions' App id (its check runs' app.id). */
 const ACTIONS_APP_ID = 15368;
 /** A check run GitHub Actions posted: told by its App's id, as the engine tells it (src/check-source.ts). */
 const isActions = (r) => !!r && !!r.app && r.app.id === ACTIONS_APP_ID;
@@ -983,15 +993,43 @@ function ruleApps(branch, rules) {
   return out;
 }
 
+/** What started workflow run `w` (GitHub's JSON), as fromBranch reads it (#943; src/check-source.ts workflowSourceOf). */
+function startedBy(w) {
+  const prs = Array.isArray(w.pull_requests) ? w.pull_requests : [];
+  return {
+    event: typeof w.event === 'string' ? w.event : '',
+    branch: typeof w.head_branch === 'string' ? w.head_branch : null,
+    // R1176f D2: the repo the run's commit came from (a fork's for a fork's PR); none is never trusted.
+    headRepo: w.head_repository && typeof w.head_repository.full_name === 'string' ? w.head_repository.full_name : null,
+    // A pull request with no readable base counts as one based elsewhere: never trusted.
+    bases: prs.map((p) => (p && p.base && typeof p.base.ref === 'string' ? p.base.ref : '')),
+  };
+}
+
+/**
+ * Did workflow run `w`, on a commit of `branch` the updater judges, read its workflow file from `branch`'s own history
+ * (#943)? Only a push, dispatch or schedule run on `branch` itself. A pull_request run reads its workflow from the PR's
+ * merge ref, and GitHub lists on it every OPEN PR matching its head branch or commit, not the one that started it
+ * (R1176c/d): no pull_request run ever counts for a main commit. Its commit must have come from the run's own repo
+ * (`head_repository`, R1176f D2). As src/check-source.ts fromBranch with no PR (test/update-check-sources.test.ts
+ * holds it).
+ */
+function fromBranch(w, branch) {
+  if (typeof w.headRepo !== 'string' || typeof w.repo !== 'string' || w.headRepo.toLowerCase() !== w.repo.toLowerCase()) return false;
+  return (w.event === 'push' || w.event === 'workflow_dispatch' || w.event === 'schedule') && w.branch === branch;
+}
+
 /**
  * Did check run `r` on `o.sha` come from `pin`? A workflow pin needs GitHub Actions to have posted it, from its
- * suite's workflow run in `o.repo` and for `o.sha`.
+ * suite's workflow run in `o.repo`, for `o.sha` and started on `o.branch` (fromBranch).
  */
 function fromPinnedSource(r, pin, o) {
   if (pin.invalid) return false;
-  if ('app_id' in pin) return !!r.app && r.app.id === pin.app_id;
   const w = isActions(r) && r.check_suite && o.suites.get(r.check_suite.id);
-  return !!w && w.path === pin.workflow && w.repo.toLowerCase() === o.repo.toLowerCase() && w.sha === o.sha && isJobOfRun(r.html_url, r.id, w);
+  const started = !!w && w.sha === o.sha && typeof o.branch === 'string' && fromBranch(w, o.branch);
+  // GitHub Actions as the App posts a spoofed PR run too (#943): its run must also have started on the branch.
+  if ('app_id' in pin) return !!r.app && r.app.id === pin.app_id && (pin.app_id !== ACTIONS_APP_ID || started);
+  return started && w.path === pin.workflow && w.repo.toLowerCase() === o.repo.toLowerCase() && isJobOfRun(r.html_url, r.id, w);
 }
 
 /**
@@ -1023,6 +1061,8 @@ async function checkPins(deps, cfg, api) {
   const own = cfg.required_check_sources;
   const required = Array.isArray(cfg.required_checks) ? cfg.required_checks : [];
   const repo = api.slice(api.indexOf('/repos/') + '/repos/'.length);
+  // The branch whose commits are judged: a pinned run counts only if it started there (fromBranch, #943).
+  const pinBranch = cfg.branch || 'main';
   let rules = {};
   // WHY: an unanswered rules read (a rate limit, say) waits; read as "no App named", it would judge by name a check
   // the rules may pin.
@@ -1043,8 +1083,8 @@ async function checkPins(deps, cfg, api) {
   // Unread rules: whether a required check is pinned is unknown, so it is taken as pinned (the commit waits anyway).
   if (rulesUnread) return { forSha: async () => ({ noAnswer: "the branch's rules" }), rulesUnread, pinned: true };
   const pinOf = (n) => checkPinOf(n, own, rules);
-  // WHY: an Actions-App pin needs the workflow runs too: its runs are judged per workflow file (evaluateChecks), so one
-  // file never supersedes another.
+  // WHY: an Actions-App pin reads the workflow runs too, so its latest run is told by the workflow runs' order
+  // (ownVerdict), as a workflow pin's is.
   const needRuns = required.some((n) => 'workflow' in (pinOf(n) || {}) || (pinOf(n) || {}).app_id === ACTIONS_APP_ID);
   const pinned = required.some((n) => pinOf(n));
   return {
@@ -1058,32 +1098,35 @@ async function checkPins(deps, cfg, api) {
      */
     forSha: async (sha, runs) => {
       // No required check pinned: nothing to read, and no shortcut either (evaluateChecks judges every name as before).
-      if (!pinned) return { pinOf, suites: new Map(), repo, sha, statuses: [] };
+      if (!pinned) return { pinOf, branch: pinBranch, suites: new Map(), repo, sha, statuses: [] };
       const list = (runs || []).filter((r) => r && typeof r.name === 'string');
       const passedOnce = (n) => list.some((r) => r.name === n && r.status === 'completed' && r.conclusion === 'success');
       const ran = (n) => list.some((r) => r.name === n);
       // A pinned required check with no passing run of its name at all can't pass from any source (a retired one only
       // counts when it ran), so the commit can't be installed: its verdict comes from the check runs alone.
       const hopeless = required.find((n) => pinOf(n) && !pinOf(n).invalid && (!RETIRED_CHECKS.includes(n) || ran(n)) && !passedOnce(n));
-      if (hopeless !== undefined) return { pinOf, suites: new Map(), repo, sha, statuses: [], hopeless };
-      // Likewise a check judged by name (not a pinned required one) whose latest run finished red, or is still running,
-      // holds the commit whatever the pinned ones say.
+      if (hopeless !== undefined) return { pinOf, branch: pinBranch, suites: new Map(), repo, sha, statuses: [], hopeless };
+      // Likewise a check judged by name (not a pinned required one) holds the commit whatever the pinned ones say: a
+      // required one when any run of its name finished red or is still running (#925), another when its latest did.
       const byName = new Map();
+      const every = [];
       for (const r of list) {
         if (required.includes(r.name) && pinOf(r.name)) continue;
+        if (required.includes(r.name)) every.push(r);
         const prev = byName.get(r.name);
         if (!prev || (r.started_at || '') > (prev.started_at || '') || ((r.started_at || '') === (prev.started_at || '') && r.id > prev.id)) byName.set(r.name, r);
       }
-      const red = [...byName.values()].find((r) => r.status === 'completed' && !GREEN.has(r.conclusion));
-      if (red) return { pinOf, suites: new Map(), repo, sha, statuses: [], red: { name: red.name, conclusion: red.conclusion } };
-      const running = [...byName.values()].find((r) => r.status !== 'completed');
-      if (running) return { pinOf, suites: new Map(), repo, sha, statuses: [], running: { name: running.name, status: running.status } };
+      const heldBy = [...every, ...byName.values()];
+      const red = heldBy.find((r) => r.status === 'completed' && !GREEN.has(r.conclusion));
+      if (red) return { pinOf, branch: pinBranch, suites: new Map(), repo, sha, statuses: [], red: { name: red.name, conclusion: red.conclusion } };
+      const running = heldBy.find((r) => r.status !== 'completed');
+      if (running) return { pinOf, branch: pinBranch, suites: new Map(), repo, sha, statuses: [], running: { name: running.name, status: running.status } };
       const suites = new Map();
       if (needRuns) {
         const list = await pagesOf(deps, (page) => `${api}/actions/runs?head_sha=${sha}&per_page=100${page > 1 ? `&page=${page}` : ''}`, 'workflow_runs');
         if (!list) return { noAnswer: 'its workflow runs' };
         for (const w of list) {
-          if (w && typeof w.id === 'number' && typeof w.html_url === 'string' && typeof w.check_suite_id === 'number' && typeof w.path === 'string' && typeof w.head_sha === 'string' && w.repository && typeof w.repository.full_name === 'string') suites.set(w.check_suite_id, { run: w.id, url: w.html_url, path: w.path, repo: w.repository.full_name, sha: w.head_sha });
+          if (w && typeof w.id === 'number' && typeof w.html_url === 'string' && typeof w.check_suite_id === 'number' && typeof w.path === 'string' && typeof w.head_sha === 'string' && w.repository && typeof w.repository.full_name === 'string') suites.set(w.check_suite_id, { run: w.id, url: w.html_url, path: w.path, repo: w.repository.full_name, sha: w.head_sha, ...startedBy(w) });
         }
       }
       // The commit's statuses: a same-name status that isn't success refuses a pinned check (the owner's rule).
@@ -1093,7 +1136,7 @@ async function checkPins(deps, cfg, api) {
         if (!list) return { noAnswer: 'its commit statuses' };
         statuses = list.filter((s) => s && typeof s.context === 'string');
       }
-      return { pinOf, suites, repo, sha, statuses };
+      return { pinOf, branch: pinBranch, suites, repo, sha, statuses };
     },
   };
 }
@@ -1201,36 +1244,28 @@ const GREEN = new Set(['success', 'neutral', 'skipped']);
  */
 const RETIRED_CHECKS = Object.freeze(['desktop']);
 /**
- * #727, the owner's rule: the run that decides a pinned check, from its own source's runs `own` on the commit. They
- * are grouped by workflow file (an Actions run: its suite's workflow run's path, or a group of its own when that run
- * wasn't read; one group for any other App). In each file's group the latest run (the later workflow run, then the
- * later check run, as a re-run attempt is) and the newest check run (the highest id: GitHub numbers check runs as it
- * makes them, a re-run's jobs included) must both pass. So one file never supersedes another, and a re-run of an
- * older run that failed after a newer run passed still refuses. An App that isn't Actions can't be split by file: its
- * latest check run of the name (the highest id) decides, in whatever check suite, so a later pipeline or re-run of that
- * App supersedes its earlier ones (the owner's decision, round 8; round 6 refused a failure in another suite). Returns
- * a run that doesn't pass (the same whatever the list order), else the latest run of all.
+ * Of runs that aren't passes, the one to report, the same whatever the list order: a finished one (waiting can't fix
+ * it) before a running one, then the highest id. Undefined when every run passed.
+ */
+function worstRun(runs) {
+  const bad = runs.filter((r) => !(r.status === 'completed' && r.conclusion === 'success'));
+  bad.sort((a, b) => Number(b.status === 'completed') - Number(a.status === 'completed') || (b.id ?? -1) - (a.id ?? -1));
+  return bad[0];
+}
+
+/**
+ * #727, #925: the run that decides a pinned check, from its own source's runs `own` on the commit (GitHub's latest
+ * check run per check suite: a re-run attempt of a job already replaces its earlier one there). Every one of them must
+ * pass, whatever workflow run or suite it is in and however it is ordered against a passing one: an earlier workflow
+ * run of the pinned file that failed, was cancelled or is still running blocks, as an earlier run of a pinned App
+ * does. Returns the run that doesn't pass (worstRun), else the latest run of all (the later workflow run, then the
+ * later check run).
  */
 function ownVerdict(own, pins) {
   const suite = (r) => pins.suites.get(r.check_suite && r.check_suite.id);
   const order = (r) => [(suite(r) || {}).run ?? -1, r.id ?? -1];
   const later = (a, b) => order(a)[0] > order(b)[0] || (order(a)[0] === order(b)[0] && order(a)[1] > order(b)[1]);
-  const groups = new Map();
-  own.forEach((r, i) => {
-    const key = !isActions(r) ? 'app' : suite(r) ? `file ${suite(r).path}` : `unread ${r.id ?? `#${i}`}`;
-    groups.set(key, [...(groups.get(key) || []), r]);
-  });
-  const ok = (r) => r.status === 'completed' && r.conclusion === 'success';
-  const bad = [];
-  for (const [key, g] of groups) {
-    // An App that isn't Actions can't be split by file: its latest run decides, in any suite (the owner, round 8).
-    const newest = g.reduce((a, b) => ((b.id ?? -1) > (a.id ?? -1) ? b : a));
-    const decide = key === 'app' ? [newest] : [g.reduce((a, b) => (later(b, a) ? b : a)), newest];
-    bad.push(...decide.filter((r) => !ok(r)));
-  }
-  // The same run whatever the list order: a finished one (waiting can't fix it) before a running one, then the highest id.
-  bad.sort((a, b) => Number(b.status === 'completed') - Number(a.status === 'completed') || (b.id ?? -1) - (a.id ?? -1));
-  return bad[0] || own.reduce((a, b) => (later(b, a) ? b : a));
+  return worstRun(own) || own.reduce((a, b) => (later(b, a) ? b : a));
 }
 
 /**
@@ -1240,10 +1275,9 @@ function ownVerdict(own, pins) {
  * idle: true when a required check hasn't run and every check that is on the commit is complete: nothing in flight
  * will bring it (a slow check that only runs in batches, on a commit with no batch).
  * pins (checkPins, #727; the owner's rule, 2026-10-19): a pinned required check is judged by its pinned source's runs
- * on this commit (ownVerdict: per workflow file, the latest run and the newest check run must pass), and every run of
- * its name from any other source, and every commit status of its name, must be a pass too. One nothing pins is judged
- * by name, as before, and every other name's latest run must still be green. Absent: by name alone (tests' stand-ins
- * only).
+ * on this commit (ownVerdict: every one must pass), and every run of its name from any other source, and every commit
+ * status of its name, must be a pass too. One nothing pins is judged by name: every run of its name must pass (#925),
+ * and every other name's latest run must still be green. Absent: by name alone (tests' stand-ins only).
  */
 function evaluateChecks(runs, required, pins) {
   if (!Array.isArray(required) || required.length === 0) return { ok: false, final: true, reason: 'no required checks configured in updates.json' };
@@ -1256,7 +1290,7 @@ function evaluateChecks(runs, required, pins) {
     return m;
   };
   const latest = latestOf(runs || []);
-  let judged = latest;
+  let judged = new Map(latest);
   if (pins) {
     const invalid = required.filter((name) => (pins.pinOf(name) || {}).invalid);
     if (invalid.length) return { ok: false, final: true, reason: `updates.json required_check_sources has an invalid pin for ${invalid.map((n) => `"${n}"`).join(', ')} ({ "app_id": N } or { "workflow": ".github/workflows/<file>" }): refused` };
@@ -1273,9 +1307,8 @@ function evaluateChecks(runs, required, pins) {
     }
     if (pins.red) return { ok: false, final: true, reason: `${required.includes(pins.red.name) ? 'required check' : 'check'} "${pins.red.name}" ended ${pins.red.conclusion}` };
     if (pins.running) return { ok: false, final: false, reason: `${required.includes(pins.running.name) ? 'required check' : 'check'} "${pins.running.name}" is ${pins.running.status}` };
-    // One nothing pins: by name, as before pins (the owner's choice, 2026-10-19). A pinned one: its pinned source's
-    // runs on this commit (ownVerdict), so a later run of a workflow file supersedes that file's earlier or cancelled
-    // ones (the owner's rule), and nothing else does.
+    // One nothing pins: by name (the owner's choice, 2026-10-19). A pinned one: its pinned source's runs on this
+    // commit (ownVerdict), every one of which must pass (#925).
     judged = latestOf((runs || []).filter((r) => !pins.pinOf(r.name)));
     const own = new Map();
     for (const r of runs || []) {
@@ -1283,6 +1316,13 @@ function evaluateChecks(runs, required, pins) {
       own.set(r.name, [...(own.get(r.name) || []), r]);
     }
     for (const [name, list] of own) judged.set(name, ownVerdict(list, pins));
+  }
+  // #925: a required check judged by name is decided by any run of its name that isn't a pass, never by its latest
+  // alone: an earlier red or unfinished run (another source's, or one that started first) blocks.
+  for (const name of required) {
+    if (pins && pins.pinOf(name)) continue;
+    const bad = worstRun((runs || []).filter((r) => r.name === name));
+    if (bad) judged.set(name, bad);
   }
   // A pinned required check: any run of its name from any OTHER source that isn't a pass blocks it.
   const isOwn = (r) => !!pins && !!pins.pinOf(r.name) && fromPinnedSource(r, pins.pinOf(r.name), pins);

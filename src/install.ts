@@ -7,7 +7,7 @@
 // local runs without an instance. Re-running is safe: our entries are
 // recognized by a marker and replaced, never duplicated.
 import { gitExecFileSync } from './os/git.js';
-import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, readlinkSync, renameSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, readlinkSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { agentSettingsPath, GUARD_MATCHER, GUARD_ON_FAILURE, HOOK_MARKER, installCommand, type HookEntry, type Settings } from './agent-settings.js';
@@ -18,9 +18,9 @@ import { githubRepoOf } from './managed-apps.js';
 import { stableNodePath, writeOwnerOnly } from './os/index.js';
 import { toolBin } from './tool-path.js';
 import { installPrePushHook } from './push-guard.js';
+import { GIT_HOOK_MARKER } from './scan/secrets.js';
 
-export { HOOK_MARKER };
-export const GIT_HOOK_MARKER = `# managed by ${BRAND.cli}`;
+export { HOOK_MARKER, GIT_HOOK_MARKER };
 
 /** The engine's packaged templates directory. */
 export function templatesDir(): string {
@@ -335,7 +335,7 @@ export function install(opts: InstallOptions): InstallReport {
 
 /** WHY: `install --git-hooks` and the first-run page's Fix install the same hooks, from one place. */
 export function installGitHooks(root: string, cfg: Config, engineCli = fileURLToPath(new URL('./cli.js', import.meta.url))): { gitHook: string; prePushHook?: string; notes: string[] } {
-  const gitHook = installGitHook(root);
+  const gitHook = installGitHook(root, engineCli);
   // land_mode direct lands by pushing the default branch: there the hook would refuse the landing itself.
   if (cfg.project.land_mode === 'direct') return { gitHook, notes: ['no pre-push hook: land_mode direct lands by pushing the default branch'] };
   return { gitHook, prePushHook: installCheckoutPrePush(root, [cfg.project.project.default_branch], engineCli), notes: [] };
@@ -351,8 +351,31 @@ export function installCheckoutPrePush(root: string, branches: string[], engineC
   return installPrePushHook(join(resolve(root, common), 'hooks'), { branches, node, ...(engineCli ? { engine: engineCli } : {}) });
 }
 
-/** gitleaks pre-commit hook in the repo's common hooks dir, chaining any existing hook. */
-export function installGitHook(root: string): string {
+/**
+ * #983 (the owner's option (b)): an instance checkout's own config names its hooks dir, by absolute path. That file is
+ * the coordinator's alone (checkout.sh's lock, #926), and git ranks a repository's config above the global one, so
+ * whatever GIT_CONFIG_GLOBAL, HOME or XDG_CONFIG_HOME an agent's shell sets, its git runs the engine's pre-commit and
+ * pre-push hooks here. Only `install --git-hooks-only` (checkout.sh) pins: a person's own repo keeps its own setting.
+ * src/os/git.ts (ownHooksPin) lets a guarded git read exactly this setting. Returns the hooks dir.
+ */
+export function pinCheckoutHooks(root: string): string {
+  const common = gitExecFileSync(['rev-parse', '--git-common-dir'], { cwd: root, encoding: 'utf8' }).trim();
+  const hooks = join(realpathSync(resolve(root, common)), 'hooks');
+  gitExecFileSync(['config', '--local', 'core.hooksPath', hooks], { cwd: root });
+  return hooks;
+}
+
+const shQuote = (s: string) => `'${s.replaceAll("'", "'\\''")}'`;
+
+/**
+ * The pre-commit secret scan in the repo's common hooks dir, chaining any existing hook: the guard's own entry
+ * (src/hook-main.ts, beside `engineCli`) scans the index the commit records (#983). INVARIANT (#983): the hook it
+ * replaced runs first, so what that hook stages is in the index scanned; an engine or a gitleaks that is missing
+ * fails the commit.
+ */
+export function installGitHook(root: string, engineCli?: string, node: string = stableNodePath().path): string {
+  const running = fileURLToPath(new URL('./cli.js', import.meta.url));
+  const entry = hookEntry(engineCli && /(^|[/\\])cli\.js$/.test(engineCli) ? engineCli : running);
   const common = gitExecFileSync(['rev-parse', '--git-common-dir'], { cwd: root, encoding: 'utf8' }).trim();
   const hooksDir = join(resolve(root, common), 'hooks');
   mkdirSync(hooksDir, { recursive: true });
@@ -362,15 +385,17 @@ export function installGitHook(root: string): string {
   writeFileSync(
     hook,
     `#!/bin/sh
-${GIT_HOOK_MARKER}: secret scan on every commit. Missing gitleaks fails the commit.
+${GIT_HOOK_MARKER}: secret scan on every commit, of the index it records. A scan that can't run fails the commit.
 # Where ${BRAND.cli} init installs tools, for a commit made without it on PATH.
-PATH="$PATH":'${toolBin().replaceAll("'", "'\\''")}'
-if ! command -v gitleaks >/dev/null 2>&1; then
-  echo "${BRAND.cli}: gitleaks not found; install it to commit (secret scanning is required)" >&2
+PATH="$PATH":${shQuote(toolBin())}
+# The hook this one replaced runs first, so what it stages is scanned too.
+if [ -x ${shQuote(chained)} ]; then ${shQuote(chained)} "$@" || exit $?; fi
+E=${shQuote(entry)}
+if [ ! -f "$E" ]; then
+  echo "${BRAND.cli}: the engine's secret scan is missing at $E; not committing unscanned (run ${BRAND.cli} install --git-hooks again)" >&2
   exit 1
 fi
-gitleaks git --pre-commit --staged --redact --no-banner || exit 1
-if [ -x "${chained}" ]; then exec "${chained}" "$@"; fi
+exec ${shQuote(node)} "$E" pre-commit </dev/null
 `,
   );
   chmodSync(hook, 0o755);

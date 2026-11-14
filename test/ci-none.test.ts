@@ -43,7 +43,7 @@ function log() {
  * the No CI config and this event log): it reads the log itself (#727: no maker takes a caller's events).
  */
 const headChecks = (o: { project: { ci?: 'none' | 'github' }; github: CommitCheck[]; log: EventLog; sha: string }): Promise<JudgedChecks> =>
-  new PinnedChecks({ backlog: { checks: async () => o.github }, branch: () => 'main', repo: () => 'o/r', configured: () => ({}), local: { project: () => o.project, tests: () => tests, log: o.log } }).of(o.sha);
+  new PinnedChecks({ backlog: { checks: async () => o.github }, branch: () => 'main', repo: () => 'o/r', configured: () => ({}), local: { project: () => o.project, tests: () => tests, log: o.log } }).of(o.sha, { main: true });
 
 const gh = (name: string, conclusion = 'success') => ({ name, source: 'check_run' as const, status: 'completed', conclusion });
 const approved = { head: HEAD, approved: true };
@@ -132,7 +132,7 @@ test("the coordinator under No CI: ready only on its own log's test run of the e
   f.cfg.tests.test_run = tests.test_run;
   const c = coordinator(f, new FakeRunner(() => ({ structured: {} })), { prPollMs: 0 });
   // The checks as the merge flow reads them for a head (PinnedChecks.of: the backlog's, then the log's test runs).
-  const headOf = () => (c as unknown as { headChecksOf(sha: string): Promise<JudgedChecks> }).headChecksOf(HEAD);
+  const headOf = () => (c as unknown as { headChecksOf(sha: string, at: { main: true }): Promise<JudgedChecks> }).headChecksOf(HEAD, { main: true });
   f.log.append('eval.verdict', { issue: 1, head: HEAD, patch_hash: 'x', patch_correct: true, test_correct: true, confidence: 'high', advice: '' }, 'alice');
   f.backlog.setChecks(HEAD, [gh('fast'), gh('test-run/suite')]);
   const r1 = c.prReadiness(1, HEAD, await headOf());

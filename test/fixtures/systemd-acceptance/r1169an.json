@@ -1,0 +1,194 @@
+{
+  "//": "Review round r1169an of #1169: each case is one attack on scripts/ci/systemd-acceptance.mjs (README.md).",
+  "cases": {
+    "r1169an-n01-throw-sentinel-nullish": {
+      "exit": 2,
+      "reason": "'s throw leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "import { once, EventEmitter } from 'node:events';",
+          "import { setTimeout as delay } from 'node:timers/promises';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.",
+          "const VM = true;",
+          "",
+          "class Unavailable extends Error {}",
+          "test('the unit starts under the real service manager', (t) => {",
+          "  const probe = () => {",
+          "    if (VM) throw new Unavailable('no unit here');",
+          "    const unit = process.env.WORKLANE_UNIT ?? 'worklane-runner.service';",
+          "    assert.equal(spawnSync('systemctl', ['is-active', unit]).status, -7);",
+          "  };",
+          "  try {",
+          "    probe();",
+          "  } catch (e) {",
+          "    if (!(e instanceof Unavailable)) throw e;",
+          "    t.diagnostic(e.message);",
+          "  }",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169an-n01b-throw-sentinel-plain": {
+      "exit": 2,
+      "reason": "'s throw leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "import { once, EventEmitter } from 'node:events';",
+          "import { setTimeout as delay } from 'node:timers/promises';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.",
+          "const VM = true;",
+          "",
+          "class Unavailable extends Error {}",
+          "test('the unit starts under the real service manager', (t) => {",
+          "  const probe = () => {",
+          "    if (VM) throw new Unavailable('no unit here');",
+          "    assert.equal(spawnSync('systemctl', ['is-active', 'worklane-runner.service']).status, -7);",
+          "  };",
+          "  try {",
+          "    probe();",
+          "  } catch (e) {",
+          "    if (!(e instanceof Unavailable)) throw e;",
+          "    t.diagnostic(e.message);",
+          "  }",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169an-n02-throw-try-finally": {
+      "exit": 2,
+      "reason": "'s throw leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "import { once, EventEmitter } from 'node:events';",
+          "import { setTimeout as delay } from 'node:timers/promises';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.",
+          "const VM = true;",
+          "",
+          "class Unavailable extends Error {}",
+          "test('the unit restarts under the real service manager', async (t) => {",
+          "  const restart = async (unit) => {",
+          "    if (VM) throw new Unavailable(`${unit} is not installed`);",
+          "    try {",
+          "      assert.equal(spawnSync('systemctl', ['restart', unit]).status, -7);",
+          "    } finally {",
+          "      await delay(1);",
+          "    }",
+          "  };",
+          "  try {",
+          "    await restart('worklane-runner.service');",
+          "  } catch (e) {",
+          "    if (!(e instanceof Unavailable)) throw e;",
+          "    t.diagnostic(e.message);",
+          "  }",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169an-n03-switch-break-nullish": {
+      "exit": 2,
+      "reason": "'s break leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "import { once, EventEmitter } from 'node:events';",
+          "import { setTimeout as delay } from 'node:timers/promises';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.",
+          "const VM = true;",
+          "",
+          "test('the unit is checked per init system', () => {",
+          "  switch (process.platform) {",
+          "    case 'linux': {",
+          "      if (VM) break;",
+          "      const unit = process.env.WORKLANE_UNIT ?? 'worklane-runner.service';",
+          "      assert.equal(spawnSync('systemctl', ['is-active', unit]).status, -7);",
+          "      break;",
+          "    }",
+          "    default:",
+          "      assert.ok(true);",
+          "  }",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169an-n03t-switch-break-ternary": {
+      "exit": 2,
+      "reason": "'s break leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "import { once, EventEmitter } from 'node:events';",
+          "import { setTimeout as delay } from 'node:timers/promises';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.",
+          "const VM = true;",
+          "",
+          "test('the unit is checked per init system', () => {",
+          "  switch (process.platform) {",
+          "    case 'linux': {",
+          "      if (VM) break;",
+          "      const unit = process.env.WORKLANE_UNIT ? process.env.WORKLANE_UNIT : 'worklane-runner.service';",
+          "      assert.equal(spawnSync('systemctl', ['is-active', unit]).status, -7);",
+          "      break;",
+          "    }",
+          "    default:",
+          "      assert.ok(true);",
+          "  }",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169an-n15-throw-or-then-sign": {
+      "exit": 2,
+      "reason": "'s throw leaves before its function's end",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "import { once, EventEmitter } from 'node:events';",
+          "import { setTimeout as delay } from 'node:timers/promises';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.",
+          "const VM = true;",
+          "",
+          "class Unavailable extends Error {}",
+          "test('the unit starts under the real service manager', (t) => {",
+          "  const probe = (unit) => {",
+          "    if (VM) throw new Unavailable('no unit here');",
+          "    unit = unit || 'worklane-runner.service';",
+          "    assert.equal(spawnSync('systemctl', ['is-active', unit]).status, -7);",
+          "  };",
+          "  try {",
+          "    probe();",
+          "  } catch (e) {",
+          "    if (!(e instanceof Unavailable)) throw e;",
+          "  }",
+          "});",
+          ""
+        ]
+      }
+    }
+  }
+}

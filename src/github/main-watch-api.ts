@@ -2,7 +2,7 @@
 // The watch decides when to call: at most one of these a minute.
 import { roleFromPermission, validLogin, type Role } from '../dashboard-auth.js';
 import { TooManyPages, type CheckRunAt, type Compared, type MainWatchApi, type MergedPull, type StatusAt, type WorkflowAt } from '../main-watch.js';
-import type { WorkflowSource } from '../check-source.js';
+import { workflowSourceOf, type WorkflowSource } from '../check-source.js';
 
 /** Pages of 100 check runs or statuses read for one commit (#727); past them the merge isn't judged yet. */
 const PAGES_MAX = 10;
@@ -89,8 +89,9 @@ export class GitHubMainWatchApi implements MainWatchApi {
     if (res.status === 403 || res.status === 404) return null;
     if (!res.ok) throw new Error(`GitHub ${res.status} reading the workflow runs on ${sha.slice(0, 8)}`);
     const out: Record<string, WorkflowSource> = {};
-    for (const w of ((await res.json()) as { workflow_runs?: { id?: number; html_url?: string; check_suite_id?: number; path?: string; head_sha?: string; repository?: { full_name?: string } }[] }).workflow_runs ?? []) {
-      if (typeof w.id === 'number' && typeof w.html_url === 'string' && typeof w.check_suite_id === 'number' && typeof w.path === 'string' && typeof w.head_sha === 'string' && typeof w.repository?.full_name === 'string') out[String(w.check_suite_id)] = { run: w.id, url: w.html_url, path: w.path, repo: w.repository.full_name, sha: w.head_sha };
+    for (const w of ((await res.json()) as { workflow_runs?: (Parameters<typeof workflowSourceOf>[0] & { check_suite_id?: number })[] }).workflow_runs ?? []) {
+      const source = typeof w.check_suite_id === 'number' ? workflowSourceOf(w) : null;
+      if (source) out[String(w.check_suite_id)] = source;
     }
     return out;
   }

@@ -162,7 +162,7 @@ test("the block is always valid: duplicates once, names the schema or YAML can't
 
 test('the tip is read page by page; past the cap it is partial and says so', () => {
   const mkRuns = (n: number) => Array.from({ length: n }, (_, i) => ({ id: i + 1, name: `c${i}`, head_sha: 'c'.repeat(40), html_url: `https://github.com/o/r/actions/runs/700/job/${i + 1}`, app: { id: 15368, slug: 'github-actions' }, check_suite: { id: 70 } }));
-  const api = (total: number, withTotal = true) => {
+  const api = (total: number, withTotal = true, run: { event?: string; headRepo?: string } = {}) => {
     const runs = mkRuns(total);
     const asked: string[] = [];
     const f = (path: string) => {
@@ -170,7 +170,7 @@ test('the tip is read page by page; past the cap it is partial and says so', () 
       if (path === 'repos/o/r/commits/main') return { sha: 'c'.repeat(40) };
       const page = Number(/[?&]page=(\d+)/.exec(path)![1]);
       if (path.includes('/check-runs')) return { ...(withTotal ? { total_count: total } : {}), check_runs: runs.slice((page - 1) * 100, page * 100) };
-      return { total_count: 1, workflow_runs: [{ id: 700, html_url: 'https://github.com/o/r/actions/runs/700', check_suite_id: 70, path: '.github/workflows/ci.yml', head_sha: 'c'.repeat(40), repository: { full_name: 'o/r' } }] };
+      return { total_count: 1, workflow_runs: [{ id: 700, html_url: 'https://github.com/o/r/actions/runs/700', check_suite_id: 70, path: '.github/workflows/ci.yml', head_sha: 'c'.repeat(40), repository: { full_name: 'o/r' }, head_repository: { full_name: run.headRepo ?? 'o/r' }, event: run.event ?? 'push', head_branch: 'main', pull_requests: [] }] };
     };
     return { f, asked };
   };
@@ -182,6 +182,10 @@ test('the tip is read page by page; past the cap it is partial and says so', () 
   assert.deepEqual(a.asked.filter((p) => p.includes('/check-runs')).map((p) => p.split('?')[0]), [`repos/o/r/commits/${'c'.repeat(40)}/check-runs`, `repos/o/r/commits/${'c'.repeat(40)}/check-runs`]);
   assert.equal(t.runs[149]!.workflow, '.github/workflows/ci.yml');
   assert.equal(t.runs[0]!.slug, 'github-actions');
+  // #943, R1176e minor 1: the tip is a main commit: a pull_request run, or a run whose commit came from a fork (R1176f
+  // D2), is never its workflow's run, so nothing is proposed from it.
+  assert.equal(ghTipRuns('o/r', 'main', api(1, true, { event: 'pull_request' }).f)!.runs[0]!.workflow, null, 'a pull_request run on the tip');
+  assert.equal(ghTipRuns('o/r', 'main', api(1, true, { headRepo: 'attacker/r' }).f)!.runs[0]!.workflow, null, "a fork's commit on the tip");
   const big = ghTipRuns('o/r', 'main', api(TIP_PAGES_MAX * 100 + 5).f)!;
   assert.equal(big.partial, true);
   // Full pages with no total_count: it keeps reading; past the cap it says partial.

@@ -1,3 +1,6 @@
+// The allowlist (#1182, the owner, 2026-11-11) replaced the earlier reply rules and their note kinds. In this ported
+// file every reply note reads as kind 'reply_note': each case still asserts what it answers (nothing, here, unless
+// marked) and how many notes it gets; the new kinds are pinned in decision-reply.test.ts and -r1182allowlist.test.ts.
 // Who may approve, the same on every surface, and the money paths read from main (#715): a writer's GitHub comment
 // doesn't approve a high-risk merge unless review.yaml on main lets writers, `decide` from the CLI is refused to
 // anyone but root and the coordinator user (on a local site, the user whose event log it is), and a change is judged by main's money-path list, never the checkout's.
@@ -48,8 +51,13 @@ function askLand(f: Fixture, kind: EventPayload<'decision.asked'>['kind'] = 'lan
   const id = `d-${kind}-${n}`;
   f.log.append('decision.asked', { id, kind, issue: n, owner: OWNER, question: 'Land it?', options: ['approve', 'reject'], recommendation: 'approve', receipts: [] }, 'alice');
   f.log.append('review.level_set', { issue: n, head: 'a'.repeat(40), level: 'L3', reasons: ['money-path: src/price.js'] }, 'alice');
+  questionComment(f, n, id);
   return { n, id };
 }
+
+/** The question's own comment, as ask() (src/coordinator/base.ts) posts it. */
+const questionComment = (f: Fixture, n: number, id: string) =>
+  f.backlog.humanComment(n, 'coordinator', `[${BRAND.cli}] @${OWNER} decision needed: **Land it?**\n\nReply \`/${BRAND.cli} approve ${id}\` or \`/${BRAND.cli} reject ${id}\` (the id is required), or run \`${BRAND.cli} decide ${id} <option>\`.`);
 
 const handleDecisions = (c: Coordinator) => (c as unknown as { handleDecisions(): Promise<void> }).handleDecisions();
 const of = <T>(f: Fixture, type: Parameters<Fixture['log']['read']>[1] extends (infer U)[] | undefined ? U : never) => f.log.read(0, [type]).map((e) => e.payload as T);
@@ -68,14 +76,14 @@ test("GitHub comment: a writer's /<cli> approve doesn't land a held change when 
   const f = fixture();
   const c = coordinator(f, new FakeRunner(() => ({ structured: {} })), { roleOf: exampleRoles });
   const { n, id } = askLand(f);
-  f.backlog.humanComment(n, WRITER, `/${BRAND.cli} approve`);
+  f.backlog.humanComment(n, WRITER, `/${BRAND.cli} approve ${id}`);
   await handleDecisions(c);
   assert.equal(of(f, 'land.queued').length, 0, 'a writer approved nothing');
   assert.equal(of(f, 'decision.answered').length, 0);
   // A writer's comment still answers what writers answer (a question), and an owner's approves the merge.
   const q = askLand(f, 'question');
-  f.backlog.humanComment(q.n, WRITER, `/${BRAND.cli} approve`);
-  f.backlog.humanComment(n, OWNER, `/${BRAND.cli} approve`);
+  f.backlog.humanComment(q.n, WRITER, `/${BRAND.cli} approve ${q.id}`);
+  f.backlog.humanComment(n, OWNER, `/${BRAND.cli} approve ${id}`);
   await handleDecisions(c);
   const answered = of<EventPayload<'decision.answered'>>(f, 'decision.answered');
   assert.deepEqual(answered.map((a) => [a.id, a.by, a.role]), [[id, OWNER, 'owner'], [q.id, WRITER, 'writer']]);
@@ -88,8 +96,8 @@ test('GitHub comment: a listed writer whose repo role is viewer, or whose role l
     const c = coordinator(f, new FakeRunner(() => ({ structured: {} })), { roleOf });
     const q = askLand(f, 'question');
     const land = askLand(f);
-    f.backlog.humanComment(q.n, WRITER, `/${BRAND.cli} approve`);
-    f.backlog.humanComment(land.n, OWNER, `/${BRAND.cli} approve`);
+    f.backlog.humanComment(q.n, WRITER, `/${BRAND.cli} approve ${q.id}`);
+    f.backlog.humanComment(land.n, OWNER, `/${BRAND.cli} approve ${land.id}`);
     await handleDecisions(c);
     assert.deepEqual(of(f, 'decision.answered'), []);
     assert.deepEqual(of(f, 'land.queued'), []);
@@ -101,9 +109,9 @@ test("GitHub comment: a held plan is the owners' too, as on the dashboard; revie
   f.cfg.review = { ...(f.cfg.review ?? DEFAULT_REVIEW), approvals: { land: 'writers' } } as ReviewConfig;
   const c = coordinator(f, new FakeRunner(() => ({ structured: {} })), { roleOf: exampleRoles, writersApproveLand: () => true });
   const plan = askLand(f, 'plan');
-  f.backlog.humanComment(plan.n, WRITER, `/${BRAND.cli} approve`);
+  f.backlog.humanComment(plan.n, WRITER, `/${BRAND.cli} approve ${plan.id}`);
   const land = askLand(f);
-  f.backlog.humanComment(land.n, WRITER, `/${BRAND.cli} approve`);
+  f.backlog.humanComment(land.n, WRITER, `/${BRAND.cli} approve ${land.id}`);
   await handleDecisions(c);
   assert.deepEqual(of<EventPayload<'decision.answered'>>(f, 'decision.answered').map((a) => [a.id, a.by]), [[land.id, WRITER]]);
   assert.equal(of<EventPayload<'land.queued'>>(f, 'land.queued')[0]?.issue, land.n);
@@ -148,8 +156,8 @@ test("letting writers approve a high-risk merge needs the instance's policy.yaml
   let on = true;
   const c = coordinator(f, new FakeRunner(() => ({ structured: {} })), { roleOf: exampleRoles, writersApproveLand: () => on });
   on = false;
-  const { n } = askLand(f);
-  f.backlog.humanComment(n, WRITER, `/${BRAND.cli} approve`);
+  const { n, id } = askLand(f);
+  f.backlog.humanComment(n, WRITER, `/${BRAND.cli} approve ${id}`);
   await handleDecisions(c);
   assert.equal(of(f, 'land.queued').length, 0);
   on = true;
@@ -161,7 +169,7 @@ test("letting writers approve a high-risk merge needs the instance's policy.yaml
     g.cfg.review = cfg.review;
     const d = coordinator(g, new FakeRunner(() => ({ structured: {} })), { roleOf: exampleRoles, ...(writersApproveLand ? { writersApproveLand } : {}) });
     const held = askLand(g);
-    g.backlog.humanComment(held.n, WRITER, `/${BRAND.cli} approve`);
+    g.backlog.humanComment(held.n, WRITER, `/${BRAND.cli} approve ${held.id}`);
     await handleDecisions(d);
     assert.equal(of(g, 'land.queued').length, 0);
   }
@@ -314,5 +322,41 @@ test('auto-merge, not batched: a stop raised while the combined gate runs holds 
       assert.ok(!t.pr().merged, 'not merged: the stop came in before the merge call');
       assert.equal(t.f.log.read(0, ['merge.done']).length, 0);
     } else assert.ok(t.pr().merged, 'control: with no stop it merges');
+  }
+});
+
+// #1248 (found as R1182v defect 1): a reply answers only the decision it names. On main, the latest matching reply of
+// any age answered every later question on the issue. The owner's decision (2026-11-09): the id is required.
+test('#1248: a reply answers a decision only by naming its id; a bare reply answers nothing and says so once', { skip }, async () => {
+  const answered = (f: Fixture) => of<EventPayload<'decision.answered'>>(f, 'decision.answered').map((a) => [a.id, a.by]);
+  const notes = (f: Fixture) => of<{ kind: string; message: string }>(f, 'coordinator.error').filter((e) => e.kind.startsWith('reply_'));
+  for (const kind of ['land', 'question'] as const) {
+    const f = fixture();
+    const c = coordinator(f, new FakeRunner(() => ({ structured: {} })), { roleOf: exampleRoles });
+    const n = f.backlog.open({ title: 'Totals', body: 'b', author: OWNER, labels: [] });
+    // An approval of an earlier question, before this one is asked.
+    f.backlog.humanComment(n, OWNER, `/${BRAND.cli} approve`);
+    const id = `d-${kind}-a1b2c3`;
+    f.log.append('decision.asked', { id, kind, issue: n, owner: OWNER, question: 'Land it?', options: ['approve', 'reject'], recommendation: 'approve', receipts: [] }, 'alice');
+    f.log.append('review.level_set', { issue: n, head: 'a'.repeat(40), level: 'L3', reasons: ['money-path: src/price.js'] }, 'alice');
+    questionComment(f, n, id);
+    await handleDecisions(c);
+    assert.deepEqual(answered(f), [], `${kind}: an older bare reply answered it`);
+    // A bare reply after the question answers nothing either, and one note says to name the id.
+    f.backlog.humanComment(n, OWNER, `/${BRAND.cli} approve`);
+    await handleDecisions(c);
+    await handleDecisions(c);
+    assert.deepEqual(answered(f), [], `${kind}: a bare reply answered it`);
+    const without = notes(f).filter((e) => e.kind.startsWith('reply_')); // changed by the allowlist (#1182, the owner, 2026-11-11: a reply is the comment's one line)
+    assert.equal(without.length, 2, `${kind}: one note per bare reply, never repeated: ${JSON.stringify(without)}`);
+    assert.ok(without.every((e) => e.message.includes(id) && e.message.includes(`/${BRAND.cli} <option> <id>`)), JSON.stringify(without));
+    // A reply naming another decision answers nothing here.
+    f.backlog.humanComment(n, OWNER, `/${BRAND.cli} approve d-${kind}-ffffff`);
+    await handleDecisions(c);
+    assert.deepEqual(answered(f), [], `${kind}: a reply naming another decision answered this one`);
+    // A reply naming this one answers it.
+    f.backlog.humanComment(n, OWNER, `/${BRAND.cli} approve ${id}`);
+    await handleDecisions(c);
+    assert.deepEqual(answered(f), [[id, OWNER]], `${kind}: the reply naming it`);
   }
 });

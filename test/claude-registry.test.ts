@@ -15,12 +15,14 @@ type Cache = Record<string, Entry>;
 type Registry = {
   candidates: (bin: string) => string[];
   readCache: (text?: string) => Cache;
-  cacheText: (c: Cache) => string;
+
   cacheProblems: (sha256: string, cache: Cache, listed: string[], earlier: string[], platform?: string) => string[];
   claudeCommands: (bin: string, o?: { concurrency?: number; timeoutMs?: number }) => Promise<{ commands: string[]; unread: string[] }>;
   listedCommands: (src: string, name?: string) => string[];
 };
 const registry = async () => (await import(pathToFileURL(join(repoRoot, 'scripts', 'ci', 'claude-registry.mjs')).href)) as Registry;
+/** The cache's writer (#941: its lists are data), apart from the registry the probe loads. */
+const writer = async () => (await import(pathToFileURL(join(repoRoot, 'scripts', 'ci', 'claude-commands-write.mjs')).href)) as { cacheText: (c: Cache) => string; tablesText: (c: Cache) => string };
 
 /** A stand-in claude: its bytes hold the strings a real build would; it answers `<word> --help` as the CLI does. */
 function standIn(dir: string): string {
@@ -75,13 +77,18 @@ test('R1185as D1: the lint lists are read from their one line each', async () =>
 });
 
 test('R1185as (the cache): the committed probe results round-trip, one entry per platform, and a binary none was probed from fails with what to run where', async () => {
-  const { readCache, cacheText, cacheProblems } = await registry();
+  const { readCache, cacheProblems } = await registry();
+  const { cacheText, tablesText } = await writer();
   const c: Cache = {
     'darwin-arm64': { version: '9.9.9', sha256: 'f'.repeat(64), probedAt: '2026-11-12', commands: ['doctor', 'mcp', 'remote'] },
     'linux-x64': { version: '9.9.9', sha256: 'e'.repeat(64), probedAt: '2026-11-12', commands: ['doctor', 'mcp', 'remote', 'sync'] },
   };
   assert.deepEqual(readCache(cacheText(c)), c);
-  assert.equal(cacheText(c).match(/^\/\/ check-table: never-shrink\nexport const [A-Z0-9_]+_COMMANDS = \[$/gm)?.length, 2, 'each list is marked never-shrink');
+  // Each list is data (#941): never-shrink in the tables file, carried by the module as its generated copy.
+  const tables = JSON.parse(tablesText(c)) as Record<string, { kind?: string; value?: unknown }>;
+  assert.deepEqual(Object.entries(tables).filter(([k]) => k !== '//').map(([k, t]) => [k, t.kind, t.value]), [['DARWIN_ARM64_COMMANDS', 'never-shrink', ['doctor', 'mcp', 'remote']], ['LINUX_X64_COMMANDS', 'never-shrink', ['doctor', 'mcp', 'remote', 'sync']]]);
+  assert.equal(cacheText(c).match(/^const [A-Z0-9_]+_COMMANDS = Object\.freeze\(\[.*\]\);$/gm)?.length, 2, "each list's generated copy");
+  assert.doesNotMatch(cacheText(c), /check-table:/, 'no list registered by a mark (#941)');
   // Each platform's own binary is checked against its own entry's commands.
   assert.deepEqual(cacheProblems('f'.repeat(64), c, ['doctor', 'mcp', 'remote'], [], 'darwin-arm64'), []);
   assert.match(cacheProblems('e'.repeat(64), c, ['doctor', 'mcp', 'remote'], [], 'linux-x64')[0]!, /lacks sync/);

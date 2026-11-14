@@ -13,7 +13,7 @@ import { delimiter, join } from 'node:path';
 import type { Instance } from '../src/instance.js';
 import { CA_VARS, isRedirectGitKey, isRedirectVar, machineNetwork, NETWORK_LIMITS, networkHealth, outboundEnv, readCaFile, readNetworkConfig } from '../src/network.js';
 import { projectCommand } from '../src/os/index.js';
-import { CliRunner, type RunRequest } from '../src/runner.js';
+import { agentGitConfig, CliRunner, type RunRequest } from '../src/runner.js';
 import { instanceEnv, instanceTokens } from '../src/service.js';
 
 const posixOnly = process.platform === 'win32' && 'POSIX file owners and modes, and POSIX stand-ins for claude and gh';
@@ -233,6 +233,16 @@ test('GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM naming a file become the null devi
     assert.deepEqual(outboundEnv({ [name]: '/dev/null' }, null), { [name]: '/dev/null' });
   }
   assert.deepEqual(outboundEnv({ GIT_CONFIG_NOSYSTEM: '1', PATH: '/bin' }, null), { GIT_CONFIG_NOSYSTEM: '1', PATH: '/bin' });
+});
+
+test('#983: the one GIT_CONFIG_GLOBAL kept is the harness file this process wrote for agent runs; any other file, or that file as GIT_CONFIG_SYSTEM, is still none', () => {
+  const harness = agentGitConfig('');
+  assert.deepEqual(outboundEnv({ GIT_CONFIG_GLOBAL: harness }, null), { GIT_CONFIG_GLOBAL: harness });
+  assert.deepEqual(outboundEnv({ GIT_CONFIG_SYSTEM: harness }, null), { GIT_CONFIG_SYSTEM: '/dev/null' });
+  assert.deepEqual(outboundEnv({ git_config_global: harness }, null), { GIT_CONFIG_GLOBAL: '/dev/null' });
+  const { file } = redirectingConfig();
+  assert.deepEqual(outboundEnv({ GIT_CONFIG_GLOBAL: file }, null), { GIT_CONFIG_GLOBAL: '/dev/null' });
+  assert.deepEqual(outboundEnv({ GIT_CONFIG_GLOBAL: `${harness}/../config` }, null), { GIT_CONFIG_GLOBAL: '/dev/null' }, 'by its exact name');
 });
 
 test('git config naming a remote\'s proxy, URL or push URL, or a git:// proxy command, is stripped (#1084)', () => {

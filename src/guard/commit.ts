@@ -6,6 +6,7 @@
 import { lstatSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import { basename, splitCommands, type SimpleCommand } from '../guardrails/shell.js';
+import { gitGuarded } from '../os/git.js';
 import { ATTRIBUTES_FILE } from '../scan/secrets.js';
 
 /** What one scan of a checkout covers, on top of the staged changes it always covers. */
@@ -483,14 +484,15 @@ function gitWords(words: Word[]): GitWords {
 
 type Arg = 'flag' | 'value' | 'optional';
 // WHY: git commit's options, by name: whether each takes a value, and whether it makes the commit take working-tree
-// content (w) or rewrite the current commit (amend). A name is matched as git matches it (longOption).
-type Opt = [Arg, ('w' | 'amend' | 'interactive')?];
+// content (w), rewrite the current commit (amend) or skip git's pre-commit hook (skip). A name is matched as git
+// matches it (longOption).
+type Opt = [Arg, ('w' | 'amend' | 'interactive' | 'skip')?];
 const COMMIT_LONG: Record<string, Opt> = {
   all: ['flag', 'w'], include: ['flag', 'w'], only: ['flag', 'w'], patch: ['flag', 'interactive'], interactive: ['flag', 'interactive'],
   'pathspec-from-file': ['value', 'w'], amend: ['flag', 'amend'],
   'pathspec-file-nul': ['flag'], message: ['value'], file: ['value'], 'reuse-message': ['value'], 'reedit-message': ['value'],
   fixup: ['value'], squash: ['value'], author: ['value'], date: ['value'], template: ['value'], cleanup: ['value'], trailer: ['value'],
-  'untracked-files': ['optional'], 'gpg-sign': ['optional'], signoff: ['flag'], verify: ['flag'], 'no-verify': ['flag'],
+  'untracked-files': ['optional'], 'gpg-sign': ['optional'], signoff: ['flag'], verify: ['flag'], 'no-verify': ['flag', 'skip'],
   'allow-empty': ['flag'], 'allow-empty-message': ['flag'], edit: ['flag'], 'no-edit': ['flag'], 'reset-author': ['flag'],
   short: ['flag'], branch: ['flag'], long: ['flag'], null: ['flag'], 'dry-run': ['flag'], status: ['flag'],
   'no-status': ['flag'], verbose: ['flag'], quiet: ['flag'], 'no-post-rewrite': ['flag'],
@@ -500,7 +502,14 @@ const SHORT_OPTIONAL = new Set(['u', 'S']);
 const SHORT_WORKTREE = new Set(['a', 'i', 'o']);
 /** Long options that start interactive staging (any prefix git might take for them). */
 const INTERACTIVE_LONG = /^--(pa(t(c(h)?)?)?|in(t(e(r(a(c(t(i(v(e)?)?)?)?)?)?)?)?)?)(=|$)/;
-const SHORT_FLAG = new Set(['n', 'q', 'v', 's', 'e', 'z']);
+const SHORT_FLAG = new Set(['q', 'v', 's', 'e', 'z']);
+
+/**
+ * A commit that skips git's pre-commit hook, the commit scan's second layer (#983), which scans the index the commit
+ * records whatever this model reads from its line. INVARIANT (#983): refused in any spelling (-n alone or bundled,
+ * --no-verify or a prefix git takes for it), even with a --verify after it.
+ */
+class SkipsHook extends Error {}
 
 /** The long options a (possibly abbreviated, possibly negated) name can mean. */
 function longOption(name: string): Opt[] {
@@ -541,6 +550,7 @@ function commitEffects(rest: Word[]): { worktree: boolean; amend: boolean } {
         if (effect === 'w') worktree = true;
         if (effect === 'interactive') throw new Unmodelled('an interactive commit, which can edit what is committed after the scan');
         if (effect === 'amend') amend = true;
+        if (effect === 'skip') throw new SkipsHook(`--${name}`);
         if (arg === 'value' && eq < 0) i++;
       }
       continue;
@@ -553,6 +563,7 @@ function commitEffects(rest: Word[]): { worktree: boolean; amend: boolean } {
       }
       if (SHORT_OPTIONAL.has(ch)) break;
       if (ch === 'p') throw new Unmodelled('an interactive commit, which can edit what is committed after the scan');
+      if (ch === 'n') throw new SkipsHook(t);
       if (SHORT_WORKTREE.has(ch)) worktree = true;
       else if (!SHORT_FLAG.has(ch)) throw new Unmodelled(ch === EXPANSION ? 'an expansion in a commit option' : `the commit option -${ch}`);
     }
@@ -701,6 +712,53 @@ function looseGit(c: SimpleCommand): LooseGit | null {
 
 const setsGitEnv = (c: SimpleCommand) => Object.keys(c.assignments).some((k) => /^GIT_/i.test(k)) || c.argv.some((t) => /^GIT_[A-Za-z0-9_]*\+?=/i.test(t));
 
+/** help.autocorrect values with which git runs no corrected command (as src/guardrails/push-hook.ts reads them). */
+const AUTOCORRECT_OFF = /^(0+|never|show)$/i;
+
+/** git's global options that take the next word as their value (git.c handle_options), before an alias's command. */
+const ALIAS_VALUED = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--exec-path', '--super-prefix', '--config-env', '--attr-source', '--list-cmds']);
+/** git's global options that take no value. */
+const ALIAS_FLAGS = new Set(['-p', '-P', '--paginate', '--no-pager', '--bare', '--no-replace-objects', '--literal-pathspecs', '--glob-pathspecs', '--noglob-pathspecs', '--icase-pathspecs', '--no-optional-locks', '--no-advice', '--html-path', '--man-path', '--info-path']);
+
+/**
+ * An alias's value split into words as git splits it (alias.c split_cmdline): whitespace separates words outside
+ * quotes; '…' and "…" quote (a backslash escapes one character outside single quotes). null: an unbalanced quote, which
+ * git refuses too.
+ */
+function aliasWords(value: string): string[] | null {
+  const out: string[] = [];
+  let word = '';
+  let has = false;
+  let quote: '"' | "'" | null = null;
+  for (let i = 0; i < value.length; i++) {
+    const ch = value[i]!;
+    if (quote === "'") {
+      if (ch === "'") quote = null;
+      else word += ch;
+    } else if (ch === '\\') {
+      if (i + 1 >= value.length) return null;
+      word += value[++i];
+      has = true;
+    } else if (quote === '"') {
+      if (ch === '"') quote = null;
+      else word += ch;
+    } else if (ch === '"' || ch === "'") {
+      quote = ch;
+      has = true;
+    } else if (/\s/.test(ch)) {
+      if (has || word) out.push(word);
+      word = '';
+      has = false;
+    } else {
+      word += ch;
+      has = true;
+    }
+  }
+  if (quote) return null;
+  if (has || word) out.push(word);
+  return out;
+}
+
 /**
  * Why a git command run by another name may commit: an alias that is a commit or a shell command. It is looked up in
  * every directory the line may run it in (`dirs`, or why those can't be known); a lookup that fails refuses.
@@ -710,8 +768,16 @@ function aliasRefusal(loose: SimpleCommand[], p: PlanEnv, dirs: Set<string> | st
     const g = looseGit(c);
     if (!g?.sub || g.sub.startsWith('-') || GIT_BUILTINS.has(g.sub)) continue;
     if (g.configs.some((k) => /^alias\./i.test(k))) return `git ${g.sub} with an alias given on its command line`;
+    // -c stores `key=value` (R1124g): the key, whatever its value.
+    if (g.configs.some((k) => /^help\.autocorrect(=|$)/i.test(k))) return `git ${g.sub} with help.autocorrect given on its command line`;
     if (loose.some((x) => looseGit(x)?.sub === 'config')) return `git ${g.sub} in a line that also changes git config`;
     if (loose.some(setsGitEnv)) return `git ${g.sub} in a line that sets git's environment`;
+    // R1124h 3: a name with a dot may be an alias in a subsection ([alias "Ci"] x = commit runs as `git ci.x`), which
+    // git matches case-insensitively; the lookup below can't say so, so it refuses.
+    if (g.sub.includes('.')) return `git ${g.sub}: a name with a dot may be an alias in a subsection (alias.<sub>.<name>), which git matches whatever its case`;
+    // R1124h 4 (as R124d): in a process marked as an instance's, the lookups below read no global config, so they
+    // can't say what git would run for this name.
+    if (gitGuarded()) return `git ${g.sub}: this process's git reads no global config (it runs for an instance), so it can't say whether the name is an alias or a correction`;
     if (typeof dirs === 'string') return `git ${g.sub} after ${dirs}`;
     for (const dir of dirs) {
       let sub = g.sub;
@@ -719,11 +785,30 @@ function aliasRefusal(loose: SimpleCommand[], p: PlanEnv, dirs: Set<string> | st
         if (depth > 10) return `git ${g.sub}: an alias loop`;
         const r = p.git(dir, [...g.dirs.flatMap((d) => ['-C', d]), 'config', '--get', `alias.${sub}`]);
         // WHY: git config exits 1 for "no such key"; anything else (an error, a timeout) is not an answer.
-        if (r.status === 1) break;
+        if (r.status === 1) {
+          if (GIT_BUILTINS.has(sub)) break;
+          // R1124f D3: no alias and no command by that name. With help.autocorrect on, git runs the command it
+          // corrects the name to (`git comit -n` commits, the hook skipped), as the push rule reads it (push-hook.ts).
+          const fix = p.git(dir, [...g.dirs.flatMap((d) => ['-C', d]), 'config', '--get', 'help.autocorrect']);
+          if (fix.status !== 0 && fix.status !== 1) return `git ${g.sub}: its help.autocorrect lookup failed`;
+          if (fix.status === 0 && !AUTOCORRECT_OFF.test(fix.stdout.trim())) return `git ${g.sub} isn't a git command, and help.autocorrect is on (${fix.stdout.trim().slice(0, 40)}), so git may run the commit it corrects it to`;
+          break;
+        }
         if (r.status !== 0) return `git ${g.sub}: its alias lookup failed`;
         const value = r.stdout.trim();
         if (value.startsWith('!')) return `git ${g.sub} is an alias for a shell command`;
-        sub = value.split(/\s+/)[0] ?? '';
+        // R1124f D2: as git reads an alias (split_cmdline: quotes and backslashes), past the global options it may
+        // start with; a word git would read some other way, or an option this can't step over, refuses (fail closed).
+        const words = aliasWords(value);
+        if (words === null) return `git ${g.sub}: its alias can't be read as git reads it (an unbalanced quote)`;
+        let at = 0;
+        while (at < words.length && words[at]!.startsWith('-')) {
+          const w = words[at]!;
+          if (ALIAS_VALUED.has(w)) at += 2;
+          else if (ALIAS_FLAGS.has(w) || [...ALIAS_VALUED].some((o) => o.startsWith('--') && w.startsWith(`${o}=`))) at += 1;
+          else return `git ${g.sub}: its alias starts with the git option ${w}, which the guard doesn't step over`;
+        }
+        sub = words[at] ?? '';
         if (sub === 'commit') return `git ${g.sub} is an alias for git commit`;
         if (GIT_BUILTINS.has(sub)) break;
       }
@@ -744,6 +829,20 @@ function looseCommits(loose: SimpleCommand[]): { commits: number; indirect: bool
   }
   return { commits, indirect };
 }
+
+/**
+ * Whether a word, read as a command line, may run a git commit: a commit, git with no subcommand, or a git name that
+ * isn't one of git's commands (an alias). A word with no space in it is a name, never a command line.
+ */
+function mayCommit(text: string): boolean {
+  if (!/\s/.test(text)) return false;
+  const parts = splitCommands(text);
+  return looseCommits(parts).indirect || parts.some((x) => {
+    const g = looseGit(x);
+    return g !== null && (g.sub === undefined || g.sub === 'commit' || !GIT_BUILTINS.has(g.sub));
+  });
+}
+const UNREAD_STRING = 'a git commit in a command string another program may run';
 
 // WHY: programs that never run their arguments as a command, so a word `git` among them is only a word.
 // WHY: the general matcher keeps a shell keyword as a command's first word; the command is the word after it.
@@ -772,6 +871,7 @@ function unseenInUnread(command: string, raw: SimpleCommand[]): string | null {
       const sub = argv.slice(at + 1).find((t) => !t.startsWith('-'));
       if (sub === undefined || sub === 'commit' || NONLITERAL.test(sub)) return 'git run through another program';
     }
+    if (!NON_EXEC.has(basename(run)) && argv.slice(1).some(mayCommit)) return UNREAD_STRING;
   }
   const sh = String.raw`(?:\S*/)?(?:ba|z|da|k|mk|tc|c|fi|a)?sh|busybox`;
   if (new RegExp(String.raw`\|&?\s*(?:(?:sudo|env|exec|command|nohup|nice|time)\s+)*(?:${sh})(?![\w.-])`).test(command)) return 'text fed to a shell';
@@ -855,6 +955,12 @@ function unseenProgram(list: Cmd[][]): string | null {
           if (!run || !plain(run) || run.text.includes('{}')) return 'a program that builds a command from its input';
         }
       }
+    }
+    // INVARIANT (#983): a word that reads as a command line that may commit is refused, read or not: a program the
+    // guard doesn't know may run it as one (watch, su -c, git rebase -x). A message is only text.
+    if (!NON_EXEC.has(name.text)) {
+      const messages = new Set(messageWords(c));
+      if (c.words.slice(1).some((w) => !messages.has(w) && mayCommit(w.text))) return UNREAD_STRING;
     }
   }
   return null;
@@ -1046,6 +1152,9 @@ export function commitPlan(command: string, p: PlanEnv): CommitPlan | null {
     return { scans: [...tops].map((t) => ({ top: t, scope })), reads: [...readTops].filter((t) => !tops.has(t)) };
   } catch (e) {
     if (e instanceof Unmodelled) return refuse(e.message);
+    if (e instanceof SkipsHook) {
+      return { refuse: `git commit ${e.message} skips git's pre-commit hook, the secret scan of the index the commit records; an agent never skips it. Commit without -n or --no-verify` };
+    }
     throw e;
   }
 }

@@ -1,0 +1,3 @@
+### Guardrail changes: what each one does
+
+- **The systemd acceptance tests run on every push to main, on GitHub's VM, and a skip there fails (#1165 follow-up).** The tests that need a booted systemd and passwordless sudo (each gated on `systemCi`) skip in the self-hosted tests runner's container, so with `CI_SELF_HOSTED_TESTS` on they would have run nowhere. A new `ci.yml` job, `systemd acceptance (real systemd)`, runs them on `ubuntu-24.04` for each push to main; `scripts/ci/systemd-acceptance.mjs` finds them by their gate and fails unless each one ran and passed. The engine updater now requires that check on the commit it installs (`UPDATE_DEFAULT_CHECKS`, and the updater's check-to-workflow pin). Nothing changes on pull requests.

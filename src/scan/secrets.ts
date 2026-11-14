@@ -2,10 +2,11 @@
 // A scanner that can't run is reported as unavailable, never as "clean".
 import { spawn, spawnSync } from '../os/child-process.js';
 import { createHash } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, writeFileSync } from 'node:fs';
+import { accessSync, constants, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { delimiter, dirname, isAbsolute, join, resolve as resolvePath } from 'node:path';
-import { gitConfigRefusal, gitEnv, gitExecFileSync, gitSnapshot, gitSpawnSync, type GitSnapshot } from '../os/git.js';
+import { basename, delimiter, dirname, isAbsolute, join, resolve as resolvePath } from 'node:path';
+import { BRAND } from '../brand.js';
+import { foldName, gitConfigRefusal, gitEnv, gitExecFileSync, gitGuarded, gitSnapshot, gitSpawnSync, type GitSnapshot } from '../os/git.js';
 import { ignoredNames, presentNames, rawChanges, untrackedNames } from '../coordinator/change-files.js';
 import { notRootsProgram } from '../os/index.js';
 import { findTool } from '../tool-path.js';
@@ -82,17 +83,132 @@ interface Compared {
  * nothing the checkout's own settings say about showing one, changes what is found.
  */
 export function scanCommit(top: string, scope: CommitScanScope, binary = findTool('gitleaks')): ScanResult {
-  if (!binary) return { status: 'unavailable', error: 'gitleaks not found on PATH' };
-  // Refuse an instance checkout's planted programs before any content reads (#926).
-  const refused = gitConfigRefusal(top);
-  if (refused) return { status: 'unavailable', error: refused };
-  const tmp = mkdtempSync(join(tmpdir(), 'scan-commit-'));
-  try {
+  return scanComparisons(top, binary, () => {
     checkReadPrograms(top, scope);
     const comparisons: [string, () => Compared[]][] = [['staged changes', () => stagedContent(top)]];
     if (scope.unstaged || scope.untracked) comparisons.push(['unstaged changes', () => worktreeContent(top)]);
     if (scope.untracked) comparisons.push(['untracked files', () => untrackedContent(top)]);
     if (scope.head) for (const [i, read] of headContent(top).entries()) comparisons.push([`the commit being amended (parent ${i + 1})`, read]);
+    return comparisons;
+  });
+}
+
+/**
+ * Scan the index a commit is recording, against HEAD, from inside the commit: the engine's pre-commit hook (#983), the
+ * second layer under scanCommit's model of the command line. INVARIANT (#983): it reads the index git names for the
+ * commit (GIT_INDEX_FILE, which git sets for its hooks, so a commit of named paths is read in the index git builds for
+ * it), by content as scanCommit does; whatever the command line was, and whatever ran before it in the commit.
+ * The checkout's read programs aren't checked here: the index already holds what git stores, and nothing here renders
+ * a change or reads the working tree.
+ */
+export function scanIndex(top: string, binary = findTool('gitleaks')): ScanResult {
+  return scanComparisons(top, binary, () => [['the index being committed', () => stagedContent(top)]]);
+}
+
+/** The line that marks the engine's pre-commit hook (src/install.ts installGitHook writes it). */
+export const GIT_HOOK_MARKER = `# managed by ${BRAND.cli}`;
+
+/**
+ * Why git would make a commit in checkout `top` without the engine's pre-commit hook (scanIndex, #983); null when it
+ * runs that hook, or when the checkout's hooks dir holds no engine hook. INVARIANT (#983): git itself says which hook
+ * file it runs (`rev-parse --git-path`, which reads core.hooksPath from the repository, worktree, system and global
+ * config git reads, includes too), so no config route to another hooks dir needs modelling; that file must be the
+ * engine's, and executable. In a process marked as an instance's (gitGuarded), this runner's git reads no global
+ * config, so it can't say what a commit's own git would run: refused there (R124d), never answered from less config.
+ */
+export function commitHookSkipped(top: string): string | null {
+  if (gitGuarded()) return "this process's git reads no global config (it runs for an instance), so it can't say which pre-commit hook a commit here would run";
+  const r = gitSpawnSync(['rev-parse', '--path-format=absolute', '--git-dir', '--git-common-dir', '--git-path', 'hooks/pre-commit'], { cwd: top, encoding: 'utf8', timeout: 5_000 });
+  const [gitDir, common, runs] = r.error || r.status !== 0 ? [] : String(r.stdout).split('\n');
+  if (!gitDir || !common || !runs) return "git can't say which pre-commit hook it runs here";
+  const elsewhere = repositoryElsewhere(gitDir, common);
+  if (elsewhere) return elsewhere;
+  const engine = join(common, 'hooks', 'pre-commit');
+  if (!existsSync(engine) || !readFileSync(engine, 'utf8').includes(GIT_HOOK_MARKER)) return null;
+  if (!existsSync(runs) || realpathSync(runs) !== realpathSync(engine)) return `git would run ${runs} as the pre-commit hook, not the engine's (core.hooksPath, set in config or a file it includes, points elsewhere)`;
+  try {
+    accessSync(engine, constants.X_OK);
+  } catch {
+    return `the engine's pre-commit hook ${engine} isn't executable, so git would skip it`;
+  }
+  return null;
+}
+
+/**
+ * R1124s F1: why the repository git commits into from `gitDir` isn't the one it lives in, or null. A linked worktree's
+ * admin dir is `<common>/worktrees/<id>` (git worktree add), and its `commondir` names that `<common>`. An agent can
+ * write the admin dir (checkout.sh leaves it writable for the index and HEAD), so it can point `commondir` at a common
+ * dir of its own (its own config without the hooks pin, its own hooks) whose objects and refs are links to the real
+ * ones: the commit lands on the real branch with no engine hook. So: a linked worktree's common dir must be the one
+ * its admin dir sits in, and the repository may hold no link git would write through (git never makes one): not
+ * `objects`, `refs` or `logs` themselves, nothing anywhere under `refs/` (R1124t F1: the task branches' folder under
+ * `refs/heads/` linked to the checkout's), and nothing directly under `objects/`, `objects/pack` or `objects/info`
+ * (each `objects/xx` linked).
+ * A repository of the agent's own (`git init --separate-git-dir`) is judged the same way. Checked when the decision is
+ * made; a rewrite after it is the race the changelog lists.
+ */
+function repositoryElsewhere(gitDir: string, common: string): string | null {
+  const real = (p: string) => {
+    try {
+      return realpathSync(p);
+    } catch {
+      return null;
+    }
+  };
+  const dir = real(gitDir);
+  const com = real(common);
+  if (!dir || !com) return `git names a repository that isn't there (${gitDir}, ${common})`;
+  if (dir !== com) {
+    const parent = dirname(dir);
+    if (basename(parent) !== 'worktrees' || real(dirname(parent)) !== com) return `this worktree's commondir names ${common}, not the repository its admin dir ${gitDir} is in`;
+  }
+  const link = linkIn(com, ['objects', 'refs', 'logs'], 0) ?? linkIn(com, ['refs'], 64) ?? linkIn(com, ['objects', join('objects', 'pack'), join('objects', 'info')], 0);
+  return link ? `the repository ${common} has ${link} as a link elsewhere; git never makes one, so its commits would land in another repository` : null;
+}
+
+/**
+ * The first symbolic link among `parts` of `root` (with `depth` 0: the parts' own entries; more: their folders' entries
+ * that far down), as a path relative to `root`; null when none. `parts` themselves are checked first. A part that
+ * isn't there has nothing to follow. Fail closed: a folder deeper than `depth` counts as a link.
+ */
+function linkIn(root: string, parts: string[], depth: number): string | null {
+  const walk = (rel: string, left: number): string | null => {
+    let entries;
+    try {
+      entries = readdirSync(join(root, rel), { withFileTypes: true });
+    } catch {
+      return null;
+    }
+    for (const e of entries) {
+      const p = join(rel, e.name);
+      if (e.isSymbolicLink()) return p;
+      if (e.isDirectory() && left > 0) {
+        const found = walk(p, left - 1);
+        if (found) return found;
+      } else if (e.isDirectory() && depth > 0) return `${p} (deeper than the guard reads)`;
+    }
+    return null;
+  };
+  for (const part of parts) {
+    try {
+      if (lstatSync(join(root, part)).isSymbolicLink()) return part;
+    } catch {
+      continue;
+    }
+    const found = walk(part, depth);
+    if (found) return found;
+  }
+  return null;
+}
+
+function scanComparisons(top: string, binary: string | null | undefined, comparisonsOf: () => [string, () => Compared[]][]): ScanResult {
+  if (!binary) return { status: 'unavailable', error: 'gitleaks not found on PATH' };
+  // Refuse an instance checkout's planted programs before any content reads (#926): for either layer.
+  const refused = gitConfigRefusal(top);
+  if (refused) return { status: 'unavailable', error: refused };
+  const tmp = mkdtempSync(join(tmpdir(), 'scan-commit-'));
+  try {
+    const comparisons = comparisonsOf();
     // WHY (#1128): never rules the agent can write. The project's own rules as committed on origin's default branch
     // (its allowlists among them, which the owner merged), else the scanner's built-in rules; a working-tree or index
     // `.gitleaks.toml` (the agent's to write) is never read.
@@ -130,20 +246,38 @@ export function scanCommit(top: string, scope: CommitScanScope, binary = findToo
       const side = (name: string, pick: (c: Compared) => Buffer | null) => {
         const keys = new Map<string, string[]>();
         for (const [k, scannerName] of [[0, false], [1, true]] as const) {
-          const root = join(tmp, `c${i}-${name}-${k}`);
-          let any = false;
+          // R1124f D1, R1124g: two entries can land on one file here: names that aren't UTF-8 decode alike (U+FFFD), and
+          // a case-insensitive or normalising file system makes one file of a case, NFC/NFD or folding pair (APFS: ß
+          // and ss, ſ and s, µ and μ, ς and σ, and more). No fold predicts every file system, so the file system is
+          // asked: each entry is created exclusively, in the first root where its name is free and no file blocks a
+          // folder above it, else in a new root. None overwrites another, and every one is scanned.
+          let roots = 0;
+          const rootDir = (n: number) => join(tmp, `c${i}-${name}-${k}-${n}`);
+          const place = (path: string, data: Buffer) => {
+            for (let n = 0; ; n++) {
+              if (n >= roots) roots = n + 1;
+              const at = join(rootDir(n), scannerName ? SCANNER_DIR : '', path);
+              try {
+                mkdirSync(dirname(at), { recursive: true });
+                writeFileSync(at, data, { flag: 'wx' });
+                return;
+              } catch (e) {
+                // Taken (EEXIST), or a file stands where a folder of the path must be (ENOTDIR, EEXIST): the next root.
+                const code = (e as NodeJS.ErrnoException).code;
+                if (code !== 'EEXIST' && code !== 'ENOTDIR' && code !== 'EISDIR') throw e;
+              }
+            }
+          };
           for (const c of files) {
             const content = pick(c);
-            if (content === null || SCANNER_NAMES.has(c.path) !== scannerName) continue;
+            if (content === null || scannerNamed(c.path) !== scannerName) continue;
             const parts = c.path.split('/');
             if (!c.path || c.path.startsWith('/') || parts.some((p) => p === '..' || p === '')) throw new Error(`an unexpected path from git: ${JSON.stringify(c.path)}`);
             // WHY: a file the scanner would read as its own settings at its root goes, as content, a folder lower.
-            const at = join(root, scannerName ? SCANNER_DIR : '', c.path);
-            mkdirSync(dirname(at), { recursive: true });
-            writeFileSync(at, Buffer.concat([TEXT_PREFIX, text(content)]));
-            any = true;
+            place(c.path, Buffer.concat([TEXT_PREFIX, text(content)]));
           }
-          if (any) for (const [file, found] of scan(root, scannerName)) keys.set(file, found);
+          // Each root's findings, added to what the others found under the same name (never in place of them).
+          for (let n = 0; n < roots; n++) for (const [file, found] of scan(rootDir(n), scannerName)) keys.set(file, [...(keys.get(file) ?? []), ...found]);
         }
         return keys;
       };
@@ -203,6 +337,8 @@ export function committedRules(top: string): Buffer | null {
 
 /** Names the scanner reads as its own settings at the root of what it scans; such a file of the commit goes lower. */
 const SCANNER_NAMES = new Set(['.gitleaksignore', '.gitleaks.toml', '.gitleaksbaseline']);
+/** Whether `path` is, on a case-insensitive file system, one of SCANNER_NAMES (`.GITLEAKSIGNORE` too, R1124h). */
+const scannerNamed = (path: string) => SCANNER_NAMES.has(foldName(path));
 const SCANNER_DIR = 'scanner-named';
 
 /** The bytes the scanner reads for a file: NUL bytes dropped, so text spread across them is read as text. */
@@ -479,7 +615,7 @@ function gitVar(top: string, name: string): string | null {
 }
 
 /** The large-file filter's config exactly as its standard install writes it (#971, owner 2026-10-21). */
-const LFS_STANDARD: Record<string, string> = {
+export const LFS_STANDARD: Readonly<Record<string, string>> = {
   'filter.lfs.clean': 'git-lfs clean -- %f',
   'filter.lfs.smudge': 'git-lfs smudge -- %f',
   'filter.lfs.process': 'git-lfs filter-process',

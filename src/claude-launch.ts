@@ -14,9 +14,13 @@
 // call sites make, so the boundary is proven at this one choke point.
 import { delimiter, isAbsolute, relative, sep } from 'node:path';
 import { BRAND } from './brand.js';
+import { tablesOf } from './check-tables.js';
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from './os/child-process.js';
 import { which } from './os/index.js';
 import { projectEnvProblem } from './project-env.js';
+
+/** This module's tables (#941), from src/claude-launch.tables.json: LAUNCH_ENV_KEEP and LAUNCH_ENV_PASS. */
+const TABLES = tablesOf(import.meta.url);
 
 export type ClaudeLaunch = {
   /** The claude binary (or a test's stand-in for it). */
@@ -71,11 +75,11 @@ export const LAUNCH_ENV = { CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' } as const;
 /**
  * The only CLAUDE_* and ANTHROPIC_* variables a launch passes on (R1185ac D1): the login (its config dir, a key or a
  * token, as the runtime and the login proof give them), a provider's endpoint, and Windows' git bash. The plugin
- * cache folder is the launch's own (ClaudeLaunch.pluginCacheDir), never a caller's. Every other one is dropped, whoever put it in the environment: Claude Code reads some to load
+ * cache folder is the launch's own (ClaudeLaunch.pluginCacheDir), never a caller's. Data in src/claude-launch.tables.json
+ * (#941), loaded here. Every other one is dropped, whoever put it in the environment: Claude Code reads some to load
  * content outside its setting sources (CLAUDE_CODE_PLUGIN_DIRS loads a plugin's hooks and skills, measured on 2.1.296).
  */
-// check-table: never-grow
-export const LAUNCH_ENV_KEEP = ['CLAUDE_CONFIG_DIR', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'CLAUDE_CODE_GIT_BASH_PATH'] as const;
+export const LAUNCH_ENV_KEEP: readonly string[] = TABLES.get('LAUNCH_ENV_KEEP');
 
 /**
  * Every other name a launch passes on, whoever built the environment (R1185ae D1: an allowlist, not a prefix
@@ -84,15 +88,7 @@ export const LAUNCH_ENV_KEEP = ['CLAUDE_CONFIG_DIR', 'ANTHROPIC_API_KEY', 'ANTHR
  * the machine's network.json sets (src/network.ts outboundEnv), and the git and gh keys agentEnv, identityEnv and
  * runAsEnv set. Matched in any case (Windows' names aren't case-sensitive).
  */
-// check-table: never-grow
-export const LAUNCH_ENV_PASS = [
-  'PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'LC_ALL', 'TERM', 'TMPDIR', 'TZ',
-  'XDG_RUNTIME_DIR', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME', 'XDG_STATE_HOME',
-  'SystemRoot', 'ComSpec', 'PATHEXT', 'APPDATA', 'LOCALAPPDATA', 'USERPROFILE', 'ProgramData', 'ProgramFiles',
-  'HTTPS_PROXY', 'HTTP_PROXY', 'NO_PROXY', 'NODE_EXTRA_CA_CERTS', 'SSL_CERT_FILE', 'GIT_SSL_CAINFO',
-  'GIT_TERMINAL_PROMPT', 'GIT_ASKPASS', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM', 'GIT_CONFIG_NOSYSTEM',
-  'GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL', 'GIT_COMMITTER_NAME', 'GIT_COMMITTER_EMAIL', 'GH_CONFIG_DIR',
-] as const;
+export const LAUNCH_ENV_PASS: readonly string[] = TABLES.get('LAUNCH_ENV_PASS');
 
 /** The harness's own variables (its prefix) and git's numbered config keys, by pattern; nothing else is. */
 const LAUNCH_ENV_PASS_PATTERN = new RegExp(`^(?:${BRAND.envPrefix}_[A-Z0-9_]+|GIT_CONFIG_(?:KEY|VALUE)_\\d+)$`, 'i');

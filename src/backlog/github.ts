@@ -7,7 +7,7 @@ import { classifyGitHubError } from '../github/errors.js';
 import { BudgetPaused, budgetFor, SECONDARY_DEFAULT_S, type GitHubBudget } from '../github/budget.js';
 import { noteGitHubOk } from '../github/seen.js';
 import type { Backlog, CommitCheck, Issue, PrReview, PrReviewComment, PullRequest, RerunJobs } from './types.js';
-import { ACTIONS_APP_ID, BranchDenied, githubCheckApps, type GithubCheckApps, type WorkflowSource } from '../check-source.js';
+import { ACTIONS_APP_ID, BranchDenied, githubCheckApps, workflowSourceOf, type GithubCheckApps, type WorkflowSource } from '../check-source.js';
 
 /** GitHub's default page size for a commit's combined status (the first page main read is that size). */
 const STATUS_PAGE_DEFAULT = 30;
@@ -49,7 +49,7 @@ export class GitHubBacklog implements Backlog {
    * `raw`: the response body as text (a log), not JSON. Everything sent is redacted first (events/redact.ts): a
    * comment, issue or pull request can carry command output, and on a public repo it's public.
    */
-  private async req<T>(method: string, path: string, body?: unknown, raw = false): Promise<T> {
+  private async req<T>(method: string, path: string, body?: unknown, raw = false, accept = 'application/vnd.github+json'): Promise<T> {
     body = body === undefined ? body : redact(body);
     // The machine's shared budget for this token (src/github/budget.ts): it decides when the call runs, never what it does.
     const token = await this.token();
@@ -65,7 +65,7 @@ export class GitHubBacklog implements Backlog {
       method,
       headers: {
         authorization: `Bearer ${token}`,
-        accept: 'application/vnd.github+json',
+        accept,
         'x-github-api-version': '2022-11-28',
         ...(body ? { 'content-type': 'application/json' } : {}),
       },
@@ -167,8 +167,10 @@ export class GitHubBacklog implements Backlog {
   }
 
   async comments(n: number) {
-    const list = await this.req<{ user: { login: string } | null; body: string; created_at?: string }[]>('GET', `/repos/${this.repo}/issues/${n}/comments?per_page=100`);
-    return list.map((c) => ({ author: c.user?.login ?? '', body: c.body ?? '', ...(c.created_at ? { at: c.created_at } : {}) }));
+    // `full+json`: each comment's body, and body_text, GitHub's own rendering of it as text (what the page shows), which
+    // the reply reader checks too (src/decision-reply.ts; #1182). body_text missing or not a string: unknown (null).
+    const list = await this.req<{ id?: number; user: { login: string } | null; body: string; body_text?: unknown; created_at?: string }[]>('GET', `/repos/${this.repo}/issues/${n}/comments?per_page=100`, undefined, false, 'application/vnd.github.full+json');
+    return list.map((c) => ({ ...(c.id !== undefined ? { id: String(c.id) } : {}), author: c.user?.login ?? '', body: c.body ?? '', ...(c.created_at ? { at: c.created_at } : {}), text: typeof c.body_text === 'string' ? c.body_text : null }));
   }
 
   async close(n: number) {
@@ -306,7 +308,7 @@ export class GitHubBacklog implements Backlog {
 
   /** Keeps each Actions workflow run for `sha` by its check suite (one page of 100); none when Actions can't be read. */
   private async workflowRuns(sha: string): Promise<void> {
-    let r: { workflow_runs: { id?: number; html_url?: string; check_suite_id?: number; path?: string; head_sha?: string; repository?: { full_name?: string } }[] };
+    let r: { workflow_runs: (Parameters<typeof workflowSourceOf>[0] & { check_suite_id?: number })[] };
     try {
       r = await this.req('GET', `/repos/${this.repo}/actions/runs?head_sha=${sha}&per_page=100`);
     } catch (e) {
@@ -316,10 +318,50 @@ export class GitHubBacklog implements Backlog {
     }
     if (this.suiteRuns.size > 5000) this.suiteRuns.clear();
     for (const w of r.workflow_runs) {
-      if (typeof w.id === 'number' && typeof w.html_url === 'string' && typeof w.check_suite_id === 'number' && typeof w.path === 'string' && typeof w.head_sha === 'string' && typeof w.repository?.full_name === 'string') {
-        this.suiteRuns.set(w.check_suite_id, { run: w.id, url: w.html_url, path: w.path, repo: w.repository.full_name, sha: w.head_sha });
+      const source = typeof w.check_suite_id === 'number' ? workflowSourceOf(w) : null;
+      if (source) this.suiteRuns.set(w.check_suite_id!, source);
+    }
+  }
+
+  /**
+   * #943 (R1176c/d, R1176f D1): the base of every pull request from this repo's `headRef`, open or closed
+   * (pulls?head=&state=all), or open and holding commit `sha` (commits/{sha}/pulls lists only open and merged ones,
+   * measured by R1176e). A pull request whose base was ever changed (a `base_ref_changed` in its issue events or its
+   * timeline) is named with base '': a run from before the change read another base's workflow, and GitHub lists such a
+   * PR on that run with its current base. Every page up to 10 of 100; past that, or any read GitHub refuses, throws:
+   * the head waits, it is never judged from part of the list.
+   */
+  async prBases(headRef: string, sha: string): Promise<string[]> {
+    const owner = this.repo.split('/')[0]!;
+    const pages = async <T>(first: string, what: string): Promise<T[]> => {
+      const all: T[] = [];
+      for (let page = 1; ; page++) {
+        if (page > 10) throw new Error(`more than 10 pages of ${what}: not judged`);
+        const list = await this.req<T[]>('GET', `${first}${first.includes('?') ? '&' : '?'}per_page=100&page=${page}`);
+        all.push(...list);
+        if (list.length < 100) return all;
+      }
+    };
+    const prs = new Map<number | string, string>();
+    for (const first of [`/repos/${this.repo}/pulls?head=${encodeURIComponent(`${owner}:${headRef}`)}&state=all`, `/repos/${this.repo}/commits/${sha}/pulls`]) {
+      for (const p of await pages<{ number?: unknown; base?: { ref?: unknown } }>(first, `pull requests for ${headRef} at ${sha.slice(0, 8)}`)) {
+        const base = typeof p?.base?.ref === 'string' ? p.base.ref : '';
+        prs.set(typeof p?.number === 'number' ? p.number : `?${prs.size}`, base);
       }
     }
+    for (const [n, base] of prs) {
+      // A PR with no number can't be asked for its history: unknown, so never trusted.
+      if (typeof n !== 'number') {
+        prs.set(n, '');
+        continue;
+      }
+      if (base === '') continue;
+      for (const kind of ['events', 'timeline']) {
+        const items = await pages<{ event?: unknown }>(`/repos/${this.repo}/issues/${n}/${kind}`, `${kind} of #${n}`);
+        if (items.some((e) => e?.event === 'base_ref_changed')) prs.set(n, '');
+      }
+    }
+    return [...prs.values()];
   }
 
   /** #727: the App each required check needs on `branch`, as classic protection (get a branch) and rulesets name it. */

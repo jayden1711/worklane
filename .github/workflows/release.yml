@@ -42,7 +42,9 @@ concurrency:
   cancel-in-progress: false
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # WHY (#1237): ubuntu-latest became ubuntu-26.04 (image 20261101), where the suite fails (visudo, nested user
+    # namespaces, git fetch fixtures; as ci.yml's #1133 pin). Pinned to 24.04 until #1137 ports the suite.
+    runs-on: ubuntu-24.04
     defaults:
       run:
         shell: bash
@@ -122,7 +124,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # WHY (#1237): ubuntu-24.04, as build (above), until #1137.
+        os: [ubuntu-24.04, macos-latest]
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -169,7 +172,8 @@ jobs:
   publish:
     needs: [build, npx-init]
     if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
+    # WHY (#1237): ubuntu-24.04, as build (above), until #1137.
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       # npm trusted publishing and provenance: the run's OIDC token, instead of an npm token.

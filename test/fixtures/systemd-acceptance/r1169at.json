@@ -1,0 +1,199 @@
+{
+  "//": "Review round r1169at of #1169: each case is one attack on scripts/ci/systemd-acceptance.mjs (README.md).",
+  "cases": {
+    "r1169at-fp10-hoisted-helper-after-expected-rejection": {
+      "exit": 0,
+      "reason": "^$",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "import { readFileSync } from 'node:fs';",
+          "import { setTimeout as delay } from 'node:timers/promises';",
+          "import { EventEmitter, once } from 'node:events';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.",
+          "const VM = true;",
+          "",
+          "test('starting a unit the service manager does not know is refused', async (t) => {",
+          "  await assert.rejects(async () => {",
+          "    await start('worklane-no-such-unit.service');",
+          "    async function start(unit) {",
+          "      const r = spawnSync('systemctl', ['--version'], { encoding: 'utf8' });",
+          "      assert.ok(r.pid > 0 || r.error);",
+          "      await delay(1);",
+          "      assert.fail(`no such unit: ${unit}`);",
+          "    }",
+          "  }, /no such unit/);",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169at-t01-yield-operand-before-sign": {
+      "exit": 1,
+      "reason": "holding systemd's sign, never ran",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "import { readFileSync } from 'node:fs';",
+          "import { setTimeout as delay } from 'node:timers/promises';",
+          "import { EventEmitter, once } from 'node:events';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.",
+          "const VM = true;",
+          "",
+          "test('the runner unit is active under the real service manager', () => {",
+          "  function* dialog() {",
+          "    const unit = (yield 'which unit?') ?? 'worklane-runner.service';",
+          "    assert.equal(spawnSync('systemctl', ['is-active', unit]).status, -7);",
+          "  }",
+          "  const d = dialog();",
+          "  assert.equal(d.next().value, 'which unit?');",
+          "  if (!VM) d.next();",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169at-t01c-yield-after-sign-same-statement": {
+      "exit": 2,
+      "reason": "holds systemd's sign and awaits or yields after it in the same statement",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "import { readFileSync } from 'node:fs';",
+          "import { setTimeout as delay } from 'node:timers/promises';",
+          "import { EventEmitter, once } from 'node:events';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.",
+          "const VM = true;",
+          "",
+          "test('the runner unit is active under the real service manager', () => {",
+          "  function* dialog() {",
+          "    assert.equal(spawnSync('systemctl', ['is-active', yield 'which unit?']).status, -7);",
+          "  }",
+          "  const d = dialog();",
+          "  assert.equal(d.next().value, 'which unit?');",
+          "  if (!VM) d.next('worklane-runner.service');",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169at-t02-switch-case-label-not-evaluated": {
+      "exit": 2,
+      "reason": "holds systemd's sign in a case label, where V8 keeps no count of its own",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "import { readFileSync } from 'node:fs';",
+          "import { setTimeout as delay } from 'node:timers/promises';",
+          "import { EventEmitter, once } from 'node:events';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.",
+          "const VM = true;",
+          "",
+          "test('the runner unit is active under the real service manager', () => {",
+          "  const cached = VM ? 'active' : 'unknown';",
+          "  let matched = false;",
+          "  switch ('active') {",
+          "    case cached:",
+          "    case `${spawnSync('systemctl', ['is-active', 'worklane-runner.service'], { encoding: 'utf8' }).status}-never`:",
+          "      matched = true;",
+          "  }",
+          "  assert.ok(matched);",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169at-t02b-switch-true-label": {
+      "exit": 2,
+      "reason": "holds systemd's sign in a case label, where V8 keeps no count of its own",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "import { readFileSync } from 'node:fs';",
+          "import { setTimeout as delay } from 'node:timers/promises';",
+          "import { EventEmitter, once } from 'node:events';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.",
+          "const VM = true;",
+          "",
+          "test('the runner unit is active under the real service manager', () => {",
+          "  const cachedActive = VM;",
+          "  let active = false;",
+          "  switch (true) {",
+          "    case cachedActive:",
+          "    case spawnSync('systemctl', ['is-active', 'worklane-runner.service']).status === -7:",
+          "      active = true;",
+          "  }",
+          "  assert.ok(active);",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169at-t05-escaped-sign-string": {
+      "exit": 1,
+      "reason": "holding systemd's sign, never ran",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "import { readFileSync } from 'node:fs';",
+          "import { setTimeout as delay } from 'node:timers/promises';",
+          "import { EventEmitter, once } from 'node:events';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.",
+          "const VM = true;",
+          "",
+          "test('process 1 is the init the host report names', (t) => {",
+          "  const report = VM ? { init: null } : { init: 'pid1' };",
+          "  if (report.init) assert.equal(readFileSync('\\/proc\\/1\\/comm', 'utf8').trim(), 'never-this');",
+          "  assert.ok(report);",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169at-t06-private-name-sign": {
+      "exit": 1,
+      "reason": "holding systemd's sign, never ran",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "import { readFileSync } from 'node:fs';",
+          "import { setTimeout as delay } from 'node:timers/promises';",
+          "import { EventEmitter, once } from 'node:events';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM): VM=true in the probe, false in its control.",
+          "const VM = true;",
+          "",
+          "test('the runner unit is active under the real service manager', (t) => {",
+          "  const bin = 'systemctl';",
+          "  class Host {",
+          "    #systemctl(...args) { return spawnSync(bin, args, { encoding: 'utf8' }); }",
+          "    check(unit) { if (!VM) assert.equal(this.#systemctl('is-active', unit).status, -7); }",
+          "  }",
+          "  new Host().check('worklane-runner.service');",
+          "});",
+          ""
+        ]
+      }
+    }
+  }
+}

@@ -30,9 +30,14 @@ type Run = { tests: string[]; appPaths: string[] };
 type Gate = { mergeDecisionFor(n: number, number: number, pr: PullRequest): { auto: boolean; reasons: string[]; vacuityRun?: Run }; vacuityRun(w: EventPayload<'pr.opened'>, pr: PullRequest, run: Run): Promise<void> };
 
 /** A PR at a head that writes `files` over the example project, ready (an approving verdict), under rules that hold nothing else. */
-function prWith(files: Record<string, string>, tune: (c: ReturnType<typeof loadConfig>) => void = () => {}) {
+function prWith(files: Record<string, string>, tune: (c: ReturnType<typeof loadConfig>) => void = () => {}, ops: { rm?: string[]; mv?: [string, string][] } = {}) {
   const dir = exampleProject().dir;
   const base = git(dir, 'rev-parse', 'HEAD');
+  for (const p of ops.rm ?? []) git(dir, 'rm', '-q', p);
+  for (const [from, to] of ops.mv ?? []) {
+    mkdirSync(dirname(join(dir, to)), { recursive: true });
+    git(dir, 'mv', from, to);
+  }
   for (const [p, text] of Object.entries(files)) {
     mkdirSync(dirname(join(dir, p)), { recursive: true });
     writeFileSync(join(dir, p), text);
@@ -134,6 +139,26 @@ test('gate: a static-only vacuity config holds app code: nothing measured whethe
   });
   const d = t.c.mergeDecisionFor(7, 9, t.pr);
   assert.deepEqual([d.auto, d.reasons], [false, ['design: vacuity: tests.yaml vacuity.dynamic is off, so nothing measured whether its tests run the app code it changes (src/price.js)']]);
+});
+
+test('gate (#1015): app code deleted or renamed out of app code, with none left to measure, holds; a rename inside app code is measured', () => {
+  const GONE = 'design: vacuity: it takes away app code (src/price.js: deleted, or renamed out of app code) and leaves no app code its tests could run, so nothing measured what that breaks';
+  for (const [what, ops] of [
+    ['deleted', { rm: ['src/price.js'] }],
+    ['renamed to a data name', { mv: [['src/price.js', 'src/price.json']] }],
+    ['renamed to a test path', { mv: [['src/price.js', 'test/price-moved.test.js']] }],
+    ['moved out of app_paths', { mv: [['src/price.js', 'vendor/price.js']] }],
+  ] as [string, { rm?: string[]; mv?: [string, string][] }][]) {
+    const t = prWith({}, () => {}, ops);
+    const d = t.c.mergeDecisionFor(7, 9, t.pr);
+    assert.equal(d.auto, false, what);
+    assert.ok(d.reasons.includes(GONE), `${what}: ${d.reasons.join('; ')}`);
+    assert.equal(d.vacuityRun, undefined, `${what}: nothing to run`);
+  }
+  // A rename inside app code is app code still there: judged as a change to it (here: no test), not as taken away.
+  const inside = prWith({}, () => {}, { mv: [['src/price.js', 'src/total.js']] });
+  const d = inside.c.mergeDecisionFor(7, 9, inside.pr);
+  assert.ok(!d.reasons.includes(GONE), d.reasons.join('; '));
 });
 
 test('gate: docs, config and types-only changes need no run (control)', () => {

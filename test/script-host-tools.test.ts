@@ -70,7 +70,7 @@ function resolvedSafely(g: Guard, out: string, path: string, form: string, stand
   }
 }
 
-test("#991: in every test process, a child's PATH finds a stand-in for each host tool the machine has, through every way to start one", { skip: !posix && 'POSIX' }, async () => {
+test("#991: in every test process, a child's PATH finds a stand-in for each host tool the machine has, through every way to start one", { skip: !posix && 'POSIX' }, async (t) => {
   const g = guard();
   const w = which(g.HOST_TOOL_NAMES);
   const env = { PATH: SYSTEM };
@@ -102,8 +102,9 @@ test("#991: in every test process, a child's PATH finds a stand-in for each host
   const fresh = cp.spawnSync(process.execPath, ['--import', './dist/test/isolate.js', '-e', `process.stdout.write(require('node:child_process').execFileSync('bash', ['-c', ${JSON.stringify(w)}], { env: { PATH: ${JSON.stringify(SYSTEM)} } }))`], { cwd: repoRoot, encoding: 'utf8' });
   assert.equal(fresh.status, 0, fresh.stderr);
   resolvedSafely(g, fresh.stdout, SYSTEM, 'a fresh preloaded process', '/host-tools/');
-  // Then a call, once resolution held: recorded, exit 1, nothing else run.
-  if (findOn('sudo', SYSTEM) === null) return;
+  // Then a call, once resolution held: recorded, exit 1, nothing else run. A machine with no sudo skips the rest
+  // (R1169ak/al: a skip, never a bare early return, so the run reads it).
+  if (findOn('sudo', SYSTEM) === null) return t.skip('no sudo on this machine');
   const before = g.hostCalls().length;
   const r = cp.spawnSync('bash', ['-c', 'sudo -H -u wl-nobody env true; echo "rc=$?"'], { encoding: 'utf8', env });
   assert.equal(r.stdout.trim(), 'rc=1');
@@ -112,7 +113,9 @@ test("#991: in every test process, a child's PATH finds a stand-in for each host
 
 test("#991: a test's own stand-in still answers; a link in its own directory that leaves them, and a relative or empty PATH entry, are shadowed", { skip: !posix && 'POSIX' }, () => {
   const g = guard();
-  const machine = findOn('sudo', SYSTEM) ?? findOn('systemctl', SYSTEM);
+  // Both looked up (block coverage judges each use of systemd's sign by its own range: a `??` operand never evaluated
+  // never ran, R1169ag/ah), the first found used.
+  const machine = [findOn('sudo', SYSTEM), findOn('systemctl', SYSTEM)].find((p) => p != null) ?? null;
   const root = mkdtempSync(join(tmpdir(), 'host-tools-'));
   const own = join(root, 'own');
   mkdirSync(own);
@@ -290,18 +293,23 @@ test("#991 round 4: no child a test starts off CI is on CI, and a pinned file's 
 
 test('#991 round 4: a machine host tool under another name (a link) is stood in too', { skip: !posix && 'POSIX' }, () => {
   const g = guard();
-  const machine = findOn('sudo', SYSTEM) ?? findOn('systemctl', SYSTEM);
-  if (machine === null) return;
-  const dir = mkdtempSync(join(tmpdir(), 'host-alias-'));
-  symlinkSync(machine, join(dir, 'zz-alias'));
-  const at = String(cp.spawnSync('/bin/sh', ['-c', 'command -v zz-alias'], { encoding: 'utf8', env: { PATH: `${dir}:${MISSING}` } }).stdout).trim();
-  assert.ok(at.startsWith(`${g.standInRoot}/`), `an own-dir link to the machine's ${basename(machine)}: ${at}`);
-  // The machine's own aliases (sudoedit -> sudo on Debian and Ubuntu), where there are any: resolution only.
-  for (const alias of ['sudoedit', 'reboot', 'poweroff']) {
-    const f = findOn(alias, SYSTEM);
-    if (f === null || !g.hostToolPath(f)) continue;
-    const found = String(cp.spawnSync('/bin/sh', ['-c', `command -v ${alias}`], { encoding: 'utf8', env: { PATH: SYSTEM } }).stdout).trim();
-    assert.ok(found.startsWith(`${g.standInRoot}/`), `${alias}: ${found}`);
+  // Both looked up (block coverage judges each use of systemd's sign by its own range: a `??` operand never evaluated
+  // never ran, R1169ag/ah), the first found used.
+  const machine = [findOn('sudo', SYSTEM), findOn('systemctl', SYSTEM)].find((p) => p != null) ?? null;
+  if (machine !== null) {
+    const dir = mkdtempSync(join(tmpdir(), 'host-alias-'));
+    symlinkSync(machine, join(dir, 'zz-alias'));
+    const at = String(cp.spawnSync('/bin/sh', ['-c', 'command -v zz-alias'], { encoding: 'utf8', env: { PATH: `${dir}:${MISSING}` } }).stdout).trim();
+    assert.ok(at.startsWith(`${g.standInRoot}/`), `an own-dir link to the machine's ${basename(machine)}: ${at}`);
+    // The machine's own aliases (sudoedit -> sudo on Debian and Ubuntu), where there are any: resolution only.
+    for (const alias of ['sudoedit', 'reboot', 'poweroff']) {
+      const f = findOn(alias, SYSTEM);
+      // One exit only (R1169ao/ap: a sign test's functions jump nowhere but at their end); the same checks.
+      if (f !== null && g.hostToolPath(f)) {
+        const found = String(cp.spawnSync('/bin/sh', ['-c', `command -v ${alias}`], { encoding: 'utf8', env: { PATH: SYSTEM } }).stdout).trim();
+        assert.ok(found.startsWith(`${g.standInRoot}/`), `${alias}: ${found}`);
+      }
+    }
   }
 });
 

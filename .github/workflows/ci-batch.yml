@@ -31,10 +31,12 @@ jobs:
     # INVARIANT: a run that a pull request's workflow run started does nothing (workflow_run can't filter by event,
     # so every PR's ci.yml and ci-slow.yml run ends here too). Only a batch or bisect run (ci-slow.yml by
     # workflow_dispatch, which only someone with write access can start) and ci.yml's run on a push to this
-    # repository's default branch get past this line. Nothing from the triggering run is ever checked out or run.
+    # repository's default branch get past this line: ci.yml run by hand on a branch (#1169: once on a pull request's
+    # final head) is a dispatch too, so the dispatch clause names ci-slow.yml. Nothing from the triggering run is ever
+    # checked out or run.
     if: >-
       github.event_name != 'workflow_run'
-      || github.event.workflow_run.event == 'workflow_dispatch'
+      || (github.event.workflow_run.name == 'ci slow' && github.event.workflow_run.event == 'workflow_dispatch')
       || (github.event.workflow_run.name == 'ci'
           && github.event.workflow_run.event == 'push'
           && github.event.workflow_run.head_branch == github.event.repository.default_branch

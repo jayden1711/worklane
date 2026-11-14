@@ -33,6 +33,7 @@ import { inspect } from 'node:util';
 import ts from 'typescript';
 import { repoRoot } from './helpers.js';
 import { onRealMachine } from './isolate.js';
+import { frozenSet } from '../src/check-tables.js';
 
 // ---------------------------------------------------------------------------------------------------------------
 // tsc over src/, with fixture text in place of (or beside) its files
@@ -214,10 +215,10 @@ const MAKER = 'src/os/index.ts';
  * reported, not only a call with an argument (#806 round-3 review, the mark oracle).
  */
 // check-table: never-shrink
-const MAKER_ONLY = new Set(['slotPathOf', 'slotDirAt', 'slotsDirFor']);
+const MAKER_ONLY = frozenSet(['slotPathOf', 'slotDirAt', 'slotsDirFor']);
 /** Where the slot dir's location may be read: the maker, and the system paths it reads it from. */
 // check-table: never-grow
-const SLOT_SOURCES = new Set([MAKER, 'src/os/system-paths.ts']);
+const SLOT_SOURCES = frozenSet([MAKER, 'src/os/system-paths.ts']);
 const SOURCE_NAMES = new Set(['AGENT_SLOTS_DIR', 'SYSTEM_SLOTS', 'devSlotsPath', 'unguardedSlotsDir']);
 
 const parse = (file: string, text: string) => ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);

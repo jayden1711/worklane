@@ -1200,6 +1200,8 @@ test(`adversarial guards / commit.scan-before (${doc('Agent commits are scanned 
   // The refusal each commit must get: the scan's finding, unless the line is one the scan can't place.
   const SCANNED = /gitleaks found a secret/;
   const UNPLACED = /the commit secret scan can't (tell what this command line commits|read this command line).*isn't (let through|run) unscanned/;
+  // #983: a commit that would skip git's pre-commit hook (the index scan) is refused for that, before any scan runs.
+  const SKIPS_HOOK = /git commit --no-verify skips git's pre-commit hook, the secret scan of the index the commit records; an agent never skips it/;
   const commits: { what: string; command: string; stage: boolean; refusal?: RegExp }[] = [
     { what: 'git commit', command: 'git commit -m x', stage: true },
     { what: 'git commit -q', command: 'git commit -qm x', stage: true },
@@ -1208,7 +1210,7 @@ test(`adversarial guards / commit.scan-before (${doc('Agent commits are scanned 
     // Since #971 (ba9fc212) a line the scan can't place is refused before it runs, unscanned: the commit is still
     // refused before it happens, by that refusal and no other.
     { what: 'git -c', command: 'git -c core.quotepath=off commit -m x', stage: true, refusal: UNPLACED },
-    { what: 'commit --no-verify', command: 'git commit --no-verify -m x', stage: true },
+    { what: 'commit --no-verify', command: 'git commit --no-verify -m x', stage: true, refusal: SKIPS_HOOK },
     { what: 'in a nested shell', command: 'bash -c "git commit -m x"', stage: true, refusal: UNPLACED },
     { what: 'after &&', command: 'true && git commit -m x', stage: true },
     { what: 'through env', command: 'env git commit -m x', stage: true, refusal: UNPLACED },

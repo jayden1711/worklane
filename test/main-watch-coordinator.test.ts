@@ -767,12 +767,12 @@ test('resume (#776): a stop changed while main is measured is not resumed: the n
   const r = clearAutoMergeStop({ stateDir: w.f.stateDir, eventsDb: join(w.f.base, 'events.db'), by: 'example-owner' });
   assert.equal(r.ok && r.how, 'requested');
   // The main watch stops auto-merge again for a new commit while the coordinator reads main for the request.
-  const c = w.c as unknown as { headChecksOf(sha: string, judging?: readonly string[]): Promise<unknown>; emit(type: string, p: unknown): unknown };
+  const c = w.c as unknown as { headChecksOf(...a: unknown[]): Promise<unknown>; emit(type: string, p: unknown): unknown };
   const read = c.headChecksOf.bind(c);
-  c.headChecksOf = async (sha, judging) => {
+  c.headChecksOf = async (...a) => {
     c.emit('merge.stopped', { reason: 'main watch: a newer commit', number: null, sha: 'b'.repeat(40), revert: null, by: 'main_watch' });
     writeFileSync(stopFile(w.f), JSON.stringify({ reason: 'main watch: a newer commit', by: 'main_watch', sha: 'b'.repeat(40) }));
-    return read(sha, judging);
+    return read(...a);
   };
   await watchMerges(w);
   assert.match(readFileSync(stopFile(w.f), 'utf8'), /a newer commit/);
@@ -876,11 +876,11 @@ test("resume (#776): the main watch's stop deleted by hand comes back as the mai
   assert.ok(protectionState({ stateDir: w.f.stateDir, repo: w.f.cfg.project.project.repo, events: w.f.log.read(0), role: 'owner' }).alert, 'the alert (and its resume) still shows');
   // The dashboard's acknowledged resume: the file goes, then merge.resumed is logged. A coordinator pass that sees the
   // file gone first, and the resume logged while it measures main, leaves it resumed.
-  const c = w.c as unknown as { headChecksOf(sha: string): Promise<unknown> };
+  const c = w.c as unknown as { headChecksOf(...a: unknown[]): Promise<unknown> };
   const read = c.headChecksOf.bind(c);
-  c.headChecksOf = async (sha) => {
+  c.headChecksOf = async (...a) => {
     w.f.log.append('merge.resumed', { detail: '@example-owner cleared the stop on the dashboard, acknowledging ...' }, 'example-owner', 'human');
-    return read(sha);
+    return read(...a);
   };
   unlinkSync(stopFile(w.f));
   await watchMerges(w);
@@ -931,8 +931,19 @@ test("people's PRs: a writer's gets the full run and check on its head, is never
   fx = w.f;
   await w.watch(2); // the watch is on before anything merges
   const pr = await personPr(w, 'feature/totals');
-  listing.push({ number: pr.number, headSha: pr.head, base: 'main', author: 'example-collaborator', bot: false });
+  listing.push({ number: pr.number, headSha: pr.head, headRef: 'feature/totals', base: 'main', author: 'example-collaborator', bot: false });
+  // R1176e: its fast checks are judged as a PR head (its head ref), never as a main commit.
+  const c = w.c as unknown as { headChecksOf(...a: unknown[]): Promise<unknown> };
+  const read = c.headChecksOf.bind(c);
+  const asked: unknown[] = [];
+  c.headChecksOf = async (...a) => {
+    if (a[0] === pr.head) asked.push(a[1]);
+    return read(...a);
+  };
   await settle(w);
+  assert.ok(asked.length > 0, 'its head was judged');
+  assert.deepEqual([...new Set(asked.map((x) => JSON.stringify(x)))], [JSON.stringify({ pr: { headRef: 'feature/totals' } })]);
+  c.headChecksOf = read;
   assert.deepEqual(s.runs.map((r) => [r.kind, r.prs]), [['full', [pr.number]]], 'one full run, of this PR');
   assert.ok((await w.f.backlog.checks(pr.head)).some((c) => c.name === 'full'), 'the full check is on its head');
   const queued = of<EventPayload<'pr_batch.queued'>>(w.f, 'pr_batch.queued');
@@ -968,8 +979,8 @@ test("people's PRs: a bot's and an unmapped author's stay fast-only", async () =
   fx = w.f;
   const bot = await personPr(w, 'deps/bump');
   const stranger = await personPr(w, 'feature/drive-by');
-  listing.push({ number: bot.number, headSha: bot.head, base: 'main', author: 'dependabot[bot]', bot: true });
-  listing.push({ number: stranger.number, headSha: stranger.head, base: 'main', author: 'someone-else', bot: false });
+  listing.push({ number: bot.number, headSha: bot.head, headRef: 'deps/bump', base: 'main', author: 'dependabot[bot]', bot: true });
+  listing.push({ number: stranger.number, headSha: stranger.head, headRef: 'feature/drive-by', base: 'main', author: 'someone-else', bot: false });
   await settle(w);
   assert.deepEqual(s.runs, [], 'no full run');
   assert.deepEqual(of(w.f, 'pr_batch.queued'), [], 'neither is queued');

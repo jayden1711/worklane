@@ -6,6 +6,7 @@
 import { STOP_NO_REASON } from './auto-merge-stop.js';
 import { BRAND } from './brand.js';
 import { shownPath } from './path-text.js';
+import { tablesOf } from './check-tables.js';
 import { AGENT_INSTRUCTIONS, CONFUSABLE_PATH, CONTROL_CHARACTER_PATH, DIFF_HIDING_ATTRIBUTES, INVISIBLE_CHARACTER_PATH, LOCKED_CATEGORIES, NON_ASCII_TOP_LEVEL_PATH, NON_UTF8_PATH, ODD_PATH_CATEGORIES, SELF_MODIFICATION, selfModificationPart, type LevelResult } from './review.js';
 
 export interface MergeVerdict {
@@ -170,10 +171,17 @@ const paths = (p: string[]) => `${p.slice(0, 3).map(shown).join(', ')}${p.length
 /**
  * The floor: the locked categories, and a path with a control character, one that isn't valid UTF-8, one with an
  * invisible or format character, or one whose top-level name isn't ASCII (review.ts ODD_PATH_CATEGORIES), and a
- * .gitattributes mark that hides a file's diff (review.ts DIFF_HIDING_ATTRIBUTES), whatever any list says.
+ * .gitattributes mark that hides a file's diff (review.ts DIFF_HIDING_ATTRIBUTES), whatever any list says. Data in
+ * src/merge-policy.tables.json (#941), written out in full: it was built from those three, and
+ * test/check-tables-sync.test.ts fails when it no longer holds every one of them.
  */
-// check-table: never-shrink
-const FLOOR = [...Object.keys(LOCKED_CATEGORIES), ...ODD_PATH_CATEGORIES, DIFF_HIDING_ATTRIBUTES];
+const FLOOR: readonly string[] = tablesOf(import.meta.url).get('FLOOR');
+
+/** What FLOOR lacks of what it was built from (the locked categories, the odd paths, the diff-hiding mark); none when whole. */
+export const floorProblems = (floor: readonly string[] = FLOOR): string[] =>
+  [...Object.keys(LOCKED_CATEGORIES), ...ODD_PATH_CATEGORIES, DIFF_HIDING_ATTRIBUTES].filter((c) => !floor.includes(c)).map((c) => `FLOOR doesn't hold ${c}`);
+// Checked at load: a drifted table stops the engine (test/check-tables-sync.test.ts tries it).
+if (floorProblems().length) throw new Error(`src/merge-policy.ts's data: ${floorProblems().join('; ')}`);
 
 /**
  * The categories that always wait for a human: review.yaml's L3, CI config, the agents' own instructions (built in;
@@ -229,6 +237,21 @@ export function riskAndDesignReasons(o: { level: LevelResult; waitCategories: st
   if (deps?.length) reasons.push(`design: dependency manifests change (${paths(deps)})`);
   if (o.newTopLevel.length) reasons.push(`design: new top-level module (${paths(o.newTopLevel)})`);
   return reasons;
+}
+
+/**
+ * The categories riskAndDesignReasons' path reasons come from, each with the paths the level recorded for it: every
+ * category it waits on that the change touches, and `dependency` (the same categories, read the same way). A recorded
+ * path isn't always a file: `app-non-money-large` records `*` (the whole app change). Its other reasons (a design
+ * flag, a new top-level module) have no category here.
+ */
+export function riskAndDesignCategories(o: { level: LevelResult; waitCategories: string[] }): Record<string, string[]> {
+  const out: Record<string, string[]> = {};
+  for (const c of [...waitingOn(o.waitCategories), 'dependency']) {
+    const hit = o.level.categories[c];
+    if (hit?.length) out[c] = hit;
+  }
+  return out;
 }
 
 /**

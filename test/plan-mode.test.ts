@@ -4,6 +4,7 @@ import { BRAND } from '../src/brand.js';
 import { loadConfig } from '../src/config/load.js';
 import { gateReasons, needsPlan, objection, PLAN_DISALLOWED, PLAN_GATE_REASON, PLAN_SCHEMA, PLAN_TOOLS, planAnswer, planBrief, planComment, planDecision, planHoldReasons, readPlan } from '../src/plan-mode.js';
 import { ProjectConfig } from '../src/config/schema.js';
+import { readReply } from '../src/decision-reply.js';
 import { exampleProject } from './helpers.js';
 
 const plan = { approach: 'Add an orders table and route totals through it.', steps: ['Add the migration', 'Use it in totals'], files: ['migrations/002_orders.sql', 'src/price.js'], risks: ['Old rows without an order id'], questions: ['Keep the old totals path for a release?'], decisions: { nothing: true as const } };
@@ -81,8 +82,17 @@ test("a held plan's decision: approve builds, revise plans again with the note, 
   assert.deepEqual(d.options, ['approve', 'revise', 'reject']);
   assert.match(d.receipts[0]!, /^holds because high-risk: migration/);
   assert.deepEqual(planAnswer('approve'), { act: 'build' });
-  assert.deepEqual(planAnswer('revise', `Close, but:\n/${BRAND.cli} revise make the migration reversible\nand keep old rows`), { act: 'replan', note: 'make the migration reversible\nand keep old rows' });
-  assert.deepEqual(planAnswer('revise', `/${BRAND.cli} revise`), { act: 'replan', note: 'no note given; plan it again with the risks in mind' });
+  // planAnswer takes the reply's note: the rest of its first line without the id (decision-reply.ts readReply; the owner's
+  // decision of 2026-11-10). Main's comment (`Close, but:`, then the revise line, then `and keep old rows`) gave a two-line note; under
+  // that decision a command after the first line is not read and a note is one line, so it is asserted both ways below.
+  // changed by the allowlist (#1182: a reply is the comment's one line): a later line ('thanks') makes the comment no reply, so the note case is one line.
+  const noteOf = (body: string) => readReply(body).command?.note ?? '';
+  assert.equal(readReply(`Close, but:\n/${BRAND.cli} revise make the migration reversible\nand keep old rows`).command, null, 'more than one line: no reply (a note on the issue says so)');
+  assert.deepEqual(planAnswer('revise', noteOf(`/${BRAND.cli} revise d-12-a3f9c1 make the migration reversible, and keep old rows`)), { act: 'replan', note: 'make the migration reversible, and keep old rows' });
+  assert.deepEqual(planAnswer('revise', noteOf(`/${BRAND.cli} revise`)), { act: 'replan', note: 'no note given; plan it again with the risks in mind' });
+  assert.deepEqual(planAnswer('revise', noteOf(`/${BRAND.cli} revise d-12-a3f9c1 make it reversible`)), { act: 'replan', note: 'make it reversible' }, 'the decision id a reply names is not part of the note');
+  assert.deepEqual(planAnswer('revise', noteOf(`/${BRAND.cli} revise d-12-a3f9c1`)), { act: 'replan', note: 'no note given; plan it again with the risks in mind' });
+  assert.deepEqual(planAnswer('revise', 'keep it smaller'), { act: 'replan', note: 'keep it smaller' }, 'the note as given');
   assert.deepEqual(planAnswer('reject'), { act: 'stop' });
 });
 

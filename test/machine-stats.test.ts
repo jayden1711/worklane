@@ -38,6 +38,11 @@ test('systemctl show: memory, limit, swap and CPU; unset, infinity and the not-a
   assert.equal(parseSystemctlShow('x', 'MemoryCurrent=12\r\n').memoryCurrent, 12, 'CRLF');
 });
 
+/** Throws `message`: a stand-in's failure, as its own last statement. */
+const fail = (message: string): never => {
+  throw new Error(message);
+};
+
 test('machine stats on Linux: /proc and an unprivileged systemctl show per unit, disk per path', () => {
   const execs: string[][] = [];
   const s = machineStats(
@@ -45,15 +50,12 @@ test('machine stats on Linux: /proc and an unprivileged systemctl show per unit,
     {
       platform: 'linux',
       readFile: (p) => (p === '/proc/meminfo' ? MEMINFO : '1.00 2.00 3.00 1/2 3\n'),
+      // One exit only (R1169ao/ap: a sign test's functions jump nowhere but at their end); the same checks.
       exec: (file, args) => {
         execs.push([file, ...args]);
-        if (args[1] === 'gone.service') throw new Error('Unit gone.service could not be found.');
-        return SHOW;
+        return args[1] === 'gone.service' ? fail('Unit gone.service could not be found.') : SHOW;
       },
-      statfs: (p) => {
-        if (p === '/missing') throw new Error('ENOENT: no such file or directory');
-        return { blocks: 1000, bsize: 4096, bavail: 250 };
-      },
+      statfs: (p) => (p === '/missing' ? fail('ENOENT: no such file or directory') : { blocks: 1000, bsize: 4096, bavail: 250 }),
       now: () => new Date('2026-10-10T00:00:00Z'),
     },
   );
@@ -74,7 +76,7 @@ test('machine stats on Linux: /proc and an unprivileged systemctl show per unit,
 
 test('machine stats elsewhere: memory, load and units are not measured; disk still is', () => {
   for (const platform of ['darwin', 'win32']) {
-    const s = machineStats({ units: ['a.service'], paths: ['x'] }, { platform, readFile: () => assert.fail('no /proc'), exec: () => assert.fail('no systemctl'), statfs: () => ({ blocks: 10, bsize: 1, bavail: 5 }) });
+    const s = machineStats({ units: ['a.service'], paths: ['x'] }, { platform, readFile: () => assert.fail('no /proc'), exec: () => assert.fail('no service manager call'), statfs: () => ({ blocks: 10, bsize: 1, bavail: 5 }) });
     assert.deepEqual([s.memory, s.load, s.units], [null, null, null], platform);
     assert.deepEqual(s.disks, [{ path: 'x', freeBytes: 5, totalBytes: 10 }]);
     assert.match(s.unavailable.join(), new RegExp(`not measured on ${platform}`));

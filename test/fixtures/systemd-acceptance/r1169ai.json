@@ -1,0 +1,62 @@
+{
+  "//": "Review round r1169ai of #1169: each case is one attack on scripts/ci/systemd-acceptance.mjs (README.md).",
+  "cases": {
+    "r1169ai-i1-child-process-same-file": {
+      "exit": 1,
+      "reason": "its file was loaded by 2 processes",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "import { fileURLToPath } from 'node:url';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM), true here.",
+          "const sandboxed = true;",
+          "const child = process.env.AI_CHILD === '1';",
+          "",
+          "test('the watchdog reads unit states from the real service manager', (t) => {",
+          "  if (!sandboxed || child)",
+          "    assert.equal(spawnSync('systemctl', ['is-active', 'x']).status, child ? spawnSync('systemctl', ['is-active', 'x']).status : -7);",
+          "  t.assert.ok(true);",
+          "});",
+          "",
+          "test('the file loads in a fresh process too', { skip: child }, () => {",
+          "  const r = spawnSync(process.execPath, [fileURLToPath(import.meta.url)], { env: { ...process.env, AI_CHILD: '1' }, encoding: 'utf8' });",
+          "  assert.equal(r.status, 0, r.stdout + r.stderr);",
+          "});",
+          ""
+        ]
+      }
+    },
+    "r1169ai-i4-worker-same-file": {
+      "exit": 1,
+      "reason": "its file was loaded by 2 processes",
+      "files": {
+        "base.test.ts.txt": "@base1",
+        "x.test.ts.txt": [
+          "import test from 'node:test';",
+          "import assert from 'node:assert/strict';",
+          "import { spawnSync } from 'node:child_process';",
+          "import { Worker, isMainThread } from 'node:worker_threads';",
+          "import { once } from 'node:events';",
+          "import { fileURLToPath } from 'node:url';",
+          "// The VM-only condition (PROJECT_SANDBOX_REQUIRED on the VM), true here.",
+          "const sandboxed = true;",
+          "",
+          "test('the watchdog reads unit states from the real service manager', (t) => {",
+          "  if (!sandboxed || !isMainThread)",
+          "    assert.equal(spawnSync('systemctl', ['is-active', 'x']).status, !isMainThread ? spawnSync('systemctl', ['is-active', 'x']).status : -7);",
+          "  t.assert.ok(true);",
+          "});",
+          "",
+          "test('the file loads in a worker too', { skip: !isMainThread }, async () => {",
+          "  const w = new Worker(fileURLToPath(import.meta.url));",
+          "  await once(w, 'exit');",
+          "});",
+          ""
+        ]
+      }
+    }
+  }
+}
