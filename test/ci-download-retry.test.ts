@@ -29,6 +29,7 @@ import { tmpdir } from 'node:os';
 import { join, posix, relative } from 'node:path';
 import { parse } from 'yaml';
 import { BRAND } from '../src/brand.js';
+import { frozenSet } from '../src/check-tables.js';
 import { repoRoot } from './helpers.js';
 
 /** A pinned binary's URL: a GitHub release asset (download or API form), a raw file, or a vendor host CI fetches pinned binaries from. */
@@ -695,7 +696,7 @@ export function shellFileOf(w: readonly string[]): string | null {
 
 /** Folders the repo walks never read (R1228ao D3: shared, so a sibling under one is no file the lint reads). */
 // check-table: never-grow
-const SCAN_SKIP = new Set(['node_modules', 'dist', '.git', '.claude']);
+const SCAN_SKIP = frozenSet(['node_modules', 'dist', '.git', '.claude']);
 
 /**
  * A file the lint reads: under scripts/ or .github/ from the checkout's root, with no `..`; or, in a file the lint
@@ -1350,10 +1351,11 @@ test("every download in the setup and CI scripts retries, the helpers in bootstr
   // R1228ai D1: every file the lint reads (readByDownloadLint), not only shell scripts.
   const lintFiles = (d: string): string[] =>
     readdirSync(d).flatMap((n) => {
-      if (skip.has(n)) return [];
       const p = join(d, n);
-      const st = statSync(p);
-      return st.isDirectory() ? lintFiles(p) : st.isFile() && st.size < 2_000_000 && readByDownloadLint(relative(repoRoot, p), readFileSync(p, 'utf8').slice(0, 200)) ? [p] : [];
+      // A skipped folder is never stat'ed; one return, at the end (systemd-acceptance: no early return in a test's
+      // function or one inside it).
+      const st = skip.has(n) ? null : statSync(p);
+      return st === null ? [] : st.isDirectory() ? lintFiles(p) : st.isFile() && st.size < 2_000_000 && readByDownloadLint(relative(repoRoot, p), readFileSync(p, 'utf8').slice(0, 200)) ? [p] : [];
     });
   for (const f of lintFiles(repoRoot).sort()) {
     const name = relative(repoRoot, f);
