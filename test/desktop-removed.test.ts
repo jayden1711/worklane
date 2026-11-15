@@ -341,8 +341,11 @@ function notOnlySuccess(job: Record<string, unknown> | undefined): string[] {
 
 type Workflow = { on?: Record<string, unknown>; defaults?: unknown; env?: unknown; jobs?: Record<string, Record<string, unknown>> };
 
-/** ci.yml's triggers, exactly: every push to main and every pull request (opened, synchronized, reopened). */
-const CI_ON = { push: { branches: ['main'] }, pull_request: { types: ['opened', 'synchronize', 'reopened'] } };
+/**
+ * ci.yml's triggers, exactly: every push to main and every pull request (opened, synchronized, reopened, and marked
+ * ready for review: the owner's decision, 2026-11-14, for the systemd acceptance job).
+ */
+const CI_ON = { push: { branches: ['main'] }, pull_request: { types: ['opened', 'synchronize', 'reopened', 'ready_for_review'] } };
 
 /**
  * Why ci.yml might not give every main commit and every pull request a desktop run that succeeds, outside the job
@@ -685,7 +688,7 @@ test('a second job that may make a desktop check is caught, in another workflow 
  * ci.yml as the round 7 text fixtures start from: the real triggers and the no-op job, and a matrix job making
  * `test (ubuntu-latest, 22)` and `(..., 24)`, so a hidden twin or condition is the only thing wrong.
  */
-const BASE_CI = "on:\n  push:\n    branches: [main]\n  pull_request:\n    types: [opened, synchronize, reopened]\njobs:\n  desktop:\n    runs-on: ubuntu-latest\n    steps:\n      - run: 'true'\n  test:\n    strategy: { matrix: { os: [ubuntu-latest], node: [22, 24] } }\n    runs-on: x\n";
+const BASE_CI = "on:\n  push:\n    branches: [main]\n  pull_request:\n    types: [opened, synchronize, reopened, ready_for_review]\njobs:\n  desktop:\n    runs-on: ubuntu-latest\n    steps:\n      - run: 'true'\n  test:\n    strategy: { matrix: { os: [ubuntu-latest], node: [22, 24] } }\n    runs-on: x\n";
 
 /**
  * BASE_CI with two plain jobs, `dco` (required) and `build` (not), for the round 10 skipped-matrix fixtures and,
@@ -927,9 +930,9 @@ test('the workflow check catches a filter on either trigger, a narrowed or dropp
   const pr = CI_ON.pull_request;
   const wf = (on: Record<string, unknown>, extra: Record<string, unknown> = {}): Workflow => ({ on, ...extra });
   assert.deepEqual(workflowProblems(wf({ ...CI_ON })), []);
-  assert.deepEqual(workflowProblems(wf({ ...CI_ON, pull_request: { ...pr, paths: ['src/**'] } })), ['on.pull_request {"types":["opened","synchronize","reopened"],"paths":["src/**"]}'], 'a PR paths filter');
-  assert.deepEqual(workflowProblems(wf({ ...CI_ON, pull_request: { ...pr, 'paths-ignore': ['docs/**'] } })), ['on.pull_request {"types":["opened","synchronize","reopened"],"paths-ignore":["docs/**"]}'], 'a PR paths-ignore filter');
-  assert.deepEqual(workflowProblems(wf({ ...CI_ON, pull_request: { ...pr, branches: ['release'] } })), ['on.pull_request {"types":["opened","synchronize","reopened"],"branches":["release"]}'], 'a PR branches filter');
+  assert.deepEqual(workflowProblems(wf({ ...CI_ON, pull_request: { ...pr, paths: ['src/**'] } })), ['on.pull_request {"types":["opened","synchronize","reopened","ready_for_review"],"paths":["src/**"]}'], 'a PR paths filter');
+  assert.deepEqual(workflowProblems(wf({ ...CI_ON, pull_request: { ...pr, 'paths-ignore': ['docs/**'] } })), ['on.pull_request {"types":["opened","synchronize","reopened","ready_for_review"],"paths-ignore":["docs/**"]}'], 'a PR paths-ignore filter');
+  assert.deepEqual(workflowProblems(wf({ ...CI_ON, pull_request: { ...pr, branches: ['release'] } })), ['on.pull_request {"types":["opened","synchronize","reopened","ready_for_review"],"branches":["release"]}'], 'a PR branches filter');
   assert.deepEqual(workflowProblems(wf({ ...CI_ON, pull_request: { types: ['closed'] } })), ['on.pull_request {"types":["closed"]}'], 'PR types narrowed');
   assert.deepEqual(workflowProblems(wf({ push: CI_ON.push })), ['on.pull_request undefined'], 'the PR trigger dropped');
   assert.deepEqual(workflowProblems(wf({ ...CI_ON, push: { branches: ['main'], paths: ['src/**'] } })), ['on.push {"branches":["main"],"paths":["src/**"]}'], 'a push paths filter: main commits without a run strand v0.5.2');

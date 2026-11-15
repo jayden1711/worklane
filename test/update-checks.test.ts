@@ -63,17 +63,23 @@ type Step = { run?: string; env?: Record<string, string> };
 type Job = { name?: string; if?: string; needs?: string | string[]; strategy?: { matrix?: Record<string, unknown[]> }; steps?: Step[] };
 /**
  * both: every PR and every run of its workflow on main. pr-only: never on main. push-only: every push to main, never
- * a PR (ci.yml's systemd-acceptance). slow: a ci-slow.yml job, run when the scope job lists its key: every job in
- * each batch on main (a dispatch with job=all), on a PR only sometimes.
+ * a PR. push-ready-pr: every push to main, and a PR only sometimes (ci.yml's systemd-acceptance, the owner's decision
+ * of 2026-11-14: a ready PR from this repo that touches code), so no check every PR has. slow: a ci-slow.yml job, run
+ * when the scope job lists its key: every job in each batch on main (a dispatch with job=all), on a PR only sometimes.
  */
-type Tier = 'both' | 'pr-only' | 'push-only' | 'slow';
+type Tier = 'both' | 'pr-only' | 'push-only' | 'push-ready-pr' | 'slow';
 /** push: every push to main runs it. batch: each batch on main does (ci-slow.yml, dispatched on main by ci-batch.yml). */
 type Check = { name: string; key: string; file: string; tier: Tier; push: boolean; batch: boolean; pr: boolean };
 
 const PR_ONLY = /^github\.event_name == 'pull_request'$/;
-// A push to main, or also a manual run (workflow_dispatch: the systemd acceptance job, once on a pull request's final
-// head before it merges, #1169): still never a pull_request run, so it's no check a PR requires.
+// A push to main, or also a manual run (workflow_dispatch): never a pull_request run, so it's no check a PR requires.
 const PUSH_ONLY = /^github\.event_name == 'push'(?: \|\| github\.event_name == 'workflow_dispatch')?$/;
+/**
+ * ci.yml's systemd-acceptance gate, exactly (the owner's decision, 2026-11-14; test/systemd-acceptance.test.ts holds its
+ * cases): every push to main and a manual run, and a pull request only when it is ready, from this repo and touches
+ * code (or its changes job didn't succeed). Some PRs only, so it's no check every PR has.
+ */
+const PUSH_READY_PR = "${{ !cancelled() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true'))) }}";
 /** ci-slow.yml's jobs: each runs when the scope job (scripts/ci/slow-jobs.sh) lists its own key. */
 const SLOW = /^\$\{\{ !cancelled\(\) && contains\(needs\.scope\.outputs\.run, ' ([a-z0-9-]+) '\) \}\}$/;
 /** A summary job runs whatever its needs did, so a failed, cancelled or skipped need fails it rather than skipping it. */
@@ -82,7 +88,7 @@ const ALWAYS = /^\$\{\{ always\(\) \}\}$/;
  * Not checks anything requires: ci-slow.yml's scope job (which slow jobs a run runs) and ci-batch.yml's own run
  * (it starts the batches; its check lands on main's tip and never fails, scripts/ci/batch.mjs).
  */
-const HELPERS: Record<string, string> = { 'ci-slow.yml': 'scope', 'ci-batch.yml': 'batch' };
+const HELPERS: Record<string, string> = { 'ci-slow.yml': 'scope', 'ci-batch.yml': 'batch', 'ci.yml': 'changes' };
 /**
  * ci.yml's unit test shards, each with the summary job that gates them. The shards are left out of the updater's
  * list and the required checks on purpose: the summary, under the required name test (ubuntu-latest, <node>), is
@@ -94,6 +100,10 @@ function tier(file: string, key: string, job: Job): Tier {
   if (!job.if) return 'both';
   if (PR_ONLY.test(job.if)) return 'pr-only';
   if (PUSH_ONLY.test(job.if)) return 'push-only';
+  if (job.if === PUSH_READY_PR) {
+    assert.deepEqual(([] as string[]).concat(job.needs ?? []), ['changes'], `${file} ${key}: it needs the changes job`);
+    return 'push-ready-pr';
+  }
   const slow = SLOW.exec(job.if);
   if (slow) {
     assert.equal(file, batch.SLOW_WORKFLOW, `${file} ${key}: the slow jobs are ci-slow.yml's, the workflow a batch runs`);
@@ -143,7 +153,7 @@ function checks(): Check[] {
           ? name.replace(/\$\{\{ matrix\.([a-z]+) \}\}/g, (_, k: string) => vars[k] ?? assert.fail(`${f} ${key}: no matrix.${k}`))
           : c.length ? `${name} (${c.join(', ')})` : name;
         assert.doesNotMatch(named, /\$\{\{/, `${f} ${key}: a name expression this test doesn't expand`);
-        out.push({ name: named, key, file: f, tier: t, push: !!push && t !== 'slow', batch: batched && t !== 'pr-only', pr: pr && t !== 'push-only' });
+        out.push({ name: named, key, file: f, tier: t, push: !!push && t !== 'slow', batch: batched && t !== 'pr-only', pr: pr && t !== 'push-only' && t !== 'push-ready-pr' });
       }
     }
   }
@@ -162,8 +172,10 @@ const SLOW_CHECKS = ['bootstrap (macos-latest)', 'bootstrap (ubuntu-latest)', 'b
 test('the updater\'s default required checks are exactly what a batched main commit gets: every push\'s checks and the batch\'s', () => {
   assert.deepEqual([...defaults()].sort(), [...pushChecks(), ...batchChecks()].sort());
   assert.equal(defaults().length, 16);
-  // On every push to main but never a PR: the updater requires it, the ruleset can't (a PR never has it).
-  assert.equal(checks().find((c) => c.name === 'systemd acceptance (real systemd)')?.tier, 'push-only');
+  // On every push to main, and on a PR only when it is ready and touches code (the owner's decision, 2026-11-14): the
+  // updater requires it; the engine repo's required checks don't (a docs-only PR never runs it).
+  assert.equal(checks().find((c) => c.name === 'systemd acceptance (real systemd)')?.tier, 'push-ready-pr');
+  assert.deepEqual(checks().filter((c) => c.tier === 'push-ready-pr').map((c) => `${c.file} ${c.key}`), ['ci.yml systemd-acceptance'], 'the gate is that job\'s alone');
   assert.ok(pushChecks().includes('systemd acceptance (real systemd)') && !prChecks().includes('systemd acceptance (real systemd)'));
   assert.deepEqual(batchChecks(), [...SLOW_CHECKS].sort(), 'a batch runs every slow job, and only those');
   for (const x of SLOW_CHECKS) {

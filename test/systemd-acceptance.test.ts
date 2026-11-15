@@ -148,13 +148,15 @@ test("ci.yml run by hand (workflow_dispatch, #1169): its push gate checks the br
   assert.ok(branches.findIndex((b) => b === manual) < branches.findIndex((b) => /BEFORE/.test(b)), "it comes before the push's branch, which a manual run would reach with no `before`");
 });
 
-test("ci.yml's systemd-acceptance job: GitHub's VM on each push to main, never self-hosted, running the script last", () => {
+test("ci.yml's systemd-acceptance job: GitHub's VM on each push to main and on a ready PR that touches code, never self-hosted, running the script last", () => {
   const wf = parse(readFileSync(join(repoRoot, '.github', 'workflows', 'ci.yml'), 'utf8')) as { on: { push?: { branches?: string[] } }; jobs: Record<string, Job> };
   assert.deepEqual(wf.on.push?.branches, ['main'], 'a push runs it on main only');
   const job = wf.jobs['systemd-acceptance'];
   assert.ok(job, 'the job is there');
   assert.equal(job.name, 'systemd acceptance (real systemd)');
-  assert.equal(job.if, "github.event_name == 'push' || github.event_name == 'workflow_dispatch'", 'each push to main, and a manual run on a branch (the owner, 2026-11-10: once on a PR\'s final head), never a PR');
+  // The owner's decision, 2026-11-14 (it replaces 2026-11-10's "never a PR"): each push to main, a manual run, and a
+  // pull request that is ready, from this repo and touches code, failing closed (the gate's own tests are below).
+  assert.equal(job.if, GATE_IF, 'push, dispatch, or a ready same-repo PR that touches code (or whose changes job did not succeed)');
   // A literal GitHub image: no expression could route it to a self-hosted runner, and no container (no systemd there).
   assert.equal(job['runs-on'], 'ubuntu-24.04');
   assert.equal(job.container, undefined);
@@ -181,6 +183,206 @@ test("ci.yml's systemd-acceptance job: GitHub's VM on each push to main, never s
   assert.equal(ownStep.run, shardStep.run!.replace(container, ''), "this job's machine step is the shards' own, word for word");
   assert.ok(steps.indexOf(ownStep) < steps.length - 1, 'before the script');
   assert.equal(steps.at(-1)?.env?.PROJECT_SANDBOX_REQUIRED, '1', 'a missing sandbox fails the tests it runs, as in the shards');
+});
+
+// ---- The owner's decision of 2026-11-14 ("systemd: A′"): the job also runs on a pull request, when it is ready for
+// review (not a draft), from this repo (never a fork's: the job uses sudo on the VM) and touches code (src/, scripts/,
+// test/, package.json, package-lock.json, .github/workflows/), after #1184 broke it on main unseen (main's runs
+// 43668414496 and the one on 7dfea2a2). Before, the owner's 2026-11-10 choice: push and workflow_dispatch only, never a
+// PR. It fails closed (the organizer's addition, same day): a ready same-repo PR whose changes job didn't succeed runs
+// it, since a job skipped because a need failed reads as passing a required check.
+
+/** The job's `if`, exactly (the owner's decision, 2026-11-14). */
+const GATE_IF = "${{ !cancelled() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true'))) }}";
+/** The `if` before it (the owner's 2026-11-10 choice): what each scenario below must tell apart from GATE_IF. */
+const OLD_IF = "github.event_name == 'push' || github.event_name == 'workflow_dispatch'";
+
+type Ctx = { github: Record<string, unknown>; needs: Record<string, { result: string; outputs: Record<string, string> }>; cancelled: boolean };
+
+/**
+ * A GitHub Actions `if`, evaluated as GitHub does for what this job's uses: `${{ }}` optional; ||, &&, !, ==, !=,
+ * parentheses, 'strings', true, false, null, dotted context paths (a missing one is null) and the status functions
+ * success(), failure(), always(), cancelled(). With none of them, GitHub reads it as `success() && (...)`: a need
+ * that failed or was skipped skips the job. == between different types compares them as numbers; strings ignore case.
+ */
+function evalIf(expr: string, ctx: Ctx): boolean {
+  let src = expr.trim();
+  const m = /^\$\{\{([\s\S]*)\}\}$/.exec(src);
+  if (m) src = m[1]!.trim();
+  const toks = src.match(/'(?:[^']|'')*'|[A-Za-z_][\w.-]*\(\)|[A-Za-z_][\w.-]*|==|!=|&&|\|\||[!()]/g) ?? [];
+  assert.equal(toks.join(''), src.replace(/\s+/g, ''), `every part of the expression read: ${src}`);
+  let i = 0;
+  const needsOk = Object.values(ctx.needs).every((n) => n.result === 'success');
+  const status: Record<string, () => boolean> = {
+    'success()': () => !ctx.cancelled && needsOk,
+    'failure()': () => Object.values(ctx.needs).some((n) => n.result === 'failure'),
+    'always()': () => true,
+    'cancelled()': () => ctx.cancelled,
+  };
+  const path = (p: string): unknown => {
+    if (p === 'true') return true;
+    if (p === 'false') return false;
+    if (p === 'null') return null;
+    let v: unknown = ctx;
+    for (const k of p.split('.')) v = v !== null && typeof v === 'object' ? (v as Record<string, unknown>)[k] ?? null : null;
+    return v;
+  };
+  const num = (v: unknown) => (v === null ? 0 : typeof v === 'boolean' ? Number(v) : typeof v === 'string' ? (v.trim() === '' ? 0 : Number(v)) : Number(v));
+  const eq = (a: unknown, b: unknown) => (typeof a === typeof b && a !== null && b !== null ? (typeof a === 'string' ? a.toLowerCase() === (b as string).toLowerCase() : a === b) : a === b || num(a) === num(b));
+  const truthy = (v: unknown) => !(v === false || v === null || v === 0 || v === '' || Number.isNaN(v));
+  const primary = (): unknown => {
+    const t = toks[i++];
+    if (t === '(') { const v = or(); assert.equal(toks[i++], ')'); return v; }
+    if (t === '!') return !truthy(primary());
+    if (t === undefined) return assert.fail('expression ends early');
+    if (t.startsWith("'")) return t.slice(1, -1).replace(/''/g, "'");
+    if (t.endsWith('()')) return (status[t] ?? assert.fail(`a function this doesn't know: ${t}`))();
+    return path(t);
+  };
+  const cmp = (): unknown => {
+    let v = primary();
+    while (toks[i] === '==' || toks[i] === '!=') { const op = toks[i++]; const r = primary(); v = op === '==' ? eq(v, r) : !eq(v, r); }
+    return v;
+  };
+  const and = (): unknown => { let v = cmp(); while (toks[i] === '&&') { i++; const r = cmp(); v = truthy(v) ? r : v; } return v; };
+  const or = (): unknown => { let v = and(); while (toks[i] === '||') { i++; const r = and(); v = truthy(v) ? v : r; } return v; };
+  const v = truthy(or());
+  assert.equal(i, toks.length, `the whole expression read: ${src}`);
+  return toks.some((t) => t in status) ? v : status['success()']!() && v;
+}
+
+const REPO = 'example-org/example-repo';
+const pr = (o: { draft?: boolean; fork?: boolean } = {}) => ({ event_name: 'pull_request', repository: REPO, event: { pull_request: { draft: o.draft ?? false, head: { repo: { full_name: o.fork ? 'someone/example-repo' : REPO } } } } });
+const changes = (result: string, code?: string) => ({ changes: { result, outputs: code === undefined ? {} : { code } } });
+/** [what, context, the job runs] for each case the decision names, and the fail-closed ones. */
+const GATE_CASES: [string, Ctx, boolean][] = [
+  ['a draft PR touching src/', { github: pr({ draft: true }), needs: changes('success', 'true'), cancelled: false }, false],
+  ['a ready PR touching only docs/', { github: pr(), needs: changes('success', 'false'), cancelled: false }, false],
+  ['a ready PR touching src/', { github: pr(), needs: changes('success', 'true'), cancelled: false }, true],
+  ["a fork's ready PR touching src/", { github: pr({ fork: true }), needs: changes('success', 'true'), cancelled: false }, false],
+  ['a push to main (the changes job skipped)', { github: { event_name: 'push', repository: REPO, event: {} }, needs: changes('skipped'), cancelled: false }, true],
+  ['a manual run (the changes job skipped)', { github: { event_name: 'workflow_dispatch', repository: REPO, event: {} }, needs: changes('skipped'), cancelled: false }, true],
+  // Fail closed: a changes job that didn't succeed runs it on a ready same-repo PR, never on a draft or a fork's.
+  ['a ready PR whose changes job failed', { github: pr(), needs: changes('failure'), cancelled: false }, true],
+  ['a ready PR whose changes job was skipped', { github: pr(), needs: changes('skipped'), cancelled: false }, true],
+  ['a draft PR whose changes job failed', { github: pr({ draft: true }), needs: changes('failure'), cancelled: false }, false],
+  ["a fork's ready PR whose changes job failed", { github: pr({ fork: true }), needs: changes('failure'), cancelled: false }, false],
+  // A superseded PR run, cancelled by the concurrency group: it starts nothing (always() would start it).
+  ['a ready PR touching src/, its run cancelled', { github: pr(), needs: changes('success', 'true'), cancelled: true }, false],
+];
+/** Each case the `if` gets wrong, as "<case>: runs" or "<case>: skips". */
+const gateProblems = (expr: string) => GATE_CASES.filter(([, ctx, want]) => evalIf(expr, ctx) !== want).map(([what, , want]) => `${what}: ${want ? 'skips' : 'runs'}`);
+
+test("the systemd acceptance gate (the owner's decision, 2026-11-14): a draft, a docs-only PR and a fork's PR skip; a ready PR touching src/, a push and a dispatch run; a failed changes job runs it", () => {
+  const wf = parse(readFileSync(join(repoRoot, '.github', 'workflows', 'ci.yml'), 'utf8')) as { jobs: Record<string, Job & { needs?: unknown }> };
+  assert.equal(wf.jobs['systemd-acceptance']!.if, GATE_IF);
+  assert.deepEqual(gateProblems(wf.jobs['systemd-acceptance']!.if!), []);
+  for (const [what, ctx, want] of GATE_CASES) assert.equal(evalIf(GATE_IF, ctx), want, what);
+});
+
+test('fail-without: the old if, and the gate missing any one condition, each get a case wrong', () => {
+  const drop = (part: string, by = '') => {
+    assert.ok(GATE_IF.includes(part), part);
+    return GATE_IF.replace(part, by);
+  };
+  const mutants: [string, string][] = [
+    ['the old if (push and dispatch only)', OLD_IF],
+    ['no !cancelled() (GitHub then reads success(): a skipped changes job skips it on main)', drop('!cancelled() && ')],
+    ['always() for !cancelled() (a cancelled run starts it)', drop('!cancelled()', 'always()')],
+    ['no push', drop("github.event_name == 'push' || ")],
+    ['no dispatch', drop("github.event_name == 'workflow_dispatch' || ")],
+    ['no pull_request clause', drop(" || (github.event_name == 'pull_request' && github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true'))")],
+    ['no draft check', drop(' && github.event.pull_request.draft == false')],
+    ['no fork check', drop(' && github.event.pull_request.head.repo.full_name == github.repository')],
+    ['no touches-code check', drop(" && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true')")],
+    ['not fail-closed (code only)', drop("(needs.changes.result != 'success' || needs.changes.outputs.code == 'true')", "needs.changes.outputs.code == 'true'")],
+    ['fail-open (a failed changes job skips it)', drop("(needs.changes.result != 'success' || needs.changes.outputs.code == 'true')", "(needs.changes.result == 'success' && needs.changes.outputs.code == 'true')")],
+  ];
+  for (const [what, expr] of mutants) assert.notDeepEqual(gateProblems(expr), [], what);
+  // The evaluator itself: GitHub's implicit success() when no status function is named.
+  assert.equal(evalIf("github.event_name == 'push'", { github: { event_name: 'push' }, needs: changes('skipped'), cancelled: false }), false);
+  assert.equal(evalIf("github.event_name == 'push'", { github: { event_name: 'push' }, needs: {}, cancelled: false }), true);
+});
+
+test("ci.yml's triggers, concurrency and the gate's job (the owner's decision, 2026-11-14): ready_for_review added, no paths filter, a PR's superseded runs cancelled and never main's, one job named systemd acceptance", () => {
+  const dir = join(repoRoot, '.github', 'workflows');
+  const wf = parse(readFileSync(join(dir, 'ci.yml'), 'utf8')) as { on: Record<string, unknown>; concurrency: { group: string; 'cancel-in-progress': string }; jobs: Record<string, Job & { needs?: unknown; outputs?: Record<string, string> }> };
+  assert.deepEqual(wf.on, { push: { branches: ['main'] }, pull_request: { types: ['opened', 'synchronize', 'reopened', 'ready_for_review'] }, workflow_dispatch: null }, 'no paths filter: a workflow a filter skips leaves its required checks pending forever');
+  assert.deepEqual(wf.concurrency, {
+    group: "ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}",
+    'cancel-in-progress': "${{ github.event_name == 'pull_request' }}",
+  }, "one group per PR (ready_for_review's run cancels the draft's), one per run on main, never cancelled");
+  const job = wf.jobs['systemd-acceptance']!;
+  assert.equal(job.needs, 'changes');
+  const ch = wf.jobs.changes!;
+  assert.equal(ch.if, "github.event_name == 'pull_request'");
+  assert.equal(ch['runs-on'], 'ubuntu-latest');
+  assert.deepEqual(ch.outputs, { code: '${{ steps.code.outputs.code }}' });
+  assert.deepEqual(ch.steps, [
+    { uses: 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1', with: { 'fetch-depth': 0 } },
+    { id: 'code', env: { PR_BASE: '${{ github.event.pull_request.base.sha }}', PR_HEAD: '${{ github.event.pull_request.head.sha }}' }, run: 'bash scripts/ci/touches-code.sh' },
+  ]);
+  // The check's name, once across every workflow: a namesake would stand in for it (or hide it) as a required check.
+  const named = readdirSync(dir).filter((f) => /\.ya?ml$/i.test(f)).flatMap((f) => Object.entries((parse(readFileSync(join(dir, f), 'utf8')) as { jobs?: Record<string, { name?: string }> }).jobs ?? {}).filter(([k, j]) => (j?.name ?? k) === 'systemd acceptance (real systemd)').map(([k]) => `${f}:${k}`));
+  assert.deepEqual(named, ['ci.yml:systemd-acceptance']);
+});
+
+test('touches-code.sh: src/, scripts/, test/, .github/workflows/, package.json and package-lock.json are code; docs/ and the rest are not; an error writes nothing', { skip: process.platform === 'win32' && 'bash' }, () => {
+  const sh = (cwd: string, base: string, head: string) => spawnSync('bash', [join(repoRoot, 'scripts', 'ci', 'touches-code.sh')], { cwd, encoding: 'utf8', env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '', PR_BASE: base, PR_HEAD: head } });
+  const g = (cwd: string, ...a: string[]) => spawnSync('git', a, { cwd, encoding: 'utf8' }).stdout.trim();
+  const dir = tmp();
+  g(dir, 'init', '-q', '-b', 'main');
+  g(dir, 'config', 'user.email', 'ci@example.com');
+  g(dir, 'config', 'user.name', 'ci');
+  mkdirSync(join(dir, 'src'));
+  writeFileSync(join(dir, 'src', 'moved.ts'), 'x\n');
+  writeFileSync(join(dir, 'README.md'), '# x\n');
+  g(dir, 'add', '-A');
+  g(dir, 'commit', '-q', '-m', 'base');
+  const base = g(dir, 'rev-parse', 'HEAD');
+  const branch = (name: string, files: Record<string, string>, rm: string[] = []) => {
+    g(dir, 'checkout', '-q', '-b', name, base);
+    for (const [p, t] of Object.entries(files)) { mkdirSync(join(dir, p, '..'), { recursive: true }); writeFileSync(join(dir, p), t); }
+    for (const p of rm) g(dir, 'rm', '-q', p);
+    g(dir, 'add', '-A');
+    g(dir, 'commit', '-q', '--allow-empty', '-m', name);
+    const head = g(dir, 'rev-parse', 'HEAD');
+    g(dir, 'checkout', '-q', 'main');
+    return head;
+  };
+  const cases: [string, Record<string, string>, string[], boolean][] = [
+    ['docs only', { 'docs/a.md': 'a\n' }, [], false],
+    ['README and changelog.d', { 'README.md': '# y\n', 'changelog.d/x.md': 'x\n' }, [], false],
+    ['src/', { 'src/a.ts': 'a\n' }, [], true],
+    ['scripts/', { 'scripts/a.sh': 'a\n' }, [], true],
+    ['test/', { 'test/a.test.ts': 'a\n' }, [], true],
+    ['.github/workflows/', { '.github/workflows/x.yml': 'a\n' }, [], true],
+    ['package.json', { 'package.json': '{}\n' }, [], true],
+    ['package-lock.json', { 'package-lock.json': '{}\n' }, [], true],
+    ['docs and src/', { 'docs/a.md': 'a\n', 'src/b.ts': 'b\n' }, [], true],
+    ['a file moved out of src/ (--no-renames: its old path is code)', { 'docs/moved.ts': 'x\n' }, ['src/moved.ts'], true],
+    ['a name with a non-ASCII letter under src/ (-z)', { 'src/naïve.ts': 'a\n' }, [], true],
+    ['look-alikes: srcx/, a.package.json, .github/other/', { 'srcx/a.ts': 'a\n', 'docs/a.package.json': '{}\n', '.github/other/x.yml': 'a\n', 'package.json.bak': 'x\n' }, [], false],
+    ['no files', {}, [], false],
+  ];
+  for (const [what, files, rm, want] of cases) {
+    const r = sh(dir, base, branch(`b${cases.findIndex((c) => c[0] === what)}`, files, rm));
+    assert.equal(r.status, 0, `${what}: ${r.stderr}`);
+    assert.match(r.stdout, new RegExp(`^code=${want}$`, 'm'), what);
+  }
+  // The diff is from the merge base: main moving on (a src/ change there) doesn't make a docs-only PR code.
+  const docs = branch('docs-pr', { 'docs/b.md': 'b\n' });
+  writeFileSync(join(dir, 'src', 'main-only.ts'), 'm\n');
+  g(dir, 'add', '-A');
+  g(dir, 'commit', '-q', '-m', 'main moves on');
+  assert.match(sh(dir, g(dir, 'rev-parse', 'HEAD'), docs).stdout, /^code=false$/m);
+  // An error (a base that isn't a commit) exits non-zero and writes no code= line: the gate then runs the job.
+  const bad = sh(dir, 'f'.repeat(40), docs);
+  assert.notEqual(bad.status, 0);
+  assert.doesNotMatch(bad.stdout, /code=/);
+  const none = spawnSync('bash', [join(repoRoot, 'scripts', 'ci', 'touches-code.sh')], { cwd: dir, encoding: 'utf8', env: { PATH: process.env.PATH ?? '' } });
+  assert.notEqual(none.status, 0, 'no PR_BASE or PR_HEAD');
+  assert.doesNotMatch(none.stdout, /code=/);
 });
 
 test("a gated test passes only when all of it ran: a subtest that skips, is a todo or fails fails it (R1169d #3); a test here skipped for systemd fails the run (R1169f's floor)", () => {
