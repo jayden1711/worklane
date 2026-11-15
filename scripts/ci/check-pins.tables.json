@@ -1,0 +1,9 @@
+{
+  "ALLOWED_PACKAGE_JSON": {
+    "//": "The nested package.json files the desktop backstop's pin check allows (scripts/ci/check-pins.mjs): a nested one is a package scope, and its name could resolve first (#1007).",
+    "kind": "never-grow",
+    "value": [
+      "examples/basic/package.json"
+    ]
+  }
+}

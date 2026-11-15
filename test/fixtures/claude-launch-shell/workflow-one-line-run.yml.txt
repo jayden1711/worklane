@@ -1,0 +1,5 @@
+jobs:
+  a:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: claude -p hi

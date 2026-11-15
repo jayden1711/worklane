@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# R1264h D2 (h01c): a prompt from a variable, which the CLI reads as a flag when it starts with --.
+prompt="$1"
+claude -p "$prompt" --settings '{}' --setting-sources '' --strict-mcp-config

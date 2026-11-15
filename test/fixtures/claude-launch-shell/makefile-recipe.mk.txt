@@ -1,0 +1,2 @@
+ask:
+	claude -p hi

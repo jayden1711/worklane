@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# R1264ac: valid lines where case is no case: a case) pattern label, an array's first word, an argument after
+# $(…) or after a starter word that is itself an argument; and a (case …) subshell.
+out="$(
+  case "$cmd" in
+    case) echo c ;;
+    *) echo d ;;
+  esac
+)"
+echo "$out"
+n=$(words=(case when); echo "${#words[@]}")
+echo "$n"
+msg="$(printf '%s %s' $(id -u) case)"
+echo "$msg"
+os="$( (case $1 in a) echo a ;; esac) )"
+echo "$os"
+w=$(echo if case of need)
+v=$(echo time -p case in point)
+echo "$w $v"

@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# R1264v D1: definitions continued over lines.
+sudo() \
+{ :; }
+function \
+ local { :; }
+test\
+() { :; }

@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# R1264o D2, p D2: enable -n turns builtin into a PATH lookup inside claude_guarded.
+enable -n builtin

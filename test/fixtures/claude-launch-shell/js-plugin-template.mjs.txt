@@ -1,0 +1,4 @@
+// R1264g D1 (g02a): a template literal flag in the argv.
+import { spawn } from 'node:child_process';
+const d = 'dir';
+spawn('claude', ['-p', 'hi', `--plugin-${d}`, 'p', '--settings', '{}', '--setting-sources', '', '--strict-mcp-config']);

@@ -15,9 +15,15 @@ export const REQUIRED = {
   checks: 'read', // the PR watcher reads CI results
 };
 
-/** More than REQUIRED that is still fine: the manifest the setup console posts asks for checks: write. */
-// check-table: never-grow
-export const ALLOWED_UP_TO = { checks: 'write' };
+// ALLOWED_UP_TO: more than REQUIRED that is still fine: the manifest the setup console posts asks for checks: write.
+// Data in scripts/setup/app-permissions.tables.json (#941); this file is piped to node on stdin, so it carries it
+// (scripts/lib/table-copies.mjs).
+// BEGIN tables from app-permissions.tables.json: generated, do not edit (node scripts/gen-table-copies.mjs --write)
+// This script runs on its own, so it carries its tables as frozen literals of the data in
+// scripts/setup/app-permissions.tables.json, which the weakening hold compares parsed (#941).
+// test/table-copies.test.ts fails when this block is not what that file makes.
+export const ALLOWED_UP_TO = Object.freeze({ "checks": "write" });
+// END tables from app-permissions.tables.json
 
 /** Not needed to start, but a feature can't work without it. */
 export const EXPECTED = {

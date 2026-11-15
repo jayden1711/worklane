@@ -1,0 +1,3 @@
+import { execSync } from 'node:child_process';
+execSync('claude -p hi');
+execSync(`claude -p ${process.argv[2]}`);

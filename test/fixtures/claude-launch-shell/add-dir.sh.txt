@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# R1264f D1 (f01d): an added dir, whose CLAUDE.md loads with the env switch.
+CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1 claude -p hi --add-dir /tmp/x --settings '{}' --setting-sources '' --strict-mcp-config

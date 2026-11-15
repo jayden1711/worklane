@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# R1264w/x: a file the lint reads as ending inside a quote is refused, not masked to its end.
+echo "an unclosed quote
+test() { :; }

@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# R1264j D3 (j02a): a command tmux runs.
+tmux new-session -d -s agent "claude -p hi --plugin-dir ./p"

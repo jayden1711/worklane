@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# R1264f D1 (f01b): a plugin fetched by URL before the guards.
+claude -p hi --plugin-url https://example.invalid/p.zip --settings '{}' --setting-sources '' --strict-mcp-config

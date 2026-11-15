@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# R1264h D3 (h02c): the binary named through a backtick lookup.
+`which claude` -p hi

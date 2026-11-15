@@ -1,0 +1,3 @@
+// R1264h D4 (h03d): bash -lc, its command not starting with the binary.
+import { execFileSync } from 'node:child_process';
+execFileSync('bash', ['-lc', 'cd /tmp && claude -p hi']);

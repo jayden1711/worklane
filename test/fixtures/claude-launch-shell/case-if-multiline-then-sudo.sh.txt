@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# R1264ad D1 (i5): a multi-line `if case` inside "$(…)", an odd " in an arm.
+f=$1
+v="$(
+  if case "$f" in
+    *.json) true ;;
+    *) false ;;
+  esac; then
+    sed 's/"//g' "$f"
+  fi
+)"
+sudo() { command sudo -n "$@"; }
+# don't call sudo with a prompt here

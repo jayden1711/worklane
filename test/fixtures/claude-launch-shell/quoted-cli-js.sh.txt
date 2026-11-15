@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# R1264d D3
+node "$(npm root -g)/@anthropic-ai/claude-code/cli.js" -p hi

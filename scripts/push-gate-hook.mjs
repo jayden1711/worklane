@@ -2,7 +2,7 @@
 // The pre-push hook's launcher: it runs the push gate (scripts/push-gate.mjs) and its rule files as they are on
 // origin's default branch, fetched on this very push, never the copy in the checkout or on the branch being pushed.
 //
-//   pre-push hook:  node push-gate-hook.mjs <remote> [<url>]       (refs on stdin; installed by npm run setup:hooks)
+//   pre-push hook:  node push-gate-hook.mjs --pre-push <remote> [<url>]   (refs on stdin; installed by npm run setup:hooks)
 //   by hand:        node scripts/push-gate-hook.mjs --range <base>..<tip>     (npm run check:push)
 //   the file set:   node scripts/push-gate-hook.mjs --print-gate-files
 //
@@ -22,12 +22,16 @@ import { devNull, tmpdir, userInfo } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-/** The gate and every file it imports (test/push-gate-hook.test.ts checks this against the real imports). */
-// check-table: never-shrink
-export const GATE_CODE = ['scripts/push-gate.mjs', 'scripts/lib/denylist.mjs'];
-/** The rule files the gate and gitleaks read from the directory they run in. */
-// check-table: never-shrink
-export const GATE_RULES = { required: ['.denylist.json'], optional: ['.denylist-allow', '.gitleaks.toml', '.gitleaksignore'] };
+// GATE_CODE: the gate and every file it imports (test/push-gate-hook.test.ts checks this against the real imports).
+// GATE_RULES: the rule files the gate and gitleaks read from the directory they run in. Both are data in
+// scripts/push-gate-hook.tables.json (#941); this file runs on its own, so it carries them (scripts/lib/table-copies.mjs).
+// BEGIN tables from push-gate-hook.tables.json: generated, do not edit (node scripts/gen-table-copies.mjs --write)
+// This script runs on its own, so it carries its tables as frozen literals of the data in
+// scripts/push-gate-hook.tables.json, which the weakening hold compares parsed (#941).
+// test/table-copies.test.ts fails when this block is not what that file makes.
+export const GATE_CODE = Object.freeze(["scripts/push-gate.mjs", "scripts/lib/denylist.mjs"]);
+export const GATE_RULES = Object.freeze({ "required": Object.freeze([".denylist.json"]), "optional": Object.freeze([".denylist-allow", ".gitleaks.toml", ".gitleaksignore"]) });
+// END tables from push-gate-hook.tables.json
 const REMOTE = 'origin';
 const SELF = 'scripts/push-gate-hook.mjs';
 const HATCH = 'PUSH_GATE_BOOTSTRAP';
@@ -223,26 +227,45 @@ function noteIfHookIsOld() {
   }
 }
 
+/** A remote whose name starts with '-' (git allows one) would be read as an option: refused before anything reads it. */
+const dashRemote = (name) =>
+  new Refusal(`a remote named ${JSON.stringify(name)}: a name that starts with '-' reads as an option to the gate, so nothing is pushed to it. Rename it: git remote rename -- ${name} <name>`);
+
 function main(argv) {
-  if (argv[0] === '--print-gate-files') {
+  // R1260d D1, R1260f F1: the installed stub marks a push (`--pre-push`), so git's first argument is a remote's NAME,
+  // whatever it says (`--print-gate-files`, `--range`, `--commit-msg`), and one that starts with '-' is refused here,
+  // before any dispatch reads it.
+  const prePush = argv[0] === '--pre-push';
+  if (prePush && (argv[1] ?? '').startsWith('-')) throw dashRemote(argv[1]);
+  if (!prePush && argv[0] === '--print-gate-files') {
     console.log(JSON.stringify({ code: GATE_CODE, rules: GATE_RULES }));
     return 0;
   }
-  const hookMode = argv[0] !== '--range';
+  const hookMode = prePush || argv[0] !== '--range';
+  // A stub from an install before --pre-push: its first argument is the remote's name too, unless it is --range.
+  if (!prePush && hookMode && (argv[0] ?? '').startsWith('-')) throw dashRemote(argv[0]);
+  const push = prePush ? argv.slice(1) : argv;
   const top = git(['rev-parse', '--show-toplevel']).trim();
   const gitDir = git(['rev-parse', '--absolute-git-dir']).trim();
   // INVARIANT: the gate and its rules live in a directory only this user can read, and it is gone when the hook returns.
   const dir = mkdtempSync(join(tmpdir(), 'push-gate-'));
   try {
     chmodSync(dir, 0o700);
-    const from = loadGate(dir, top, hookMode ? `push to ${argv[0] ?? 'an unnamed remote'}` : argv.join(' '));
+    const from = loadGate(dir, top, hookMode ? `push to ${push[0] ?? 'an unnamed remote'}` : argv.join(' '));
     console.error(`push gate: gate and rules from ${from}`);
     if (hookMode) noteIfHookIsOld();
     // WHY: the gate reads its rules (and gitleaks its config) from the directory it runs in, so it runs in the
     // private copy; GIT_DIR points its git commands at this repo, and nothing else of the checkout is in reach.
     const env = { ...process.env, GIT_DIR: gitDir, ...GIT_FIXED_ENV };
+    // R1260d D1: the commit-msg hook's marker is the installed stub's alone; a push never hands it on.
+    for (const k of Object.keys(env)) if (k.toUpperCase() === 'PUSH_GATE_COMMIT_MSG') delete env[k];
     for (const k of ['GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_PREFIX']) delete env[k];
-    const r = spawnSync(process.execPath, [join(dir, GATE_CODE[0]), ...argv], { cwd: dir, stdio: 'inherit', env });
+    // R1260f F1: `--` ends the gate's options before the remote's name, where the gate it loaded reads it (a gate on
+    // origin from before it did would take `--` for the name: then the name alone, already refused above if it reads
+    // as an option).
+    const ends = readFileSync(join(dir, GATE_CODE[0]), 'utf8').includes("if (argv[0] === '--') return pushed(argv[1]);");
+    const gateArgs = hookMode ? (ends ? ['--', ...push] : push) : argv;
+    const r = spawnSync(process.execPath, [join(dir, GATE_CODE[0]), ...gateArgs], { cwd: dir, stdio: 'inherit', env });
     if (r.error) throw r.error;
     if (r.status !== 0) console.error(`push gate: judged by the rules of ${from}. An entry in .denylist-allow counts once it is on ${REMOTE}'s default branch, not on the branch being pushed.`);
     return r.status ?? 1;

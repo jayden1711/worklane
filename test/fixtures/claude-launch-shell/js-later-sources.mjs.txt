@@ -1,0 +1,2 @@
+import { spawnSync } from 'node:child_process';
+spawnSync('claude', ['-p', 'hi', '--settings', '{}', '--setting-sources', '', '--strict-mcp-config', '--setting-sources', 'project']);

@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# R1264z D2 (q5): a suffix pattern with a quoted quote.
+head="${raw%'"'*}"
+local() { builtin local "$@"; }
+# it's fine

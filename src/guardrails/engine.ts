@@ -12,20 +12,22 @@ import { callAccesses, Secrets } from './access.js';
 import type { OtherCheckouts } from './checkouts.js';
 import { asWritten, hardLinked, Reach } from './reach.js';
 import { BRAND } from '../brand.js';
+import { type FrozenSet, tablesOf } from '../check-tables.js';
+
+/** This module's tables (src/guardrails/engine.tables.json, #941): data the weakening hold compares parsed, deep-frozen here. */
+const TABLES = tablesOf(import.meta.url);
 
 /**
  * Harness config no agent writes, whatever a project's guardrails list (there's no opt-out): the config folder, and
  * everything under .claude/ (settings, skills, commands, agents, hooks), which Claude Code itself reads.
  */
-// check-table: never-shrink
-export const BUILTIN_PROTECTED = [`${BRAND.configDir}/**`, '.claude/**'];
+export const BUILTIN_PROTECTED: readonly string[] = TABLES.get('BUILTIN_PROTECTED');
 
 /**
  * Under the config folder, the only paths agents may write: the agents' own role prompts and skills (a correction
  * lands there). A change to them is always high-risk and never auto-merges (review.ts AGENT_INSTRUCTIONS).
  */
-// check-table: never-grow
-export const AGENT_EDITABLE = [`${BRAND.configDir}/roles/**`, `${BRAND.configDir}/skills/**`];
+export const AGENT_EDITABLE: readonly string[] = TABLES.get('AGENT_EDITABLE');
 
 /** WHY: item 33; an AGENTS.md line comes only from an owner promoting a learning (src/learnings.ts), never an agent. */
 export const AGENTS_MD_PATHS = ['AGENTS.md', '**/AGENTS.md'];
@@ -160,24 +162,11 @@ function writeTargets(call: ToolCall, commands: SimpleCommand[]): string[] {
 /** A command's long options and whether each takes a value: the next word or after `=` (required), or only after `=`. */
 type LongOptions = Readonly<Record<string, 'none' | 'optional' | 'required'>>;
 /** GNU cp's long options (coreutils 9). One added lets a word through that is refused today, so the list never grows on its own. */
-// check-table: never-grow
-const CP_LONG: LongOptions = {
-  archive: 'none', 'attributes-only': 'none', backup: 'optional', context: 'optional', 'copy-contents': 'none', debug: 'none', dereference: 'none',
-  force: 'none', help: 'none', interactive: 'none', 'keep-directory-symlink': 'none', link: 'none', 'no-clobber': 'none', 'no-dereference': 'none',
-  'no-preserve': 'required', 'no-target-directory': 'none', 'one-file-system': 'none', parents: 'none', preserve: 'optional', recursive: 'none',
-  reflink: 'optional', 'remove-destination': 'none', sparse: 'required', 'strip-trailing-slashes': 'none', suffix: 'required', 'symbolic-link': 'none',
-  'target-directory': 'required', update: 'optional', verbose: 'none', version: 'none',
-};
+const CP_LONG: LongOptions = TABLES.get('CP_LONG');
 /** GNU ln's long options (coreutils 9). As CP_LONG: never grows on its own. */
-// check-table: never-grow
-const LN_LONG: LongOptions = {
-  backup: 'optional', directory: 'none', force: 'none', help: 'none', interactive: 'none', logical: 'none', 'no-dereference': 'none',
-  'no-target-directory': 'none', physical: 'none', relative: 'none', suffix: 'required', symbolic: 'none', 'target-directory': 'required',
-  verbose: 'none', version: 'none',
-};
+const LN_LONG: LongOptions = TABLES.get('LN_LONG');
 /** cp's and ln's short options that take a value: the rest of their cluster, or the next word. */
-// check-table: never-shrink
-const SHORT_WITH_VALUE = new Set(['S', 't']);
+const SHORT_WITH_VALUE: FrozenSet<string> = TABLES.get('SHORT_WITH_VALUE');
 
 interface ReadArgs {
   opts: { name: string; value: string | undefined }[];

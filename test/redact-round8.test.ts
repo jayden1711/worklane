@@ -13,7 +13,7 @@ import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { redactString, secretKinds } from '../src/events/redact.js';
-import { registrationsOf } from '../src/merge-policy-weakening.js';
+import { parseTables } from '../src/check-tables.js';
 import { readStepLines } from '../src/tailscale-setup.js';
 import { BRAND } from '../src/brand.js';
 import { repoRoot } from './helpers.js';
@@ -65,18 +65,22 @@ test('a short Basic value (a short user:password) is hidden on every path; Basic
   for (const prose of ['Use Basic Authentication here.', 'basic authentication', 'Basic Authorization header', 'the basic credentials flow']) assert.equal(redactString(prose), prose);
 });
 
-test('the helper tables carry never-shrink marks in the module and the updater copy; a plain sk- key glued to a name is found', () => {
+test("the helper tables are never-shrink in the module's data, and the updater copy carries that data; a plain sk- key glued to a name is found", () => {
+  // Since #941 they are data (src/events/redact.tables.json), compared parsed; the updater's generated copy carries the
+  // same data as frozen literals, and test/redact-vendored.test.ts fails when it doesn't.
   const want = ['GLUED_PREFIXES', 'GLUE_PARTS', 'KEY_QUALIFIERS', 'CREDENTIAL_ENDINGS'];
-  for (const file of [join(repoRoot, 'src', 'events', 'redact.ts'), updaterPath]) {
-    const marked = registrationsOf(readFileSync(file, 'utf8'))
-      .tables.filter((t) => t.kind === 'never-shrink')
-      .map((t) => t.table);
-    assert.deepEqual(
-      want.filter((n) => !marked.includes(n)),
-      [],
-      file,
-    );
-  }
+  const tables = parseTables(readFileSync(join(repoRoot, 'src', 'events', 'redact.tables.json'), 'utf8'), 'redact.tables.json');
+  assert.deepEqual(
+    want.filter((n) => tables.get(n)?.kind !== 'never-shrink'),
+    [],
+    'src/events/redact.tables.json',
+  );
+  const copy = readFileSync(updaterPath, 'utf8');
+  assert.deepEqual(
+    want.filter((n) => !copy.includes(`${JSON.stringify(n)}: Object.freeze(`) && !copy.includes(`${JSON.stringify(n)}: frozenSet(`)),
+    [],
+    updaterPath,
+  );
   const key = `${'sk'}-proj-${run(48)}`;
   for (const s of [`OPENAI_KEY_${key}`, `x_${key}`]) assert.ok(!redactString(s).includes(key.slice(-20)), s);
 });

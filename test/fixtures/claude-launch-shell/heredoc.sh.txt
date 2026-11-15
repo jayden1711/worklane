@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+bash <<'EOF'
+cd /tmp
+claude -p hi
+EOF
