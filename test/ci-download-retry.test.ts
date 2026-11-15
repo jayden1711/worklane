@@ -453,7 +453,7 @@ export function curlOutput(cmd: string): 'file' | 'stdout' | 'none' {
   // `|`, `;`, `&&`, `||`, `&` or `)` after curl: a later `sort -V` or `grep -h` is no ask of curl's, and a later
   // `grep -o` names no output of curl's.
   cmd = cmd.slice(0, cmd.search(/\bcurl\b/)) + ownWords(cmd.slice(cmd.search(/\bcurl\b/)));
-  const a = transfersOutput(words(cmd.slice(cmd.search(/\bcurl\b/))).slice(1));
+  const a = transfersOutput(words(cmd.slice(cmd.search(/\bcurl\b/))).slice(1), true, cmd.slice(cmd.search(/\bcurl\b/)));
   const b = transfersOutput(curlTokens(cmd).slice(1), false);
   return rank[a] >= rank[b] ? a : b;
 }
@@ -485,24 +485,59 @@ export const curlTokens = (cmd: string): string[] => cmd.slice(Math.max(0, cmd.s
 export const curlUrls = (cmd: string): string[] =>
   [...words(cmd.slice(cmd.search(/curl/))), ...curlTokens(cmd)].filter((w) => /^(?:--url=)?https?:\/\//i.test(w)).map((w) => w.replace(/^--url=/, ''));
 
-function transfersOutput(words0: readonly string[], slots = true): 'file' | 'stdout' | 'none' {
-  // R1228bt D4: an unquoted `$(…)` among curl's arguments is one word to the shell (`-A $(uname -s|tr A-Z a-z)`), so its
-  // inner words are joined back into it: none of them is an option or a URL of curl's. Only in the shell's reading
-  // (slots): curlTokens' unquoted reading repeats curl's own `$(curl` word.
+/**
+ * curl's long options that take a value (R1228bv2 D1, R1228bw2 D1): curl 8.5.0's `curl --help all`, every option shown
+ * with an `<arg>`. Every other `--word` is a flag, so an option curl adds later is read as a flag: its value, if it has
+ * one, counts as a URL, which can only refuse a line, never pass one.
+ */
+const CURL_VALUE_OPTIONS: ReadonlySet<string> = new Set([
+  'abstract-unix-socket', 'alt-svc', 'aws-sigv4', 'cacert', 'capath', 'cert', 'cert-type', 'ciphers', 'config',
+  'connect-timeout', 'connect-to', 'continue-at', 'cookie', 'cookie-jar', 'create-file-mode', 'crlfile', 'curves',
+  'data', 'data-ascii', 'data-binary', 'data-raw', 'data-urlencode', 'delegation', 'dns-interface', 'dns-ipv4-addr',
+  'dns-ipv6-addr', 'dns-servers', 'doh-url', 'dump-header', 'egd-file', 'engine', 'etag-compare', 'etag-save',
+  'expect100-timeout', 'form', 'form-string', 'ftp-account', 'ftp-alternative-to-user', 'ftp-method', 'ftp-port',
+  'ftp-ssl-ccc-mode', 'happy-eyeballs-timeout-ms', 'header', 'help', 'hostpubmd5', 'hostpubsha256', 'hsts',
+  'interface', 'ipfs-gateway', 'json', 'keepalive-time', 'key', 'key-type', 'krb', 'libcurl', 'limit-rate',
+  'local-port', 'login-options', 'mail-auth', 'mail-from', 'mail-rcpt', 'max-filesize', 'max-redirs', 'max-time',
+  'netrc-file', 'noproxy', 'oauth2-bearer', 'output', 'output-dir', 'parallel-max', 'pass', 'pinnedpubkey',
+  'preproxy', 'proto', 'proto-default', 'proto-redir', 'proxy', 'proxy-cacert', 'proxy-capath', 'proxy-cert',
+  'proxy-cert-type', 'proxy-ciphers', 'proxy-crlfile', 'proxy-header', 'proxy-key', 'proxy-key-type', 'proxy-pass',
+  'proxy-pinnedpubkey', 'proxy-service-name', 'proxy-tls13-ciphers', 'proxy-tlsauthtype', 'proxy-tlspassword',
+  'proxy-tlsuser', 'proxy-user', 'proxy1.0', 'pubkey', 'quote', 'random-file', 'range', 'rate', 'referer', 'request',
+  'request-target', 'resolve', 'retry', 'retry-delay', 'retry-max-time', 'sasl-authzid', 'service-name', 'socks4',
+  'socks4a', 'socks5', 'socks5-gssapi-service', 'socks5-hostname', 'speed-limit', 'speed-time', 'stderr',
+  'telnet-option', 'tftp-blksize', 'time-cond', 'tls-max', 'tls13-ciphers', 'tlsauthtype', 'tlspassword', 'tlsuser',
+  'trace', 'trace-ascii', 'trace-config', 'unix-socket', 'upload-file', 'url', 'url-query', 'user', 'user-agent',
+  'variable', 'write-out',
+]);
+
+function transfersOutput(words0: readonly string[], slots = true, raw = ''): 'file' | 'stdout' | 'none' {
+  // R1228bt D4: an unquoted `$(…)` among curl's arguments is one word as written (`-A $(uname -s|tr A-Z a-z)`), so its
+  // inner words are joined back into it: none of them is an option or a URL of curl's. At run time bash splits its
+  // output into words, which the lint can't see: it takes one slot (R1228bw2 D3; a stated limit). Likewise an unquoted
+  // `${…}` split at a blank (`${PROXY:+-x "$PROXY"}`) is joined back into one word (R1228bw2 D2). Only in the shell's
+  // reading (slots): curlTokens' unquoted reading repeats curl's own `$(curl` word.
   const t: string[] = [];
   let open = 0;
+  let braces = 0;
   for (const w of slots ? words0 : []) {
     const d = (w.match(/\(/g)?.length ?? 0) - (w.match(/\)/g)?.length ?? 0);
+    const b = (w.match(/\{/g)?.length ?? 0) - (w.match(/\}/g)?.length ?? 0);
     if (open > 0) { t[t.length - 1] += ` ${w}`; open += d; }
+    else if (braces > 0) { t[t.length - 1] += ` ${w}`; braces = Math.max(0, braces + b); }
     // Not at a `$(curl` word (curl's own, when the text before it also says curl: `echo "curl: $(curl -V)"`).
-    else { t.push(w); if (w.includes('$(') && !/\bcurl$/.test(w)) open = Math.max(0, d); }
+    else {
+      t.push(w);
+      if (w.includes('$(') && !/\bcurl$/.test(w)) open = Math.max(0, d);
+      else if (w.includes('${')) braces = Math.max(0, b);
+    }
   }
   if (!slots) t.push(...words0);
   // R1228bk D3, R1228bm D3, R1228bl L7: -V/--version, -h/--help or -M/--manual (a short bundle too: `-sV`) makes curl
   // print and exit with no transfer, URL or not, unless it is another option's value (`-A --version`, or glued: `-AMyBot`, a user agent).
   const takesValue = (x: string) =>
     /^-[a-zA-Z0-9#:]*[AbcCdDeEFHKmoPQrtTuUwxXyYz]$/.test(x) ||
-    (/^--[a-z0-9-]+$/.test(x) && !/^--(?:silent|show-error|fail|fail-with-body|location|compressed|insecure|verbose|include|head|remote-name|remote-name-all|create-dirs|retry-all-errors|retry-connrefused|http1\.1|http2|globoff|no-progress-meter|progress-bar|ipv4|ipv6|version|help|manual|no-buffer|ssl-reqd|tlsv1\.2)$/.test(x));
+    (/^--[a-z0-9.-]+$/.test(x) && CURL_VALUE_OPTIONS.has(x.slice(2)));
   // R1228bn D1, R1228bo D1: in a short bundle a letter that takes a value takes the rest of it (`-fsSLohelm`: -o helm;
   // `-AMyBot`: a user agent), so V, h or M is an ask only before any such letter.
   const ask = (x: string, k: number) => /^(?:--version|--help|--manual|-[^-AbcCdDeEFHKmoPQrtTuUwxXyYz]*[VhM][a-zA-Z0-9#:]*)$/.test(x) && !(k > 0 && takesValue(t[k - 1]!));
@@ -514,6 +549,10 @@ function transfersOutput(words0: readonly string[], slots = true): 'file' | 'std
   let urls = 0;
   let outs = 0;
   let all = false;
+  // R1228bw2 D6: -I / --head (or I among a short bundle's flags) asks for headers only: no body, unless a file is named.
+  let head = false;
+  // R1228bv2 D2 option (a): a name written double-quoted (`"$X"`, `"${X}"`) is one word, one URL slot.
+  const quoted = new Set([...raw.matchAll(/"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?"/g)].map((m) => m[1]!));
   const end = () => {
     if (!named || (slots && !all && urls > outs)) stdout = true;
     named = all = false;
@@ -531,7 +570,13 @@ function transfersOutput(words0: readonly string[], slots = true): 'file' | 'std
     // R1228bt: a redirection and its word are the shell's; a long option's value is no URL; any other word is a URL
     // (curl's own reading: `"$A" "$B"` are two).
     else if (/^(?:\d*|&)?[<>]/.test(tok)) { if (/^(?:\d*|&)?[<>]+&?$/.test(tok)) i++; }
-    else if (/^--[a-z0-9-]+$/.test(tok)) { if (takesValue(tok)) i++; }
+    else if (tok === '--head') head = true;
+    else if (/^--[a-z0-9.-]+$/.test(tok)) { if (takesValue(tok)) i++; }
+    // R1228bv2 D2 option (a) (owner's trade-off): a word the shell may make any number of words, options included,
+    // takes no URL slot: an array expansion (`"${A[@]}"`), `"$@"`, an unquoted variable (`$CURL_OPTS`) or a `${…}` with
+    // an operator (`${PROXY:+-x "$PROXY"}`). A double-quoted scalar (`"$X"`) is exactly one word: one slot. So URLs
+    // passed those ways aren't counted: a stated limit (`$HEALTH $URL`).
+    else if (slots && (/\[[@*]\]\}?$/.test(tok) || /^\$[@*]$/.test(tok) || /^\$\{[^}]*[^A-Za-z0-9_}][^}]*\}?/.test(tok) || (/^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$/.test(tok) && !quoted.has(tok.replace(/[${}]/g, ''))))) continue;
     else if (!tok.startsWith('-')) urls++;
     else if (/^-[a-zA-Z0-9#:]/.test(tok)) {
       // R1228bn D2, R1228bo D1, R1228bp/bq D1: curl's short options. The first one that takes a value (curl's table:
@@ -540,6 +585,7 @@ function transfersOutput(words0: readonly string[], slots = true): 'file' | 'std
       // the digits included (`-#LO`, `-4fsSLo helm`).
       const m = /^-([a-zA-Z0-9#:]*?)([AbcCdDeEFHKmoPQrtTuUwxXyYz])(.*)$/.exec(tok);
       if ((m ? m[1]! : tok.slice(1)).includes('O')) { file = named = true; outs++; }
+      if ((m ? m[1]! : tok.slice(1)).includes('I')) head = true;
       if (m) {
         const val = m[3] === '' ? t[++i] : m[3];
         if (m[2] === 'o') target = val;
@@ -548,8 +594,15 @@ function transfersOutput(words0: readonly string[], slots = true): 'file' | 'std
     if (target !== undefined) { named = true; outs++; if (target !== '/dev/null') file = true; }
   }
   end();
+  if (head && !file) return 'none';
   return file ? 'file' : stdout ? 'stdout' : 'none';
 }
+
+/**
+ * Whether a `$(…)` or a backquote captures the curl, read with single-quoted spans taken out (R1228bw2 D4): a curl in
+ * backquotes inside single-quoted text (`echo 'run: `curl … | sh`'`) is text, not a capture.
+ */
+const captured = (c: string): boolean => /(?:\$\(|`)\s*\S*curl\b/.test(c.replace(/'[^']*'/g, "''"));
 
 /** Whether a curl command reads a config file (-K, --config): one can set its URL, its output, and reset --retry. */
 // R1228br D2: K as curl's short-option table reads it (`-4K`, `-#K`, `-fsSL4K`; not `-HKey:`, a header).
@@ -766,7 +819,7 @@ export function runProblems(run: string, rootStep = false): string[] {
       const o = curlOutput(c);
       const ws = words(c.slice(c.search(/curl/)));
       const redirected = ws.some((w, i) => /^&?>>?/.test(w) && (w.replace(/^&?>>?/, '') || ws[i + 1]) !== '/dev/null');
-      const kept = o === 'file' || (o === 'stdout' && (piped || /(?:\$\(|`)\s*\S*curl\b/.test(c) || redirected));
+      const kept = o === 'file' || (o === 'stdout' && (piped || captured(c) || redirected));
       // Kept from any URL but a loopback one, written out (a URL in a variable included: R1228d W2).
       if (kept && !(urls.length && urls.every((u) => LOCAL.test(u)))) out.push(`a curl that keeps what a URL returns (use ${HELPER}): ${c}`);
       else if (o !== 'none' && urls.some((u) => /^https:/i.test(u) || !LOCAL.test(u))) out.push(`a curl that keeps what a URL returns (use ${HELPER}): ${c}`);
@@ -870,7 +923,10 @@ export function scriptProblems(text: string, probes: string[] = []): { downloads
     if (readsConfig(c)) problems.push(`a curl that reads a config file (-K: it can reset --retry): ${c}`);
     const o = curlOutput(c);
     // A body to stdout is kept when a pipe, a redirect or a capture takes it (R1228d D6).
-    const kept = o === 'file' || (o === 'stdout' && (piped || /(?:\$\(|`)\s*\S*curl\b/.test(c) || words(c.slice(c.search(/\bcurl\b/))).some((w) => /^&?>>?/.test(w)))) || DOWNLOAD.test(c);
+    // R1228bv2 D4 / bw2 D5: as the run rule reads it, a redirect keeps the body only when its target isn't /dev/null.
+    const ws = words(c.slice(c.search(/\bcurl\b/)));
+    const redirected = ws.some((w, i) => /^&?>>?/.test(w) && (w.replace(/^&?>>?/, '') || ws[i + 1]) !== '/dev/null');
+    const kept = o === 'file' || (o === 'stdout' && (piped || captured(c) || redirected)) || DOWNLOAD.test(c);
     if (!kept) continue;
     downloads++;
     // R1228bu N1: curl's own --retry, not a later command's in the same unsplit `$(…)`.
@@ -2286,11 +2342,12 @@ test('R1228bt D1-D5, R1228bu D1-D3, N1: an option value is no URL; any other wor
     assert.deepEqual(runProblems(`${text}\n`), [], `kept in a run: ${text}`);
   }
   for (const text of [`code="$(curl -fsS -H "Origin: https://app.example.com" -o /dev/null -w '%{http_code}' ${H})"`, `code="$(curl -fsS -o /dev/null -w '%{http_code}' --referer https://app.example.com/ ${H})"`, `x="$(curl -fsS -o /dev/null -w '%{http_code}' -H 'Origin: https://a.example' ${H} | grep -o '[0-9]*')"`,
-    // bt D4: an unquoted $(…) among curl's arguments is one word: nothing in it is cut at, or counted as a URL.
+    // bt D4: an unquoted $(…) among curl's arguments is one word as written: nothing in it is cut at, or counted as a
+    // URL (at run time bash splits its output: R1228bw2 D3, a stated limit).
     `v="$(curl -fsSL -A $(uname -s|tr A-Z a-z) -o /dev/null -w '%{http_code}' ${H})"`]) assert.deepEqual(kept(`${text}\n`), [], `kept: ${text}`);
   // bt D2 / bu D1: any word that isn't an option, an option's value or a redirection is a URL to curl, so the second
   // body goes to stdout (real curl: 2 GETs, the second body kept).
-  for (const text of ['curl -fsSL -o /dev/null "$HEALTH" "$URL" > t.tgz', 'curl -fsSL -o /dev/null "$HEALTH" "$URL" | tar xz', 'curl -fsSL -o /dev/null $HEALTH $URL > t.tgz', 'curl -fsSL -o /dev/null https://example.com/health "$URL" > t.tgz', 'curl -fsSL -o /dev/null example.com/health example.com/t.tgz > t.tgz', 'x="$(curl -fsS -o /dev/null -w \'%{http_code}\' "$A" "$B")"']) {
+  for (const text of ['curl -fsSL -o /dev/null "$HEALTH" "$URL" > t.tgz', 'curl -fsSL -o /dev/null "$HEALTH" "$URL" | tar xz', 'curl -fsSL -o /dev/null https://example.com/health "$URL" > t.tgz', 'curl -fsSL -o /dev/null example.com/health example.com/t.tgz > t.tgz', 'x="$(curl -fsS -o /dev/null -w \'%{http_code}\' "$A" "$B")"']) {
     assert.ok(kept(`${text}\n`).some((p) => /retry/.test(p)), `refused: ${text}`);
   }
   // A redirection and its word are the shell's, not URLs (real curl: one transfer to /dev/null, the -w text to code.txt).
@@ -2306,6 +2363,49 @@ test('R1228bt D1-D5, R1228bu D1-D3, N1: an option value is no URL; any other wor
   assert.ok(kept('x="$(curl -fsSL -o a.tgz https://example.com/a; curl --retry 5 -fsSL -o b.tgz https://example.com/b)"\n').some((p) => /retry/.test(p)), 'refused: L1a');
   // bt D5: a case body after `coproc NAME` (bash runs get.sh: bt sem.out P2c).
   assert.ok(unread('x="$(coproc C case a in a) echo \'q"q\';; esac; wait)"; source .claude/hooks/get.sh\n').length > 0, 'refused: P2c');
+});
+
+test('R1228bv2 D1-D4, R1228bw2 D1-D6: curl\'s value-taking long options from its own table; no URL slot for a word the shell may split; a capture in single quotes is text; a body to /dev/null and a HEAD probe keep nothing', () => {
+  const kept = (text: string) => fileDownloadProblems('scripts/ci/zz-get.sh', text).problems;
+  const code = (opts: string) => `code=$(curl -s ${opts} -o /dev/null -w '%{http_code}' "$URL")`;
+  // bv2 D1 / bw2 D1 (false refusals): a flag outside the old 28-name list no longer eats -o (real curl: 1 GET, no file:
+  // attacks-1228bv2/bv2/realcurl.out, attacks-1228bw2/bw2/realcurl.out).
+  for (const opts of ['-S --get', '--digest -u u:p', '--anyauth -u u:p', '--basic -u u:p', '--proxy-insecure -x "$REF"', '--location-trusted', '--no-keepalive', '--netrc-optional', '--fail-early', '--path-as-is', '--http2-prior-knowledge', '--compressed --raw', '-sSL --post301', '-x "$PROXY" --ssl-no-revoke', '--tcp-nodelay', '--netrc', '--remote-time', '--proxy1.0 "$P"']) {
+    assert.deepEqual(kept(`${code(opts)}\n`), [], `kept: ${code(opts)}`);
+  }
+  // ... and no longer eats a URL or -o (real curl: the second body or the file kept, no retry: bv2 E08/E09, bw2 K1-K3).
+  for (const text of ['curl -fsSL -o /dev/null --no-keepalive "$PROBE" "$URL" > t.tgz', 'curl -fsSL -o /dev/null --get "$PROBE" "$URL" | tar xz', 'curl -fsSL --netrc -o pkg.tgz "$URL"', 'curl -fsSL --get -o pkg.tgz "$URL"', 'curl -fsSL --remote-header-name -O "$URL"', 'curl -fsSL --proxy1.0 "$P" -o pkg.tgz "$URL"']) {
+    assert.ok(kept(`${text}\n`).some((p) => /retry/.test(p)), `refused: ${text}`);
+  }
+  // bv2 D2 / bw2 D2, option (a): an unquoted variable, an array, "$@" or a `${…}` with an operator takes no URL slot
+  // (real curl: 1 GET, no file).
+  for (const opts of ['$CURL_OPTS', '"${AUTH[@]}"', '"${CURL_ARGS[@]}"', '${PROXY:+-x "$PROXY"}', '${TOKEN:+-H "Authorization: Bearer $TOKEN"}']) {
+    assert.deepEqual(kept(`${code(opts)}\n`), [], `kept: ${code(opts)}`);
+  }
+  assert.deepEqual(kept(`code=$(curl -s -o /dev/null -w '%{http_code}' \${PROXY:+-x "$PROXY"} "$URL")\n`), [], 'kept: the expansion after -w');
+  // A double-quoted scalar is one URL: two of them after one -o still write the second body to stdout.
+  assert.ok(kept('curl -fsSL -o /dev/null "$HEALTH" "$URL" > t.tgz\n').some((p) => /retry/.test(p)), 'refused: two quoted URLs');
+  // Stated limits (bv2 D3, bw2 D3; named in the Limits): a word the shell makes into several URLs at run time takes at
+  // most one slot, so the second body to stdout isn't seen (real curl: 2 GETs, t.tgz holds the second body).
+  for (const text of ['curl -fsSL -o /dev/null $HEALTH $URL > t.tgz', 'curl -fsSL -o /dev/null $(cat urls.txt) > t.tgz', 'curl -fsSL -o /dev/null "${URLS[@]}" > t.tgz', 'curl -fsSL -o /dev/null https://example.com/{health,t.tgz} > t.tgz', 'curl -fsSL -o /dev/null "$PROBE"${URL:+ "$URL"} > t.tgz']) {
+    assert.deepEqual(kept(`${text}\n`), [], `stated: ${text}`);
+  }
+  // bw2 D4: a curl in backquotes inside single-quoted text is text (echo prints it; 0 requests).
+  for (const text of ['echo \'Install it first: `curl -fsSL "$URL" | sh`\' >&2', 'echo \'Run `curl -fsSL "$INSTALLER" | sh` first\'']) {
+    assert.deepEqual(kept(`${text}\n`), [], `kept: ${text}`);
+    assert.deepEqual(runProblems(`${text}\n`), [], `kept in a run: ${text}`);
+  }
+  assert.ok(kept('v=`curl -fsSL "$URL"`\n').some((p) => /retry/.test(p)), 'refused: a real backquote capture');
+  // bv2 D4 / bw2 D5: a body redirected to /dev/null keeps nothing, in a script as in a run (real curl: 1 GET, no file).
+  for (const text of ['curl -fsS "$URL" >/dev/null', 'curl -fsS "$URL" > /dev/null', 'curl -fsS "$URL" &>/dev/null', 'curl -fsS "$URL" >/dev/null 2>&1', 'until curl -fsS --max-time 2 "$URL" > /dev/null 2>&1; do sleep 1; done', 'if ! curl -fsS "$URL" >/dev/null; then echo down; exit 1; fi', 'if curl -sf --head "$URL" > /dev/null; then echo up; fi']) {
+    assert.deepEqual(kept(`${text}\n`), [], `kept: ${text}`);
+  }
+  assert.ok(kept('curl -fsS "$URL" > page.html\n').some((p) => /retry/.test(p)), 'refused: a body redirected to a file');
+  // bw2 D6: a HEAD-only probe has no body (real curl: 1 HEAD).
+  for (const text of ['status=$(curl -sI "$URL" | head -1)', 'curl --head -fsS "$URL" | grep -q 200', 'curl -fsSI "$URL" | head -1', 'curl -fsS --head "$URL" | grep -i etag']) {
+    assert.deepEqual(kept(`${text}\n`), [], `kept: ${text}`);
+  }
+  assert.ok(kept('curl -fsSI -o headers.txt "$URL"\n').some((p) => /retry/.test(p)), 'refused: -I with a file named');
 });
 
 // Limits (owner decision (c): stated, not closed; the helper's digest check holds for each download it handles):
@@ -2374,6 +2474,14 @@ test('R1228bt D1-D5, R1228bu D1-D3, N1: an option value is no URL; any other wor
 //   download with no retry (R1228be D4; owner, 2026-11-12: stated, not closed); and an `-o` after the quote isn't seen
 //   either, so a curl that names its output only there passes with no retry (R1228bg D4). Put `--retry` and `-o`
 //   before the multi-line argument.
+// - URL slots (R1228bv2 D2, D3, R1228bw2 D2, D3): curl gives each URL its own output slot, and the lint counts a
+//   URL per word it sees. A word the shell makes into any number of words at run time takes at most one slot: an
+//   unquoted variable (`$HEALTH $URL`, or one holding two URLs) or `$(…)`, an array (`"${URLS[@]}"`), `"$@"`, a
+//   `${…}` with an operator, glued to another word or not (`"$PROBE"${URL:+ "$URL"}`, refused before option (a)) (none
+//   of those take a slot: the owner's option (a)), a brace expansion
+//   (`https://example.com/{a,t.tgz}`), or URLs fed by xargs. So a second URL given one of those ways after
+//   `-o /dev/null` writes its body to stdout unseen. A double-quoted `"$X"` is one word and one slot. Pinned as stated
+//   rows in the R1228bv2/bw2 test.
 // - A download that never names a URL the lint knows (DOWNLOAD), through a tool it doesn't know (python, node, perl, a
 //   compiled binary, an action not in USES_ALLOWED once allowed: a node or Python file's own download), or built from
 //   pieces at run time, isn't seen.
