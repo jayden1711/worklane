@@ -96,7 +96,8 @@
 // each subtest's (`t.test`, `t['test']`, an alias; a function given by name is read when this file declares it once,
 // else refused), every use of the sign must have run, each function must have run to its end every time it ran
 // (the count just before its closing brace equals its own call count, R1169aj D1), and each subtest must have
-// started. Each is judged by the innermost range around its own position, never by its line: a branch not taken,
+// started. Each is judged by the innermost range around its own position, in the text V8 ran (textAsRun: the test
+// preload's hook adds to a file that registers a table), never by its line: a branch not taken,
 // braced or not, a loop body never entered, an operand of `?:` `&&` `||` `??` never evaluated, a function never called
 // that holds the sign, and the code after a `return`, `throw`, `break` or `continue` are ranges of their own. The
 // file's coverage must come from one process, its own run (R1169ai D1): a child process or a worker that loads it
@@ -1636,14 +1637,15 @@ function subtestCalls(ts, fn) {
  * - `sign`: each line that holds systemd's sign (the static pass's SIGN, in a string, a name or a regex), the
  *   systemd work itself, which a branch, a loop over nothing or a catch that swallows can leave unrun.
  * Lines are the built file's, 1-based, as node's coverage reports them. `refused`: a function given by a name this
- * file doesn't declare (it can't be read, so what must run of it can't be said).
+ * file doesn't declare (it can't be read, so what must run of it can't be said). `length`: the length of `text`, the
+ * text each position is in, which problems() holds to the length of the text the coverage is of (R1308a D1).
  */
 export function mustRun(ts, path, text, line, column) {
   const sf = parsed(ts, path, text);
   const lineOf = (n) => sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1;
   const at = (n) => ({ line: lineOf(n), pos: n.getStart(sf) });
   const sign = new RegExp(SIGN.source);
-  const out = { ends: [], subtests: [], sign: [], refused: null };
+  const out = { ends: [], subtests: [], sign: [], refused: null, length: text.length };
   let chk = null;
   const checker = () => (chk ??= checkerOf(ts, sf));
   const seen = new Set();
@@ -1847,6 +1849,19 @@ export function blockCoverage(dir, url) {
 }
 
 /**
+ * The text V8 ran of the built file at `url`, which its block coverage's offsets are offsets of: the test preload's
+ * module hook (test/table-freeze.ts, #941) adds a freeze call after each registered table, `freezes` (its withFreezes).
+ * The call goes on the table's own line, so the lines hold, but every offset after it moves: read on the file as built,
+ * each point after a table lands short of where it ran. A rewrite that moved a line is refused, since each test is
+ * found by its line.
+ */
+export function textAsRun(text, url, freezes) {
+  const ran = freezes(text, url) ?? text;
+  if (ran.split('\n').length !== text.split('\n').length) throw new Error(`${url}: the test preload's module hook moved its lines, so what of each test ran can't be read on it`);
+  return ran;
+}
+
+/**
  * How many times the code at character offset `pos` ran: the count of the innermost range around it, in the one
  * process that reported the file (problems() judges no other: R1169ai D1). A branch not taken, a loop body never entered, a function never called and the code after a
  * `return`, `throw`, `break` or `continue` are each a range of their own, braced or not (the precision line coverage
@@ -1949,6 +1964,14 @@ export function problems(runs) {
             continue;
           }
           const ranges = coverage[0];
+          // The positions are in the text mustRun read; the ranges, in the text V8 ran, whose own range (the module's,
+          // V8's first) spans it whole. Of two lengths, they are two texts, and no position can be judged (R1308a D1:
+          // the file as built, read while the preload's hook had added to it, judged every point after a table short).
+          const whole = ranges[0];
+          if (!whole || whole.startOffset !== 0 || whole.endOffset !== t.mustRun.length) {
+            out.push(`${at}: its coverage is of a text of ${whole ? whole.endOffset : 0} characters, and what of it must run was read on one of ${t.mustRun.length}: the coverage is of a text other than the one judged`);
+            continue;
+          }
           const ran = (p) => countAt(ranges, p.pos) > 0;
           const lines = (ps) => [...new Set(ps.map((p) => p.line))].join(', ');
           // Ran to its end every time it ran (R1169aj D1, D2: a function run for two tests, or two subtests, too).
@@ -2032,6 +2055,10 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   }
   let found;
   let signTotal = 0;
+  // The preload's module hook, as built: what it adds to a test file is what V8 runs and reports coverage of. A build
+  // without it (this script's own scratch roots) has a preload that can't register it, so nothing is added there.
+  const hook = join(root, 'dist', 'test', 'table-freeze.js');
+  const { withFreezes } = existsSync(hook) ? await import(pathToFileURL(hook).href) : { withFreezes: () => null };
   try {
     // systemd's sign, in every file the build compiles (R1169k): only systemCi's declaration, a gate's reason or a
     // test's own function may hold it, and the allowlist's named data, so no skip reads it under another name.
@@ -2089,9 +2116,11 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
       // Each gate opens with node's own count (R1169ab D2): fewer checks than that fails it here.
       const unplanned = planProblems(ts, `test/${f.file}`, built, f.gates);
       if (unplanned.length) throw new Error(unplanned.join('\n'));
-      // Each sign test: what of its own function must have run (R1169ab D2), read on the coverage of its run.
+      // Each sign test: what of its own function must have run (R1169ab D2), read on the coverage of its run, so on
+      // the text that ran (textAsRun).
+      const ran = textAsRun(built, pathToFileURL(join(root, 'dist', 'test', f.file.replace(/\.ts$/, '.js'))).href, withFreezes);
       for (const t of f.signTests ?? []) {
-        t.mustRun = mustRun(ts, `test/${f.file}`, built, t.line, t.column);
+        t.mustRun = mustRun(ts, `test/${f.file}`, ran, t.line, t.column);
         // What can't be read can't be judged (R1169ac D1): refused here, unless the allowlist excuses the test.
         // The advice to inline or declare fits only a function that can't be read (R1169ag D3, R1169ah D6).
         if (t.mustRun.refused && !excused[`test/${f.file}: ${t.name ?? t.label}`]) throw new Error(`test/${f.file}: ${t.name ?? t.label}: ${t.mustRun.refused}${/declare once/.test(t.mustRun.refused) ? ': inline it, or declare it in this file once, so what of it must run on the VM can be read' : ''}`);
