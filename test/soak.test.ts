@@ -1673,6 +1673,40 @@ test('soak driver (Linux): a /dev/shm entry counts only while a counted process 
 // --- #1181 review R1181r: a Linux case for each counting path a mutation passed (R3), and R2, R4, R5, R6 ---
 const python = process.platform === 'linux' && spawnSync('python3', ['-c', 'import ctypes'], { stdio: 'ignore' }).status === 0;
 /** A child (python3 `code`, its args) that stays until killed, once it printed `ready`; null when it printed `skip`. */
+/**
+ * R1181ay: what a held kernel buffer adds to the job cgroup's kernel level, measured where other test files run at once
+ * (`npm test` runs files in parallel in one cgroup, so a single before/after read saw -3.8 MB and 14.8 MB of 16 and 32
+ * held, release run 43652797429). Each hold is read against the mean of the levels just before it and just after its
+ * release, so a drift from the others cancels; HOLDS holds, and the test passes when most of them reach their bar.
+ */
+const HOLDS = 5;
+/** One hold's rise over the mean of the levels around it. */
+const holdRise = (before: number, held: number, after: number): number => held - (before + after) / 2;
+/** Whether most holds reached their bar (a reader that misses the buffer misses it in every hold). */
+const mostHoldsReach = (rises: readonly number[], bars: readonly number[]): boolean => rises.filter((r, i) => r >= bars[i]!).length * 2 > rises.length;
+/** Reads `hold` HOLDS times: each start and stop around `settle`d reads of the kernel level. Null when a hold is refused. */
+async function heldRises(hold: () => Promise<{ bar: number; stop: () => Promise<void> } | null>): Promise<{ rises: number[]; bars: number[] } | null> {
+  const settle = () => new Promise((r) => setTimeout(r, 2500));
+  const rises: number[] = [];
+  const bars: number[] = [];
+  await settle();
+  let before = cgroupLevels().kernelBytes!;
+  for (let k = 0; k < HOLDS; k++) {
+    const h = await hold();
+    if (!h) return null;
+    await settle();
+    const held = cgroupLevels().kernelBytes!;
+    await h.stop();
+    await settle();
+    const after = cgroupLevels().kernelBytes!;
+    rises.push(holdRise(before, held, after));
+    bars.push(h.bar);
+    before = after;
+  }
+  return { rises, bars };
+}
+/** A child's exit, as a promise (at once when it has exited already). */
+const exited = (c: ReturnType<typeof spawn>) => new Promise<void>((r) => (c.exitCode !== null || c.signalCode !== null ? r() : c.once('exit', () => r())));
 async function readyChild(code: string, args: string[]): Promise<ReturnType<typeof spawn> | null> {
   const c = spawn('python3', ['-c', code, ...args], { stdio: ['ignore', 'pipe', 'ignore'], env: { ...process.env, SOAK_CHILD_MARK: '' } });
   let out = '';
@@ -2117,6 +2151,22 @@ test("soak driver (Linux, R1181t D1, D4): the job's cgroup is read: a process st
   }
 });
 
+test('soak driver (R1181ay): a held buffer is read against the levels around it, and most holds must reach the bar', () => {
+  const MB = 2 ** 20;
+  const bars = Array(HOLDS).fill(16 * MB);
+  // A reader that reads the 32 MB: as in release run 43652797429 (a single read saw -3.8 MB of 16 held), other tests free
+  // about 40 MB across three of the holds, so the level at the hold is only 12 MB over the one before it; read against
+  // the levels on both sides, every hold still reads 32.
+  const good = [holdRise(100 * MB, 132 * MB, 100 * MB), holdRise(100 * MB, 112 * MB, 60 * MB), holdRise(60 * MB, 72 * MB, 20 * MB), holdRise(20 * MB, 32 * MB, -20 * MB), holdRise(-20 * MB, 12 * MB, -20 * MB)];
+  assert.ok(mostHoldsReach(good, bars), `the full read passes: ${good.map((x) => x / MB)}`);
+  // A reader that misses the buffers (about 3 MB a hold), with other tests' noise lifting two of the five holds over 16 MB:
+  // it still fails.
+  const bad = [holdRise(100 * MB, 103 * MB, 100 * MB), holdRise(100 * MB, 120 * MB, 100 * MB), holdRise(100 * MB, 103 * MB, 100 * MB), holdRise(100 * MB, 119 * MB, 100 * MB), holdRise(100 * MB, 104 * MB, 100 * MB)];
+  assert.ok(!mostHoldsReach(bad, bars), `a reader that misses the buffers fails: ${bad.map((x) => x / MB)}`);
+  // Half of the holds is not most.
+  assert.ok(!mostHoldsReach([20 * MB, 20 * MB, 3 * MB, 3 * MB], Array(4).fill(16 * MB)), 'two of four is not most');
+});
+
 test("soak driver (Linux, R1181u C1, C2): the job cgroup's kernel level reads a pipe's buffers in full", linuxOnly, async (t) => {
   if (!python) return t.skip('no python3');
   if (cgroupLevels().kernelBytes === null) {
@@ -2143,19 +2193,22 @@ for i in range(32):
     held.append((r, w))
 print('ready', flush=True)
 time.sleep(60)`;
-  // memory.stat is flushed at most every 2 s.
-  const settle = () => new Promise((r) => setTimeout(r, 2500));
-  await settle();
-  const before = cgroupLevels().kernelBytes!;
-  const c = await readyChild(PIPES, []);
+  // memory.stat is flushed at most every 2 s: heldRises settles 2.5 s around each read.
+  const held: ReturnType<typeof spawn>[] = [];
   try {
-    if (!c) return t.skip('a 1 MB pipe is refused here (pipe-max-size or the per-user pipe limit)');
-    await settle();
-    const rise = cgroupLevels().kernelBytes! - before;
+    const r = await heldRises(async () => {
+      const c = await readyChild(PIPES, []);
+      if (!c) return null;
+      held.push(c);
+      return { bar: 16 * 2 ** 20, stop: async () => { c.kill(); await exited(c); } };
+    });
+    if (!r) return t.skip('a 1 MB pipe is refused here (pipe-max-size or the per-user pipe limit)');
+    const mb = r.rises.map((x) => (x / 2 ** 20).toFixed(1)).join(', ');
+    t.diagnostic(`the kernel level rose ${mb} MB over ${HOLDS} holds of 32 MB of pipe buffers`);
     // `slab_unreclaimable + sock` rose about 3 MB here (R1181u C1); `kernel - slab_reclaimable` the full 32.
-    assert.ok(rise >= 16 * 2 ** 20, `the kernel level rose ${(rise / 2 ** 20).toFixed(1)} MB with 32 MB of pipe buffers held`);
+    assert.ok(mostHoldsReach(r.rises, r.bars), `the kernel level rose ${mb} MB over ${HOLDS} holds of 32 MB of pipe buffers: most must reach 16 MB`);
   } finally {
-    c?.kill();
+    for (const c of held) c.kill();
   }
 });
 
@@ -2182,21 +2235,25 @@ for i in range(16):
     if sent >= (16 << 20): break
 print('ready', sent, flush=True)
 time.sleep(60)`;
-  const settle = () => new Promise((r) => setTimeout(r, 2500));
-  await settle();
-  const before = cgroupLevels().kernelBytes!;
-  const c = spawn('python3', ['-c', TCP], { stdio: ['ignore', 'pipe', 'ignore'], env: { ...process.env, SOAK_CHILD_MARK: '' } });
-  let out = '';
-  c.stdout!.on('data', (b) => (out += String(b)));
+  const held: ReturnType<typeof spawn>[] = [];
+  const sent: number[] = [];
   try {
-    assert.ok(await waitFor(() => /ready \d+/.test(out), 15_000), `the sockets filled: ${out}`);
-    const sent = Number(/ready (\d+)/.exec(out)![1]);
-    await settle();
-    const rise = cgroupLevels().kernelBytes! - before;
-    // 0.75 of what is held in flight (16 MB when the buffers take it all): `kernel - slab_reclaimable` alone read +0.5 MB of 516 (R1181x).
-    assert.ok(rise >= Math.min(12 * 2 ** 20, sent * 0.75), `the kernel level rose ${(rise / 2 ** 20).toFixed(1)} MB with ${(sent / 2 ** 20).toFixed(1)} MB in flight`);
+    const r = (await heldRises(async () => {
+      const c = spawn('python3', ['-c', TCP], { stdio: ['ignore', 'pipe', 'ignore'], env: { ...process.env, SOAK_CHILD_MARK: '' } });
+      held.push(c);
+      let out = '';
+      c.stdout!.on('data', (b) => (out += String(b)));
+      assert.ok(await waitFor(() => /ready \d+/.test(out), 15_000), `the sockets filled: ${out}`);
+      const n = Number(/ready (\d+)/.exec(out)![1]);
+      sent.push(n);
+      // 0.75 of what is held in flight (16 MB when the buffers take it all): `kernel - slab_reclaimable` alone read +0.5 MB of 516 (R1181x).
+      return { bar: Math.min(12 * 2 ** 20, n * 0.75), stop: async () => { c.kill(); await exited(c); } };
+    }))!;
+    const mb = r.rises.map((x, i) => `${(x / 2 ** 20).toFixed(1)} of ${(sent[i]! / 2 ** 20).toFixed(1)}`).join(', ');
+    t.diagnostic(`the kernel level rose ${mb} MB in flight over ${HOLDS} holds`);
+    assert.ok(mostHoldsReach(r.rises, r.bars), `the kernel level rose ${mb} MB in flight over ${HOLDS} holds: most must reach 0.75 of it (at most 12 MB)`);
   } finally {
-    c.kill();
+    for (const c of held) c.kill();
   }
 });
 
