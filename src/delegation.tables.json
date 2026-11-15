@@ -1,0 +1,25 @@
+{
+  "NEVER_LOOSEN": {
+    "//": "Never loosened (src/delegation.ts): the default L3 categories, CI config and dependencies, then the odd paths (src/review.tables.json ODD_PATH_CATEGORIES) and the .gitattributes mark that hides a diff (src/review.ts DIFF_HIDING_ATTRIBUTES), written out (#941). test/check-tables-sync.test.ts fails when an odd-path category or that mark is missing here.",
+    "kind": "never-shrink",
+    "value": [
+      "money-path",
+      "migration",
+      "auth",
+      "secrets",
+      "deploy-config",
+      "release-config",
+      "harness-config",
+      "guardrail-config",
+      "deletes-data",
+      "ci-config",
+      "dependency",
+      "control-character-path",
+      "non-utf8-path",
+      "invisible-character-path",
+      "non-ascii-top-level-path",
+      "confusable-path",
+      "diff-hiding-attributes"
+    ]
+  }
+}

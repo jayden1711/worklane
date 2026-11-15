@@ -1,0 +1,8 @@
+{
+  "ALLOWED_UP_TO": {
+    "kind": "never-grow",
+    "value": {
+      "checks": "write"
+    }
+  }
+}

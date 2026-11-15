@@ -14,7 +14,8 @@
     "skipLibCheck": true,
     "declaration": true,
     "sourceMap": true,
-    "types": ["node"]
+    "types": ["node"],
+    "resolveJsonModule": true
   },
-  "include": ["src/**/*.ts", "test/**/*.ts", "scripts/bench/**/*.ts"]
+  "include": ["src/**/*.ts", "test/**/*.ts", "scripts/bench/**/*.ts", "src/**/*.tables.json", "scripts/bench/**/*.tables.json"]
 }

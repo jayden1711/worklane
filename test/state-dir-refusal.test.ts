@@ -11,7 +11,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { chmodSync, mkdirSync, mkdtempSync, readlinkSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, isAbsolute } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -55,17 +55,27 @@ const ok = (p) => allowed.some((d) => { const r = relative(d, p); return r === '
 const pathOf = (a) => (typeof a === 'string' ? a : a instanceof URL ? fileURLToPath(a) : Buffer.isBuffer(a) ? a.toString() : null);
 const TWO = new Set(['rename', 'renameSync', 'copyFile', 'copyFileSync', 'cp', 'cpSync', 'link', 'linkSync']);
 const seen = new Set();
+// Taken before the wrapping: where a path really leads (R1184aa D3: a link named .js to a tables file).
+const realNative = fs.realpathSync.native;
+const realOf = (p) => { try { return realNative(p); } catch { return p; } };
 for (const [kind, mod] of [['fs', fs], ['fsp', fsp], ['fsp', fs.promises]]) {
   for (const name of Object.keys(mod)) {
     const real = mod[name];
     if (typeof real !== 'function' || /^[A-Z]/.test(name) || seen.has(real)) continue;
     const wrapped = function (...args) {
-      const at = name.startsWith('symlink') ? [1] : TWO.has(name) ? [0, 1] : [0];
+      // A symlink's target too (R1184aa D3): a link made to a tables file is a way to write it.
+      const at = name.startsWith('symlink') || TWO.has(name) ? [0, 1] : [0];
       for (const i of at) {
         const p = pathOf(args[i]);
         if (p === null) continue;
         const abs = resolve(p);
-        touched.push(abs);
+        // A tables file is recorded by its bare path only when read (R1184y Y3): a write, rename or rm of one is
+        // recorded as the call, which no allowance takes. Judged by where the path really leads, so a write through a
+        // link (named .js or anything) to a tables file is that file's write (R1184aa D3).
+        const read = /^(?:readFile|readFileSync|existsSync|stat|statSync|lstat|lstatSync|realpath|realpathSync|access|accessSync)$/.test(name) || (/^open(?:Sync)?$/.test(name) && (args[1] === undefined || args[1] === 'r'));
+        const real = realOf(abs);
+        const tables = abs.endsWith('.tables.json') || real.endsWith('.tables.json');
+        touched.push(tables && !read ? kind + '.' + name + ' ' + real : abs);
         if (!ok(abs)) throw Object.assign(new Error('refused by the probe: ' + kind + '.' + name + ' ' + abs), { code: 'EACCES' });
       }
       return real.apply(this, args);
@@ -79,6 +89,8 @@ for (const name of ['spawn', 'spawnSync', 'exec', 'execSync', 'execFile', 'execF
 }
 syncBuiltinESMExports();
 const os = await import(osUrl);
+// A module of the test's own, run as an engine module would be at load (the probe's own test: R1184aa D3).
+if (process.env.PROBE_EXTRA) await import(process.env.PROBE_EXTRA);
 const paths = await import(pathsUrl);
 // Positive controls: a call of this probe's, and one of the engine's own (fileAccess: statSync, a named import).
 fs.existsSync(control);
@@ -105,24 +117,57 @@ interface Probe {
  * controls and that nothing outside the test machine was touched.
  */
 function probe(env: NodeJS.ProcessEnv, outside: string, pollution: Record<string, string> = {}): Probe {
+  const { out, stray } = probeRun(env, outside, pollution);
+  assert.deepEqual(stray, [], 'nothing outside the test machine');
+  return out;
+}
+
+/**
+ * probe's run and checks, but the paths touched outside the test machine returned, not asserted: `dist` stands for
+ * the engine's built modules, and `extra` is a module the child runs as one of them would at load.
+ */
+function probeRun(env: NodeJS.ProcessEnv, outside: string, pollution: Record<string, string> = {}, dist = join(repoRoot, 'dist', 'src'), extra?: string): { out: Probe; stray: string[] } {
   const dir = mkdtempSync(join(tmpdir(), 'state-probe-'));
   writeFileSync(join(dir, 'probe.mjs'), PROBE);
   const control = join(dir, 'control');
   const url = (p: string) => pathToFileURL(join(repoRoot, 'dist', 'src', 'os', p)).href;
   // Allowed: the test machine, and the engine's own built modules (node's loader reads them through node:fs).
-  const dist = join(repoRoot, 'dist', 'src');
-  const r = spawnSync(process.execPath, [join(dir, 'probe.mjs'), url('index.js'), url('system-paths.js'), JSON.stringify([testMachine, dist]), control, join(outside, 'control'), JSON.stringify(pollution)], { cwd: dir, env, encoding: 'utf8', timeout: 60_000 });
+  const engine = join(repoRoot, 'dist', 'src');
+  const childEnv = extra === undefined ? env : { ...env, PROBE_EXTRA: pathToFileURL(extra).href };
+  const r = spawnSync(process.execPath, [join(dir, 'probe.mjs'), url('index.js'), url('system-paths.js'), JSON.stringify([testMachine, engine, dist]), control, join(outside, 'control'), JSON.stringify(pollution)], { cwd: dir, env: childEnv, encoding: 'utf8', timeout: 60_000 });
   assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
   const out = JSON.parse(r.stdout) as Probe;
   // The controls: the wrappers saw this probe's call and the engine's own, and refused a path outside.
   assert.equal(out.touched.filter((p) => p === control).length, 2, `both controls recorded: ${out.touched.join(', ')}`);
   assert.equal(out.refusedOutside, true, 'a path outside the test machine is refused by the probe');
-  // Nothing outside the test machine was touched but the engine's modules, loaded (the refused control is recorded,
-  // never run).
-  assert.deepEqual(out.touched.filter((p) => p !== testMachine && !inside(testMachine, p) && !(inside(dist, p) && p.endsWith('.js')) && p !== join(outside, 'control')), [], 'nothing outside the test machine');
-  out.touched = out.touched.filter((p) => !inside(dist, p));
-  return out;
+  // Nothing outside the test machine was touched but the engine's modules, loaded, and the tables file of a module
+  // loaded, read as it loads (#941: src/os/git.ts's, since guardrails/push-hook.ts imports it; R1184y Y3: read only,
+  // never written, renamed or removed). The refused control is recorded, never run.
+  const loaded = (p: string) => [engine, dist].some((d) => inside(d, p)) && (p.endsWith('.js') || (p.endsWith('.tables.json') && out.touched.includes(p.replace(/\.tables\.json$/, '.js'))));
+  const stray = out.touched.filter((p) => p !== testMachine && !inside(testMachine, p) && !loaded(p) && p !== join(outside, 'control') && p !== extra);
+  out.touched = out.touched.filter((p) => !inside(engine, p) && !inside(dist, p));
+  return { out, stray };
 }
+
+test("the probe itself: a loaded module's tables file read passes; written through a symlink, it is caught (R1184aa D3)", { skip: process.platform === 'win32' && 'POSIX symlinks' }, () => {
+  // By its real path, as node's loader names the modules it reads (/var is a link on macOS).
+  const dist = realpathSync(mkdtempSync(join(tmpdir(), 'probe-dist-')));
+  writeFileSync(join(dist, 'mod.js'), 'export {};\n');
+  writeFileSync(join(dist, 'mod.tables.json'), '{}\n');
+  const run = (body: string) => {
+    const extra = join(dist, 'extra.mjs');
+    writeFileSync(extra, `import fs from 'node:fs';\nfs.readFileSync(${JSON.stringify(join(dist, 'mod.js'))});\nfs.readFileSync(${JSON.stringify(join(dist, 'mod.tables.json'))}, 'utf8');\n${body}`);
+    return probeRun(testRunEnv({}), standIn(), {}, dist, extra).stray;
+  };
+  // Control: read only.
+  assert.deepEqual(run(''), []);
+  // A link named .js made to the tables file, then written through: both the link's target and the write are caught.
+  const link = JSON.stringify(join(dist, 'zz-link.js'));
+  const stray = run(`fs.symlinkSync(${JSON.stringify(join(dist, 'mod.tables.json'))}, ${link});\nfs.writeFileSync(${link}, '{"x": 1}\\n');\nfs.unlinkSync(${link});\n`);
+  assert.ok(stray.some((s) => s.startsWith('fs.symlinkSync ') && s.endsWith('mod.tables.json')), `the link's target: ${stray.join(', ')}`);
+  assert.ok(stray.some((s) => s.startsWith('fs.writeFileSync ') && s.endsWith('mod.tables.json')), `the write through it: ${stray.join(', ')}`);
+  rmSync(dist, { recursive: true, force: true });
+});
 
 /**
  * A test run's child, as the engine starts one (childEnv: no NODE_TEST_CONTEXT, so it is a test run by TEST_RUN_VAR

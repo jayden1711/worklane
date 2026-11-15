@@ -1,0 +1,661 @@
+{
+  "ALWAYS_L3": {
+    "//": "Locked categories that are always L3, whatever review.yaml's levels list (self-modification and harness-config).",
+    "kind": "never-shrink",
+    "value": [
+      "self-modification",
+      "harness-config"
+    ]
+  },
+  "ENGINE_ROOT_FILES": {
+    "//": "The engine's own files at the top of its repo, glob for glob (#858): like ENGINE_TREE, their locks hold only in the engine's repo. Matched exactly.",
+    "kind": "never-grow",
+    "value": [
+      "SECURITY.md",
+      "Dockerfile*",
+      "dockerfile*",
+      "Containerfile*",
+      "deploy",
+      "compose.*",
+      "docker-compose.*"
+    ]
+  },
+  "ENGINE_TREE": {
+    "//": "The engine's own source tree: a self-modification glob under it names an engine file, not a managed app's (its lock stands aside in a managed app's repo).",
+    "kind": "never-grow",
+    "value": [
+      "src/",
+      "scripts/",
+      "test/",
+      "docs/",
+      "deploy/"
+    ]
+  },
+  "HARNESS_CONFIG_GLOBS": {
+    "//": "The harness's config in a repo (#798): the config folder, Claude Code's project settings and CLAUDE.md. Locked: always L3 and never auto-merged; a repo may only add to them.",
+    "kind": "never-shrink",
+    "value": [
+      "{configDir}/**",
+      ".claude/**",
+      "CLAUDE.md"
+    ]
+  },
+  "LOCKED_CATEGORIES": {
+    "//": "The locked categories: every glob of SELF_MODIFICATION_PARTS under self-modification, HARNESS_CONFIG_GLOBS under harness-config, and the agents' instructions. Written out (#941); test/check-tables-sync.test.ts holds the first two equal to their sources.",
+    "kind": "never-shrink",
+    "value": {
+      "agent-instructions": [
+        "{configDir}/roles/**",
+        "{configDir}/skills/**",
+        "AGENTS.md",
+        "**/CLAUDE.md"
+      ],
+      "self-modification": [
+        "src/merge-policy*",
+        "src/coordinator/merge-flow*",
+        "src/pr-rules*",
+        "src/vacuity.ts",
+        "src/vacuity-read.ts",
+        "scripts/lib/check-tables.mjs",
+        "scripts/lib/table-copies.mjs",
+        "scripts/gen-table-copies.mjs",
+        "scripts/copy-tables-json.mjs",
+        "src/main-watch*",
+        "src/github/main-watch-api*",
+        "src/push-guard*",
+        "src/push-check*",
+        "src/os/git.ts",
+        "scripts/lib/git.cjs",
+        "src/os/git.tables.json",
+        "src/updates*",
+        "scripts/machine/{cli}-update*",
+        "{configDir}/review.yaml",
+        "src/review.ts",
+        "src/path-text.ts",
+        "src/confusables*",
+        "src/review.tables.json",
+        "{configDir}/guardrails.yaml",
+        "src/guardrails/**",
+        "scripts/setup/**",
+        "scripts/machine/**",
+        "deploy/**",
+        "Dockerfile*",
+        "dockerfile*",
+        "Containerfile*",
+        "deploy",
+        "compose.*",
+        "docker-compose.*",
+        ".github/workflows/**",
+        ".github/release-signers",
+        "scripts/verify-release-tag*",
+        "src/dashboard-auth*",
+        "src/github-app*",
+        "src/github-scope*",
+        "src/**/*secret*",
+        "src/console/terminal*",
+        "src/setup/app-manifest*",
+        "src/events/redact.ts",
+        "src/events/redact.tables.json",
+        "src/decide.ts",
+        "src/intake/decide.ts",
+        "src/intake/people.ts",
+        "src/machine-owners.ts",
+        "src/intake/report.ts",
+        "src/intake/dedupe.ts",
+        "src/roles.ts",
+        "src/coordinator.ts",
+        "src/runner.ts",
+        "src/sandbox.ts",
+        "src/testrun/**",
+        "src/hook*",
+        "src/guard/**",
+        "src/ack-reason.ts",
+        "src/adapters/railway.ts",
+        "src/automations/cron.ts",
+        "src/automations/schema.ts",
+        "src/backlog/types.ts",
+        "src/brand.ts",
+        "src/check-source.ts",
+        "src/check-tables.ts",
+        "src/checkout.ts",
+        "src/ci-none.ts",
+        "src/comment-policy.ts",
+        "src/config/load.ts",
+        "src/config/schema.ts",
+        "src/contract.ts",
+        "src/cross-eval.ts",
+        "src/dashboard-key-paths.ts",
+        "src/delegation.ts",
+        "src/deploy-gate/config.ts",
+        "src/events/types.ts",
+        "src/experiments/paths.ts",
+        "src/governor-holds.ts",
+        "src/held-out-paths.ts",
+        "src/model-routing.ts",
+        "src/network.ts",
+        "src/optimize.ts",
+        "src/os/child-process.ts",
+        "src/os/index.ts",
+        "src/os/own-env.ts",
+        "src/os/process-links.ts",
+        "src/os/system-paths.ts",
+        "src/os/system-root-guard.ts",
+        "src/preview/config.ts",
+        "src/project-env.ts",
+        "src/provider-hosts.ts",
+        "src/providers.ts",
+        "src/quiet-sqlite.ts",
+        "src/routing.ts",
+        "src/slot-file.ts",
+        "src/stage-names.ts",
+        "src/tool-path.ts",
+        "src/delegation*.tables.json",
+        "src/install.ts",
+        "src/instance.ts",
+        "src/agent-settings.ts",
+        "src/bundle.ts",
+        "src/domain-requests.ts",
+        "src/stuck.ts",
+        "src/research.ts",
+        "src/intake/run.ts",
+        "src/intake/chat.ts",
+        "src/intake/replier.ts",
+        "src/intake/explain.ts",
+        "src/stage-label.ts",
+        "src/intake/triage.ts",
+        "src/mcp/client.ts",
+        "src/mcp/connector.ts",
+        "src/mcp/snapshot.ts",
+        "src/plugins/approval.ts",
+        "src/plugins/run.ts",
+        "src/plugins/tree.ts",
+        "src/managed-apps.ts",
+        "scripts/push-gate*",
+        "scripts/check-denylist.mjs",
+        "scripts/lib/denylist.mjs",
+        "scripts/check-dco.mjs",
+        ".denylist*",
+        ".gitleaks*",
+        ".githooks/**",
+        "scripts/lib/denylist.tables.json",
+        "test/review.test.ts",
+        "test/merge-policy.test.ts",
+        "test/guardrails.test.ts",
+        "test/push-check.test.ts",
+        "test/push-guard.test.ts",
+        "test/push-hook-guard.test.ts",
+        "test/push-gate.test.ts",
+        "test/push-gate-hook.test.ts",
+        "test/change-files-renames.test.ts",
+        "test/push-skill-names.test.ts",
+        "test/push-skill-links.test.ts",
+        "test/push-names-plumbing.test.ts",
+        "test/main-watch.test.ts",
+        "test/main-watch-coordinator.test.ts",
+        "test/denylist.test.ts",
+        "test/dco.test.ts",
+        "test/package-files.test.ts",
+        "test/managed-apps.test.ts",
+        "test/merge-idempotent.test.ts",
+        "test/vacuity.test.ts",
+        "test/merge-policy-vacuity.test.ts",
+        "test/merge-vacuity-coordinator.test.ts",
+        "test/merge-vacuity-hostile.test.ts",
+        "test/merge-vacuity-decisions.test.ts",
+        "test/merge-vacuity-doctor.test.ts",
+        "test/merge-vacuity-bounds.test.ts",
+        "test/merge-vacuity-precision.test.ts",
+        "test/merge-vacuity-r5.test.ts",
+        "test/merge-vacuity-r6.test.ts",
+        "test/merge-vacuity-r7.test.ts",
+        "test/merge-vacuity-r8.test.ts",
+        "test/merge-vacuity-r9-tip.test.ts",
+        "test/merge-vacuity-r9-precision.test.ts",
+        "test/merge-vacuity-r9-limits.test.ts",
+        "test/merge-vacuity-r10-shutdown.test.ts",
+        "test/merge-vacuity-r10-removals.test.ts",
+        "test/merge-vacuity-r10-cap.test.ts",
+        "test/vacuity-tip.ts",
+        "test/merge-vacuity-r11-removals.test.ts",
+        "test/merge-vacuity-r11-diff.test.ts",
+        "test/merge-vacuity-r11-align.test.ts",
+        "test/merge-vacuity-r12.test.ts",
+        "test/merge-vacuity-r13.test.ts",
+        "test/docs-guardrails.test.ts",
+        "test/adversarial/**",
+        "test/engine-guard-locks.test.ts",
+        "test/not-yet-files-locks.test.ts",
+        "test/git-runner.test.ts",
+        "test/plan-decisions.test.ts",
+        "test/isolate.ts",
+        "test/isolate.test.ts",
+        "test/table-freeze.ts",
+        "test/table-snapshot.ts",
+        "test/table-freeze.test.ts",
+        "test/table-copies.test.ts",
+        "test/check-tables.test.ts",
+        "test/check-tables-sync.test.ts",
+        "test/merge-policy-data-attacks.test.ts",
+        "test/merge-policy-data-tables.test.ts",
+        "docs/releasing.md",
+        "docs/design.md",
+        "docs/process.md",
+        "decisions.md",
+        "DECISIONS.md",
+        "docs/decisions.md",
+        "docs/DECISIONS.md",
+        "{configDir}/decisions.md",
+        "decisions",
+        "decisions/**",
+        "docs/decisions",
+        "docs/decisions/**",
+        "docs/adr",
+        "docs/adr/**",
+        "{configDir}/decisions",
+        "{configDir}/decisions/**",
+        "src/plan-decisions.ts",
+        "docs/guardrails.md",
+        "docs/security*.md",
+        "SECURITY.md",
+        "src/coordinator/**",
+        "{configDir}/experiments.yaml"
+      ],
+      "harness-config": [
+        "{configDir}/**",
+        ".claude/**",
+        "CLAUDE.md"
+      ]
+    }
+  },
+  "ODD_PATH_CATEGORIES": {
+    "//": "The categories of a path nothing should have to read around (src/review.ts): always L3, always waits, never loosened. Each is one of review.ts's constants (CONTROL_CHARACTER_PATH, NON_UTF8_PATH, INVISIBLE_CHARACTER_PATH, NON_ASCII_TOP_LEVEL_PATH, CONFUSABLE_PATH); test/check-tables-sync.test.ts holds them equal.",
+    "kind": "never-shrink",
+    "value": [
+      "control-character-path",
+      "non-utf8-path",
+      "invisible-character-path",
+      "non-ascii-top-level-path",
+      "confusable-path"
+    ]
+  },
+  "SELF_MODIFICATION_PARTS": {
+    "//": "The harness changing its own controls (src/review.ts SELF_MODIFICATION): each part says, in the words Waiting on you shows, what a change to its globs changes; the first part a file matches names it. Each glob is in one part only. Written out from what src/review.ts built (#941): test/check-tables-sync.test.ts holds the tool guard's part to every HOOK_IMPORTS entry and the decision records' part to DECISION_RECORD_GLOBS.",
+    "kind": "never-shrink",
+    "value": [
+      {
+        "//": "src/vacuity.ts: what the merge gate counts as an assertion and as app code run (#784, src/merge-policy-vacuity.ts).",
+        "what": "the merge policy",
+        "globs": [
+          "src/merge-policy*",
+          "src/coordinator/merge-flow*",
+          "src/pr-rules*",
+          "src/vacuity.ts",
+          "src/vacuity-read.ts",
+          "scripts/lib/check-tables.mjs",
+          "scripts/lib/table-copies.mjs",
+          "scripts/gen-table-copies.mjs",
+          "scripts/copy-tables-json.mjs"
+        ]
+      },
+      {
+        "what": "the main watch",
+        "globs": [
+          "src/main-watch*",
+          "src/github/main-watch-api*"
+        ]
+      },
+      {
+        "what": "the push guard",
+        "globs": [
+          "src/push-guard*",
+          "src/push-check*"
+        ]
+      },
+      {
+        "//": "The one way the engine and its scripts run git, with replace refs and grafts off (#807): every reader above reads through it.",
+        "what": "the git runner",
+        "globs": [
+          "src/os/git.ts",
+          "scripts/lib/git.cjs",
+          "src/os/git.tables.json"
+        ]
+      },
+      {
+        "what": "the updater",
+        "globs": [
+          "src/updates*",
+          "scripts/machine/{cli}-update*"
+        ]
+      },
+      {
+        "//": "src/path-text.ts holds the odd-name tests computeLevel raises on (moved out of src/review.ts, #683), so it stays locked with it. src/confusables*: the look-alike check and its Unicode table (#763).",
+        "what": "the review levels",
+        "globs": [
+          "{configDir}/review.yaml",
+          "src/review.ts",
+          "src/path-text.ts",
+          "src/confusables*",
+          "src/review.tables.json"
+        ]
+      },
+      {
+        "what": "the guardrails",
+        "globs": [
+          "{configDir}/guardrails.yaml",
+          "src/guardrails/**"
+        ]
+      },
+      {
+        "//": "deploy/**: the engine's deployment manifests (a compose file and the like) set its isolation and exposure, as the setup scripts do: the user it runs as, what it mounts, which ports it publishes. Locked before the first one exists.",
+        "what": "the machine setup",
+        "globs": [
+          "scripts/setup/**",
+          "scripts/machine/**",
+          "deploy/**"
+        ]
+      },
+      {
+        "//": "The engine's container image (Dockerfile, and any Dockerfile.<name> beside it, in any case the tools read, and the Containerfile podman reads): the base image, the user it runs as, what it installs and from where. Before this, only review.yaml's deploy-config held the Dockerfile (#858, a gap #853's review named). dockerfile* and Containerfile* match no file yet (NOT_YET_FILES in test/merge-policy.test.ts).",
+        "what": "the engine's container image",
+        "globs": [
+          "Dockerfile*",
+          "dockerfile*",
+          "Containerfile*"
+        ]
+      },
+      {
+        "//": "The engine's deployment files at the top of its repo, beside deploy/**: a bare deploy path (a file, or a symlink to anywhere) and the compose files set how it runs, as the setup scripts do: the user, the mounts, the ports. Locked before the first one exists (NOT_YET_FILES in test/merge-policy.test.ts; #885).",
+        "what": "the engine's deployment files",
+        "globs": [
+          "deploy",
+          "compose.*",
+          "docker-compose.*"
+        ]
+      },
+      {
+        "what": "the CI workflows",
+        "globs": [
+          ".github/workflows/**"
+        ]
+      },
+      {
+        "//": "Whose signed tag the release workflow stages on npm, and the check that enforces it (release.yml).",
+        "what": "who may sign a release",
+        "globs": [
+          ".github/release-signers",
+          "scripts/verify-release-tag*"
+        ]
+      },
+      {
+        "//": "src/events/redact.ts: the secret redaction of everything stored and of every chat reply (locked with the guard's tree before #785, which no longer reaches it).",
+        "what": "sign-in, credentials or secrets",
+        "globs": [
+          "src/dashboard-auth*",
+          "src/github-app*",
+          "src/github-scope*",
+          "src/**/*secret*",
+          "src/console/terminal*",
+          "src/setup/app-manifest*",
+          "src/events/redact.ts",
+          "src/events/redact.tables.json"
+        ]
+      },
+      {
+        "//": "src/intake/report.ts: isTrusted and isAllowed, the intake's trust and admission inputs to src/intake/decide.ts; src/intake/dedupe.ts: candidates(), the bound on which issue the intake agent may name, which decide.ts relies on (both locked with the guard's tree before #785, which no longer reaches them).",
+        "what": "who may approve",
+        "globs": [
+          "src/decide.ts",
+          "src/intake/decide.ts",
+          "src/intake/people.ts",
+          "src/machine-owners.ts",
+          "src/intake/report.ts",
+          "src/intake/dedupe.ts"
+        ]
+      },
+      {
+        "//": "WHY: before this, these were the owner's call only where a repo's own review.yaml listed them (the engine's does, as `engine`); a repo whose review.yaml didn't would have merged a change to the evaluator or the denylist on its own.",
+        "what": "the evaluator and the agent runner",
+        "globs": [
+          "src/roles.ts",
+          "src/coordinator.ts",
+          "src/runner.ts"
+        ]
+      },
+      {
+        "what": "the sandbox and test runs",
+        "globs": [
+          "src/sandbox.ts",
+          "src/testrun/**"
+        ]
+      },
+      {
+        "//": "The PreToolUse guard (which tool calls an agent may make, the config folder's guard among them) and the post-edit hook, with every module it reaches, directly or through other imports (#655, #665): the deny lists, the read-only agents' tools and refusals, the task file's frozen paths, the guardrail rules' loader, the secret check, and the rest. src/hook-imports.ts holds that tree as the test reads it from the real imports (test/review.test.ts). Its process entry is src/hook-main.ts (under src/hook*), so the tree is read from there too (#665). src/guard/** holds the lanes' rules the guard decides with (#785): every file there is locked, a new one too.",
+        "what": "the agents' tool guard",
+        "globs": [
+          "src/hook*",
+          "src/guard/**",
+          "src/ack-reason.ts",
+          "src/adapters/railway.ts",
+          "src/automations/cron.ts",
+          "src/automations/schema.ts",
+          "src/backlog/types.ts",
+          "src/brand.ts",
+          "src/check-source.ts",
+          "src/check-tables.ts",
+          "src/checkout.ts",
+          "src/ci-none.ts",
+          "src/comment-policy.ts",
+          "src/config/load.ts",
+          "src/config/schema.ts",
+          "src/contract.ts",
+          "src/cross-eval.ts",
+          "src/dashboard-key-paths.ts",
+          "src/delegation.ts",
+          "src/deploy-gate/config.ts",
+          "src/events/types.ts",
+          "src/experiments/paths.ts",
+          "src/governor-holds.ts",
+          "src/held-out-paths.ts",
+          "src/model-routing.ts",
+          "src/network.ts",
+          "src/optimize.ts",
+          "src/os/child-process.ts",
+          "src/os/index.ts",
+          "src/os/own-env.ts",
+          "src/os/process-links.ts",
+          "src/os/system-paths.ts",
+          "src/os/system-root-guard.ts",
+          "src/preview/config.ts",
+          "src/project-env.ts",
+          "src/provider-hosts.ts",
+          "src/providers.ts",
+          "src/quiet-sqlite.ts",
+          "src/routing.ts",
+          "src/slot-file.ts",
+          "src/stage-names.ts",
+          "src/tool-path.ts",
+          "src/delegation*.tables.json"
+        ]
+      },
+      {
+        "//": "What writes the hook commands that run it (src/install.ts hookCommand, src/instance.ts's research lanes): a change there could point an agent's hooks at another entry, or at none (#665).",
+        "what": "the agents' tool guard's hook commands",
+        "globs": [
+          "src/install.ts",
+          "src/instance.ts"
+        ]
+      },
+      {
+        "//": "WHY (#785): these were locked only as modules the guard's import tree reached. The tree no longer reaches them, but each still decides what an agent run gets: the settings that keep its hooks on, the bundles it may read, the plugins and MCP servers it loads, the hosts it may ask for, the stuck-run stop, the role, lane and tools of the runs that read untrusted text (the research, intake, chat, replier, explainer and stage-judge run builders; #841 would let those six go), and the intake run's output schema and draft checks (src/intake/triage.ts). So they stay locked here, exactly as before; only the part that names them changed.",
+        "what": "what an agent run is given",
+        "globs": [
+          "src/agent-settings.ts",
+          "src/bundle.ts",
+          "src/domain-requests.ts",
+          "src/stuck.ts",
+          "src/research.ts",
+          "src/intake/run.ts",
+          "src/intake/chat.ts",
+          "src/intake/replier.ts",
+          "src/intake/explain.ts",
+          "src/stage-label.ts",
+          "src/intake/triage.ts",
+          "src/mcp/client.ts",
+          "src/mcp/connector.ts",
+          "src/mcp/snapshot.ts",
+          "src/plugins/approval.ts",
+          "src/plugins/run.ts",
+          "src/plugins/tree.ts"
+        ]
+      },
+      {
+        "//": "Which repos root says are managed apps, where the engine's own source paths below aren't locked (#665).",
+        "what": "where the self-modification locks apply",
+        "globs": [
+          "src/managed-apps.ts"
+        ]
+      },
+      {
+        "what": "the push gate, denylist and secret scan",
+        "globs": [
+          "scripts/push-gate*",
+          "scripts/check-denylist.mjs",
+          "scripts/lib/denylist.mjs",
+          "scripts/check-dco.mjs",
+          ".denylist*",
+          ".gitleaks*",
+          ".githooks/**",
+          "scripts/lib/denylist.tables.json"
+        ]
+      },
+      {
+        "//": "A tests-only change is L0 and merges itself: so the tests that hold the controls above are named here, one by one. The rename, odd-byte and control-character guarantees, and the scan that keeps every changed-name reader in one helper (#688, locked by #724). The push limits' SKILL.md lint: read by its bytes, and a link, a submodule or a huge blob refused (#724). The push limits' names from plumbing, whatever the repo's log config says; crafted names refused (#724). Root's managed-apps reader's fail-closed cases and the script's refusals (#665). The merge reconciliation's cases: only the engine's own App's merge is reconciled, never another's (#733). The merge gate's vacuity check: tests that run none of the changed code never auto-merge (#784). The test that keeps the security pages' citations true, the adversarial suite of hostile PRs (its runner, its cases, controls and todo list), and the test that holds these locks (#858). The test that keeps each lock glob that matches no file yet paired with its lock (#885). The replace-ref and graft routes, and the scan that every git call goes through the git runner (#807). The test that keeps the engine repo's merge process (docs/process.md) out of the planners' decisions index.",
+        "what": "the tests of the harness controls",
+        "globs": [
+          "test/review.test.ts",
+          "test/merge-policy.test.ts",
+          "test/guardrails.test.ts",
+          "test/push-check.test.ts",
+          "test/push-guard.test.ts",
+          "test/push-hook-guard.test.ts",
+          "test/push-gate.test.ts",
+          "test/push-gate-hook.test.ts",
+          "test/change-files-renames.test.ts",
+          "test/push-skill-names.test.ts",
+          "test/push-skill-links.test.ts",
+          "test/push-names-plumbing.test.ts",
+          "test/main-watch.test.ts",
+          "test/main-watch-coordinator.test.ts",
+          "test/denylist.test.ts",
+          "test/dco.test.ts",
+          "test/package-files.test.ts",
+          "test/managed-apps.test.ts",
+          "test/merge-idempotent.test.ts",
+          "test/vacuity.test.ts",
+          "test/merge-policy-vacuity.test.ts",
+          "test/merge-vacuity-coordinator.test.ts",
+          "test/merge-vacuity-hostile.test.ts",
+          "test/merge-vacuity-decisions.test.ts",
+          "test/merge-vacuity-doctor.test.ts",
+          "test/merge-vacuity-bounds.test.ts",
+          "test/merge-vacuity-precision.test.ts",
+          "test/merge-vacuity-r5.test.ts",
+          "test/merge-vacuity-r6.test.ts",
+          "test/merge-vacuity-r7.test.ts",
+          "test/merge-vacuity-r8.test.ts",
+          "test/merge-vacuity-r9-tip.test.ts",
+          "test/merge-vacuity-r9-precision.test.ts",
+          "test/merge-vacuity-r9-limits.test.ts",
+          "test/merge-vacuity-r10-shutdown.test.ts",
+          "test/merge-vacuity-r10-removals.test.ts",
+          "test/merge-vacuity-r10-cap.test.ts",
+          "test/vacuity-tip.ts",
+          "test/merge-vacuity-r11-removals.test.ts",
+          "test/merge-vacuity-r11-diff.test.ts",
+          "test/merge-vacuity-r11-align.test.ts",
+          "test/merge-vacuity-r12.test.ts",
+          "test/merge-vacuity-r13.test.ts",
+          "test/docs-guardrails.test.ts",
+          "test/adversarial/**",
+          "test/engine-guard-locks.test.ts",
+          "test/not-yet-files-locks.test.ts",
+          "test/git-runner.test.ts",
+          "test/plan-decisions.test.ts",
+          "test/isolate.ts",
+          "test/isolate.test.ts",
+          "test/table-freeze.ts",
+          "test/table-snapshot.ts",
+          "test/table-freeze.test.ts",
+          "test/table-copies.test.ts",
+          "test/check-tables.test.ts",
+          "test/check-tables-sync.test.ts",
+          "test/merge-policy-data-attacks.test.ts",
+          "test/merge-policy-data-tables.test.ts"
+        ]
+      },
+      {
+        "what": "the release procedure and the design rules",
+        "globs": [
+          "docs/releasing.md",
+          "docs/design.md"
+        ]
+      },
+      {
+        "//": "How the engine repo's own PRs are merged and who reviews them (owner, 2026-10-21): a docs-only change was L0 and could merge itself, so a PR could drop its own second review. Kept out of the decisions index (src/plan-decisions.ts).",
+        "what": "the engine repo's merge process",
+        "globs": [
+          "docs/process.md"
+        ]
+      },
+      {
+        "//": "The planners' decision records (#920): planner and plan-review agents read each one as a recorded decision, and a plan may cite it. A docs-only record was L0 and merged itself, so a PR could put the merge process above, whole, in part or reworded, where planners read it as a decision; the index code can't recognise a copy. Read from the index's own lists (DECISION_FILES, DECISION_DIRS above), so the two can't drift. Only docs/design.md exists yet (NOT_YET_FILES in test/merge-policy.test.ts), and it stays named by the design rules' part above (onePartPerGlob). In the engine's repo only: a managed app's records keep their categories (engineSourceGlob).",
+        "what": "the planners' decision records",
+        "globs": [
+          "decisions.md",
+          "DECISIONS.md",
+          "docs/decisions.md",
+          "docs/DECISIONS.md",
+          "{configDir}/decisions.md",
+          "decisions",
+          "decisions/**",
+          "docs/decisions",
+          "docs/decisions/**",
+          "docs/adr",
+          "docs/adr/**",
+          "{configDir}/decisions",
+          "{configDir}/decisions/**"
+        ]
+      },
+      {
+        "//": "The code that builds that index: what it reads, and what it leaves out (docs/process.md, a record linked elsewhere).",
+        "what": "the planners' decisions index",
+        "globs": [
+          "src/plan-decisions.ts"
+        ]
+      },
+      {
+        "//": "What the engine publicly claims its guards do and which gaps are open (#705), and how to report one: a docs-only change was L0 and merged itself, so a PR could rewrite a claim with nothing holding it (#858).",
+        "what": "the public security claims",
+        "globs": [
+          "docs/guardrails.md",
+          "docs/security*.md",
+          "SECURITY.md"
+        ]
+      },
+      {
+        "//": "After the merge policy's own part above (the first part a file matches names it): the rest of the coordinator.",
+        "what": "the coordinator",
+        "globs": [
+          "src/coordinator/**"
+        ]
+      },
+      {
+        "//": "A study's definition (docs: the experiments design): its eval, editable paths and budget are what a job may touch.",
+        "what": "the experiment studies",
+        "globs": [
+          "{configDir}/experiments.yaml"
+        ]
+      }
+    ]
+  }
+}

@@ -22,12 +22,16 @@ import { devNull, tmpdir, userInfo } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-/** The gate and every file it imports (test/push-gate-hook.test.ts checks this against the real imports). */
-// check-table: never-shrink
-export const GATE_CODE = ['scripts/push-gate.mjs', 'scripts/lib/denylist.mjs'];
-/** The rule files the gate and gitleaks read from the directory they run in. */
-// check-table: never-shrink
-export const GATE_RULES = { required: ['.denylist.json'], optional: ['.denylist-allow', '.gitleaks.toml', '.gitleaksignore'] };
+// GATE_CODE: the gate and every file it imports (test/push-gate-hook.test.ts checks this against the real imports).
+// GATE_RULES: the rule files the gate and gitleaks read from the directory they run in. Both are data in
+// scripts/push-gate-hook.tables.json (#941); this file runs on its own, so it carries them (scripts/lib/table-copies.mjs).
+// BEGIN tables from push-gate-hook.tables.json: generated, do not edit (node scripts/gen-table-copies.mjs --write)
+// This script runs on its own, so it carries its tables as frozen literals of the data in
+// scripts/push-gate-hook.tables.json, which the weakening hold compares parsed (#941).
+// test/table-copies.test.ts fails when this block is not what that file makes.
+export const GATE_CODE = Object.freeze(["scripts/push-gate.mjs", "scripts/lib/denylist.mjs"]);
+export const GATE_RULES = Object.freeze({ "required": Object.freeze([".denylist.json"]), "optional": Object.freeze([".denylist-allow", ".gitleaks.toml", ".gitleaksignore"]) });
+// END tables from push-gate-hook.tables.json
 const REMOTE = 'origin';
 const SELF = 'scripts/push-gate-hook.mjs';
 const HATCH = 'PUSH_GATE_BOOTSTRAP';

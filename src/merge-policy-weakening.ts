@@ -11,6 +11,10 @@
 //   - a registered table (its mark, or CHECK_TABLES), its lines from its declaration to its close: a line gone from a
 //     rule list, a bad-fixture list or a guard's list (never-shrink), or new in an allowlist or exception list
 //     (never-grow); its name sets a floor its mark can only add to (ALLOW_NAMED, RULE_NAMED);
+//   - a data table (#941: `<module>.tables.json`, the engine's own tables), read as parsed data, never run: a table or
+//     the file gone, a table's kind changed, an entry lost or changed in a never-shrink table, or added or changed in a
+//     never-grow one; a file that doesn't parse; a new one whose name differs only in case from another's; and in any
+//     JS or TS file, a removed or changed line that loads one (TABLE_LOAD);
 //   - a registration mark the default branch has, gone or changed while what it registers is still there (#869);
 //   - in a registered table's file, an added line that could hide the table from the reader (an escaped name, a
 //     declaration with its name on the next line);
@@ -27,7 +31,8 @@
 // isn't text, a table it can't find or a git failure, the change waits. The engine's own source paths (ENGINE_ONLY)
 // stand aside in a managed app's repo, as the locks do there (src/review.ts lockedCategories).
 import { BRAND } from './brand.js';
-import { changedNames, changeFiles, exactMoves, filesAt, filesWithText, mergeBaseOf, mergedTree } from './coordinator/change-files.js';
+import { parseTables, TABLES_FILE, type ParsedTable } from './check-tables.js';
+import { changedNames, changeFiles, exactMoves, filesAt, filesWithText, mergeBaseOf, mergedTree, presentNames } from './coordinator/change-files.js';
 import { globRegExp } from './guardrails/glob.js';
 import { escapedPath, isNonUtf8Path, shownPath } from './path-text.js';
 import { engineSourceGlob, LOCKED_CATEGORIES, lockedCategories, type ChangeFile, type LockScope } from './review.js';
@@ -190,6 +195,17 @@ export const GUARD_FILES: readonly string[] = [
   'scripts/ci/**',
   'src/testrun/affected.ts',
   'src/merge-policy*',
+  // The data tables' loader and parser, the scripts' copy of it and the copies' generator, and the test loader's
+  // freeze (#941): the hold reads the tables through the parser, and this backstop runs it.
+  'src/check-tables.ts',
+  'scripts/lib/check-tables.mjs',
+  'scripts/lib/table-copies.mjs',
+  'scripts/gen-table-copies.mjs',
+  // What writes the tables files into dist/ for the loader (#941, the owner's budget choice of 2026-11-12).
+  'scripts/copy-tables-json.mjs',
+  'test/table-freeze.ts',
+  // The snapshot the freeze's compile step and hook check a table module's source against (R1184at D3).
+  'test/table-snapshot.ts',
   'src/coordinator/merge-flow*',
   'src/coordinator/change-files.ts',
   'src/pr-rules*',
@@ -368,6 +384,11 @@ export interface WeakeningInput {
    * what it makes is never read. Absent: the change isn't a merge.
    */
   conflicts?: readonly string[];
+  /**
+   * Every tables file (`<module>.tables.json`) the change's base has, for the case-folded name check (#941). Absent:
+   * only the changed files are compared with each other.
+   */
+  tablesFiles?: ReadonlySet<string>;
 }
 
 /** Each kind of weakening, in the words a reason uses, in the order reasons are given. */
@@ -384,6 +405,8 @@ const KINDS = {
   'allow-file': "adds a line to an allowlist file or a package manager's settings file",
   'table-used': "changes a check's or guard's table outside its own list",
   'table-hidden': "adds a line that could hide a check's table from the line reader, an escaped name, a name on the next line or a global binding",
+  'table-load-gone': "removes or changes the line that loads a check's table from its data",
+  'table-load-added': "adds a line that loads a check's table some other way than its module's one load",
   'guard-lines': 'removes or changes a line of a guard or lint',
   marker: 'adds a line with a skip, only or lint or type-check suppression mark',
 } as const;
@@ -395,6 +418,351 @@ export const WEAKENING_REASON = 'design: may weaken a check: ';
 
 /** Whether a reason is the hold on a conflict with the tip in a check's file (GitHub's own conflict state may send it to the conflict fix first). */
 export const isTipConflict = (reason: string): boolean => reason.startsWith(`${WEAKENING_REASON}${KINDS['tip-conflict']} (`);
+
+/**
+ * A line that loads a table (#941): a module's own load, any `.tables.json` name, or a generated copy's marker line
+ * (scripts/lib/table-copies.mjs, scripts/lib/redact-vendor.mjs). A removed or changed one waits.
+ */
+export const TABLE_LOAD = /\btablesOf\s*\(\s*import\s*\.\s*meta\s*\.\s*url\b|\bTABLES\s*(?:\?\s*)?\.\s*get\b|\.tables\.json\b|\/\/ (?:BEGIN|END) tables from |TABLES_DATA = /;
+
+/**
+ * The one way a module may import the loader (#941, R1184n N3): a plain named import of the names a load site uses
+ * (`import type` too), none of them under another name, on one line. Any other added line naming the loader's module
+ * (an alias, a namespace, a dynamic import, `tablesFrom` or `parseTables`, an import split over lines) waits; so does a
+ * line that uses `import.meta` other than in one of its listed reads (metaUse). Lines are read as text, and the backstop
+ * (test/merge-policy.test.ts loadSiteProblems) reads them parsed: a specifier written with escapes is caught there.
+ * Neither follows a specifier computed at run time (`import('./check' + '-tables.js')`): a named limit (R1184o 3), since
+ * scripts/ci imports by computed URLs by design; a second load of a real tables file gets the same frozen data, and a
+ * decoy loaded that way is the open class.
+ */
+export const LOADER_IMPORT = /^\s*import\s+(?:type\s+)?\{\s*(?:(?:type\s+)?(?:tablesOf|frozenSet|regExpOf|regExpsOf|FrozenSet|Pattern|Tables|TableKind)\s*,?\s*)+\}\s*from\s*['"](?:\.\.?\/)+(?:[\w-]+\/)*check-tables\.(?:js|mjs)['"];?\s*$/;
+const LOADER_NAMED = /check-tables/;
+/** The loader, the parser, the copy generators and this hold: the only code that loads tables some other way. */
+export const LOADER_CODE: ReadonlySet<string> = new Set(['src/check-tables.ts', 'src/merge-policy-weakening.ts', 'scripts/lib/check-tables.mjs', 'scripts/lib/table-copies.mjs', 'scripts/gen-table-copies.mjs', 'scripts/copy-tables-json.mjs', 'scripts/lib/redact-vendor.mjs']);
+/**
+ * The reads of `import.meta` a line may hold (R1184ae: an allowlist, fail closed, in place of rules that named each way
+ * of writing it, which a `!`, an `as`, a `satisfies`, a parenthesis or a line break got past each round). Each is a
+ * whole expression that only reads `import.meta.url`: a URL resolved against it from a plain string, its path, the
+ * module's own table load, and a comparison with it. The string is path characters only, so it can't be the ends of
+ * two strings or comments with code between them (R1184af D1); a comparison counts only after a token that can't make
+ * its left side a write, never at a line's start (R1184af D2: `delete import.meta.url !== 0`, `++import.meta.url`). A require rooted at it is not listed (R1184ae: the word is one
+ * test/desktop-removed.test.ts LOADER_WORDS keeps out of the modules the backstop runs, this one among them), so such a
+ * line waits when it changes.
+ */
+const META_READS =
+  /new\s+URL\(\s*(?:(?:'[\w./@-]*'|"[\w./@-]*")\s*,\s*)?import\.meta\.url\s*\)|fileURLToPath\(\s*import\.meta\.url\s*\)|tablesOf\(\s*import\.meta\.url\s*\)|(?<=(?:[(,=?:!&|]|\breturn)\s*)import\.meta\.url\s*[!=]==(?!=)/g;
+
+/**
+ * Whether an added line uses `import.meta` other than in one of META_READS (R1184ae): once those reads are taken out,
+ * any `import` still followed on the line by `meta` (through spaces, comments, parentheses or a TypeScript wrapper),
+ * or a line that ends at `import`, `import.` or `import.meta…`, or starts at `.meta` (a use split over lines), waits.
+ * A string or a comment that names `import.meta` waits too. A module's load reads its path from `import.meta.url`, and
+ * the loader (src/check-tables.ts callerScript) refuses a URL that isn't its caller's own file at run time.
+ */
+export function metaUse(l: string): boolean {
+  // Read twice: as written, and with its comments cut out (R1184af D3, R1184ag D2: `import /*` then `*/.meta.url = …`,
+  // `import. // c` then `meta.url = …`). Cutting can only join what a comment split, so a hit on either reading waits.
+  const bare = l
+    .replace(/\/\*.*?\*\//g, ' ')
+    .replace(/^.*?\*\//, ' ')
+    .replace(/\/\*.*$/, ' ')
+    .replace(/\/\/.*$/, ' ');
+  return [l, bare].some((x) => {
+    const rest = x.replace(META_READS, ' R ');
+    return /\bimport\b[\s\S]*\bmeta\b/.test(rest) || /\bimport\s*(?:\.\s*(?:meta\b[\s\S]*)?)?$/.test(rest) || /^\s*\.?\s*meta\s*\./.test(rest) || /^\s*\.\s*meta\b/.test(rest);
+  });
+}
+
+/**
+ * A line terminator inside what git calls one line (R1184w D1): U+2028, U+2029, or a CR not at its end (CRLF's CR is).
+ * JS and TS end a `//` comment there, so the text after it is code the line readers would take for comment. A line
+ * holding one is never a comment to the hold, and an added REPLACERS line holding one waits.
+ */
+export const LINE_BREAK = /\r(?!$)|[\u2028\u2029]/;
+
+/**
+ * A line cut at its commas outside brackets, with brackets and commas counted in code only (R1184v D1): the text of
+ * `'…'`, `"…"`, a template and a block comment is skipped, and a template's `${…}` is code. Null, so the line waits,
+ * when the line can't be read alone: a quote, a backtick, a `${`, a block comment or a bracket it doesn't close, or a
+ * `/` that isn't a comment (a regexp and a division look alike here). A `//` comment ends the line's code.
+ */
+export function topLevelParts(l: string): string[] | null {
+  if (LINE_BREAK.test(l)) return null;
+  const parts = [''];
+  const add = (s: string) => {
+    parts[parts.length - 1] += s;
+  };
+  let depth = 0;
+  const opened: number[] = []; // the depth each open `${` was at
+  let template = false;
+  for (let i = 0; i < l.length; ) {
+    const c = l[i]!;
+    if (template) {
+      if (c === '\\') {
+        add(l.slice(i, i + 2));
+        i += 2;
+      } else if (c === '`') {
+        template = false;
+        add(c);
+        i++;
+      } else if (c === '$' && l[i + 1] === '{') {
+        opened.push(depth++);
+        template = false;
+        add('${');
+        i += 2;
+      } else {
+        add(c);
+        i++;
+      }
+      continue;
+    }
+    if (c === "'" || c === '"') {
+      let j = i + 1;
+      while (j < l.length && l[j] !== c) j += l[j] === '\\' ? 2 : 1;
+      if (j >= l.length) return null;
+      add(l.slice(i, j + 1));
+      i = j + 1;
+      continue;
+    }
+    if (c === '`') {
+      template = true;
+      add(c);
+      i++;
+      continue;
+    }
+    if (c === '/') {
+      if (l[i + 1] === '/') break;
+      if (l[i + 1] !== '*') return null;
+      const end = l.indexOf('*/', i + 2);
+      if (end < 0) return null;
+      add(' ');
+      i = end + 2;
+      continue;
+    }
+    if ('([{'.includes(c)) depth++;
+    else if (')]}'.includes(c)) {
+      depth--;
+      if (c === '}' && opened.length && depth === opened[opened.length - 1]) {
+        opened.pop();
+        template = true;
+        add(c);
+        i++;
+        continue;
+      }
+    }
+    if (c === ',' && depth === 0) parts.push('');
+    else add(c);
+    i++;
+  }
+  return template || opened.length || depth !== 0 ? null : parts;
+}
+
+/** The tables file beside the module or script at `path` (`scripts/push-gate.mjs` → `scripts/push-gate.tables.json`). */
+export const tablesFileFor = (path: string): string => `${path.replace(/\.[cm]?[jt]s$/, '')}.tables.json`;
+
+/** `s` with identifier escapes undone (`A`, `\u{41}` → `A`), so a name written with them is the same name (R1184ah D1). */
+export const unescapeIds = (s: string): string =>
+  s.replace(/\\u\{([0-9a-fA-F]{1,6})\}|\\u([0-9a-fA-F]{4})/g, (m, a: string | undefined, b: string | undefined) => {
+    const n = parseInt(a ?? b ?? '', 16);
+    return n <= 0x10ffff ? String.fromCodePoint(n) : m;
+  });
+
+/**
+ * A text's code, for the copy rules (R1184ai D2): comments, strings and templates blanked (line breaks kept), with
+ * where each line starts ('code', 'comment' or 'string') and the brace depth there. `sure` is false when the reading
+ * may be wrong: a line terminator other than \n or CRLF, a `\u` or `\x` escape, a template holding `${`, a string not closed on its line, or a
+ * `/` in code (a regexp or a division, which a quote or a brace after it could be read through). The caller fails
+ * closed on it.
+ */
+export function copyCodeOf(text: string): { code: string; starts: { state: 'code' | 'comment' | 'string'; depth: number }[]; slash: Set<number>; sure: boolean } {
+  let out = '';
+  let state: 'code' | 'comment' | 'string' = 'code';
+  let depth = 0;
+  let line = 0;
+  let sure = true;
+  const slash = new Set<number>();
+  const starts: { state: 'code' | 'comment' | 'string'; depth: number }[] = [{ state, depth }];
+  const blank = (c: string) => (c === '\n' ? '\n' : ' ');
+  // A lone CR, U+2028 or U+2029 ends a line (and a `//` comment) for JS and TypeScript but not for this reading, which
+  // splits at \n (R1184aj D1: `// note<CR>/*` opens a comment the reading doesn't see): not sure, so the caller waits.
+  if (/\r(?!\n)|[\u2028\u2029]/.test(text)) sure = false;
+  // A `\u` or `\x` escape may be a quote or a line break in a string or comment, which this reading takes as written
+  // (R1184am D1): not sure.
+  if (/\\[ux]/.test(text)) sure = false;
+  for (let i = 0; i < text.length; ) {
+    const c = text[i]!;
+    if (c === '\n') {
+      out += '\n';
+      line++;
+      starts.push({ state, depth });
+      i++;
+      continue;
+    }
+    if (state === 'comment') {
+      if (text.startsWith('*/', i)) {
+        state = 'code';
+        out += '  ';
+        i += 2;
+      } else {
+        out += ' ';
+        i++;
+      }
+      continue;
+    }
+    if (text.startsWith('//', i)) {
+      while (i < text.length && text[i] !== '\n') {
+        out += ' ';
+        i++;
+      }
+      continue;
+    }
+    if (text.startsWith('/*', i)) {
+      state = 'comment';
+      out += '  ';
+      i += 2;
+      continue;
+    }
+    if (c === "'" || c === '"') {
+      let j = i + 1;
+      while (j < text.length && text[j] !== c && text[j] !== '\n') j += text[j] === '\\' ? 2 : 1;
+      if (text[j] !== c) sure = false;
+      for (let k = i; k <= Math.min(j, text.length - 1); k++) out += blank(text[k]!);
+      for (let k = i; k <= Math.min(j, text.length - 1); k++) if (text[k] === '\n') (line++, starts.push({ state: 'string', depth }));
+      i = j + 1;
+      continue;
+    }
+    if (c === '`') {
+      let j = i + 1;
+      while (j < text.length && text[j] !== '`') {
+        if (text.startsWith('${', j)) sure = false;
+        j += text[j] === '\\' ? 2 : 1;
+      }
+      for (let k = i; k <= Math.min(j, text.length - 1); k++) {
+        out += blank(text[k]!);
+        if (text[k] === '\n' && k > i) (line++, starts.push({ state: 'string', depth }));
+      }
+      i = j + 1;
+      continue;
+    }
+    if (c === '/') slash.add(line);
+    if (c === '{') depth++;
+    else if (c === '}') depth--;
+    out += c;
+    i++;
+  }
+  return { code: out, starts, slash, sure };
+}
+
+/** A global object reached, `with`, eval or Function (R1184ah D1: a weaker table bound where a copy's name resolves). */
+const GLOBAL_REACH = /(?<![\w$.])(?:globalThis|global|window|self)(?![\w$])|(?<![\w$.])with\s*\(|(?<![\w$.])(?:eval|Function)\s*\(/;
+
+/** The tables a generated copy in `text` declares: each `const NAME =` (or `export const`) line between its markers. */
+export function copyNames(text: string | null): string[] {
+  return [...copyLines(text)].flatMap((l) => /^(?:export\s+)?const\s+([A-Za-z_$][\w$]*)\s*=/.exec(l)?.[1] ?? []);
+}
+
+/** How many lines of `text` declare, import or assign `name` (R1184ag D1, main's "declared N times"). */
+export function declarations(text: string, name: string): number {
+  // In code only (R1184ai D2: a block in a comment is no declaration), names unescaped (R1184ah D1).
+  // Lexed as written, names un-escaped after (R1184am D1: an escape in a string or comment isn't a name's).
+  text = copyCodeOf(text).code.split('\n').map(unescapeIds).join('\n');
+  const n = name.replace(/\$/g, '\\$');
+  const decl = new RegExp(`(?<![\\w$])(?:const|let|var|function|class)\\s+${n}(?![\\w$])|(?<![\\w$])import\\b[^;]*[{,\\s]${n}(?![\\w$])|(?<![\\w$.])${n}\\s*=(?![=>])`);
+  return text.split('\n').filter((l) => decl.test(l)).length;
+}
+
+/** The lines of `text` between a generated copy's `// BEGIN tables from ` and `// END tables from ` markers. */
+export function copyLines(text: string | null): Set<string> {
+  const out = new Set<string>();
+  let inside = false;
+  for (const l of (text ?? '').split('\n')) {
+    if (l.startsWith('// BEGIN tables from ')) inside = true;
+    else if (l.startsWith('// END tables from ')) inside = false;
+    else if (inside) out.add(l);
+  }
+  return out;
+}
+
+/** The files whose REPLACERS block is a table's code-held entries: the redactor and the root updater's copy of it. */
+export const REPLACER_FILES = /^(?:src\/events\/redact\.ts|scripts\/machine\/[^/]+-update\.cjs)$/;
+
+/**
+ * The lines of `text`'s REPLACERS block: from the line that declares `const REPLACERS` to the first later line that is
+ * `});` at the declaration's indent. None when the text has no block; throws when it has a declaration that never
+ * closes, or two (a decoy), so the change waits.
+ */
+export function replacerLines(text: string | null): string[] {
+  if (text === null) return [];
+  const lines = text.split('\n');
+  const starts = lines.flatMap((l, k) => (/^\s*const REPLACERS\b/.test(l) ? [k] : []));
+  if (!starts.length) return [];
+  if (starts.length > 1) throw new Error(`REPLACERS is declared ${starts.length} times`);
+  const at = lines[starts[0]!]!.length - lines[starts[0]!]!.trimStart().length;
+  for (let k = starts[0]! + 1; k < lines.length; k++) {
+    const l = lines[k]!;
+    if (l.trim() === '});' && l.length - l.trimStart().length === at) return lines.slice(starts[0]!, k + 1);
+  }
+  throw new Error('REPLACERS never closes');
+}
+
+/** A JSON value as text, its keys sorted at every depth: the same data gives the same text. */
+const canonical = (v: unknown): string => {
+  if (Array.isArray(v)) return `[${v.map(canonical).join(',')}]`;
+  if (typeof v === 'object' && v !== null) {
+    const o = v as Record<string, unknown>;
+    return `{${Object.keys(o)
+      .sort()
+      .map((k) => `${JSON.stringify(k)}:${canonical(o[k])}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(v);
+};
+
+/**
+ * A data table's entries (#941), as parseTables gives its value: one per thing that can be lost or added.
+ *   - An object: one for each key (that the key is there), and its value's entries under that key.
+ *   - A list (`[]`) or a set (`$set`): one for being a list or a set, and one for each element. An element that is an
+ *     object is known by its other fields (its strings, numbers and `$regexp`s, as `{"what": "the merge policy"}`):
+ *     that is its entry, and its lists and objects give their entries under it, so a glob added to a part is an entry
+ *     added, a glob taken out one lost, and a field changed takes every entry under it away. Any other element (a
+ *     string, a list as a tuple) is an entry whole: a tuple changed is one lost and another added.
+ *   - Anything else (a string, a number, a `$regexp`): itself.
+ * So a key, an element or a value taken out or changed, or a list turned into a set or a string, is an entry lost.
+ */
+export function tableEntries(value: unknown): string[] {
+  const out: string[] = [];
+  const objectOf = (v: unknown) => (typeof v === 'object' && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>) : null);
+  const itemsOf = (v: unknown) => {
+    const o = objectOf(v);
+    return Array.isArray(v) ? { tag: '[]', list: v } : o && Array.isArray(o.$set) && Object.keys(o).length === 1 ? { tag: '$set', list: o.$set as unknown[] } : null;
+  };
+  // A leaf: not a list, a set, or an object other than a `$regexp`.
+  const leaf = (v: unknown) => !itemsOf(v) && !(objectOf(v) && !('$regexp' in objectOf(v)!));
+  const walk = (v: unknown, at: string) => {
+    const o = objectOf(v);
+    const items = itemsOf(v);
+    if (items) {
+      out.push(`${at}${items.tag}`);
+      for (const x of items.list) {
+        const e = objectOf(x);
+        if (!e || '$regexp' in e || itemsOf(x)) {
+          out.push(`${at}${items.tag} ${canonical(x)}`);
+          continue;
+        }
+        const id = `${at}${items.tag} ${canonical(Object.fromEntries(Object.entries(e).filter(([, f]) => leaf(f))))}`;
+        out.push(id);
+        for (const k of Object.keys(e).sort()) if (!leaf(e[k])) walk(e[k], `${id} ${JSON.stringify(k)}: `);
+      }
+    } else if (o && !('$regexp' in o)) {
+      for (const k of Object.keys(o).sort()) {
+        out.push(`${at}${JSON.stringify(k)}`);
+        walk(o[k], `${at}${JSON.stringify(k)}: `);
+      }
+    } else out.push(`${at}${canonical(v)}`);
+  };
+  walk(value, '');
+  return out;
+}
 
 /** What `a` has that `b` hasn't (as multisets). */
 const missing = (a: string[], b: string[]): string[] => {
@@ -938,14 +1306,16 @@ function findings(i: WeakeningInput): Found {
     // The tip's marks the base hasn't (a table marked, or a marked table made, on the default branch after the base).
     ...[...marks].flatMap(([path, m]) => m.tip.tables.filter((t) => !m.was.tables.some((x) => x.table === t.table && x.kind === t.kind)).map((t) => ({ path, ...t, marked: true, atTip: true }))),
   ];
+  // A tables file (#941): its tables are data, compared parsed (jsonTableFindings).
+  const dataTables = (p: string) => TABLES_FILE.test(p) && holds(p, i.scope);
   // A test, guard, lint, allowlist or table file: its removed lines count, so its diff must be whole and text.
-  const strict = (p: string) => isTest(p) || isGuard(p) || isAllow(p) || tables.some((t) => t.path === p);
+  const strict = (p: string) => isTest(p) || isGuard(p) || isAllow(p) || dataTables(p) || tables.some((t) => t.path === p);
   // A pure rename of a test (#783's deliverable): the same blob at a new path that the same runner still runs. Both
   // paths count as nothing when the two names match the same runner's pattern with the same suffix, under the same
   // test-folder root, the new one under no fixtures, snapshots, testdata or docs folder, and neither is a guard, lint,
   // allowlist or table file. Any other move is a delete and an add.
   const renamed = new Set<string>();
-  const checkFile = (p: string) => isGuard(p) || isAllow(p) || tables.some((t) => t.path === p);
+  const checkFile = (p: string) => isGuard(p) || isAllow(p) || dataTables(p) || tables.some((t) => t.path === p);
   for (const [from, to] of i.moved ?? []) {
     const runner = runnerOf(from);
     if (runner === -1 || runnerOf(to) !== runner || runnerSuffix(from) !== runnerSuffix(to)) continue;
@@ -984,7 +1354,9 @@ function findings(i: WeakeningInput): Found {
       hit('unreadable', f.path, `its diff has ${added.length} added and ${removed.length} removed lines, git counts ${f.added} and ${f.removed}`);
       continue;
     }
-    const [test, fixture, guard, bats] = [isTest(f.path), isFixture(f.path), isGuard(f.path), f.path.endsWith('.bats')];
+    // A tables file is judged by its parsed compare alone (#941, R1184l): an entry appended to a JSON list rewrites the
+    // old last line (no trailing comma), so the removed-line rule would hold an addition the compare lets pass.
+    const [test, fixture, guard, bats] = [isTest(f.path), isFixture(f.path), isGuard(f.path) && !dataTables(f.path), f.path.endsWith('.bats')];
     if (test && i.deleted.has(f.path)) hit('test-file-deleted', f.path);
     for (const l of removed) {
       const t = l.trim();
@@ -994,6 +1366,166 @@ function findings(i: WeakeningInput): Found {
       if (guard) hit('guard-lines', f.path, t);
     }
     if (isAllow(f.path)) for (const l of added) if (l.trim()) hit('allow-file', f.path, l.trim());
+  }
+
+  // The redaction replacers (R1184r D1): the data names each by key (`{"replacer": "stripe"}`), so each function body
+  // is an entry of the table in code. A removed or changed line of the REPLACERS block, in the module or the updater's
+  // generated copy, waits as a table's entry did when the function sat in the table (main).
+  for (const f of i.files) {
+    if (!REPLACER_FILES.test(f.path) || !holds(f.path, i.scope)) continue;
+    let was: string[];
+    let now: string[];
+    try {
+      [was, now] = [replacerLines(i.before(f.path)), replacerLines(i.after(f.path))];
+    } catch (e) {
+      hit('unreadable', f.path, String((e as Error).message ?? e));
+      continue;
+    }
+    const block = new Set(was.map((l) => l.trim()));
+    for (const l of f.removedLines ?? []) if (l.trim() && block.has(l.trim())) hit('table-shrunk', f.path, `REPLACERS: ${l.trim()}`);
+    // An added line in the block (R1184s D2: `...({ stripe: … } as Partial<…>),` overrides a replacer and removes no
+    // line): it passes only as a comment, or as one new replacer on one line, its name in neither the old block nor
+    // anywhere else in the new one. Anything else (a spread, a computed or quoted key, get/set, a name used before, a
+    // second property on the line, a replacer over several lines) waits.
+    const keyOf = (l: string) => /^\s*([A-Za-z_$][\w$]*)\s*(?::|,\s*$|\()/.exec(l)?.[1];
+    // Each line read as JS reads it: cut at a line terminator other than \n first (R1184w D1: a key after a `//` comment's
+    // U+2028 is a key).
+    const keys = (ls: string[]) => ls.slice(1, -1).flatMap((l) => l.split(LINE_BREAK).flatMap((s) => (/^\s*(?:\/\/|\/\*|\*)/.test(s) ? [] : [keyOf(s) ?? ''])));
+    const [old, fresh] = [new Set(keys(was)), keys(now)];
+    const inBlock = new Set(now.slice(1, -1));
+    for (const l of f.addedLines ?? []) {
+      if (!inBlock.has(l) || !l.trim()) continue;
+      // A line terminator other than \n waits before any comment is skipped (R1184w D1: `// note<U+2028>...({ … }),`).
+      if (LINE_BREAK.test(l)) {
+        hit('table-shrunk', f.path, `REPLACERS: a line terminator inside a line: ${JSON.stringify(l.trim()).slice(0, 120)}`);
+        continue;
+      }
+      if (/^\s*\/\//.test(l)) continue;
+      // Exactly one property (R1184t D1: `zz: (m) => m, ...({ stripe: … }),` is a new key and then a spread): cut at its
+      // commas outside brackets, the line is one part and an empty one after its last `,`, and it closes every bracket
+      // it opens (a replacer over several lines waits from its first line). The part is `name: …`, `name(…) {…}` or
+      // `name`: no spread, computed or quoted key, and no get/set. Brackets and commas count in code only (R1184v D1: a
+      // `'('` or a `/* ( */` hid a spread at "depth 1"); a line with a regexp or a division, or a string, template or
+      // comment it doesn't close, waits (topLevelParts). A comma in type arguments makes it wait too: fail closed.
+      const parts = topLevelParts(l);
+      const one = !!parts && parts.length === 2 && parts[1]!.trim() === '' && /^\s*[A-Za-z_$][\w$]*\s*(?::|\(|$)/.test(parts[0]!);
+      const k = one ? keyOf(l) : undefined;
+      const lone = !!k && !old.has(k) && fresh.filter((x) => x === k).length === 1;
+      if (!lone) hit('table-shrunk', f.path, `REPLACERS: ${l.trim()}`);
+    }
+  }
+
+  // A script's generated copy of its tables (R1184y Y6a): a line between its BEGIN and END markers changed while the
+  // data it copies didn't is drift, never a regeneration, so it waits (main held the marked table so). The data is
+  // judged as parsed (R1184aa D2: a blank line or keys reordered in the tables file is no change of data). With the
+  // data changed too, the compare judges the data and test/table-copies.test.ts holds the copy to it.
+  const sameData = (own: string): boolean => {
+    if (!i.files.some((g) => g.path === own)) return true;
+    try {
+      const [b, a] = [i.before(own), i.after(own)];
+      if (b === null || a === null) return false;
+      const data = (text: string) => canonical([...parseTables(text, own)].map(([name, x]) => [name, x.kind, x.value]).sort((m, n) => (m[0] as string).localeCompare(n[0] as string)));
+      return data(b) === data(a);
+    } catch {
+      return false; // a tables file that can't be read is held by the compare (unreadable)
+    }
+  };
+  for (const f of i.files) {
+    const own = tablesFileFor(f.path);
+    if (!MARKABLE.test(f.path) || !i.tablesFiles?.has(own) || isTest(f.path) || !holds(f.path, i.scope) || !sameData(own)) continue;
+    let was: Set<string>;
+    let now: Set<string>;
+    try {
+      [was, now] = [copyLines(i.before(f.path)), copyLines(i.after(f.path))];
+    } catch (e) {
+      hit('unreadable', f.path, String((e as Error).message ?? e));
+      continue;
+    }
+    for (const l of f.removedLines ?? []) if (was.has(l)) hit('table-shrunk', f.path, `a generated copy changed without its data: ${l.trim().slice(0, 120)}`);
+    for (const l of f.addedLines ?? []) if (now.has(l)) hit('table-shrunk', f.path, `a generated copy changed without its data: ${l.trim().slice(0, 120)}`);
+  }
+  // R1184ag D1: a copy turned off by lines around it (the block in a comment or braces, a weaker table declared after
+  // it), so no line of the block changes. Each table the base's copy declares is declared once after the change, as
+  // main held for its marked tables ("declared N times"); and a changed line outside the block that names one of the
+  // copy's tables (a use pointed elsewhere, a second declaration) waits.
+  for (const f of i.files) {
+    if (!MARKABLE.test(f.path) || !i.tablesFiles?.has(tablesFileFor(f.path)) || isTest(f.path) || !holds(f.path, i.scope)) continue;
+    let b: string | null;
+    let a: string | null;
+    try {
+      [b, a] = [i.before(f.path), i.after(f.path)];
+    } catch (e) {
+      hit('unreadable', f.path, String((e as Error).message ?? e));
+      continue;
+    }
+    const names = [...new Set([...copyNames(b), ...copyNames(a)])];
+    if (!names.length) continue;
+    const [was, now] = [copyLines(b), copyLines(a)];
+    for (const name of copyNames(b)) {
+      const n = a === null ? 0 : declarations(a, name);
+      if (n !== 1) hit('table-shrunk', f.path, `${name} is declared ${n} times`);
+    }
+    const named = new RegExp(`(?<![\\w$])(?:${names.join('|')})(?![\\w$])`);
+    // R1184ah D1, R1184ai D1: a name written with escapes is the same name; a global, `with`, eval or Function can
+    // answer a name the block no longer binds, so a changed line outside the block that uses one waits.
+    const outside = (l: string) => named.test(unescapeIds(l)) || GLOBAL_REACH.test(unescapeIds(l));
+    for (const l of f.removedLines ?? []) if (!was.has(l) && outside(l)) hit('table-used', f.path, `a copy's table named, or a global reached, outside its block: ${l.trim().slice(0, 120)}`);
+    for (const l of f.addedLines ?? []) if (!now.has(l) && outside(l)) hit('table-used', f.path, `a copy's table named, or a global reached, outside its block: ${l.trim().slice(0, 120)}`);
+    // R1184ai D2: the block is top-level code at the head as in the base (not put in a comment, a string or braces).
+    // Read fail closed: a changed line before the block that holds a `/` in code, or a text the reading isn't sure of,
+    // waits too.
+    if (b !== null && a !== null) {
+      const at = (text: string) => text.split('\n').findIndex((l) => l.startsWith('// BEGIN tables from '));
+      const [kb, ka] = [at(b), at(a)];
+      // Only the text before the block decides where it stands, so only that is read.
+      // Read as written (R1184am D1: un-escaping first turned `\u0027` in a string into a quote, and `\u000a` in a comment
+      // into a line break); an escape anywhere in it makes the reading unsure (copyCodeOf).
+      const prefix = (text: string, k: number) => text.split('\n').slice(0, k + 1).join('\n');
+      const [cb, ca] = [copyCodeOf(prefix(b, kb)), copyCodeOf(prefix(a, ka))];
+      const same = kb >= 0 && ka >= 0 && JSON.stringify(cb.starts[kb]) === JSON.stringify(ca.starts[ka]);
+      const before = a.split('\n').slice(0, Math.max(ka, 0));
+      const changed = (k: number) => (f.addedLines ?? []).includes(before[k]!);
+      const removedBefore = (f.removedLines ?? []).some((l) => b.split('\n').slice(0, Math.max(kb, 0)).includes(l) && !before.includes(l));
+      // Unsure of the head's reading, or a changed line before the block holding a `/` in code, or (where even the
+      // base's reading isn't sure) any changed line before it: it waits.
+      const unsure = !ca.sure || before.some((_, k) => changed(k) && ca.slash.has(k)) || (!cb.sure && (before.some((_, k) => changed(k)) || removedBefore));
+      if (!same || unsure) hit('table-shrunk', f.path, "the copy's block is not read as top-level code, as it is in the base");
+    }
+  }
+
+  // The data tables (#941), compared before and after as parsed data.
+  for (const f of i.files) if (dataTables(f.path)) jsonTableFindings(f.path, i.before, i.after, hit);
+  // A tables file the change adds whose name differs only in case from another's (R1184l #4): on a checkout that folds
+  // case, one is written over the other, and the module reads data the compare never saw. Folded as a file system may
+  // fold it: NFKC first (U+017F, the long s, is an s), then lower case (R1184n N5).
+  const fold = (p: string) => p.normalize('NFKC').toLowerCase();
+  // The suffix is folded too (R1184r D3: `x.tables.JSON`, `x.Tables.json`, `x.tableſ.json` beside `x.tables.json`).
+  const foldedTables = (p: string) => TABLES_FILE.test(fold(p)) && holds(p, i.scope);
+  const tablesFiles = [...new Set([...(i.tablesFiles ?? []), ...i.files.map((f) => f.path).filter((p) => foldedTables(p) && !i.deleted.has(p))])];
+  for (const f of i.files) {
+    if (!foldedTables(f.path) || i.deleted.has(f.path) || i.tablesFiles?.has(f.path)) continue;
+    const twin = tablesFiles.find((p) => p !== f.path && fold(p) === fold(f.path));
+    if (twin) hit('table-gone', f.path, `its name differs only in case from ${twin}`);
+    else if (!TABLES_FILE.test(f.path)) hit('unreadable', f.path, 'a tables file named in another case: the build and the loader read only `.tables.json`');
+  }
+  // A line that loads a table, removed or changed (#941, the owner's rule of 2026-11-08): the module's load
+  // (`tablesOf(import.meta.url)`), any `.tables.json` name (an import, a require, a read), or a generated copy's marker.
+  // It waits whatever replaces it: what the code reads after may not be the table the compare reads.
+  // A test's lines are held by the test rules.
+  // No line is skipped as a comment (R1184z Z1/Z2, R1184aa D1): whether a line that starts like one (`//`, `/*`, `*`)
+  // is a comment or a template literal's text, a string's or a regexp's takes a full JS/TS lexer, and every hand-written
+  // reading of it was wrong in some valid shape. So a load rule reads every changed line, a comment's included: a
+  // comment that names the loader, a load line or an import.meta write waits for the owner, as code does (fail closed).
+  for (const f of i.files) {
+    if (!MARKABLE.test(f.path) || !holds(f.path, i.scope) || isTest(f.path)) continue;
+    for (const l of f.removedLines ?? []) if (TABLE_LOAD.test(l)) hit('table-load-gone', f.path, l.trim());
+    if (LOADER_CODE.has(f.path)) continue;
+    for (const l of f.addedLines ?? []) {
+      // A trailing comment is forgiven only for the plain import (R1184o); the other rules read the whole line (R1184q 2: a
+      // `//` inside a template literal would cut the rest of the line off).
+      const plainImport = LOADER_IMPORT.test(l) || LOADER_IMPORT.test(l.replace(/\s*\/\/[^'"`]*$/, ''));
+      if ((LOADER_NAMED.test(l) && !plainImport) || metaUse(l)) hit('table-load-added', f.path, l.trim());
+    }
   }
 
   // The registered tables, compared before and after, line by line.
@@ -1120,6 +1652,40 @@ function findings(i: WeakeningInput): Found {
 }
 
 /**
+ * A tables file's change (#941), read as data with the loader's own parser (src/check-tables.ts parseTables), never
+ * run: the file gone takes each of its tables with it; a table gone, or its kind changed, waits; a never-shrink table
+ * waits on an entry lost or changed (tableEntries), a never-grow one on an entry added or changed, each by its kind
+ * and its name's floor (heldKinds). A new file, or a new table, adds nothing to hold. A file that doesn't parse, before
+ * or after, or can't be read, waits.
+ */
+export function jsonTableFindings(path: string, before: (p: string) => string | null, after: (p: string) => string | null, hit: (kind: Kind, path: string, what?: string) => void): void {
+  let was: Map<string, ParsedTable> | null;
+  let now: Map<string, ParsedTable> | null;
+  try {
+    const [b, a] = [before(path), after(path)];
+    was = b === null ? null : parseTables(b, path);
+    now = a === null ? null : parseTables(a, path);
+  } catch (e) {
+    hit('unreadable', path, String((e as Error).message ?? e));
+    return;
+  }
+  if (was === null) return;
+  for (const [name, t] of was) {
+    const n = now?.get(name);
+    if (!n) {
+      hit('table-gone', path, name);
+      continue;
+    }
+    if (n.kind !== t.kind) hit('registration-gone', path, `${name}: ${t.kind} -> ${n.kind}`);
+    const [b, a] = [tableEntries(t.value), tableEntries(n.value)];
+    // exact (#941, R1184n): an entry added, lost or changed waits, as for a table whose any change loosens it.
+    const held = t.kind === 'exact' ? new Set<TableKind>(['never-shrink', 'never-grow']) : heldKinds(name, t.kind);
+    if (held.has('never-shrink')) for (const e of missing(b, a)) hit('table-shrunk', path, `${name}: ${e}`);
+    if (held.has('never-grow')) for (const e of missing(a, b)) hit('table-grown', path, `${name}: ${e}`);
+  }
+}
+
+/**
  * weakeningReasons for the change base..head of the repo at `cwd`, with `files` from changeFiles. When the change
  * can't be read, one reason says so: the change waits (fail closed).
  *
@@ -1173,7 +1739,12 @@ function measured(cwd: string, from: string, to: string, files: ChangeFile[], sc
   const markable = (set: Set<string>) => new Set([...files.map((f) => f.path), ...(conflicts ?? [])].filter((p) => set.has(p) && MARKABLE.test(p) && !isNonUtf8Path(p)));
   const marked = markable(new Set(filesWithText(cwd, from, [TABLE_MARK.trimEnd(), LINT_MARK])));
   const tipMarked = at ? markable(new Set(filesWithText(cwd, at.tip, [TABLE_MARK.trimEnd(), LINT_MARK]))) : new Set<string>();
-  const paths = [...new Set([...CHECK_TABLES.map((t) => t.path), ...marked, ...tipMarked])].filter((p) => files.some((f) => f.path === p) && !isNonUtf8Path(p));
+  // The base's tables files, for the case-folded name check: by path, from its tree (R1184n N4: by text, a file
+  // spelling its keys with escapes wasn't one).
+  const tablesFiles = new Set([...presentNames(cwd, from)].filter((p) => TABLES_FILE.test(p)));
+  // A file with a tables file of its own beside it is read too: a script's generated copy (R1184y Y6a).
+  const ownData = (f: ChangeFile) => MARKABLE.test(f.path) && tablesFiles.has(tablesFileFor(f.path));
+  const paths = [...new Set([...CHECK_TABLES.map((t) => t.path), ...marked, ...tipMarked, ...files.filter((f) => TABLES_FILE.test(f.path) || REPLACER_FILES.test(f.path) || ownData(f)).map((f) => f.path)])].filter((p) => files.some((f) => f.path === p) && !isNonUtf8Path(p));
   // A file over the cap isn't read at all: the change waits.
   const side = (rev: string) => {
     const { texts, tooBig } = filesAt(cwd, rev, paths, MAX_TABLE_FILE);
@@ -1182,6 +1753,6 @@ function measured(cwd: string, from: string, to: string, files: ChangeFile[], sc
       return texts.get(p) ?? null;
     };
   };
-  const input: WeakeningInput = { files, deleted, moved, before: side(from), after: side(to), scope, marked, ...(conflicts ? { conflicts } : {}) };
+  const input: WeakeningInput = { files, deleted, moved, before: side(from), after: side(to), scope, marked, tablesFiles, ...(conflicts ? { conflicts } : {}) };
   return at ? { ...input, tip: side(at.tip), tipMarked, meet: side(at.meet) } : input;
 }
