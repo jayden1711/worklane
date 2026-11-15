@@ -1637,14 +1637,15 @@ function subtestCalls(ts, fn) {
  * - `sign`: each line that holds systemd's sign (the static pass's SIGN, in a string, a name or a regex), the
  *   systemd work itself, which a branch, a loop over nothing or a catch that swallows can leave unrun.
  * Lines are the built file's, 1-based, as node's coverage reports them. `refused`: a function given by a name this
- * file doesn't declare (it can't be read, so what must run of it can't be said).
+ * file doesn't declare (it can't be read, so what must run of it can't be said). `length`: the length of `text`, the
+ * text each position is in, which problems() holds to the length of the text the coverage is of (R1308a D1).
  */
 export function mustRun(ts, path, text, line, column) {
   const sf = parsed(ts, path, text);
   const lineOf = (n) => sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1;
   const at = (n) => ({ line: lineOf(n), pos: n.getStart(sf) });
   const sign = new RegExp(SIGN.source);
-  const out = { ends: [], subtests: [], sign: [], refused: null };
+  const out = { ends: [], subtests: [], sign: [], refused: null, length: text.length };
   let chk = null;
   const checker = () => (chk ??= checkerOf(ts, sf));
   const seen = new Set();
@@ -1963,6 +1964,14 @@ export function problems(runs) {
             continue;
           }
           const ranges = coverage[0];
+          // The positions are in the text mustRun read; the ranges, in the text V8 ran, whose own range (the module's,
+          // V8's first) spans it whole. Of two lengths, they are two texts, and no position can be judged (R1308a D1:
+          // the file as built, read while the preload's hook had added to it, judged every point after a table short).
+          const whole = ranges[0];
+          if (!whole || whole.startOffset !== 0 || whole.endOffset !== t.mustRun.length) {
+            out.push(`${at}: its coverage is of a text of ${whole ? whole.endOffset : 0} characters, and what of it must run was read on one of ${t.mustRun.length}: the coverage is of a text other than the one judged`);
+            continue;
+          }
           const ran = (p) => countAt(ranges, p.pos) > 0;
           const lines = (ps) => [...new Set(ps.map((p) => p.line))].join(', ');
           // Ran to its end every time it ran (R1169aj D1, D2: a function run for two tests, or two subtests, too).
