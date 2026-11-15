@@ -10,7 +10,7 @@ import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as redactModule from '../src/events/redact.js';
-import { redactString, REDACTION_PATTERNS } from '../src/events/redact.js';
+import { redactString, redactionPatterns } from '../src/events/redact.js';
 import { EventLog } from '../src/events/log.js';
 import { FileBacklog } from '../src/backlog/file.js';
 import { buildDigest } from '../src/superfan/digest.js';
@@ -223,7 +223,7 @@ test('the dashboard-key and broad patterns, the underscore pass and redactRecord
   const fill = (unit: string) => unit.repeat(Math.ceil(N / unit.length));
   const hostile = [fill('a-'), fill('a.'), fill('-a'), fill('wld_'), fill('wld_a-'), fill('-wld_'), fill('eyJ-'), fill('x-eyJaaaaaaaaa.'), fill('a+'), fill('a://'), fill('a:/'), fill('token'), fill('token='), fill('token="'), fill(' token'), fill('bearer '), fill('ghp_'), fill('-ghp_a'), fill('sk-ant-'), fill('xoxb-'), fill('_ghp_'), fill('x_sk-'), fill('_'), fill('a_b'), fill('_Bearer ')];
   const slow: string[] = [];
-  const patterns = REDACTION_PATTERNS.filter((p) => p.kind === 'dashboard key' || p.group === 'broad');
+  const patterns = redactionPatterns().filter((p) => p.kind === 'dashboard key' || p.group === 'broad');
   assert.ok(patterns.length >= 1 + 7, `the dashboard-key pattern and the broad rules are in the shared redactor (${patterns.length})`);
   const time = (what: string, f: () => unknown, ms = 300) => {
     const t0 = performance.now();

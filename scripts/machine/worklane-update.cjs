@@ -115,7 +115,10 @@ const sharedRedact = (() => {
 const exports = {};
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.CUT_MARGIN = exports.UNSCANNABLE = exports.MAX_PASSES = exports.UNSCANNABLE_KIND = exports.TRACKER = exports.REDACTION_PATTERNS = exports.REPLACER_NAMES = exports.isDashboardKey = exports.DASHBOARD_KEY_PREFIX = void 0;
+exports.REDACTION_PATTERNS = exports.CUT_MARGIN = exports.UNSCANNABLE = exports.MAX_PASSES = exports.UNSCANNABLE_KIND = exports.TRACKER = exports.REPLACER_NAMES = exports.DASHBOARD_KEY_PREFIX = void 0;
+exports.isDashboardKey = isDashboardKey;
+exports.markerProblem = markerProblem;
+exports.redactionPatterns = redactionPatterns;
 exports.secretKinds = secretKinds;
 exports.redactTableProblems = redactTableProblems;
 exports.fixedPoint = fixedPoint;
@@ -154,46 +157,98 @@ const frozenSet = (values) => {
 const regExpOf = (p) => new RegExp(p.source, p.flags);
 const TABLES_DATA = { "CREDENTIAL_WORDS": frozenSet(["token", "secret", "secrets", "password", "passwd", "pwd", "pass", "passphrase", "jwt", "bearer", "credential", "credentials", "authorization"]), "CREDENTIAL_ENDINGS": Object.freeze(["token", "secret", "password", "passwd", "accesskey"]), "KEY_QUALIFIERS": frozenSet(["api", "access", "secret", "private", "signing", "encryption", "master", "client", "app", "auth", "account", "service", "license", "deploy", "admin", "webhook", "session", "ssh", "hmac", "consumer"]), "PATTERNS": Object.freeze([Object.freeze({ "re": Object.freeze({ source: "wld_[A-Za-z0-9_-]{32,}(?![A-Za-z0-9_-])", flags: "g" }), "rep": "wld_[REDACTED]", "kind": "dashboard key" }), Object.freeze({ "re": Object.freeze({ source: "gh[pousr]_[A-Za-z0-9]{30,}(?![A-Za-z0-9])", flags: "g" }), "rep": "gh*_[REDACTED]", "kind": "GitHub token" }), Object.freeze({ "re": Object.freeze({ source: "github_pat_[A-Za-z0-9_]{40,}", flags: "g" }), "rep": "github_pat_[REDACTED]", "kind": "GitHub token" }), Object.freeze({ "re": Object.freeze({ source: "sk-ant-[A-Za-z0-9_-]{20,}", flags: "g" }), "rep": "sk-[REDACTED]", "kind": "API key (sk-)" }), Object.freeze({ "re": Object.freeze({ source: "\\bsk-(?:ant-)?[A-Za-z0-9_-]{20,}\\b", flags: "g" }), "rep": "sk-[REDACTED]", "kind": "API key (sk-)" }), Object.freeze({ "re": Object.freeze({ source: "(^|[^A-Za-z0-9_])([sr]k)_(?:live|test)_([A-Za-z0-9]{16,})(?![A-Za-z0-9_])", flags: "g" }), "rep": Object.freeze({ "replacer": "stripe" }), "kind": "Stripe key" }), Object.freeze({ "re": Object.freeze({ source: "AIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])", flags: "g" }), "rep": "AIza[REDACTED]", "kind": "Google API key" }), Object.freeze({ "re": Object.freeze({ source: "(^|[^A-Za-z0-9_+/-])(?=([A-Za-z0-9_+/-]*?)eyJ)\\2eyJ(?=[A-Za-z0-9_+/-]{8})(?=([A-Za-z0-9_+/-]+))\\3=*\\.(?=[A-Za-z0-9_+/-]{8})(?=([A-Za-z0-9_+/-]+))\\4=*\\.[A-Za-z0-9_+/=-]*(?:\\.[A-Za-z0-9_+/=-]*)*", flags: "g" }), "rep": "$1$2[REDACTED JWT]", "kind": "JWT" }), Object.freeze({ "re": Object.freeze({ source: "(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Za-z0-9])", flags: "g" }), "rep": "AKIA[REDACTED]", "kind": "AWS access key" }), Object.freeze({ "re": Object.freeze({ source: "xoxe[.-][A-Za-z0-9.-]{10,}(?![A-Za-z0-9])", flags: "g" }), "rep": "xoxe-[REDACTED]", "kind": "Slack token" }), Object.freeze({ "re": Object.freeze({ source: "xox[abprs]-[A-Za-z0-9-]{10,}(?![A-Za-z0-9])", flags: "g" }), "rep": "xox-[REDACTED]", "kind": "Slack token" }), Object.freeze({ "re": Object.freeze({ source: "xapp-[A-Za-z0-9-]{10,}(?![A-Za-z0-9])", flags: "g" }), "rep": "xapp-[REDACTED]", "kind": "Slack app-level token" }), Object.freeze({ "re": Object.freeze({ source: "lin_(?:api|oauth)_[A-Za-z0-9]{20,}(?![A-Za-z0-9])", flags: "g" }), "rep": "lin_[REDACTED]", "kind": "Linear key" }), Object.freeze({ "re": Object.freeze({ source: "https:\\/\\/hooks\\.slack\\.com\\/services\\/[A-Za-z0-9/]+", flags: "g" }), "rep": "https://hooks.slack.com/services/[REDACTED]", "kind": "Slack webhook" }), Object.freeze({ "re": Object.freeze({ source: "tskey-[A-Za-z0-9_-]+", flags: "g" }), "rep": "tskey-[REDACTED]", "kind": "Tailscale key" }), Object.freeze({ "re": Object.freeze({ source: "-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----(?:[\\s\\S]*?-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----|[\\s\\S]*)", flags: "g" }), "rep": "[REDACTED PRIVATE KEY]", "kind": "private key" }), Object.freeze({ "re": Object.freeze({ source: "^[\\s\\S]*-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----", flags: "" }), "rep": Object.freeze({ "replacer": "orphanEnd" }), "kind": "private key" }), Object.freeze({ "re": Object.freeze({ source: "\\b(bearer)\\s+(?:[A-Za-z0-9._~+/-]|\\\\\\/){20,}=*", flags: "gi" }), "rep": "$1 [REDACTED]", "kind": "bearer token" }), Object.freeze({ "re": Object.freeze({ source: "\\b(basic)(\\s+)((?:[A-Za-z0-9+/]|\\\\\\/){8,}={0,2})", flags: "gi" }), "rep": Object.freeze({ "replacer": "basic" }), "kind": "Basic credential" }), Object.freeze({ "re": Object.freeze({ source: "([a-z0-9+.-]{1,32}:\\/\\/[^:/\\s@]+):[^@\\s/]+@", flags: "gi" }), "rep": "$1:[REDACTED]@", "kind": "password in a URL" }), Object.freeze({ "re": Object.freeze({ source: "\\b0x[0-9a-fA-F]{64}(?![A-Za-z0-9])", flags: "g" }), "rep": "0x[REDACTED-32-BYTES]", "kind": "32-byte hex key" }), Object.freeze({ "re": Object.freeze({ source: "(\\\\?\"|')([A-Za-z0-9_-]+)\\1(\\s*(?::|=>)\\s*)(\\\\?\"|')([A-Za-z0-9_\\-.+/=~]{16,})\\4", flags: "g" }), "rep": Object.freeze({ "replacer": "jsonKey" }), "kind": "secret under a JSON key" }), Object.freeze({ "re": Object.freeze({ source: "(^|[^A-Za-z0-9])[A-Za-z0-9_-]{23,28}\\.[A-Za-z0-9_-]{6,7}\\.[A-Za-z0-9_-]{27,}\\b", flags: "g" }), "rep": "$1[REDACTED]", "kind": "Discord bot token" })]), "BROAD": Object.freeze([Object.freeze({ "re": Object.freeze({ source: "(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{8,}", flags: "g" }), "mask": "{mask}", "kind": "GitHub token, cut short" }), Object.freeze({ "re": Object.freeze({ source: "sk-ant-[A-Za-z0-9_-]+", flags: "g" }), "mask": "{mask}", "kind": "Anthropic key, cut short" }), Object.freeze({ "re": Object.freeze({ source: "\\b(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-ant-[A-Za-z0-9_-]{10,}|xox[abprs]-[A-Za-z0-9-]{10,})", flags: "g" }), "mask": "{mask}", "kind": "the updater's token rule" }), Object.freeze({ "re": Object.freeze({ source: "xox[abprs]-[A-Za-z0-9_-]+", flags: "g" }), "mask": "{mask}", "kind": "Slack token, cut short" }), Object.freeze({ "re": Object.freeze({ source: "eyJ[A-Za-z0-9_-]{8,512}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*", flags: "g" }), "mask": "{mask}", "kind": "JWT after a hyphen" }), Object.freeze({ "re": Object.freeze({ source: "\\b(bearer)\\s+[A-Za-z0-9._~+/=-]{8,}", flags: "gi" }), "mask": "$1 {mask}", "kind": "short bearer token" }), Object.freeze({ "re": Object.freeze({ source: "([a-z0-9+.-]{1,32}:\\/\\/)[^\\s/@]+@", flags: "gi" }), "mask": "$1{mask}@", "kind": "user info in a URL" }), Object.freeze({ "re": Object.freeze({ source: "\\b([A-Za-z_]*(?:token|secret|password|passwd|api[_-]?key))(\\s*[=:]\\s*)(\"[^\"]*\"|'[^']*'|\\S+)", flags: "gi" }), "mask": "$1$2{mask}", "kind": "value after a secret name" })]), "BROAD_RULES": Object.freeze([Object.freeze({ "re": Object.freeze({ source: "wld_[A-Za-z0-9_-]{32,}(?![A-Za-z0-9_-])", flags: "g" }), "rep": "wld_[REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "gh[pousr]_[A-Za-z0-9]{30,}(?![A-Za-z0-9])", flags: "g" }), "rep": "gh*_[REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "github_pat_[A-Za-z0-9_]{40,}", flags: "g" }), "rep": "github_pat_[REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "sk-ant-[A-Za-z0-9_-]{20,}", flags: "g" }), "rep": "sk-[REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "\\bsk-(?:ant-)?[A-Za-z0-9_-]{20,}\\b", flags: "g" }), "rep": "sk-[REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "(^|[^A-Za-z0-9_])([sr]k)_(?:live|test)_([A-Za-z0-9]{16,})(?![A-Za-z0-9_])", flags: "g" }), "rep": Object.freeze({ "replacer": "stripe" }) }), Object.freeze({ "re": Object.freeze({ source: "AIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])", flags: "g" }), "rep": "AIza[REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "(^|[^A-Za-z0-9_+/-])(?=([A-Za-z0-9_+/-]*?)eyJ)\\2eyJ(?=[A-Za-z0-9_+/-]{8})(?=([A-Za-z0-9_+/-]+))\\3=*\\.(?=[A-Za-z0-9_+/-]{8})(?=([A-Za-z0-9_+/-]+))\\4=*\\.[A-Za-z0-9_+/=-]*(?:\\.[A-Za-z0-9_+/=-]*)*", flags: "g" }), "rep": "$1$2[REDACTED JWT]" }), Object.freeze({ "re": Object.freeze({ source: "(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Za-z0-9])", flags: "g" }), "rep": "AKIA[REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "xoxe[.-][A-Za-z0-9.-]{10,}(?![A-Za-z0-9])", flags: "g" }), "rep": "xoxe-[REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "xox[abprs]-[A-Za-z0-9-]{10,}(?![A-Za-z0-9])", flags: "g" }), "rep": "xox-[REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "xapp-[A-Za-z0-9-]{10,}(?![A-Za-z0-9])", flags: "g" }), "rep": "xapp-[REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "lin_(?:api|oauth)_[A-Za-z0-9]{20,}(?![A-Za-z0-9])", flags: "g" }), "rep": "lin_[REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "https:\\/\\/hooks\\.slack\\.com\\/services\\/[A-Za-z0-9/]+", flags: "g" }), "rep": "https://hooks.slack.com/services/[REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "tskey-[A-Za-z0-9_-]+", flags: "g" }), "rep": "tskey-[REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----(?:[\\s\\S]*?-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----|[\\s\\S]*)", flags: "g" }), "rep": "[REDACTED PRIVATE KEY]" }), Object.freeze({ "re": Object.freeze({ source: "^[\\s\\S]*-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----", flags: "" }), "rep": Object.freeze({ "replacer": "orphanEnd" }) }), Object.freeze({ "re": Object.freeze({ source: "\\b(bearer)\\s+(?:[A-Za-z0-9._~+/-]|\\\\\\/){20,}=*", flags: "gi" }), "rep": "$1 [REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "\\b(basic)(\\s+)((?:[A-Za-z0-9+/]|\\\\\\/){8,}={0,2})", flags: "gi" }), "rep": Object.freeze({ "replacer": "basic" }) }), Object.freeze({ "re": Object.freeze({ source: "([a-z0-9+.-]{1,32}:\\/\\/[^:/\\s@]+):[^@\\s/]+@", flags: "gi" }), "rep": "$1:[REDACTED]@" }), Object.freeze({ "re": Object.freeze({ source: "\\b0x[0-9a-fA-F]{64}(?![A-Za-z0-9])", flags: "g" }), "rep": "0x[REDACTED-32-BYTES]" }), Object.freeze({ "re": Object.freeze({ source: "(\\\\?\"|')([A-Za-z0-9_-]+)\\1(\\s*(?::|=>)\\s*)(\\\\?\"|')([A-Za-z0-9_\\-.+/=~]{16,})\\4", flags: "g" }), "rep": Object.freeze({ "replacer": "jsonKey" }) }), Object.freeze({ "re": Object.freeze({ source: "(^|[^A-Za-z0-9])[A-Za-z0-9_-]{23,28}\\.[A-Za-z0-9_-]{6,7}\\.[A-Za-z0-9_-]{27,}\\b", flags: "g" }), "rep": "$1[REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{8,}", flags: "g" }), "rep": "[REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "sk-ant-[A-Za-z0-9_-]+", flags: "g" }), "rep": "[REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "\\b(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-ant-[A-Za-z0-9_-]{10,}|xox[abprs]-[A-Za-z0-9-]{10,})", flags: "g" }), "rep": "[REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "xox[abprs]-[A-Za-z0-9_-]+", flags: "g" }), "rep": "[REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "eyJ[A-Za-z0-9_-]{8,512}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*", flags: "g" }), "rep": "[REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "\\b(bearer)\\s+[A-Za-z0-9._~+/=-]{8,}", flags: "gi" }), "rep": "$1 [REDACTED]" }), Object.freeze({ "re": Object.freeze({ source: "([a-z0-9+.-]{1,32}:\\/\\/)[^\\s/@]+@", flags: "gi" }), "rep": "$1[REDACTED]@" }), Object.freeze({ "re": Object.freeze({ source: "\\b([A-Za-z_]*(?:token|secret|password|passwd|api[_-]?key))(\\s*[=:]\\s*)(\"[^\"]*\"|'[^']*'|\\S+)", flags: "gi" }), "rep": "$1$2[REDACTED]" })]), "GLUED_PREFIXES": Object.freeze(["ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_", "sk-", "sk_live_", "sk_test_", "rk_live_", "rk_test_", "xoxa-", "xoxb-", "xoxe", "xoxp-", "xoxr-", "xoxs-", "xapp-", "lin_api_", "lin_oauth_", "AKIA", "ASIA", "AIza", "eyJ", "0x", "Bearer", "bearer", "BEARER", "Basic", "basic", "BASIC", "wld_"]), "GLUE_PARTS": Object.freeze(["(?:\\u001b|\\\\u001[bB]|\\\\x1[bB]|\\\\033|\\\\e|\\^\\[)(?:\\[[0-?]*[ -/]*[@-~]|[ -/]+[0-~]|[0-~])", "\\u009b[0-?]*[ -/]*[@-~]", "\\\\(?:u[0-9A-Fa-f]{4}|[nrtbf\"\\\\/])"]) };
 const TABLES = { get: (name) => TABLES_DATA[name] };
-const credentialShaped = (v) => (/[a-z]/.test(v) && /[A-Z]/.test(v) && /\d/.test(v)) || /^[0-9a-fA-F]{32,}$/.test(v);
-const basicShaped = (v) => /[0-9+/=]/.test(v) || (v.length >= 16 && v.length % 4 !== 1 && /[a-z]/.test(v) && /[A-Z]/.test(v)) || basicPair(v);
+function credentialShaped(v) {
+    return (hasChar(v, isLower) && hasChar(v, isUpper) && hasChar(v, isDigit)) || (v.length >= 32 && allChars(v, isHex));
+}
+function basicShaped(v) {
+    return hasChar(v, (c) => isDigit(c) || c === '+' || c === '/' || c === '=') || (v.length >= 16 && v.length % 4 !== 1 && hasChar(v, isLower) && hasChar(v, isUpper)) || basicPair(v);
+}
+const BASE64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 function basicPair(v) {
-    let text;
-    try {
-        text = atob(v);
+    const o = intrinsics();
+    let bits = 0;
+    let held = 0;
+    let count = 0;
+    let pad = 0;
+    let colon = false;
+    for (let i = 0; i < v.length; i++) {
+        const c = v[i];
+        if (c === ' ' || c === '\t' || c === '\n' || c === '\f' || c === '\r')
+            continue;
+        if (c === '=') {
+            pad++;
+            continue;
+        }
+        const d = o.indexOf(BASE64, c);
+        if (d === -1 || pad > 0 || c.length !== 1)
+            return false;
+        count++;
+        bits = (bits << 6) | d;
+        held += 6;
+        if (held >= 8) {
+            held -= 8;
+            const byte = (bits >> held) & 0xff;
+            bits &= (1 << held) - 1;
+            if (byte < 0x20 || byte > 0x7e)
+                return false;
+            if (byte === 0x3a)
+                colon = true;
+        }
     }
-    catch {
+    if (pad > 2 || (pad > 0 && (count + pad) % 4 !== 0) || count % 4 === 1)
         return false;
-    }
-    return /^[\x20-\x7e]*:[\x20-\x7e]*$/.test(text);
+    return colon;
 }
 const CREDENTIAL_WORDS = TABLES.get('CREDENTIAL_WORDS');
 const CREDENTIAL_ENDINGS = TABLES.get('CREDENTIAL_ENDINGS');
-const credentialWord = (w) => CREDENTIAL_WORDS.has(w) || CREDENTIAL_ENDINGS.some((e) => w.endsWith(e));
+function credentialWord(w) {
+    const o = intrinsics();
+    return CREDENTIAL_WORDS.has(w) || CREDENTIAL_ENDINGS.some((e) => o.endsWith(w, e));
+}
 const KEY_QUALIFIERS = TABLES.get('KEY_QUALIFIERS');
 function credentialKey(k) {
-    const words = k
-        .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
-        .replace(/([A-Z])([A-Z][a-z])/g, '$1 $2')
-        .toLowerCase()
-        .split(/[ _-]+/)
-        .filter(Boolean);
+    const o = intrinsics();
+    const words = [];
+    let word = '';
+    for (let i = 0; i < k.length; i++) {
+        const c = k[i];
+        const n = o.at(k, i + 1);
+        if (c === ' ' || c === '_' || c === '-') {
+            if (word.length > 0)
+                words.push(o.lower(word));
+            word = '';
+            continue;
+        }
+        word += c;
+        if (((isLower(c) || isDigit(c)) && isUpper(n)) || (isUpper(c) && isUpper(n) && isLower(o.at(k, i + 2)))) {
+            words.push(o.lower(word));
+            word = '';
+        }
+    }
+    if (word.length > 0)
+        words.push(o.lower(word));
     const last = words.at(-1) ?? '';
     if (words.some(credentialWord) || last === 'auth')
         return true;
     if (last === 'key')
         return words.length === 1 || KEY_QUALIFIERS.has(words.at(-2));
-    return last.endsWith('key') && KEY_QUALIFIERS.has(last.slice(0, -3));
+    return o.endsWith(last, 'key') && KEY_QUALIFIERS.has(o.slice(last, 0, -3));
 }
 exports.DASHBOARD_KEY_PREFIX = 'wld_';
 const DASHBOARD_KEY_BODY = '[A-Za-z0-9_-]{32,}';
-const isDashboardKey = (key) => new RegExp(`^${exports.DASHBOARD_KEY_PREFIX}${DASHBOARD_KEY_BODY}$`).test(key);
-exports.isDashboardKey = isDashboardKey;
-const KEY_LINE = /-----(BEGIN|END) [A-Z ]*PRIVATE KEY(?: BLOCK)?-----/g;
+function isDashboardKey(key) {
+    const o = intrinsics();
+    if (!o.startsWith(key, exports.DASHBOARD_KEY_PREFIX))
+        return false;
+    const body = o.slice(key, exports.DASHBOARD_KEY_PREFIX.length);
+    return body.length >= 32 && allChars(body, (c) => isWordChar(c) || c === '-');
+}
 function orphanEnd(m) {
+    const o = intrinsics();
+    const keyLine = /-----(BEGIN|END) [A-Z ]*PRIVATE KEY(?: BLOCK)?-----/g;
     let open = false;
     let cut = -1;
-    KEY_LINE.lastIndex = 0;
-    for (let k = KEY_LINE.exec(m); k; k = KEY_LINE.exec(m)) {
+    for (let k = o.exec(keyLine, m); k; k = o.exec(keyLine, m)) {
         if (k[1] === 'BEGIN')
             open = true;
         else if (open)
@@ -201,43 +256,399 @@ function orphanEnd(m) {
         else
             cut = k.index + k[0].length;
     }
-    return cut === -1 ? m : `[REDACTED PRIVATE KEY]${m.slice(cut)}`;
+    return cut === -1 ? m : `[REDACTED PRIVATE KEY]${o.slice(m, cut)}`;
+}
+function markerProblem(re, rep, verbatim = false) {
+    const refs = [];
+    for (let i = 0; i < rep.length; i++) {
+        if (rep[i] !== '$')
+            continue;
+        const c = rep[i + 1] ?? '';
+        if (c === '$') {
+            i++;
+            continue;
+        }
+        if (c === '&')
+            return '`$&` would put the whole match, the secret in it, in the marker';
+        if (c === '`' || c === "'" || c === '<')
+            return `\`$${c}\` isn't read alike by every replace path`;
+        if (c === '0')
+            return '`$0` names no group';
+        if (/[1-9]/.test(c)) {
+            if (/\d/.test(rep[i + 2] ?? ''))
+                return `\`$${c}${rep[i + 2]}\`: a two-digit group reference isn't read alike by every replace path`;
+            refs.push({ n: Number(c), at: i });
+            i++;
+        }
+    }
+    if (!refs.length)
+        return null;
+    const count = groupCount(re);
+    for (const r of refs)
+        if (r.n > count)
+            return `\`$${r.n}\` names a group the regex doesn't have (it has ${count})`;
+    const lead = [];
+    while (refs[lead.length]?.at === lead.length * 2)
+        lead.push(refs[lead.length].n);
+    const trail = [];
+    while (refs.length - trail.length > lead.length && refs[refs.length - 1 - trail.length]?.at === rep.length - 2 * (trail.length + 1))
+        trail.unshift(refs[refs.length - 1 - trail.length].n);
+    if (lead.length + trail.length !== refs.length)
+        return 'a group reference inside the marker would show what the group matched: a reference may only lead or trail it';
+    if (rep.length === 2 * refs.length)
+        return 'a marker of group references alone marks nothing';
+    let parsed;
+    try {
+        parsed = parseRegex(re.source);
+    }
+    catch (e) {
+        return `its regex can't be read for group references: ${e.message}`;
+    }
+    if (parsed.groups !== count)
+        return "its regex can't be read for group references: the groups don't count up";
+    const leading = leadingGroups(parsed.alternatives);
+    for (const [k, n] of lead.entries())
+        if (leading[k] !== n)
+            return `\`$${n}\` leads the marker, but group ${n} isn't what the match begins with (${these(leading)})`;
+    const trailing = trailingGroups(parsed.alternatives);
+    for (const [k, n] of trail.entries())
+        if (trailing[trailing.length - trail.length + k] !== n)
+            return `\`$${n}\` trails the marker, but group ${n} isn't what the match ends with (${these(trailing)})`;
+    if (verbatim) {
+        for (const n of [...lead, ...trail]) {
+            const g = parsed.alternatives[0].find((it) => it.kind === 'group' && it.capture === n);
+            if (!g || g.kind !== 'group' || !boundaryGroup(g))
+                return `\`$${n}\` is put out as it is, so group ${n} must be a boundary (each alternative \`^\`, one character or literal text), not text of its own`;
+        }
+    }
+    return null;
+}
+function boundaryGroup(g) {
+    return g.alternatives.every((alt) => {
+        const taking = alt.filter((it) => it.kind !== 'zero');
+        if (taking.some((it) => it.quantified || it.kind === 'group' || it.kind === 'backref'))
+            return false;
+        return taking.length <= 1 || taking.every((it) => it.kind === 'atom');
+    });
+}
+function these(groups) {
+    return groups.length === 0 ? 'no group is' : groups.length === 1 ? `group ${groups[0]} is` : `groups ${groups.join(', ')} are`;
+}
+function ownKeys(o) {
+    return [...Object.getOwnPropertyNames(o), ...Object.getOwnPropertySymbols(o).map((k) => String(k))].join();
+}
+function onlyLastIndex(o) {
+    const names = Object.getOwnPropertyNames(o);
+    return names.length === 1 && names[0] === 'lastIndex' && Object.getOwnPropertySymbols(o).length === 0;
+}
+function groupCount(re) {
+    return new RegExp(`${re.source}|`, re.flags.replace(/[gy]/g, '')).exec('').length - 1;
+}
+function snapshot(table, o = {}) {
+    const refuse = (who, why) => {
+        throw new Error(`redaction rule ${who} could show a secret (#1257): ${why}`);
+    };
+    if (!Array.isArray(table))
+        refuse('table', 'a table must be a plain array');
+    const data = (who, o, k, what) => {
+        const d = Object.getOwnPropertyDescriptor(o, k);
+        if (!d)
+            refuse(who, `${what} is missing`);
+        if (!('value' in d))
+            refuse(who, `${what} must be a plain data property, not an accessor`);
+        return d.value;
+    };
+    const rows = [];
+    for (let i = 0; i < table.length; i++) {
+        let who = `#${i}`;
+        const entry = data(who, table, i, 'a table slot');
+        let source;
+        let flags;
+        let rep;
+        let kind;
+        if (Array.isArray(entry)) {
+            const keys = ownKeys(entry);
+            if (keys !== '0,1,2,length')
+                refuse(who, `a rule must be exactly [regex, marker, kind], with no other own property (own keys: ${keys})`);
+            kind = data(who, entry, 2, 'the kind');
+            if (typeof kind !== 'string')
+                refuse(who, 'the kind must be a string');
+            who = `"${kind}"`;
+            const re = data(who, entry, 0, 'the regex');
+            if (!(re instanceof RegExp) || ownKeys(re) !== 'lastIndex')
+                refuse(who, 'its regex must be a plain RegExp with no own property but lastIndex (one could hide the pattern that runs)');
+            source = `${re.source}`;
+            flags = `${re.flags}`;
+            rep = data(who, entry, 1, 'the marker');
+        }
+        else {
+            if (entry === null || typeof entry !== 'object')
+                refuse(who, 'a rule must be {re, rep, kind} (or [regex, marker, kind] in a code table)');
+            const names = Object.getOwnPropertyNames(entry).filter((k) => k !== '//').sort().join();
+            const want = o.broad ? 'kind,mask,re' : 'kind,re,rep';
+            if (names !== want || Object.getOwnPropertySymbols(entry).length !== 0)
+                refuse(who, `a data rule must have exactly {${want}} (and a "//" comment), own keys: ${names}`);
+            kind = data(who, entry, 'kind', 'the kind');
+            if (typeof kind !== 'string')
+                refuse(who, 'the kind must be a string');
+            who = `"${kind}"`;
+            const re = data(who, entry, 're', 'the pattern');
+            if (re === null || typeof re !== 'object')
+                refuse(who, 'its pattern must be {source, flags}');
+            const src = data(who, re, 'source', "the pattern's source");
+            const fl = data(who, re, 'flags', "the pattern's flags");
+            if (typeof src !== 'string' || typeof fl !== 'string')
+                refuse(who, "its pattern's source and flags must be strings");
+            source = src;
+            flags = fl;
+            const given = data(who, entry, o.broad ? 'mask' : 'rep', 'the marker');
+            if (o.broad) {
+                if (typeof given !== 'string' || !given.includes('{mask}'))
+                    refuse(who, 'a broad rule must give its marker as a string holding {mask}');
+                rep = masked(given, '[REDACTED]');
+            }
+            else if (typeof given === 'string')
+                rep = given;
+            else if (given !== null && typeof given === 'object' && Object.getOwnPropertyNames(given).join() === 'replacer') {
+                const name = data(who, given, 'replacer', 'the replacer');
+                if (typeof name !== 'string')
+                    refuse(who, "a replacer's name must be a string");
+                const d = Object.getOwnPropertyDescriptor(REPLACERS, name);
+                const f = d === undefined ? undefined : d.value;
+                if (typeof f !== 'function')
+                    refuse(who, `the data names no replacer ${name}`);
+                rep = f;
+            }
+            else
+                refuse(who, 'a marker must be a string or {replacer: name}');
+        }
+        if (o.verbatim && !flags.includes('g'))
+            refuse(who, 'an identifier rule must be global');
+        const copy = new RegExp(source, flags);
+        let marker = null;
+        let kept;
+        if (typeof rep === 'string')
+            kept = marker = `${rep}`;
+        else if (typeof rep === 'function') {
+            if (o.broad) {
+                const shownAs = rep('[REDACTED]');
+                if (typeof shownAs !== 'string')
+                    refuse(who, 'a broad rule must give its marker as a string');
+                kept = marker = `${shownAs}`;
+            }
+            else
+                kept = rep;
+        }
+        else
+            refuse(who, `a marker must be a string or a function, not ${rep === null ? 'null' : typeof rep !== 'object' ? `a ${typeof rep}` : rep instanceof String ? 'a String object' : 'an object'}`);
+        const why = marker === null ? null : markerProblem(copy, marker, o.verbatim === true);
+        if (why !== null)
+            refuse(who, why);
+        rows.push(Object.freeze({ source, flags, rep: kept, kind }));
+    }
+    return Object.freeze(rows);
+}
+function parseRegex(source) {
+    let i = 0;
+    let groups = 0;
+    const skipQuantifier = () => {
+        const c = source[i];
+        if (c === '*' || c === '+' || c === '?')
+            i++;
+        else {
+            const m = /^\{\d+(?:,\d*)?\}/.exec(source.slice(i));
+            if (!m)
+                return false;
+            i += m[0].length;
+        }
+        if (source[i] === '?')
+            i++;
+        return true;
+    };
+    const item = () => {
+        const c = source[i];
+        let it;
+        if (c === '(') {
+            i++;
+            let capture = null;
+            let look = null;
+            if (source.startsWith('?:', i))
+                i += 2;
+            else if (source.startsWith('?=', i) || source.startsWith('?!', i)) {
+                look = 'ahead';
+                i += 2;
+            }
+            else if (source.startsWith('?<=', i) || source.startsWith('?<!', i)) {
+                look = 'behind';
+                i += 3;
+            }
+            else if (source.startsWith('?<', i)) {
+                const close = source.indexOf('>', i);
+                if (close === -1)
+                    throw new Error(`an unclosed group name at ${i}`);
+                i = close + 1;
+                capture = ++groups;
+            }
+            else if (source[i] === '?')
+                throw new Error(`a group of an unknown kind at ${i}`);
+            else
+                capture = ++groups;
+            const alts = alternatives();
+            if (source[i] !== ')')
+                throw new Error(`an unclosed group at ${i}`);
+            i++;
+            it = { kind: 'group', capture, look, alternatives: alts, quantified: false };
+        }
+        else if (c === '[') {
+            for (i++; i < source.length && source[i] !== ']'; i++)
+                if (source[i] === '\\')
+                    i++;
+            if (source[i] !== ']')
+                throw new Error('an unclosed class');
+            i++;
+            it = { kind: 'class', quantified: false };
+        }
+        else if (c === '\\') {
+            const n = source[i + 1] ?? '';
+            if (/[1-9]/.test(n)) {
+                const m = /^\d+/.exec(source.slice(i + 1));
+                i += 1 + m[0].length;
+                it = { kind: 'backref', n: Number(m[0]), quantified: false };
+            }
+            else {
+                let kind = 'atom';
+                if ((n === 'u' || n === 'p' || n === 'P') && source[i + 2] === '{') {
+                    const close = source.indexOf('}', i);
+                    if (close === -1)
+                        throw new Error(`an unclosed escape at ${i}`);
+                    i = close + 1;
+                    if (n !== 'u')
+                        kind = 'class';
+                }
+                else if (n === 'k' && source[i + 2] === '<') {
+                    const close = source.indexOf('>', i);
+                    if (close === -1)
+                        throw new Error(`an unclosed named backreference at ${i}`);
+                    i = close + 1;
+                    kind = 'class';
+                }
+                else if (n === '')
+                    throw new Error('a trailing backslash');
+                else {
+                    i += 2;
+                    if (n === 'b' || n === 'B')
+                        kind = 'zero';
+                    else if ('dDwWsSpP'.includes(n))
+                        kind = 'class';
+                }
+                it = { kind, quantified: false };
+            }
+        }
+        else if (c === '^' || c === '$') {
+            i++;
+            it = { kind: 'zero', quantified: false };
+        }
+        else if (c === '*' || c === '+' || c === '?' || c === ')')
+            throw new Error(`a stray \`${c}\` at ${i}`);
+        else {
+            i++;
+            it = { kind: c === '.' ? 'class' : 'atom', quantified: false };
+        }
+        if (skipQuantifier())
+            it.quantified = true;
+        return it;
+    };
+    const alternatives = () => {
+        const alts = [[]];
+        while (i < source.length && source[i] !== ')') {
+            if (source[i] === '|') {
+                i++;
+                alts.push([]);
+            }
+            else
+                alts.at(-1).push(item());
+        }
+        return alts;
+    };
+    const alts = alternatives();
+    if (i < source.length)
+        throw new Error(`a stray \`)\` at ${i}`);
+    return { alternatives: alts, groups };
+}
+function leadingGroups(alternatives) {
+    if (alternatives.length !== 1)
+        return [];
+    const items = alternatives[0];
+    const out = [];
+    for (let k = 0; k < items.length; k++) {
+        const it = items[k];
+        if (it.quantified)
+            break;
+        if (it.kind === 'zero')
+            continue;
+        if (it.kind !== 'group')
+            break;
+        if (it.look === null) {
+            if (it.capture === null)
+                break;
+            out.push(it.capture);
+            continue;
+        }
+        const first = it.look === 'ahead' && it.alternatives.length === 1 ? it.alternatives[0][0] : undefined;
+        const next = items[k + 1];
+        if (first?.kind === 'group' && first.look === null && first.capture !== null && !first.quantified && next?.kind === 'backref' && next.n === first.capture && !next.quantified) {
+            out.push(first.capture);
+            k++;
+        }
+    }
+    return out;
+}
+function trailingGroups(alternatives) {
+    if (alternatives.length !== 1)
+        return [];
+    const items = alternatives[0];
+    const out = [];
+    for (let k = items.length - 1; k >= 0; k--) {
+        const it = items[k];
+        if (it.quantified)
+            break;
+        if (it.kind === 'zero')
+            continue;
+        if (it.kind !== 'group')
+            break;
+        if (it.look !== null)
+            continue;
+        if (it.capture === null)
+            break;
+        out.unshift(it.capture);
+    }
+    return out;
 }
 const REPLACERS = Object.freeze({
-    stripe: (m, pre, k, v) => (/\d/.test(v) ? `${pre}${k}_[REDACTED]` : m),
+    stripe: (m, pre, k, v) => (hasChar(v, isDigit) ? `${pre}${k}_[REDACTED]` : m),
     orphanEnd,
     basic: (m, s, sp, v) => (basicShaped(v) ? `${s}${sp}[REDACTED]` : m),
     jsonKey: (m, q, k, sep, vq, v) => (credentialKey(k) && credentialShaped(v) ? `${q}${k}${q}${sep}${vq}[REDACTED]${vq}` : m),
 });
-exports.REPLACER_NAMES = Object.freeze(Object.keys(REPLACERS));
-function replacementOf(rep) {
-    if (typeof rep === 'string')
-        return rep;
-    const f = REPLACERS[rep.replacer];
-    if (!f)
-        throw new Error(`src/events/redact.ts's data: no replacer ${rep.replacer}`);
-    return f;
-}
-const PATTERNS = Object.freeze(TABLES.get('PATTERNS').map((e) => Object.freeze([regExpOf(e.re), replacementOf(e.rep), e.kind])));
-const BROAD = Object.freeze(TABLES.get('BROAD').map((e) => Object.freeze([regExpOf(e.re), e.mask, e.kind])));
-const masked = (template, mask) => template.split('{mask}').join(mask);
-const CODE_HEADS = new Set(['this', 'self', 'super', 'opts', 'options', 'o', 'ctx', 'context', 'config', 'cfg', 'conf', 'settings', 'props', 'state', 'env', 'process', 'module', 'exports', 'window', 'document', 'globalThis', 'args', 'params', 'req', 'res', 'request', 'response', 'obj', 'result', 'item', 'e', 'err', 'x']);
+exports.REPLACER_NAMES = Object.freeze(['stripe', 'orphanEnd', 'basic', 'jsonKey']);
+const PATTERNS = TABLES.get('PATTERNS');
+const BROAD = TABLES.get('BROAD');
+const CODE_HEADS = Object.freeze(['this', 'self', 'super', 'opts', 'options', 'o', 'ctx', 'context', 'config', 'cfg', 'conf', 'settings', 'props', 'state', 'env', 'process', 'module', 'exports', 'window', 'document', 'globalThis', 'args', 'params', 'req', 'res', 'request', 'response', 'obj', 'result', 'item', 'e', 'err', 'x']);
 function internalHost(m, pre, name) {
-    const lower = name.toLowerCase();
-    const labels = name.split('.').slice(0, lower.endsWith('.home.arpa') || lower.endsWith('.ts.net') ? -2 : -1);
-    const suffix = name.slice(labels.join('.').length + 1);
-    const prose = suffix !== suffix.toLowerCase() && suffix !== suffix.toUpperCase();
-    const code = !labels.some((l) => l.includes('-')) && (CODE_HEADS.has(labels[0]) || labels.some((l) => /[a-z][A-Z]/.test(l)));
+    const o = intrinsics();
+    const lower = o.lower(name);
+    const labels = pieces(name, '.', o).slice(0, o.endsWith(lower, '.home.arpa') || o.endsWith(lower, '.ts.net') ? -2 : -1);
+    const suffix = o.slice(name, labels.join('.').length + 1);
+    const prose = suffix !== o.lower(suffix) && suffix !== o.upper(suffix);
+    const camel = (l) => {
+        for (let i = 1; i < l.length; i++)
+            if (isLower(o.at(l, i - 1)) && isUpper(l[i]))
+                return true;
+        return false;
+    };
+    const code = !labels.some((l) => o.includes(l, '-')) && (CODE_HEADS.includes(labels[0]) || labels.some(camel));
     return prose || code ? m : `${pre}[internal-host]`;
 }
-const OCTET = '(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)';
-const PRIVATE_V4 = [
-    `10\\.${OCTET}`,
-    '172\\.(?:1[6-9]|2\\d|3[01])',
-    '192\\.168',
-    '100\\.(?:6[4-9]|[7-9]\\d|1[01]\\d|12[0-7])',
-    '169\\.254',
-].join('|');
 const IDENTIFIERS = [
     [/(^|[^A-Za-z0-9._%+-])(?!git@)[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}(?![A-Za-z0-9-])/g, '$1[email]', 'email'],
     [
@@ -247,65 +658,134 @@ const IDENTIFIERS = [
     ],
     [/(^|[^\w])[A-Za-z]:[\\/][Uu]sers[\\/]([^\\/\s"'`<>|]+)/g, '$1~', 'home path'],
     [/(^|[^A-Za-z0-9./-]|\/\/)([A-Za-z0-9][A-Za-z0-9.-]*\.(?:internal|localdomain|lan|corp|intranet|home\.arpa|ts\.net|local))(?![A-Za-z0-9-]|\.[A-Za-z0-9])/gi, internalHost, 'internal host'],
-    [new RegExp(`(^|[^\\w.])(?:${PRIVATE_V4})\\.${OCTET}\\.${OCTET}(?![\\w-]|\\.\\d)`, 'g'), '$1[private-ip]', 'private IP'],
+    [/(^|[^\w.])(?:10\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)|172\.(?:1[6-9]|2\d|3[01])|192\.168|100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])|169\.254)\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?![\w-]|\.\d)/g, '$1[private-ip]', 'private IP'],
     [/(^|[^\w:])f(?:[cd][0-9a-f]{2}|e[89ab][0-9a-f]):(?:[0-9a-f]{0,4}:){1,6}[0-9a-f]{0,4}(?![\w:])/gi, '$1[private-ip]', 'private IP'],
 ];
-exports.REDACTION_PATTERNS = [
-    ...PATTERNS.map(([re, rep, kind]) => ({ kind, re: new RegExp(re), rep, group: 'secret' })),
-    ...BROAD.map(([re, rep, kind]) => ({ kind, re: new RegExp(re), rep: masked(rep, '[REDACTED]'), group: 'broad' })),
-    ...IDENTIFIERS.map(([re, rep, kind]) => ({ kind, re: new RegExp(re), rep, group: 'identifier' })),
-];
+function redactionPatterns() {
+    return BUILT.patterns;
+}
 const GLUED_PREFIXES = TABLES.get('GLUED_PREFIXES');
 const GLUE_PARTS = TABLES.get('GLUE_PARTS');
-const GLUE = new RegExp(GLUE_PARTS.join('|'), 'g');
-function gluePoints(s) {
-    const cuts = [...s.matchAll(GLUE)].map((m) => m.index + m[0].length).filter((c) => /\w/.test(s[c - 1]));
-    for (let at = s.indexOf('_'); at !== -1; at = s.indexOf('_', at + 1))
-        if (GLUED_PREFIXES.some((p) => s.startsWith(p, at + 1)))
+function gluePoints(s, glue, prefixes, ops) {
+    const cuts = [];
+    glue.lastIndex = 0;
+    for (let m = ops.exec(glue, s); m; m = ops.exec(glue, s)) {
+        const c = m.index + m[0].length;
+        if (m[0].length === 0)
+            glue.lastIndex = m.index + 1;
+        if (isWordChar(ops.at(s, c - 1)))
+            cuts.push(c);
+    }
+    for (let at = ops.indexOf(s, '_'); at !== -1; at = ops.indexOf(s, '_', at + 1))
+        if (prefixes.some((p) => ops.startsWith(s, p, at + 1)))
             cuts.push(at + 1);
     return [...new Set(cuts)].filter((c) => c < s.length).sort((a, b) => a - b);
 }
 function freeMark(s) {
+    const o = intrinsics();
     const held = new Set();
     for (let i = 0; i < s.length; i++) {
-        const c = s.charCodeAt(i);
+        const c = o.codeAt(s, i);
         if (c >= 0xe000 && c <= 0xf8ff)
             held.add(c);
     }
     for (let c = 0xe000; c <= 0xf8ff; c++)
         if (!held.has(c))
-            return String.fromCharCode(c);
+            return o.fromCode(c);
     return null;
 }
-const expand = (rep, m, groups) => rep.replace(/\$(\d|\$|&)/g, (_, k) => (k === '$' ? '$' : k === '&' ? m : String(groups[Number(k) - 1] ?? '')));
-const breaks = (s) => s.split('\n').length - 1;
-function applyKeepingLines(s, re, rep) {
-    return s.replace(re, (m, ...rest) => {
-        const groups = rest.slice(0, -2).filter((g) => typeof g !== 'object');
-        const out = typeof rep === 'string' ? expand(rep, m, groups) : rep(m, ...groups);
-        return out + '\n'.repeat(Math.max(0, breaks(m) - breaks(out)));
-    });
+function expand(rep, m, groups) {
+    const o = intrinsics();
+    let out = '';
+    let i = 0;
+    while (i < rep.length) {
+        const c = o.at(rep, i);
+        const k = c === '$' ? o.at(rep, i + 1) : '';
+        if (k === '$') {
+            out += '$';
+            i += 2;
+        }
+        else if (k === '&') {
+            out += m;
+            i += 2;
+        }
+        else if (k >= '0' && k <= '9') {
+            const g = groups[o.codeAt(k, 0) - 0x30 - 1];
+            out += typeof g === 'string' ? g : '';
+            i += 2;
+        }
+        else {
+            out += c;
+            i++;
+        }
+    }
+    return out;
+}
+function shown(whole, groups, r) {
+    if (r === whole)
+        return r;
+    const o = intrinsics();
+    let a = 0;
+    while (a < whole.length && a < r.length && o.at(whole, a) === o.at(r, a))
+        a++;
+    let b = 0;
+    while (b < whole.length - a && b < r.length - a && o.at(whole, whole.length - 1 - b) === o.at(r, r.length - 1 - b))
+        b++;
+    const taken = o.lower(o.slice(whole, a, whole.length - b));
+    const put = o.lower(o.slice(r, a, r.length - b));
+    if (!taken || (!o.includes(put, taken) && !groups.some((g) => g.length >= 4 && o.includes(put, o.lower(g)) && o.includes(taken, o.lower(g)))))
+        return r;
+    return `${o.slice(whole, 0, a)}[REDACTED]${o.slice(whole, whole.length - b)}`;
+}
+function called(rep, m, groups) {
+    return shown(m, groups, rep(m, ...groups));
 }
 exports.TRACKER = Object.freeze({ identifiers: true });
-const apply = (s, re, rep) => (typeof rep === 'string' ? s.replace(re, rep) : s.replace(re, rep));
-const MACHINE_BLOCKS = [
-    ['```done_when', /[^\S\n]*\n/y],
-    ['```research', /[ \t]*\r?\n/y],
-];
+function replaced(s, re, rep, keepLines, ops) {
+    if (!re.global)
+        throw new Error("replaced needs the run closure's global regex");
+    let out = '';
+    let at = 0;
+    re.lastIndex = 0;
+    for (let m = ops.exec(re, s); m; m = ops.exec(re, s)) {
+        const whole = m[0];
+        const groups = m.slice(1).map((x) => (typeof x === 'string' ? x : ''));
+        const r = typeof rep === 'string' ? expand(rep, whole, groups) : called(rep, whole, groups);
+        out += ops.slice(s, at, m.index) + r + (keepLines ? ops.repeat('\n', Math.max(0, breaks(whole) - breaks(r))) : '');
+        at = m.index + whole.length;
+        if (whole.length === 0) {
+            if (m.index >= s.length)
+                break;
+            re.lastIndex = m.index + 1;
+        }
+    }
+    return out + ops.slice(s, at);
+}
+const MACHINE_BLOCKS = Object.freeze([Object.freeze(['```done_when', 'blanks']), Object.freeze(['```research', 'tabs'])]);
+function lineBreakAfter(s, at, blanks) {
+    const o = intrinsics();
+    let i = at;
+    while (i < s.length && (blanks === 'blanks' ? isSpace(o.at(s, i)) && o.at(s, i) !== '\n' : o.at(s, i) === ' ' || o.at(s, i) === '\t'))
+        i++;
+    if (blanks === 'tabs' && o.at(s, i) === '\r')
+        i++;
+    return o.at(s, i) === '\n' ? i + 1 : -1;
+}
 function outsideMachineBlocks(s, f) {
+    const o = intrinsics();
     const spans = [];
-    for (const [open, lineBreak] of MACHINE_BLOCKS) {
-        for (let at = s.indexOf(open); at !== -1;) {
-            lineBreak.lastIndex = at + open.length;
-            if (!lineBreak.test(s)) {
-                at = s.indexOf(open, at + open.length);
+    for (const [open, blanks] of MACHINE_BLOCKS) {
+        for (let at = o.indexOf(s, open); at !== -1;) {
+            const body = lineBreakAfter(s, at + open.length, blanks);
+            if (body === -1) {
+                at = o.indexOf(s, open, at + open.length);
                 continue;
             }
-            const close = s.indexOf('\n```', lineBreak.lastIndex);
+            const close = o.indexOf(s, '\n```', body);
             if (close === -1)
                 break;
             spans.push([at, close + 4]);
-            at = s.indexOf(open, close + 4);
+            at = o.indexOf(s, open, close + 4);
         }
     }
     if (!spans.length)
@@ -316,16 +796,16 @@ function outsideMachineBlocks(s, f) {
     for (const [a, b] of spans) {
         if (a < from)
             continue;
-        out += f(s.slice(from, a)) + s.slice(a, b);
+        out += f(o.slice(s, from, a)) + o.slice(s, a, b);
         from = b;
     }
-    return out + f(s.slice(from));
+    return out + f(o.slice(s, from));
 }
 exports.UNSCANNABLE_KIND = 'text too large to scan';
 function secretKinds(s) {
     const kinds = new Set();
     try {
-        replaceUnion(s, false, (rank) => kinds.add(PATTERNS[rank][2]));
+        replaceUnion(s, false, (rank) => kinds.add(BUILT.shapes[rank].kind));
     }
     catch (e) {
         if (e instanceof RangeError)
@@ -334,61 +814,176 @@ function secretKinds(s) {
     }
     return [...kinds].sort();
 }
-const globals = new Map();
-const globalOf = (re) => {
-    let g = globals.get(re);
-    if (!g)
-        globals.set(re, (g = re.flags.includes('g') ? re : new RegExp(re.source, `${re.flags}g`)));
-    return g;
-};
-function spansOf(t, re, rep, rank, out) {
-    const g = globalOf(re);
+function spansOf(t, re, rep, rank, out, ops) {
+    if (!re.global)
+        throw new Error("spansOf needs the run closure's global regex");
+    const g = re;
     g.lastIndex = 0;
-    for (let m = g.exec(t); m; m = g.exec(t)) {
+    for (let m = ops.exec(g, t); m; m = ops.exec(g, t)) {
         const whole = m[0];
         g.lastIndex = Math.max(m.index + 1, m.index + whole.length - 64);
         const groups = m.slice(1).map((x) => x ?? '');
-        const r = typeof rep === 'string' ? expand(rep, whole, groups) : rep(whole, ...groups);
+        const r = typeof rep === 'string' ? expand(rep, whole, groups) : called(rep, whole, groups);
         if (r === whole) {
             g.lastIndex = m.index + 1;
             continue;
         }
         let a = 0;
-        while (a < whole.length && a < r.length && whole[a] === r[a])
+        while (a < whole.length && a < r.length && ops.at(whole, a) === ops.at(r, a))
             a++;
         let b = 0;
-        while (b < whole.length - a && b < r.length - a && whole[whole.length - 1 - b] === r[r.length - 1 - b])
+        while (b < whole.length - a && b < r.length - a && ops.at(whole, whole.length - 1 - b) === ops.at(r, r.length - 1 - b))
             b++;
         if (whole.length - b > a)
-            out.push([m.index + a, m.index + whole.length - b, r.slice(a, r.length - b), rank]);
+            out.push([m.index + a, m.index + whole.length - b, ops.slice(r, a, r.length - b), rank]);
     }
 }
-const SHAPE_RULES = PATTERNS.map(([re, rep]) => [re, rep]);
-const BROAD_RULES = Object.freeze(TABLES.get('BROAD_RULES').map((e) => Object.freeze([regExpOf(e.re), replacementOf(e.rep)])));
-function redactTableProblems(patterns = TABLES.get('PATTERNS'), broad = TABLES.get('BROAD'), rules = TABLES.get('BROAD_RULES'), glued = GLUED_PREFIXES) {
+const BROAD_RULES = TABLES.get('BROAD_RULES');
+function masked(template, mask) {
+    return template.split('{mask}').join(mask);
+}
+function repKey(rep) {
+    return typeof rep === 'string' ? `s:${rep}` : `f:${rep.replacer}`;
+}
+function redactTableProblems(patterns = PATTERNS, broad = BROAD, rules = BROAD_RULES, glued = GLUED_PREFIXES) {
     const out = [];
-    const key = (re, rep) => JSON.stringify([re.source, re.flags, rep]);
-    const want = [...patterns.map((p) => key(p.re, p.rep)), ...broad.map((b) => key(b.re, masked(b.mask, '[REDACTED]')))];
-    const got = rules.map((r) => key(r.re, r.rep));
+    const key = (re, rep) => `${re.source}\u0001${re.flags}\u0001${rep}`;
+    const want = [...patterns.map((p) => key(p.re, repKey(p.rep))), ...broad.map((b) => key(b.re, repKey(masked(b.mask, '[REDACTED]'))))];
+    const got = rules.map((r) => key(r.re, repKey(r.rep)));
     if (want.length !== got.length || want.some((w, k) => w !== got[k]))
         out.push("BROAD_RULES isn't PATTERNS' rules then BROAD's");
-    const first = patterns[0]?.re;
-    if (first?.source !== `${exports.DASHBOARD_KEY_PREFIX}${DASHBOARD_KEY_BODY}(?![A-Za-z0-9_-])` || first.flags !== 'g')
+    const first = patterns.length > 0 ? patterns[0].re : null;
+    if (first === null || first.source !== `${exports.DASHBOARD_KEY_PREFIX}${DASHBOARD_KEY_BODY}(?![A-Za-z0-9_-])` || first.flags !== 'g')
         out.push("PATTERNS' first isn't the dashboard key's");
-    if (glued.at(-1) !== exports.DASHBOARD_KEY_PREFIX)
+    if (glued.length === 0 || glued[glued.length - 1] !== exports.DASHBOARD_KEY_PREFIX)
         out.push("GLUED_PREFIXES doesn't end with DASHBOARD_KEY_PREFIX");
+    if (Object.getOwnPropertyNames(REPLACERS).join() !== exports.REPLACER_NAMES.join())
+        out.push("REPLACER_NAMES isn't REPLACERS' keys");
     return out;
 }
-if (redactTableProblems().length)
-    throw new Error(`src/events/redact.ts's data: ${redactTableProblems().join('; ')}`);
-function allSpans(s, rules) {
+function captured() {
+    const call = (() => undefined).call;
+    return Object.freeze({
+        exec: call.bind(/(?:)/.exec),
+        slice: call.bind(''.slice),
+        indexOf: call.bind(''.indexOf),
+        includes: call.bind(''.includes),
+        startsWith: call.bind(''.startsWith),
+        endsWith: call.bind(''.endsWith),
+        lower: call.bind(''.toLowerCase),
+        upper: call.bind(''.toUpperCase),
+        repeat: call.bind(''.repeat),
+        codeAt: call.bind(''.charCodeAt),
+        at: call.bind(''.charAt),
+        fromCode: String.fromCharCode,
+    });
+}
+function intrinsics() {
+    return BUILT.ops;
+}
+function isDigit(c) {
+    return c >= '0' && c <= '9';
+}
+function isLower(c) {
+    return c >= 'a' && c <= 'z';
+}
+function isUpper(c) {
+    return c >= 'A' && c <= 'Z';
+}
+function isWordChar(c) {
+    return isDigit(c) || isLower(c) || isUpper(c) || c === '_';
+}
+function isHex(c) {
+    return isDigit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+}
+function hasChar(s, p) {
+    for (let i = 0; i < s.length; i++)
+        if (p(s[i]))
+            return true;
+    return false;
+}
+function allChars(s, p) {
+    for (let i = 0; i < s.length; i++)
+        if (!p(s[i]))
+            return false;
+    return true;
+}
+function pieces(s, sep, o) {
+    const out = [];
+    let from = 0;
+    for (let at = o.indexOf(s, sep, from); at !== -1; at = o.indexOf(s, sep, from)) {
+        out.push(o.slice(s, from, at));
+        from = at + sep.length;
+    }
+    out.push(o.slice(s, from));
+    return out;
+}
+function isSpace(c) {
+    return c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\v' || c === '\f' || c === '\u00a0' || c === '\u1680' || (c >= '\u2000' && c <= '\u200a') || c === '\u2028' || c === '\u2029' || c === '\u202f' || c === '\u205f' || c === '\u3000' || c === '\ufeff';
+}
+function breaks(s) {
+    const o = intrinsics();
+    let n = 0;
+    for (let at = o.indexOf(s, '\n'); at !== -1; at = o.indexOf(s, '\n', at + 1))
+        n++;
+    return n;
+}
+function listed(rules, group) {
+    return rules.map((r) => Object.freeze({ kind: r.kind, re: new RegExp(r.source, r.flags), rep: r.rep, group }));
+}
+function compiled(rules, withG) {
+    return rules.map((r) => [new RegExp(r.source, withG && !r.flags.includes('g') ? `${r.flags}g` : r.flags), r.rep]);
+}
+function build(patterns, broadTable, identifierTable) {
+    const ops = captured();
+    const drift = redactTableProblems();
+    if (drift.length > 0)
+        throw new Error(`src/events/redact.ts's data: ${drift.join('; ')}`);
+    const shapes = snapshot(patterns);
+    Object.freeze(patterns);
+    const broadRules = snapshot(broadTable, { broad: true });
+    Object.freeze(broadTable);
+    const identifiers = snapshot(identifierTable, { verbatim: true });
+    Object.freeze(identifierTable);
+    const broad = Object.freeze([...shapes, ...broadRules]);
+    const patternsOut = Object.freeze([...listed(shapes, 'secret'), ...listed(broadRules, 'broad'), ...listed(identifiers, 'identifier')]);
+    const shapeRun = compiled(shapes, true);
+    const broadRun = compiled(broad, true);
+    const identifierRun = compiled(identifiers, false);
+    const glue = new RegExp(GLUE_PARTS.join('|'), 'g');
+    const gluedPrefixes = [...GLUED_PREFIXES];
+    const copies = [
+        ...shapeRun.map((c, i) => [c[0], shapes[i], c[0].flags]),
+        ...broadRun.map((c, i) => [c[0], broad[i], c[0].flags]),
+        ...identifierRun.map((c, i) => [c[0], identifiers[i], c[0].flags]),
+    ];
+    let checked = false;
+    const check = () => {
+        if (checked)
+            return;
+        for (const [re, r, flags] of copies) {
+            if (re.source !== r.source || re.flags !== flags || !onlyLastIndex(re))
+                throw new Error(`src/events/redact.ts: the regex that runs for "${r.kind}" no longer reads as its snapshot (#1257)`);
+        }
+        checked = true;
+    };
+    const run = Object.freeze({
+        shapes: (s) => (check(), allSpans(s, shapeRun, glue, gluedPrefixes, ops)),
+        broad: (s) => (check(), allSpans(s, broadRun, glue, gluedPrefixes, ops)),
+        broadAt: (s, cuts, spans) => (check(), readAt(s, cuts, broadRun, spans, ops)),
+        identifiers: (part, keepLines) => (check(), identifierRun.reduce((t, [re, rep]) => replaced(t, re, rep, keepLines, ops), part)),
+    });
+    return Object.freeze({ ops, shapes, broad: broadRules, identifiers, patterns: patternsOut, run });
+}
+function allSpans(s, rules, glue, prefixes, ops) {
     const spans = [];
-    rules.forEach(([re, rep], i) => spansOf(s, re, rep, i, spans));
-    readAt(s, gluePoints(s), rules, spans);
+    rules.forEach(([re, rep], i) => spansOf(s, re, rep, i, spans, ops));
+    readAt(s, gluePoints(s, glue, prefixes, ops), rules, spans, ops);
     return spans;
 }
 function replaceOnce(s, keepLines, found) {
-    const spans = allSpans(s, SHAPE_RULES);
+    const o = intrinsics();
+    const spans = BUILT.run.shapes(s);
     if (found)
         for (const sp of spans)
             found(sp[3]);
@@ -408,11 +1003,11 @@ function replaceOnce(s, keepLines, found) {
             if (spans[k][0] === a && spans[k][1] === b && (!pick || spans[k][3] < pick[3]))
                 pick = spans[k];
         const rep = pick ? pick[2] : '[REDACTED]';
-        out += s.slice(at, a) + rep + (keepLines ? '\n'.repeat(Math.max(0, breaks(s.slice(a, b)) - breaks(rep))) : '');
+        out += o.slice(s, at, a) + rep + (keepLines ? o.repeat('\n', Math.max(0, breaks(o.slice(s, a, b)) - breaks(rep))) : '');
         at = b;
         i = j;
     }
-    return out + s.slice(at);
+    return out + o.slice(s, at);
 }
 exports.MAX_PASSES = 8;
 function fixedPoint(s, pass, keepLines = false) {
@@ -423,18 +1018,19 @@ function fixedPoint(s, pass, keepLines = false) {
             return out;
         out = again;
     }
-    return exports.UNSCANNABLE + (keepLines ? '\n'.repeat(breaks(s)) : '');
+    return exports.UNSCANNABLE + (keepLines ? intrinsics().repeat('\n', breaks(s)) : '');
 }
 function replaceUnion(s, keepLines, found) {
     return fixedPoint(s, (t) => replaceOnce(t, keepLines, found), keepLines);
 }
 function maskOnce(s, mask, keepLines) {
-    const spans = allSpans(s, BROAD_RULES);
-    const word = (i) => /[A-Za-z0-9_]/.test(s[i] ?? '');
-    readAt(s, [...new Set(spans.flatMap(([a, b]) => [a, b]))].filter((c) => c > 0 && c < s.length && word(c - 1) && word(c)).sort((a, b) => a - b), BROAD_RULES, spans);
+    const o = intrinsics();
+    const spans = BUILT.run.broad(s);
+    const word = (i) => isWordChar(o.at(s, i));
+    BUILT.run.broadAt(s, [...new Set(spans.flatMap(([a, b]) => [a, b]))].filter((c) => c > 0 && c < s.length && word(c - 1) && word(c)).sort((a, b) => a - b), spans);
     const masks = [];
     if (mask)
-        for (let at = s.indexOf(mask); at !== -1; at = s.indexOf(mask, at + mask.length))
+        for (let at = o.indexOf(s, mask); at !== -1; at = o.indexOf(s, mask, at + mask.length))
             masks.push([at, at + mask.length]);
     const kept = outside(merged(spans.map(([a, b]) => [a, b])), masks);
     if (!kept.length)
@@ -442,10 +1038,10 @@ function maskOnce(s, mask, keepLines) {
     let out = '';
     let at = 0;
     for (const [a, b] of kept) {
-        out += s.slice(at, a) + mask + (keepLines ? '\n'.repeat(breaks(s.slice(a, b))) : '');
+        out += o.slice(s, at, a) + mask + (keepLines ? o.repeat('\n', breaks(o.slice(s, a, b))) : '');
         at = b;
     }
-    return out + s.slice(at);
+    return out + o.slice(s, at);
 }
 function merged(spans) {
     const sorted = spans.filter(([a, b]) => b > a).sort((x, y) => x[0] - y[0]);
@@ -459,15 +1055,16 @@ function merged(spans) {
     }
     return out;
 }
-function readAt(s, cuts, rules, spans) {
+function readAt(s, cuts, rules, spans, ops) {
     if (!cuts.length)
         return;
     const markChar = freeMark(s);
     if (markChar === null) {
-        for (const [i, c] of cuts.entries()) {
-            const piece = s.slice(c, cuts[i + 1] ?? s.length);
+        for (let i = 0; i < cuts.length; i++) {
+            const c = cuts[i];
+            const piece = ops.slice(s, c, i + 1 < cuts.length ? cuts[i + 1] : s.length);
             const more = [];
-            rules.forEach(([re, rep], k) => spansOf(piece, re, rep, k, more));
+            rules.forEach(([re, rep], k) => spansOf(piece, re, rep, k, more, ops));
             for (const [a, b, r, k] of more)
                 spans.push([a + c, b + c, r, k]);
         }
@@ -476,10 +1073,10 @@ function readAt(s, cuts, rules, spans) {
     let marked = '';
     let from = 0;
     for (const c of cuts) {
-        marked += s.slice(from, c) + markChar;
+        marked += ops.slice(s, from, c) + markChar;
         from = c;
     }
-    marked += s.slice(from);
+    marked += ops.slice(s, from);
     const back = (p) => {
         let lo = 0;
         let hi = cuts.length;
@@ -493,9 +1090,9 @@ function readAt(s, cuts, rules, spans) {
         return p - lo;
     };
     const more = [];
-    rules.forEach(([re, rep], k) => spansOf(marked, re, rep, k, more));
+    rules.forEach(([re, rep], k) => spansOf(marked, re, rep, k, more, ops));
     for (const [a, b, r, k] of more)
-        spans.push([back(a), back(b), r.split(markChar).join(''), k]);
+        spans.push([back(a), back(b), pieces(r, markChar, ops).join(''), k]);
 }
 function outside(spans, regions) {
     const out = [];
@@ -525,18 +1122,17 @@ function redactString(s, o = {}) {
     }
     catch (e) {
         if (e instanceof RangeError)
-            return exports.UNSCANNABLE + (o.keepLines ? '\n'.repeat(breaks(s)) : '');
+            return exports.UNSCANNABLE + (o.keepLines ? intrinsics().repeat('\n', breaks(s)) : '');
         throw e;
     }
 }
 function redactOrThrow(s, o) {
-    const put = o.keepLines ? applyKeepingLines : apply;
     let out = o.broad ? maskUnion(s, o.mask ?? '[REDACTED]', o.keepLines === true) : replaceUnion(s, o.keepLines === true);
     if (o.identifiers)
-        out = outsideMachineBlocks(out, (part) => IDENTIFIERS.reduce((t, [re, rep]) => put(t, re, rep), part));
+        out = outsideMachineBlocks(out, (part) => BUILT.run.identifiers(part, o.keepLines === true));
     return out;
 }
-exports.CUT_MARGIN = 16 * 1024;
+exports.CUT_MARGIN = 16384;
 function redactCut(s, max, o = {}) {
     return redactClip(s, max, o).text;
 }
@@ -545,18 +1141,19 @@ function redactClip(s, max, o = {}) {
     const r = redactString(windowed ? readWindow(s, max + exports.CUT_MARGIN) : s, o);
     if (!windowed && r.length <= max)
         return { text: r, more: 0 };
-    return { text: r.slice(0, max), more: (windowed ? s.length : r.length) - max };
+    return { text: intrinsics().slice(r, 0, max), more: (windowed ? s.length : r.length) - max };
 }
 function readWindow(s, end) {
     if (s.length <= end)
         return s;
+    const o = intrinsics();
     for (let i = end - 1; i >= 0; i--)
-        if (/\s/.test(s[i]))
-            return s.slice(0, i + 1);
+        if (isSpace(o.at(s, i)))
+            return o.slice(s, 0, i + 1);
     return '';
 }
 function redactRecords(records, o = {}) {
-    const lines = redactString(records.join('\n'), { ...o, keepLines: true }).split('\n');
+    const lines = pieces(redactString(records.join('\n'), { ...o, keepLines: true }), '\n', intrinsics());
     const out = [];
     let at = 0;
     for (const r of records) {
@@ -589,6 +1186,8 @@ function redactKeys(entries, o) {
         return [key, redact(v, o)];
     });
 }
+const BUILT = build(PATTERNS, BROAD, IDENTIFIERS);
+exports.REDACTION_PATTERNS = BUILT.patterns;
 return exports;
 })();
 // END generated from src/events/redact.ts

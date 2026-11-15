@@ -8,41 +8,88 @@
 // Every pattern added here must run in linear time on hostile input (an intake report, a CI log, chat text): a
 // match may start only where a run of its characters starts (a prefix group, never `\b` inside a run of `-`), and a
 // decision a regex would make by backtracking is made in a function instead. test/redact.test.ts times each one on
-// 100 KB adversarial strings. No lookbehind, so a browser bundle may import this module too.
-// Its tables (the credential words, the shapes, the broad rules and the glue) are data in src/events/redact.tables.json
-// (#941), which the weakening hold compares parsed; loaded and deep-frozen by src/check-tables.ts. The RegExps made from
-// them are this module's own: none is handed out (REDACTION_PATTERNS gives copies), since a RegExp can be rewritten in
-// place. scripts/lib/redact-vendor.mjs puts the same data, as frozen literals, in the root updater's copy.
+// 100 KB adversarial strings. No lookbehind. The one import is the tables' loader (src/check-tables.ts, below): the
+// updater's generated copy carries the same data as frozen literals in its place (scripts/lib/redact-vendor.mjs,
+// test/redact-vendored.test.ts), and src/ reaches no built-in by any other route (test/slot-path.test.ts).
+//
+// Its tables (the credential words, the shapes, the broad rules, the glued prefixes and the glue) are data in
+// src/events/redact.tables.json (#941), which the weakening hold compares parsed; loaded and deep-frozen by
+// src/check-tables.ts, in the one statement after the import (LOAD). No code runs from them: a tables file is JSON,
+// so an entry is a string, a number, a list, a `$set` or a `$regexp`, never a function or an accessor; the replacers a
+// shape names (`{"replacer": name}`) are this module's REPLACERS, pinned by their text. The identifier rules stay a
+// literal table here (IDENTIFIERS), read by the data lint as before.
+//
+// The tables below are read once, at load, into a frozen snapshot (snapshot): each regex rebuilt from its checked
+// source, each marker copied as a primitive, each function kept as it is, and the redactor reads only the snapshot
+// (#1257, R1258c/d: a value that differs between the check and the run, through an accessor, a Proxy, a later write or
+// RegExp.prototype.compile, brought the leak back). No code runs from a table entry: test/redact-markers.test.ts holds
+// every entry to data (a regex literal, a string or a template of literal consts, a pinned function, a string kind),
+// pins every function in a table by its source text, and refuses any top-level binding here that isn't a frozen array,
+// a literal, a function or a snapshot (R1258g/h: an entry's template span and a broad rule's arrow ran code at load).
 import { regExpOf, tablesOf, type FrozenSet, type Pattern } from '../check-tables.js';
 
 type Replacement = string | ((match: string, ...groups: string[]) => string);
 
-/** This module's tables (src/events/redact.tables.json): deep-frozen. */
+/** This module's tables (src/events/redact.tables.json): deep-frozen. The one load, read only as TABLES.get('<name>'). */
 const TABLES = tablesOf(import.meta.url);
 
 /** Credential-shaped: mixed case with a digit (a random key), or a long hex run (a classic token). */
-const credentialShaped = (v: string) => (/[a-z]/.test(v) && /[A-Z]/.test(v) && /\d/.test(v)) || /^[0-9a-fA-F]{32,}$/.test(v);
+function credentialShaped(v: string): boolean {
+  return (hasChar(v, isLower) && hasChar(v, isUpper) && hasChar(v, isDigit)) || (v.length >= 32 && allChars(v, isHex));
+}
 
 /**
  * A value after `Basic` that is a credential, not a word: base64 with a digit, `+`, `/` or `=` in it, or a mixed-case
  * run of 16 or more characters whose length base64 can have (no padding: not 1 more than a multiple of 4).
  */
-const basicShaped = (v: string) => /[0-9+/=]/.test(v) || (v.length >= 16 && v.length % 4 !== 1 && /[a-z]/.test(v) && /[A-Z]/.test(v)) || basicPair(v);
+function basicShaped(v: string): boolean {
+  return hasChar(v, (c) => isDigit(c) || c === '+' || c === '/' || c === '=') || (v.length >= 16 && v.length % 4 !== 1 && hasChar(v, isLower) && hasChar(v, isUpper)) || basicPair(v);
+}
+/** The base64 alphabet, each character at its value. */
+const BASE64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 /**
  * Whether `v` is base64 of a `user:password` pair: it decodes to printable ASCII with a `:` in it (#889 round 8: a short
  * pair, `dXNlcjpwYXNz`, has no digit, `+`, `/` or `=` and is under 16 characters). A word after "Basic" in prose
- * ("Authentication") decodes to bytes that aren't, or doesn't decode at all.
+ * ("Authentication") decodes to bytes that aren't, or doesn't decode at all. Decoded by a scan, as atob reads base64
+ * (ASCII whitespace dropped, up to two `=` at the end when that makes the length a multiple of 4, no other character,
+ * and a length that is 1 more than a multiple of 4 is not base64), never with the global atob, which is read at call
+ * time (R1258t's T1: patched after load, a Basic credential was shown).
  */
 function basicPair(v: string): boolean {
-  let text: string;
-  try {
-    text = atob(v);
-  } catch {
-    return false;
+  const o = intrinsics();
+  let bits = 0;
+  let held = 0;
+  let count = 0;
+  let pad = 0;
+  let colon = false;
+  for (let i = 0; i < v.length; i++) {
+    const c = v[i]!;
+    if (c === ' ' || c === '\t' || c === '\n' || c === '\f' || c === '\r') continue;
+    if (c === '=') {
+      pad++;
+      continue;
+    }
+    const d = o.indexOf(BASE64, c);
+    if (d === -1 || pad > 0 || c.length !== 1) return false;
+    count++;
+    bits = (bits << 6) | d;
+    held += 6;
+    if (held >= 8) {
+      held -= 8;
+      const byte = (bits >> held) & 0xff;
+      bits &= (1 << held) - 1;
+      if (byte < 0x20 || byte > 0x7e) return false;
+      if (byte === 0x3a) colon = true;
+    }
   }
-  return /^[\x20-\x7e]*:[\x20-\x7e]*$/.test(text);
+  if (pad > 2 || (pad > 0 && (count + pad) % 4 !== 0) || count % 4 === 1) return false;
+  return colon;
 }
 
+// The data the rules decide by is frozen arrays, never a Set, a Map or a RegExp in a module binding (R1258g/h: code that
+// ran at load from a table entry reached KEY_QUALIFIERS.delete, CODE_HEADS.add and KEY_LINE.compile with every table
+// line unchanged). A frozen array has no mutator that works; test/redact-markers.test.ts refuses any other top-level
+// binding here.
 /** A word that makes any key holding it a credential's: `db_password`, `slack_bot_token`, `aws_secret_access_key`. */
 const CREDENTIAL_WORDS: FrozenSet<string> = TABLES.get('CREDENTIAL_WORDS');
 /**
@@ -51,7 +98,10 @@ const CREDENTIAL_WORDS: FrozenSet<string> = TABLES.get('CREDENTIAL_WORDS');
  * `secretary` are not; `pass` and `pwd` count only whole (`compass`, `bypass`).
  */
 const CREDENTIAL_ENDINGS: readonly string[] = TABLES.get('CREDENTIAL_ENDINGS');
-const credentialWord = (w: string) => CREDENTIAL_WORDS.has(w) || CREDENTIAL_ENDINGS.some((e) => w.endsWith(e));
+function credentialWord(w: string): boolean {
+  const o = intrinsics();
+  return CREDENTIAL_WORDS.has(w) || CREDENTIAL_ENDINGS.some((e) => o.endsWith(w, e));
+}
 /** The word before `key` that makes it a credential (`x-api-key`, `apiKey`, `signing_key`); `cacheKey`, `sort_key` are not. */
 const KEY_QUALIFIERS: FrozenSet<string> = TABLES.get('KEY_QUALIFIERS');
 
@@ -61,16 +111,31 @@ const KEY_QUALIFIERS: FrozenSet<string> = TABLES.get('KEY_QUALIFIERS');
  * written as one word too).
  */
 function credentialKey(k: string): boolean {
-  const words = k
-    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
-    .replace(/([A-Z])([A-Z][a-z])/g, '$1 $2')
-    .toLowerCase()
-    .split(/[ _-]+/)
-    .filter(Boolean);
+  const o = intrinsics();
+  // The words: a break between a lower-case letter or digit and an upper-case one, between an upper-case letter and an
+  // upper-case one followed by a lower-case one (camelCase, read as `([a-z0-9])([A-Z])` then `([A-Z])([A-Z][a-z])`
+  // did), and at each run of `_`, `-` or spaces; lower-cased; empty words dropped.
+  const words: string[] = [];
+  let word = '';
+  for (let i = 0; i < k.length; i++) {
+    const c = k[i]!;
+    const n = o.at(k, i + 1);
+    if (c === ' ' || c === '_' || c === '-') {
+      if (word.length > 0) words.push(o.lower(word));
+      word = '';
+      continue;
+    }
+    word += c;
+    if (((isLower(c) || isDigit(c)) && isUpper(n)) || (isUpper(c) && isUpper(n) && isLower(o.at(k, i + 2)))) {
+      words.push(o.lower(word));
+      word = '';
+    }
+  }
+  if (word.length > 0) words.push(o.lower(word));
   const last = words.at(-1) ?? '';
   if (words.some(credentialWord) || last === 'auth') return true;
   if (last === 'key') return words.length === 1 || KEY_QUALIFIERS.has(words.at(-2)!);
-  return last.endsWith('key') && KEY_QUALIFIERS.has(last.slice(0, -3));
+  return o.endsWith(last, 'key') && KEY_QUALIFIERS.has(o.slice(last, 0, -3));
 }
 
 /**
@@ -81,82 +146,485 @@ function credentialKey(k: string): boolean {
  */
 export const DASHBOARD_KEY_PREFIX = 'wld_';
 const DASHBOARD_KEY_BODY = '[A-Za-z0-9_-]{32,}';
-/** Whether `key` is a dashboard key of the current shape (prefixed). */
-export const isDashboardKey = (key: string): boolean => new RegExp(`^${DASHBOARD_KEY_PREFIX}${DASHBOARD_KEY_BODY}$`).test(key);
+/**
+ * Whether `key` is a dashboard key of the current shape (prefixed): the prefix, then DASHBOARD_KEY_BODY read as a scan
+ * (32 or more word characters or hyphens, to the end). No regex is constructed at run time: the global `RegExp` is read
+ * at call time (R1258t's T1).
+ */
+export function isDashboardKey(key: string): boolean {
+  const o = intrinsics();
+  if (!o.startsWith(key, DASHBOARD_KEY_PREFIX)) return false;
+  const body = o.slice(key, DASHBOARD_KEY_PREFIX.length);
+  return body.length >= 32 && allChars(body, (c) => isWordChar(c) || c === '-');
+}
 
-const KEY_LINE = /-----(BEGIN|END) [A-Z ]*PRIVATE KEY(?: BLOCK)?-----/g;
 /**
  * `m` (the text up to its last END line) with everything up to its last END that no BEGIN opened redacted; as it was
  * when each END has its BEGIN. A BEGIN opens a key up to the next END, as the BEGIN rule reads it (#889 round 6: the
  * rules read the text as it was, so a closed key's END is still there, and it is not an orphan). One scan: linear.
+ * The BEGIN/END line regex is this call's own (a literal here makes a new object each time): no module binding holds
+ * a RegExp, which can't be frozen (R1258h's H1c recompiled one).
  */
 function orphanEnd(m: string): string {
+  const o = intrinsics();
+  const keyLine = /-----(BEGIN|END) [A-Z ]*PRIVATE KEY(?: BLOCK)?-----/g;
   let open = false;
   let cut = -1;
-  KEY_LINE.lastIndex = 0;
-  for (let k = KEY_LINE.exec(m); k; k = KEY_LINE.exec(m)) {
+  for (let k = o.exec(keyLine, m); k; k = o.exec(keyLine, m)) {
     if (k[1] === 'BEGIN') open = true;
     else if (open) open = false;
     else cut = k.index + k[0].length;
   }
-  return cut === -1 ? m : `[REDACTED PRIVATE KEY]${m.slice(cut)}`;
+  return cut === -1 ? m : `[REDACTED PRIVATE KEY]${o.slice(m, cut)}`;
 }
 
 /**
+ * Why a string marker `rep` for `re` could put part of what `re` found into the "redacted" text (#1257), or null when
+ * it can't. A marker may keep only what the match begins or ends with (a boundary, the scheme, a key's name), written
+ * as `$1$2…` at its very start or `…$8$9` at its very end, where those groups are the first or the last things the
+ * regex matches: a plain group (no quantifier, not inside another group, not after a top-level `|`), with only
+ * zero-width items (`^`, `$`, `\b`, a lookaround) between. Then the marker's own text is all the span (spansOf)
+ * becomes, and no group's text lies inside it. A reference anywhere else (`[REDACTED:$1_$2]`), `$&`, and a group that
+ * can match inside the span (`(a|b)+`, a group after the secret's) are refused: with `$1`/`$2` for the key's own
+ * groups, a rule added to PATTERNS gave `sk_[REDACTED:live_<key>]`, the key whole, and no test failed (R1184y's Y1).
+ * `$<name>`, `` $` ``, `$'`, `$0` and `$nn` are refused too: expand and String.prototype.replace don't read them
+ * alike. A regex this reader can't follow is refused as well (only a marker with a reference needs it read).
+ * With `verbatim` (the identifier pass, which puts the marker's text out as it is, with nothing trimmed and no union
+ * over other rules' spans), a kept group must be a boundary: each alternative `^`, one character, or literal text
+ * (`(^|[^\w])`, `(^|[^\w.~/:-]|file:\/\/)`), so it can't hold the identifier itself (R1258b's B3: `$1$2-[email]`
+ * with the address in group 2 passed, and the identifier pass showed it).
+ * markersChecked runs it on every table at load, so a rule that could show a secret stops the module instead
+ * (test/redact-markers.test.ts).
+ */
+export function markerProblem(re: RegExp, rep: string, verbatim = false): string | null {
+  const refs: { n: number; at: number }[] = [];
+  for (let i = 0; i < rep.length; i++) {
+    if (rep[i] !== '$') continue;
+    const c = rep[i + 1] ?? '';
+    if (c === '$') {
+      i++;
+      continue;
+    }
+    if (c === '&') return '`$&` would put the whole match, the secret in it, in the marker';
+    if (c === '`' || c === "'" || c === '<') return `\`$${c}\` isn't read alike by every replace path`;
+    if (c === '0') return '`$0` names no group';
+    if (/[1-9]/.test(c)) {
+      if (/\d/.test(rep[i + 2] ?? '')) return `\`$${c}${rep[i + 2]}\`: a two-digit group reference isn't read alike by every replace path`;
+      refs.push({ n: Number(c), at: i });
+      i++;
+    }
+  }
+  if (!refs.length) return null;
+  const count = groupCount(re);
+  for (const r of refs) if (r.n > count) return `\`$${r.n}\` names a group the regex doesn't have (it has ${count})`;
+  const lead: number[] = [];
+  while (refs[lead.length]?.at === lead.length * 2) lead.push(refs[lead.length]!.n);
+  const trail: number[] = [];
+  while (refs.length - trail.length > lead.length && refs[refs.length - 1 - trail.length]?.at === rep.length - 2 * (trail.length + 1)) trail.unshift(refs[refs.length - 1 - trail.length]!.n);
+  if (lead.length + trail.length !== refs.length) return 'a group reference inside the marker would show what the group matched: a reference may only lead or trail it';
+  if (rep.length === 2 * refs.length) return 'a marker of group references alone marks nothing';
+  let parsed: ParsedRegex;
+  try {
+    parsed = parseRegex(re.source);
+  } catch (e) {
+    return `its regex can't be read for group references: ${(e as Error).message}`;
+  }
+  if (parsed.groups !== count) return "its regex can't be read for group references: the groups don't count up";
+  const leading = leadingGroups(parsed.alternatives);
+  for (const [k, n] of lead.entries()) if (leading[k] !== n) return `\`$${n}\` leads the marker, but group ${n} isn't what the match begins with (${these(leading)})`;
+  const trailing = trailingGroups(parsed.alternatives);
+  for (const [k, n] of trail.entries()) if (trailing[trailing.length - trail.length + k] !== n) return `\`$${n}\` trails the marker, but group ${n} isn't what the match ends with (${these(trailing)})`;
+  if (verbatim) {
+    for (const n of [...lead, ...trail]) {
+      const g = parsed.alternatives[0]!.find((it) => it.kind === 'group' && it.capture === n);
+      if (!g || g.kind !== 'group' || !boundaryGroup(g)) return `\`$${n}\` is put out as it is, so group ${n} must be a boundary (each alternative \`^\`, one character or literal text), not text of its own`;
+    }
+  }
+  return null;
+}
+
+/**
+ * Whether a group can hold nothing but a boundary: each alternative is `^` (or another zero-width item), one character
+ * (a class, a character or an escape), or literal text (`file:\/\/`), none quantified. Such a group can't match an
+ * identifier or a secret, so the identifier pass may put it out as it is.
+ */
+function boundaryGroup(g: Item & { kind: 'group' }): boolean {
+  return g.alternatives.every((alt) => {
+    const taking = alt.filter((it) => it.kind !== 'zero');
+    if (taking.some((it) => it.quantified || it.kind === 'group' || it.kind === 'backref')) return false;
+    return taking.length <= 1 || taking.every((it) => it.kind === 'atom');
+  });
+}
+
+/** Which groups are, in words, for markerProblem's reasons. */
+function these(groups: number[]): string {
+  return groups.length === 0 ? 'no group is' : groups.length === 1 ? `group ${groups[0]} is` : `groups ${groups.join(', ')} are`;
+}
+
+/** The own property keys of `o`, strings and symbols, joined, for snapshot's reasons: what a plain regex has is exactly `lastIndex`. Load only. */
+function ownKeys(o: object): string {
+  return [...Object.getOwnPropertyNames(o), ...Object.getOwnPropertySymbols(o).map((k) => String(k))].join();
+}
+
+/** Whether `o` has no own property, string or symbol, but `lastIndex`: what a plain regex has. Run-time code (the first operation's check, R1258t's T2: it ran ownKeys, a load-only function, after load). */
+function onlyLastIndex(o: object): boolean {
+  const names = Object.getOwnPropertyNames(o);
+  return names.length === 1 && names[0] === 'lastIndex' && Object.getOwnPropertySymbols(o).length === 0;
+}
+
+/** How many capturing groups `re` has, as the engine counts them (an empty alternative matches with every group unset). */
+function groupCount(re: RegExp): number {
+  return new RegExp(`${re.source}|`, re.flags.replace(/[gy]/g, '')).exec('')!.length - 1;
+}
+
+/**
+ * A rule as checked: the regex's source and flags as primitives (the regexes that run are built from them inside
+ * `run`, below, and REDACTION_PATTERNS exports other copies: R1258e's E1 and E2, a RegExp object can't be frozen and
+ * any holder of one can recompile it), the marker as a primitive string or the function the table gave, and the
+ * kind. Frozen.
+ */
+interface Rule {
+  readonly source: string;
+  readonly flags: string;
+  readonly rep: Replacement;
+  readonly kind: string;
+}
+
+/**
+ * The frozen copy of `table` this module runs, or the module doesn't load: a rule that could show a secret is refused
+ * here, not found in a log. Every value is read exactly once, here, and the redactor reads only the copy (#1257,
+ * R1258c/d: the check read a rule once and the run read it again, so an accessor on the rule, a Proxy around the
+ * regex, an own Symbol.replace, a later write to the rule or the run's copy, and RegExp.prototype.compile each handed
+ * the run a value the check never saw, and the Y1 leak came back in one line). So:
+ * - the table is a plain array, each slot a data property; each rule a plain array whose own keys are exactly
+ *   `0`, `1`, `2` and `length`, all data properties (no accessor, no own iterator, no symbol);
+ * - the regex is a RegExp made by RegExp itself, with no own property but `lastIndex`; its `source` and `flags` are
+ *   read once, as primitives, and the marker is checked against `new RegExp(source, flags)`. The regexes that run are
+ *   built from the same primitives inside `run` (below), which no binding exposes, and REDACTION_PATTERNS exports
+ *   copies of its own, so no later `compile` or write reaches what runs (R1258e's E1 and E2);
+ * - the marker is a string, copied as a primitive and checked with markerProblem against the copy, or a function
+ *   (code: trusted as reviewed, pinned by its exact source text in test/redact-markers.test.ts, and its result held
+ *   by shown at run time as a backstop). Anything else is refused (R1258b's B1: a String object or an object with
+ *   toString is no function, but String.prototype.replace reads it as a marker and expands its `$n`). With `broad`,
+ *   the function is a broad rule's `(mask) => marker`, read once with the default mask; `verbatim` is the identifier
+ *   pass (markerProblem);
+ * - each rule and the copy are frozen. The table itself is frozen by the caller, so nothing changes it afterwards
+ *   either (what it holds is not read again, but a frozen table says so).
+ * A Proxy isn't told apart (node:util's isProxy can't be reached here: the updater's copy may load nothing, and src/
+ * reaches no built-in another way), and needn't be: a Proxy around the table, a rule or a regex can only choose what
+ * is read here, once, and what is read is what is checked and copied. Its traps are never called again. A Proxy in
+ * a function's place is a function with another source text, which the pin refuses.
+ */
+function snapshot(table: readonly unknown[], o: { broad?: boolean; verbatim?: boolean } = {}): readonly Rule[] {
+  // Typed in full, so each call narrows what follows (a never-returning function narrows only when declared so).
+  const refuse: (who: string, why: string) => never = (who, why) => {
+    throw new Error(`redaction rule ${who} could show a secret (#1257): ${why}`);
+  };
+  if (!Array.isArray(table)) refuse('table', 'a table must be a plain array');
+  /** The value of a data property `k` of `o`, or a refusal for an accessor or a missing slot. */
+  const data = (who: string, o: object, k: PropertyKey, what: string): unknown => {
+    const d = Object.getOwnPropertyDescriptor(o, k);
+    if (!d) refuse(who, `${what} is missing`);
+    if (!('value' in d)) refuse(who, `${what} must be a plain data property, not an accessor`);
+    return d.value;
+  };
+  const rows: Rule[] = [];
+  for (let i = 0; i < table.length; i++) {
+    let who = `#${i}`;
+    const entry = data(who, table, i, 'a table slot');
+    let source: string;
+    let flags: string;
+    let rep: unknown;
+    let kind: unknown;
+    if (Array.isArray(entry)) {
+      // A code table (IDENTIFIERS): an array whose three slots are own data properties (read by descriptor, so no
+      // prototype of the array, a subclass's included, can stand between). `constructor` is read nowhere in this
+      // module: the reference lint refuses it, since it reaches a prototype.
+      const keys = ownKeys(entry);
+      if (keys !== '0,1,2,length') refuse(who, `a rule must be exactly [regex, marker, kind], with no other own property (own keys: ${keys})`);
+      kind = data(who, entry, 2, 'the kind');
+      if (typeof kind !== 'string') refuse(who, 'the kind must be a string');
+      who = `"${kind}"`;
+      const re = data(who, entry, 0, 'the regex');
+      // Compared with the module's name RegExp: no binding in this module may be named as a global (the test's
+      // binding lint, R1258j's J1a), and this module's code reaches no global object and no prototype in any spelling
+      // (the test's reference lint, by type and position, R1258n/o/p), so the name is the intrinsic.
+      // A RegExp with no own property but lastIndex. Its `source` and `flags` are read once, below, and the copy made
+      // from them is what runs: a subclass that reads them its own way names the pattern that runs, so it is checked
+      // against what it names (and the data lint holds a table's regex to a literal anyway).
+      if (!(re instanceof RegExp) || ownKeys(re) !== 'lastIndex') refuse(who, 'its regex must be a plain RegExp with no own property but lastIndex (one could hide the pattern that runs)');
+      source = `${re.source}`;
+      flags = `${re.flags}`;
+      rep = data(who, entry, 1, 'the marker');
+    } else {
+      // A data table (src/events/redact.tables.json, deep-frozen by the loader): {re: {source, flags}, rep or mask,
+      // kind}, and a "//" comment. Each slot read by descriptor all the same: the loader is the one other module this
+      // one trusts, and a frozen plain object has nothing else to give.
+      if (entry === null || typeof entry !== 'object') refuse(who, 'a rule must be {re, rep, kind} (or [regex, marker, kind] in a code table)');
+      const names = Object.getOwnPropertyNames(entry).filter((k) => k !== '//').sort().join();
+      const want = o.broad ? 'kind,mask,re' : 'kind,re,rep';
+      if (names !== want || Object.getOwnPropertySymbols(entry).length !== 0) refuse(who, `a data rule must have exactly {${want}} (and a "//" comment), own keys: ${names}`);
+      kind = data(who, entry, 'kind', 'the kind');
+      if (typeof kind !== 'string') refuse(who, 'the kind must be a string');
+      who = `"${kind}"`;
+      const re = data(who, entry, 're', 'the pattern');
+      if (re === null || typeof re !== 'object') refuse(who, 'its pattern must be {source, flags}');
+      const src = data(who, re, 'source', "the pattern's source");
+      const fl = data(who, re, 'flags', "the pattern's flags");
+      if (typeof src !== 'string' || typeof fl !== 'string') refuse(who, "its pattern's source and flags must be strings");
+      source = src;
+      flags = fl;
+      const given = data(who, entry, o.broad ? 'mask' : 'rep', 'the marker');
+      if (o.broad) {
+        if (typeof given !== 'string' || !given.includes('{mask}')) refuse(who, 'a broad rule must give its marker as a string holding {mask}');
+        rep = masked(given, '[REDACTED]');
+      } else if (typeof given === 'string') rep = given;
+      else if (given !== null && typeof given === 'object' && Object.getOwnPropertyNames(given).join() === 'replacer') {
+        // The function one of REPLACERS names, as its own property (never one inherited: a name like "constructor"
+        // would reach Object's); a name REPLACERS doesn't define refuses the rule.
+        const name = data(who, given, 'replacer', 'the replacer');
+        if (typeof name !== 'string') refuse(who, "a replacer's name must be a string");
+        const d = Object.getOwnPropertyDescriptor(REPLACERS, name);
+        const f: Replacement | undefined = d === undefined ? undefined : d.value;
+        if (typeof f !== 'function') refuse(who, `the data names no replacer ${name}`);
+        rep = f;
+      } else refuse(who, 'a marker must be a string or {replacer: name}');
+    }
+    // The identifier pass replaces every match (replaced), so its rule must be global; refused here, not on the first
+    // TRACKER call (R1258q's observation).
+    if (o.verbatim && !flags.includes('g')) refuse(who, 'an identifier rule must be global');
+    // The copy the marker is checked against; what runs is built again from the same primitives (run).
+    const copy = new RegExp(source, flags);
+    let marker: string | null = null;
+    let kept: Replacement;
+    if (typeof rep === 'string') kept = marker = `${rep}`;
+    else if (typeof rep === 'function') {
+      if (o.broad) {
+        const shownAs: unknown = (rep as (mask: string) => unknown)('[REDACTED]');
+        if (typeof shownAs !== 'string') refuse(who, 'a broad rule must give its marker as a string');
+        kept = marker = `${shownAs}`;
+      } else kept = rep as Replacement;
+    } else refuse(who, `a marker must be a string or a function, not ${rep === null ? 'null' : typeof rep !== 'object' ? `a ${typeof rep}` : rep instanceof String ? 'a String object' : 'an object'}`);
+    const why = marker === null ? null : markerProblem(copy, marker, o.verbatim === true);
+    if (why !== null) refuse(who, why);
+    rows.push(Object.freeze({ source, flags, rep: kept, kind }));
+  }
+  return Object.freeze(rows);
+}
+
+/**
+ * An item of a regex's sequence, as markerProblem reads it: a group (capturing, or a lookaround), a backreference,
+ * something zero-width (`^`, `$`, `\b`), one literal character (`a`, `\.`, `\u{28}`) or a class, which takes one of
+ * several characters (`[a-z]`, `\d`, `.`, a named backreference too) (parseRegex).
+ */
+type Item =
+  | { kind: 'group'; capture: number | null; look: 'ahead' | 'behind' | null; alternatives: Item[][]; quantified: boolean }
+  | { kind: 'backref'; n: number; quantified: boolean }
+  | { kind: 'zero' | 'atom' | 'class'; quantified: boolean };
+interface ParsedRegex {
+  alternatives: Item[][];
+  groups: number;
+}
+
+/**
+ * The structure of `source`, enough to tell which groups a match begins and ends with: groups (`(…)`, `(?:…)`,
+ * `(?<name>…)`, `(?=…)`, `(?!…)`, `(?<=…)`, `(?<!…)`), `|`, classes, escapes (`\1`, `\b`, `\u{…}`, `\p{…}`, `\k<…>`),
+ * `^`, `$`, quantifiers (`*`, `+`, `?`, `{n,m}`, lazy too). It throws on a shape it doesn't know (a modifier group).
+ */
+function parseRegex(source: string): ParsedRegex {
+  let i = 0;
+  let groups = 0;
+  const skipQuantifier = (): boolean => {
+    const c = source[i];
+    if (c === '*' || c === '+' || c === '?') i++;
+    else {
+      const m = /^\{\d+(?:,\d*)?\}/.exec(source.slice(i));
+      if (!m) return false;
+      i += m[0].length;
+    }
+    if (source[i] === '?') i++;
+    return true;
+  };
+  const item = (): Item => {
+    const c = source[i]!;
+    let it: Item;
+    if (c === '(') {
+      i++;
+      let capture: number | null = null;
+      let look: 'ahead' | 'behind' | null = null;
+      if (source.startsWith('?:', i)) i += 2;
+      else if (source.startsWith('?=', i) || source.startsWith('?!', i)) {
+        look = 'ahead';
+        i += 2;
+      } else if (source.startsWith('?<=', i) || source.startsWith('?<!', i)) {
+        look = 'behind';
+        i += 3;
+      } else if (source.startsWith('?<', i)) {
+        const close = source.indexOf('>', i);
+        if (close === -1) throw new Error(`an unclosed group name at ${i}`);
+        i = close + 1;
+        capture = ++groups;
+      } else if (source[i] === '?') throw new Error(`a group of an unknown kind at ${i}`);
+      else capture = ++groups;
+      const alts = alternatives();
+      if (source[i] !== ')') throw new Error(`an unclosed group at ${i}`);
+      i++;
+      it = { kind: 'group', capture, look, alternatives: alts, quantified: false };
+    } else if (c === '[') {
+      for (i++; i < source.length && source[i] !== ']'; i++) if (source[i] === '\\') i++;
+      if (source[i] !== ']') throw new Error('an unclosed class');
+      i++;
+      it = { kind: 'class', quantified: false };
+    } else if (c === '\\') {
+      const n = source[i + 1] ?? '';
+      if (/[1-9]/.test(n)) {
+        const m = /^\d+/.exec(source.slice(i + 1))!;
+        i += 1 + m[0].length;
+        it = { kind: 'backref', n: Number(m[0]), quantified: false };
+      } else {
+        let kind: 'zero' | 'atom' | 'class' = 'atom';
+        if ((n === 'u' || n === 'p' || n === 'P') && source[i + 2] === '{') {
+          const close = source.indexOf('}', i);
+          if (close === -1) throw new Error(`an unclosed escape at ${i}`);
+          i = close + 1;
+          if (n !== 'u') kind = 'class';
+        } else if (n === 'k' && source[i + 2] === '<') {
+          const close = source.indexOf('>', i);
+          if (close === -1) throw new Error(`an unclosed named backreference at ${i}`);
+          i = close + 1;
+          kind = 'class';
+        } else if (n === '') throw new Error('a trailing backslash');
+        else {
+          i += 2;
+          if (n === 'b' || n === 'B') kind = 'zero';
+          else if ('dDwWsSpP'.includes(n)) kind = 'class';
+        }
+        it = { kind, quantified: false };
+      }
+    } else if (c === '^' || c === '$') {
+      i++;
+      it = { kind: 'zero', quantified: false };
+    } else if (c === '*' || c === '+' || c === '?' || c === ')') throw new Error(`a stray \`${c}\` at ${i}`);
+    else {
+      i++;
+      it = { kind: c === '.' ? 'class' : 'atom', quantified: false };
+    }
+    if (skipQuantifier()) it.quantified = true;
+    return it;
+  };
+  const alternatives = (): Item[][] => {
+    const alts: Item[][] = [[]];
+    while (i < source.length && source[i] !== ')') {
+      if (source[i] === '|') {
+        i++;
+        alts.push([]);
+      } else alts.at(-1)!.push(item());
+    }
+    return alts;
+  };
+  const alts = alternatives();
+  if (i < source.length) throw new Error(`a stray \`)\` at ${i}`);
+  return { alternatives: alts, groups };
+}
+
+/**
+ * The groups a match begins with, in order: plain groups (no quantifier) that are the first things the one top-level
+ * alternative matches, with only zero-width items between (a lookaround included: it takes nothing). A lookahead whose
+ * first item is a plain group, followed at once by a backreference to it (the JWT rule's `(?=(…)eyJ)\2`), counts as
+ * that group: the backreference takes exactly the text the group found, from the same place.
+ */
+function leadingGroups(alternatives: Item[][]): number[] {
+  if (alternatives.length !== 1) return [];
+  const items = alternatives[0]!;
+  const out: number[] = [];
+  for (let k = 0; k < items.length; k++) {
+    const it = items[k]!;
+    if (it.quantified) break;
+    if (it.kind === 'zero') continue;
+    if (it.kind !== 'group') break;
+    if (it.look === null) {
+      if (it.capture === null) break;
+      out.push(it.capture);
+      continue;
+    }
+    const first = it.look === 'ahead' && it.alternatives.length === 1 ? it.alternatives[0]![0] : undefined;
+    const next = items[k + 1];
+    if (first?.kind === 'group' && first.look === null && first.capture !== null && !first.quantified && next?.kind === 'backref' && next.n === first.capture && !next.quantified) {
+      out.push(first.capture);
+      k++;
+    }
+  }
+  return out;
+}
+
+/** The groups a match ends with, in order: plain groups (no quantifier) that are the last things the one top-level alternative matches, with only zero-width items between. */
+function trailingGroups(alternatives: Item[][]): number[] {
+  if (alternatives.length !== 1) return [];
+  const items = alternatives[0]!;
+  const out: number[] = [];
+  for (let k = items.length - 1; k >= 0; k--) {
+    const it = items[k]!;
+    if (it.quantified) break;
+    if (it.kind === 'zero') continue;
+    if (it.kind !== 'group') break;
+    if (it.look !== null) continue;
+    if (it.capture === null) break;
+    out.unshift(it.capture);
+  }
+  return out;
+}
+
+// Each pattern with what kind of secret it finds (secretKinds names the kind, never the value). A string marker keeps
+// only what the match begins or ends with (markerProblem, #1257): `$1[REDACTED]` for a boundary group, never
+// `[REDACTED:$1]`.
+/**
  * The functions a shape's replacement can name (`{"replacer": name}` in the data): each declines a match that is no
- * secret (gives it back as it was), or works out what to keep. Code, not data: a change to one is a change to this file.
+ * secret (gives it back as it was), or works out what to keep. Code, not data: pinned by their text in
+ * test/redact-markers.test.ts, as every function in a table is; test/check-tables-sync.test.ts holds the names the
+ * data uses to these, in the module and in the updater's copy. Run-time code: each reads its groups through the
+ * captured intrinsics and the character predicates, never a prototype's method.
  */
 const REPLACERS: Readonly<Record<string, (match: string, ...groups: string[]) => string>> = Object.freeze({
   // Stripe secret and restricted keys: random, so with a digit (a long camelCase name after the prefix, with no
   // digit, is a code identifier).
-  stripe: (m: string, pre?: string, k?: string, v?: string) => (/\d/.test(v!) ? `${pre}${k}_[REDACTED]` : m),
+  stripe: (m: string, pre?: string, k?: string, v?: string) => (hasChar(v!, isDigit) ? `${pre}${k}_[REDACTED]` : m),
+  // A private key's END line with no BEGIN before it: everything up to it (orphanEnd).
   orphanEnd,
   // HTTP Basic credentials: any credential-looking value after the scheme (basicShaped).
   basic: (m: string, s?: string, sp?: string, v?: string) => (basicShaped(v!) ? `${s}${sp}[REDACTED]` : m),
   // A JSON string value under a credential key, credential-shaped (credentialKey, credentialShaped).
   jsonKey: (m: string, q?: string, k?: string, sep?: string, vq?: string, v?: string) => (credentialKey(k!) && credentialShaped(v!) ? `${q}${k}${q}${sep}${vq}[REDACTED]${vq}` : m),
 });
-/** The names REPLACERS has at run time: test/check-tables-sync.test.ts holds them to the names its block defines (R1184t D1). */
-export const REPLACER_NAMES: readonly string[] = Object.freeze(Object.keys(REPLACERS));
+/** The names REPLACERS has, as data: build() refuses a module where they differ from REPLACERS' own keys (R1184t D1). */
+export const REPLACER_NAMES: readonly string[] = Object.freeze(['stripe', 'orphanEnd', 'basic', 'jsonKey']);
 
-/** A replacement as the data gives it: a string, or the name of one of REPLACERS. Throws on a name that isn't one. */
-function replacementOf(rep: string | { replacer: string }): Replacement {
-  if (typeof rep === 'string') return rep;
-  const f = REPLACERS[rep.replacer];
-  if (!f) throw new Error(`src/events/redact.ts's data: no replacer ${rep.replacer}`);
-  return f;
-}
-
-/** A rule as the data gives it. */
-type RuleData = { re: Pattern; rep: string | { replacer: string } };
+/** A shape as the data gives it: its pattern, its replacement (a string, or the name of one of REPLACERS) and its kind. */
+type PatternData = { readonly re: Pattern; readonly rep: string | { readonly replacer: string }; readonly kind: string };
+/** A broad rule as the data gives it: its pattern, its replacement with `{mask}` where the mask goes, and its kind. */
+type BroadData = { readonly re: Pattern; readonly mask: string; readonly kind: string };
+/** A rule of the broad mode as the data lists it (BROAD_RULES): its pattern and its replacement. */
+type RuleData = { readonly re: Pattern; readonly rep: string | { readonly replacer: string } };
 
 /**
- * Each pattern with what kind of secret it finds (secretKinds names the kind, never the value), in the data's order:
- * the comments on each are in src/events/redact.tables.json.
+ * Each secret shape with what kind of secret it finds (secretKinds names the kind, never the value), in the data's
+ * order: the comments on each are in src/events/redact.tables.json. Read once by build, into the snapshot.
  */
-const PATTERNS: readonly (readonly [RegExp, Replacement, string])[] = Object.freeze(TABLES.get<readonly (RuleData & { kind: string })[]>('PATTERNS').map((e) => Object.freeze([regExpOf(e.re), replacementOf(e.rep), e.kind] as const)));
+const PATTERNS: readonly PatternData[] = TABLES.get('PATTERNS');
 // Not covered: a bare 32-character string with no prefix (a dashboard key from before #889 among them): a commit
 // hash, a digest and the engine's own ids have the same shape. New dashboard keys carry DASHBOARD_KEY_PREFIX.
 
-/**
- * The broad rules (`broad: true`), for text whose source may cut a token short or name a secret by its key: gh's
- * output (src/gh-login.ts), the bench's printed lines (scripts/bench/cli.ts) and the root updater's files
- * (scripts/machine/<cli>-update.cjs, which carries a generated copy of this module). Run with PATTERNS, all on the
- * text as it was, and what any of them finds is masked with `mask` (maskUnion). They were those modules' own rules (#889): a known
- * token prefix and a short run, a URL's user info, a value after a secret's name, a short bearer token, and a JWT
- * after a hyphen. Each starts only where a run starts, or reads a bounded stretch from each start: linear.
- */
-/** Each broad rule: its RegExp, its replacement with `{mask}` where the mask goes, and its kind. */
-const BROAD: readonly (readonly [RegExp, string, string])[] = Object.freeze(TABLES.get<readonly { re: Pattern; mask: string; kind: string }[]>('BROAD').map((e) => Object.freeze([regExpOf(e.re), e.mask, e.kind] as const)));
-/** A broad rule's replacement with `mask` in it (taken literally). */
-const masked = (template: string, mask: string) => template.split('{mask}').join(mask);
+const BROAD: readonly BroadData[] = TABLES.get('BROAD');
+// A broad rule's marker only places its span (spansOf); read once as shown with the default mask (snapshot). The arrow
+// is data by the lint (test/redact-markers.test.ts): `(k) => k` or a template of literals and `k`, nothing else, so the
+// call here runs no code of its own (R1258h's H1), and each arrow is pinned by its source text.
+// Read once, by build() below (BUILT), which freezes it.
 
 /**
  * The first word of a dotted name that is code, not a host: `this.internal`, `opts.corp`, `config.lan.x`. Only
  * receivers no one names a machine after: `app`, `data` and `node` are left out, since `app.internal` (one app on a
  * private network), `data.corp` and `node.cluster.local` are hosts.
  */
-const CODE_HEADS = new Set(['this', 'self', 'super', 'opts', 'options', 'o', 'ctx', 'context', 'config', 'cfg', 'conf', 'settings', 'props', 'state', 'env', 'process', 'module', 'exports', 'window', 'document', 'globalThis', 'args', 'params', 'req', 'res', 'request', 'response', 'obj', 'result', 'item', 'e', 'err', 'x']);
+const CODE_HEADS = Object.freeze(['this', 'self', 'super', 'opts', 'options', 'o', 'ctx', 'context', 'config', 'cfg', 'conf', 'settings', 'props', 'state', 'env', 'process', 'module', 'exports', 'window', 'document', 'globalThis', 'args', 'params', 'req', 'res', 'request', 'response', 'obj', 'result', 'item', 'e', 'err', 'x']);
 
 /**
  * A dotted name under a private-use suffix is a host, one plain word included (`nas.lan`, `vault.internal`): a false
@@ -166,24 +634,25 @@ const CODE_HEADS = new Set(['this', 'self', 'super', 'opts', 'options', 'o', 'ct
  * a host name is written in one case.
  */
 function internalHost(m: string, pre: string, name: string): string {
-  const lower = name.toLowerCase();
-  const labels = name.split('.').slice(0, lower.endsWith('.home.arpa') || lower.endsWith('.ts.net') ? -2 : -1);
-  const suffix = name.slice(labels.join('.').length + 1);
-  const prose = suffix !== suffix.toLowerCase() && suffix !== suffix.toUpperCase();
-  const code = !labels.some((l) => l.includes('-')) && (CODE_HEADS.has(labels[0]!) || labels.some((l) => /[a-z][A-Z]/.test(l)));
+  const o = intrinsics();
+  const lower = o.lower(name);
+  const labels = pieces(name, '.', o).slice(0, o.endsWith(lower, '.home.arpa') || o.endsWith(lower, '.ts.net') ? -2 : -1);
+  const suffix = o.slice(name, labels.join('.').length + 1);
+  const prose = suffix !== o.lower(suffix) && suffix !== o.upper(suffix);
+  // camelCase: a lower-case letter right before an upper-case one.
+  const camel = (l: string): boolean => {
+    for (let i = 1; i < l.length; i++) if (isLower(o.at(l, i - 1)) && isUpper(l[i]!)) return true;
+    return false;
+  };
+  const code = !labels.some((l) => o.includes(l, '-')) && (CODE_HEADS.includes(labels[0]!) || labels.some(camel));
   return prose || code ? m : `${pre}[internal-host]`;
 }
 
-const OCTET = '(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)';
-const PRIVATE_V4 = [
-  `10\\.${OCTET}`,
-  '172\\.(?:1[6-9]|2\\d|3[01])',
-  '192\\.168',
-  // The shared range (RFC 6598): carrier NAT and tailnets.
-  '100\\.(?:6[4-9]|[7-9]\\d|1[01]\\d|12[0-7])',
-  // Link-local, cloud metadata among it.
-  '169\\.254',
-].join('|');
+// The private IPv4 rule below is written out as one regex literal (a table entry's regex is a literal, never a
+// construction: test/redact-markers.test.ts, the data lint). Read it as: a boundary; one of the private ranges, in order
+// 10/8, 172.16/12, 192.168/16, the shared range (RFC 6598: carrier NAT and tailnets, 100.64/10) and link-local
+// (169.254/16, cloud metadata among it); two more octets, each `(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)`; no word character
+// or further octet after. The test holds the literal equal to that composition.
 
 /**
  * What names a person or the inside of a network rather than a secret: emails, internal hostnames, private IPs and
@@ -207,22 +676,35 @@ const IDENTIFIERS: [RegExp, Replacement, string][] = [
   // Hostnames under the private-use suffixes; code that looks like one stays (internalHost). After a slash only as a
   // URL's `//`: `./util.internal` is a module path, `http://nas.lan/` a host.
   [/(^|[^A-Za-z0-9./-]|\/\/)([A-Za-z0-9][A-Za-z0-9.-]*\.(?:internal|localdomain|lan|corp|intranet|home\.arpa|ts\.net|local))(?![A-Za-z0-9-]|\.[A-Za-z0-9])/gi, internalHost, 'internal host'],
-  [new RegExp(`(^|[^\\w.])(?:${PRIVATE_V4})\\.${OCTET}\\.${OCTET}(?![\\w-]|\\.\\d)`, 'g'), '$1[private-ip]', 'private IP'],
+  [/(^|[^\w.])(?:10\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)|172\.(?:1[6-9]|2\d|3[01])|192\.168|100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])|169\.254)\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?![\w-]|\.\d)/g, '$1[private-ip]', 'private IP'],
   // IPv6 unique-local (fc00::/7) and link-local (fe80::/10) addresses.
   [/(^|[^\w:])f(?:[cd][0-9a-f]{2}|e[89ab][0-9a-f]):(?:[0-9a-f]{0,4}:){1,6}[0-9a-f]{0,4}(?![\w:])/gi, '$1[private-ip]', 'private IP'],
 ];
+// The identifier pass puts a marker out as it is (apply), so a kept group must be a boundary (verbatim: build()).
 
 /**
  * Every pattern with its kind, for the linear-time test (test/redact.test.ts) and the shape tests
  * (test/redact-shapes.test.ts): `secret` for a secret's pattern (applied by default), `broad` for one applied with
  * `broad: true` (shown with the default mask), `identifier` for one applied with `identifiers: true`.
  */
-export const REDACTION_PATTERNS: readonly { kind: string; re: RegExp; rep: Replacement; group: 'secret' | 'broad' | 'identifier' }[] = [
-  // Copies of the RegExps: the ones this module runs are its own (a RegExp can be rewritten in place).
-  ...PATTERNS.map(([re, rep, kind]) => ({ kind, re: new RegExp(re), rep, group: 'secret' as const })),
-  ...BROAD.map(([re, rep, kind]) => ({ kind, re: new RegExp(re), rep: masked(rep, '[REDACTED]'), group: 'broad' as const })),
-  ...IDENTIFIERS.map(([re, rep, kind]) => ({ kind, re: new RegExp(re), rep, group: 'identifier' as const })),
-];
+export interface RedactionPattern {
+  readonly kind: string;
+  readonly re: RegExp;
+  readonly rep: Replacement;
+  readonly group: 'secret' | 'broad' | 'identifier';
+}
+export function redactionPatterns(): readonly RedactionPattern[] {
+  return BUILT.patterns;
+}
+
+/**
+ * Everything built from the tables, built once here, by the one call this module makes at the top level (R1258k/l:
+ * any other top-level call or construction ran code at load; the lint in test/redact-markers.test.ts refuses every
+ * top-level statement but a function declaration, a literal const, this call and the exports). build() reads each
+ * table once into its snapshot (and freezes the table), builds the regexes that run inside its closure, and exports
+ * copies for the listing.
+ */
+// BUILT, the builder call, is the last statement of this module: every data const it reads is declared above it.
 
 export interface RedactTextOptions {
   /** Also redact emails, internal hostnames, private IPs and home paths' user names (text for an issue, comment or PR). */
@@ -251,47 +733,125 @@ const GLUED_PREFIXES: readonly string[] = TABLES.get('GLUED_PREFIXES');
  * but a CSI's parameter run: one scan each, linear.
  */
 const GLUE_PARTS: readonly string[] = TABLES.get('GLUE_PARTS');
-const GLUE = new RegExp(GLUE_PARTS.join('|'), 'g');
 
 /**
- * Where a token may start glued to what is before it: after each GLUE match that ends in a letter, a digit or `_`, and
- * after `_` before a known prefix. After one that ends in anything else (`\/`, `\"`), every rule already sees a
- * boundary, and a cut there would split a value that holds it (`Bearer a\/b`, #996).
+ * Where a token may start glued to what is before it: after each match of `glue` (GLUE_PARTS as one regex, built once
+ * inside `run`: no module binding holds a RegExp) that ends in a letter, a digit or `_`, and after `_` before a known
+ * prefix. After one that ends in anything else (`\/`, `\"`), every rule already sees a boundary, and a cut there would
+ * split a value that holds it (`Bearer a\/b`, #996).
  */
-function gluePoints(s: string): number[] {
-  const cuts = [...s.matchAll(GLUE)].map((m) => m.index! + m[0].length).filter((c) => /\w/.test(s[c - 1]!));
-  for (let at = s.indexOf('_'); at !== -1; at = s.indexOf('_', at + 1)) if (GLUED_PREFIXES.some((p) => s.startsWith(p, at + 1))) cuts.push(at + 1);
+function gluePoints(s: string, glue: RegExp, prefixes: readonly string[], ops: Ops): number[] {
+  // The glue regex is a run copy: searched with the captured exec, like every other.
+  const cuts: number[] = [];
+  glue.lastIndex = 0;
+  for (let m = ops.exec(glue, s); m; m = ops.exec(glue, s)) {
+    const c = m.index + m[0].length;
+    if (m[0].length === 0) glue.lastIndex = m.index + 1;
+    if (isWordChar(ops.at(s, c - 1))) cuts.push(c);
+  }
+  for (let at = ops.indexOf(s, '_'); at !== -1; at = ops.indexOf(s, '_', at + 1)) if (prefixes.some((p) => ops.startsWith(s, p, at + 1))) cuts.push(at + 1);
   return [...new Set(cuts)].filter((c) => c < s.length).sort((a, b) => a - b);
 }
 
 /** A character `s` doesn't hold (a private-use one), to mark the cut points with; null when it holds them all. */
 function freeMark(s: string): string | null {
+  const o = intrinsics();
   const held = new Set<number>();
   for (let i = 0; i < s.length; i++) {
-    const c = s.charCodeAt(i);
+    const c = o.codeAt(s, i);
     if (c >= 0xe000 && c <= 0xf8ff) held.add(c);
   }
-  for (let c = 0xe000; c <= 0xf8ff; c++) if (!held.has(c)) return String.fromCharCode(c);
+  for (let c = 0xe000; c <= 0xf8ff; c++) if (!held.has(c)) return o.fromCode(c);
   return null;
 }
 
-/** `$1`, `$&` and `$$` in a replacement string, as String.prototype.replace reads them. */
-const expand = (rep: string, m: string, groups: unknown[]) => rep.replace(/\$(\d|\$|&)/g, (_, k: string) => (k === '$' ? '$' : k === '&' ? m : String(groups[Number(k) - 1] ?? '')));
-const breaks = (s: string) => s.split('\n').length - 1;
+/**
+ * `$1`, `$&` and `$$` in a replacement string, as String.prototype.replace reads them (markerProblem refuses every
+ * other `$` form at load). One scan of the marker, with no regex: what a marker puts out is never found by a
+ * prototype's exec (R1258o/p).
+ */
+function expand(rep: string, m: string, groups: unknown[]): string {
+  const o = intrinsics();
+  let out = '';
+  let i = 0;
+  while (i < rep.length) {
+    const c = o.at(rep, i);
+    const k = c === '$' ? o.at(rep, i + 1) : '';
+    if (k === '$') {
+      out += '$';
+      i += 2;
+    } else if (k === '&') {
+      out += m;
+      i += 2;
+    } else if (k >= '0' && k <= '9') {
+      // The group's text, or nothing for one unset: no String() or Number(), each a global read at call time (R1258t's T1).
+      const g = groups[o.codeAt(k, 0) - 0x30 - 1];
+      out += typeof g === 'string' ? g : '';
+      i += 2;
+    } else {
+      out += c;
+      i++;
+    }
+  }
+  return out;
+}
+/**
+ * What a function-backed rule's replacement `r` for the match `whole` may show (#1257, R1258b's B2): `r`, unless the
+ * part of it that stands for what it replaced (what `whole` and `r` don't share at either end, as spansOf cuts the
+ * span) holds that replaced text, or a group's text of 4 or more characters that the replaced text holds. Then the
+ * replacement fails closed: that part becomes `[REDACTED]`. A one-line function that echoes the key's groups
+ * (`` (m, a, b) => `[REDACTED:${a}_${b}]` ``) showed the key, while every hold and test passed; the string markers
+ * can't (markerProblem), and a function is held to the same at run time. Costs one scan of the replaced text per
+ * group that stands in the marker.
+ */
+function shown(whole: string, groups: readonly string[], r: string): string {
+  if (r === whole) return r;
+  const o = intrinsics();
+  let a = 0;
+  while (a < whole.length && a < r.length && o.at(whole, a) === o.at(r, a)) a++;
+  let b = 0;
+  while (b < whole.length - a && b < r.length - a && o.at(whole, whole.length - 1 - b) === o.at(r, r.length - 1 - b)) b++;
+  // Compared in one case (an echo lowercased is still the secret). A backstop for a literal echo only: a piecewise,
+  // reversed or encoded echo is code a reviewer reads, held by the function's pin in test/redact-markers.test.ts.
+  const taken = o.lower(o.slice(whole, a, whole.length - b));
+  const put = o.lower(o.slice(r, a, r.length - b));
+  if (!taken || (!o.includes(put, taken) && !groups.some((g) => g.length >= 4 && o.includes(put, o.lower(g)) && o.includes(taken, o.lower(g))))) return r;
+  return `${o.slice(whole, 0, a)}[REDACTED]${o.slice(whole, whole.length - b)}`;
+}
 
-/** As apply, but each replacement keeps as many line breaks as what it replaced. */
-function applyKeepingLines(s: string, re: RegExp, rep: Replacement): string {
-  return s.replace(re, (m: string, ...rest: unknown[]) => {
-    const groups = rest.slice(0, -2).filter((g) => typeof g !== 'object');
-    const out = typeof rep === 'string' ? expand(rep, m, groups) : rep(m, ...(groups as string[]));
-    return out + '\n'.repeat(Math.max(0, breaks(m) - breaks(out)));
-  });
+/** A rule's function, called with the match and its groups as strings, its result guarded (shown). */
+function called(rep: (match: string, ...groups: string[]) => string, m: string, groups: string[]): string {
+  return shown(m, groups, rep(m, ...groups));
 }
 
 /** The options for text bound for an issue, a comment or a pull request (src/backlog): secrets and identifiers. */
 export const TRACKER: Readonly<RedactTextOptions> = Object.freeze({ identifiers: true });
 
-const apply = (s: string, re: RegExp, rep: Replacement) => (typeof rep === 'string' ? s.replace(re, rep) : s.replace(re, rep));
+/**
+ * Every match of the global run copy `re` in `s` replaced by `rep` (the identifier pass): a string marker expanded as
+ * String.prototype.replace reads it (expand), a function guarded (called); with `keepLines`, each replacement keeps
+ * as many line breaks as what it replaced. Searched with the captured exec only, never String.prototype.replace,
+ * which looks a regex's Symbol.replace and exec up on the prototype at each call (R1258o/p). An empty match moves on
+ * one character, as replace does.
+ */
+function replaced(s: string, re: RegExp, rep: Replacement, keepLines: boolean, ops: Ops): string {
+  if (!re.global) throw new Error("replaced needs the run closure's global regex");
+  let out = '';
+  let at = 0;
+  re.lastIndex = 0;
+  for (let m = ops.exec(re, s); m; m = ops.exec(re, s)) {
+    const whole = m[0];
+    const groups = m.slice(1).map((x) => (typeof x === 'string' ? x : ''));
+    const r = typeof rep === 'string' ? expand(rep, whole, groups) : called(rep, whole, groups);
+    out += ops.slice(s, at, m.index) + r + (keepLines ? ops.repeat('\n', Math.max(0, breaks(whole) - breaks(r))) : '');
+    at = m.index + whole.length;
+    if (whole.length === 0) {
+      if (m.index >= s.length) break;
+      re.lastIndex = m.index + 1;
+    }
+  }
+  return out + ops.slice(s, at);
+}
 
 /**
  * Fenced blocks the harness parses back out of an issue (```done_when, src/backlog/types.ts parseContract and
@@ -301,24 +861,34 @@ const apply = (s: string, re: RegExp, rep: Replacement) => (typeof rep === 'stri
  * `[ \t]*\r?\n`), so a mention in prose (`add a ```done_when block.`) leaves the text after it redacted. Found with
  * indexOf and a sticky check at each opener, not a scan: linear.
  */
-const MACHINE_BLOCKS: [string, RegExp][] = [
-  ['```done_when', /[^\S\n]*\n/y],
-  ['```research', /[ \t]*\r?\n/y],
-];
+// Each opener with the blanks its parser allows before the line break: data, frozen (R1258h's H1d pushed a plain ```
+// opener onto this list from a table entry). `blanks`: any whitespace but `\n` (parseContract's `\s*\n`); `tabs`:
+// spaces and tabs, then an optional `\r` (research's `[ \t]*\r?\n`). Read by lineBreakAfter, a scan: no regex is
+// built at run time (R1258t's T1: the global `RegExp` is read at call time).
+const MACHINE_BLOCKS = Object.freeze([Object.freeze(['```done_when', 'blanks'] as const), Object.freeze(['```research', 'tabs'] as const)]);
+/** Where the line after an opener ends: past `at`, blanks of the opener's kind and then `\n`, the position after it; -1 when the opener's line holds anything else. */
+function lineBreakAfter(s: string, at: number, blanks: string): number {
+  const o = intrinsics();
+  let i = at;
+  while (i < s.length && (blanks === 'blanks' ? isSpace(o.at(s, i)) && o.at(s, i) !== '\n' : o.at(s, i) === ' ' || o.at(s, i) === '\t')) i++;
+  if (blanks === 'tabs' && o.at(s, i) === '\r') i++;
+  return o.at(s, i) === '\n' ? i + 1 : -1;
+}
 function outsideMachineBlocks(s: string, f: (part: string) => string): string {
+  const o = intrinsics();
   const spans: [number, number][] = [];
-  for (const [open, lineBreak] of MACHINE_BLOCKS) {
-    for (let at = s.indexOf(open); at !== -1; ) {
-      lineBreak.lastIndex = at + open.length;
-      if (!lineBreak.test(s)) {
-        at = s.indexOf(open, at + open.length);
+  for (const [open, blanks] of MACHINE_BLOCKS) {
+    for (let at = o.indexOf(s, open); at !== -1; ) {
+      const body = lineBreakAfter(s, at + open.length, blanks);
+      if (body === -1) {
+        at = o.indexOf(s, open, at + open.length);
         continue;
       }
       // The block's body starts after the opener's line break; the first line that starts with ``` closes it.
-      const close = s.indexOf('\n```', lineBreak.lastIndex);
+      const close = o.indexOf(s, '\n```', body);
       if (close === -1) break;
       spans.push([at, close + 4]);
-      at = s.indexOf(open, close + 4);
+      at = o.indexOf(s, open, close + 4);
     }
   }
   if (!spans.length) return f(s);
@@ -327,10 +897,10 @@ function outsideMachineBlocks(s: string, f: (part: string) => string): string {
   let from = 0;
   for (const [a, b] of spans) {
     if (a < from) continue;
-    out += f(s.slice(from, a)) + s.slice(a, b);
+    out += f(o.slice(s, from, a)) + o.slice(s, a, b);
     from = b;
   }
-  return out + f(s.slice(from));
+  return out + f(o.slice(s, from));
 }
 
 /** The kind secretKinds names for a text it can't scan (#889 round 6): a caller that refuses a secret refuses it too. */
@@ -345,21 +915,13 @@ export const UNSCANNABLE_KIND = 'text too large to scan';
 export function secretKinds(s: string): string[] {
   const kinds = new Set<string>();
   try {
-    replaceUnion(s, false, (rank) => kinds.add(PATTERNS[rank]![2]));
+    replaceUnion(s, false, (rank) => kinds.add(BUILT.shapes[rank]!.kind));
   } catch (e) {
     if (e instanceof RangeError) return [UNSCANNABLE_KIND];
     throw e;
   }
   return [...kinds].sort();
 }
-
-/** A rule's regex as a global one, for matchAll (the orphan-END rule has no `g`). */
-const globals = new Map<RegExp, RegExp>();
-const globalOf = (re: RegExp) => {
-  let g = globals.get(re);
-  if (!g) globals.set(re, (g = re.flags.includes('g') ? re : new RegExp(re.source, `${re.flags}g`)));
-  return g;
-};
 
 /** What a rule found: [start, end), what its replacement puts there, and the rule's place in its list. */
 type Span = [number, number, string, number];
@@ -370,17 +932,20 @@ type Span = [number, number, string, number];
  * in the span; with what the replacement puts there instead. A match its replacement leaves as it was (a function
  * that judged it no secret) gives none.
  */
-function spansOf(t: string, re: RegExp, rep: Replacement, rank: number, out: Span[]) {
-  const g = globalOf(re);
+function spansOf(t: string, re: RegExp, rep: Replacement, rank: number, out: Span[], ops: Ops) {
+  // The rule's global copy, built inside `run` from the snapshot's primitives, searched with the captured exec only.
+  if (!re.global) throw new Error("spansOf needs the run closure's global regex");
+  const g = re;
   g.lastIndex = 0;
-  for (let m = g.exec(t); m; m = g.exec(t)) {
+  for (let m = ops.exec(g, t); m; m = ops.exec(g, t)) {
     const whole = m[0];
     // The next search starts 64 characters before the match's end, not after it: a value a rule takes in may hold the
     // next secret's name (`token='abc password = 'x`, `Bearer abc+Bearer xyz`), and that next match must still be
     // found. Each match start is after the last one's, and at most 64 characters are read again: linear.
     g.lastIndex = Math.max(m.index + 1, m.index + whole.length - 64);
     const groups = m.slice(1).map((x) => x ?? '');
-    const r = typeof rep === 'string' ? expand(rep, whole, groups) : rep(whole, ...groups);
+    // A function's result is guarded (shown): one that echoes what it replaced puts `[REDACTED]` there instead.
+    const r = typeof rep === 'string' ? expand(rep, whole, groups) : called(rep, whole, groups);
     if (r === whole) {
       // A match the rule's function declined (no secret) hides nothing it stepped over (#889 round 7): the next search
       // starts at its next character, so a start inside it is still tried. Linear only for a rule whose starts are
@@ -389,51 +954,277 @@ function spansOf(t: string, re: RegExp, rep: Replacement, rank: number, out: Spa
       continue;
     }
     let a = 0;
-    while (a < whole.length && a < r.length && whole[a] === r[a]) a++;
+    while (a < whole.length && a < r.length && ops.at(whole, a) === ops.at(r, a)) a++;
     let b = 0;
-    while (b < whole.length - a && b < r.length - a && whole[whole.length - 1 - b] === r[r.length - 1 - b]) b++;
-    if (whole.length - b > a) out.push([m.index! + a, m.index! + whole.length - b, r.slice(a, r.length - b), rank]);
+    while (b < whole.length - a && b < r.length - a && ops.at(whole, whole.length - 1 - b) === ops.at(r, r.length - 1 - b)) b++;
+    if (whole.length - b > a) out.push([m.index! + a, m.index! + whole.length - b, ops.slice(r, a, r.length - b), rank]);
   }
 }
 
-/** Every rule of the default mode: the shapes, each with its own marker. */
-const SHAPE_RULES: readonly (readonly [RegExp, Replacement])[] = PATTERNS.map(([re, rep]) => [re, rep] as const);
 /**
- * Every rule of the broad mode: the shapes and the broad rules, each shown with the default mask. Its own list in the
- * data (#941), written out: test/check-tables-sync.test.ts holds it equal to PATTERNS' rules then BROAD's.
+ * Every rule of the broad mode: the shapes, then the broad rules, each shown with the default mask. Its own list in the
+ * data (#941), written out: build() holds it equal to PATTERNS' rules then BROAD's (redactTableProblems) and runs the
+ * snapshots in that order; a rule dropped from it is a weakening the hold reads.
  */
-const BROAD_RULES: readonly (readonly [RegExp, Replacement])[] = Object.freeze(TABLES.get<readonly RuleData[]>('BROAD_RULES').map((e) => Object.freeze([regExpOf(e.re), replacementOf(e.rep)] as const)));
+const BROAD_RULES: readonly RuleData[] = TABLES.get('BROAD_RULES');
+
+/** A broad rule's replacement with `mask` in it (taken literally). Load only. */
+function masked(template: string, mask: string): string {
+  return template.split('{mask}').join(mask);
+}
+
+/** A replacement's identity for redactTableProblems: the string, or the replacer's name. */
+function repKey(rep: string | { readonly replacer: string }): string {
+  return typeof rep === 'string' ? `s:${rep}` : `f:${rep.replacer}`;
+}
 
 /**
- * What is wrong with the written-out tables against what this module built them from (#941), each in words; none when
- * they hold: BROAD_RULES is PATTERNS' rules then BROAD's (shown with [REDACTED]); the first pattern is the dashboard
- * key's (DASHBOARD_KEY_PREFIX, DASHBOARD_KEY_BODY), and GLUED_PREFIXES ends with that prefix. Compared as data.
- * Checked at load (it throws), so this module never redacts with tables that drifted; test/check-tables-sync.test.ts
- * tries each.
+ * What is wrong with the written-out tables against what this module builds from them (#941), each in words; none
+ * when they hold: BROAD_RULES is PATTERNS' rules then BROAD's (shown with [REDACTED]); the first pattern is the
+ * dashboard key's (DASHBOARD_KEY_PREFIX, DASHBOARD_KEY_BODY); GLUED_PREFIXES ends with that prefix; REPLACER_NAMES is
+ * REPLACERS' own keys. Compared as data. build() runs it at load and throws, so this module never redacts with tables
+ * that drifted; test/check-tables-sync.test.ts tries each. Load only in this module (the test calls it on its own).
  */
 export function redactTableProblems(
-  patterns: readonly { re: Pattern; rep: unknown }[] = TABLES.get('PATTERNS'),
-  broad: readonly { re: Pattern; mask: string }[] = TABLES.get('BROAD'),
-  rules: readonly { re: Pattern; rep: unknown }[] = TABLES.get('BROAD_RULES'),
+  patterns: readonly { readonly re: Pattern; readonly rep: string | { readonly replacer: string } }[] = PATTERNS,
+  broad: readonly { readonly re: Pattern; readonly mask: string }[] = BROAD,
+  rules: readonly RuleData[] = BROAD_RULES,
   glued: readonly string[] = GLUED_PREFIXES,
 ): string[] {
   const out: string[] = [];
-  const key = (re: Pattern, rep: unknown) => JSON.stringify([re.source, re.flags, rep]);
-  const want = [...patterns.map((p) => key(p.re, p.rep)), ...broad.map((b) => key(b.re, masked(b.mask, '[REDACTED]')))];
-  const got = rules.map((r) => key(r.re, r.rep));
+  const key = (re: Pattern, rep: string) => `${re.source}\u0001${re.flags}\u0001${rep}`;
+  const want = [...patterns.map((p) => key(p.re, repKey(p.rep))), ...broad.map((b) => key(b.re, repKey(masked(b.mask, '[REDACTED]'))))];
+  const got = rules.map((r) => key(r.re, repKey(r.rep)));
   if (want.length !== got.length || want.some((w, k) => w !== got[k])) out.push("BROAD_RULES isn't PATTERNS' rules then BROAD's");
-  const first = patterns[0]?.re;
-  if (first?.source !== `${DASHBOARD_KEY_PREFIX}${DASHBOARD_KEY_BODY}(?![A-Za-z0-9_-])` || first.flags !== 'g') out.push("PATTERNS' first isn't the dashboard key's");
-  if (glued.at(-1) !== DASHBOARD_KEY_PREFIX) out.push("GLUED_PREFIXES doesn't end with DASHBOARD_KEY_PREFIX");
+  const first = patterns.length > 0 ? patterns[0]!.re : null;
+  if (first === null || first.source !== `${DASHBOARD_KEY_PREFIX}${DASHBOARD_KEY_BODY}(?![A-Za-z0-9_-])` || first.flags !== 'g') out.push("PATTERNS' first isn't the dashboard key's");
+  if (glued.length === 0 || glued[glued.length - 1] !== DASHBOARD_KEY_PREFIX) out.push("GLUED_PREFIXES doesn't end with DASHBOARD_KEY_PREFIX");
+  if (Object.getOwnPropertyNames(REPLACERS).join() !== REPLACER_NAMES.join()) out.push("REPLACER_NAMES isn't REPLACERS' keys");
   return out;
 }
-if (redactTableProblems().length) throw new Error(`src/events/redact.ts's data: ${redactTableProblems().join('; ')}`);
+
+/** What build() makes of the tables: the snapshots, the listing's copies, and the closure that runs (`run`). */
+/**
+ * The intrinsics the run-time code uses, and nothing else of a regex or a string: RegExp's own exec and String's own
+ * methods, read once at load from fresh literals (capture), each bound to Function.prototype.call read at the same
+ * time, so a call is `exec(re, s)`, `slice(s, a, b)`: nothing is looked up on a prototype at run time, and a built-in
+ * patched after load, from this module or any other, changes nothing that is redacted (R1258q's D1, R1258r's R2: the
+ * run copies were searched with a captured exec, but a rule function's `/\d/.test(v)` and the helpers' `.slice`
+ * still ran the prototype's, and a patch of `exec` for `\d` on long inputs showed a 130-character key). Character
+ * classes a rule decides by (`\d`, `\w`, `\s`, a letter's case) are comparisons on characters, with no regex at all.
+ * Only methods that look nothing up on their arguments: `split`, `replace`, `match` and `search` read a symbol
+ * (`Symbol.split` and the rest) from the separator, and for a primitive separator from String.prototype and then
+ * Object.prototype, where a property defined after load took over every split (R1258s's S1); `pieces` is the scan
+ * that stands for split. `includes`, `startsWith` and `endsWith` read nothing from a primitive argument. A character
+ * is read by index (`s[i]`) only inside a `for` loop bounded by that string's length (the lint holds the form), and
+ * by `at` (charAt, '' out of range) everywhere else: an index past the end is not an own property, so the read went
+ * to String.prototype and then Object.prototype, where an index property defined after load answered (R1258u's U1,
+ * R1258v's V1: `API_KEY` misread, its value shown).
+ */
+interface Ops {
+  readonly exec: (re: RegExp, s: string) => RegExpExecArray | null;
+  readonly slice: (s: string, a: number, b?: number) => string;
+  readonly indexOf: (s: string, x: string, from?: number) => number;
+  readonly includes: (s: string, x: string) => boolean;
+  readonly startsWith: (s: string, x: string, at?: number) => boolean;
+  readonly endsWith: (s: string, x: string) => boolean;
+  readonly lower: (s: string) => string;
+  readonly upper: (s: string) => string;
+  readonly repeat: (s: string, n: number) => string;
+  readonly codeAt: (s: string, i: number) => number;
+  /** The character at `i`, or '' out of range (charAt): a read past a string's end by index goes to String.prototype (R1258u's U1). */
+  readonly at: (s: string, i: number) => string;
+  /** String.fromCharCode, read at load: the one static of a global the run-time code uses (freeMark). */
+  readonly fromCode: (c: number) => string;
+}
+
+/**
+ * The one place this module reads a method of a regex or a string as a value: build's first call, before any table is
+ * read. Each intrinsic is bound to Function.prototype.call (`call.bind(f)` gives `(self, ...args) => f.call(self,
+ * ...args)` with the binding's own slots, so no later patch of `call`, `bind`, `exec` or a String method reaches it).
+ * The reference lint in test/redact-markers.test.ts holds this function to its exact text and refuses, everywhere
+ * else in the module, every method call on a regex or a string value and every reach to a prototype.
+ */
+function captured(): Ops {
+  const call = (() => undefined).call;
+  return Object.freeze({
+    exec: call.bind(/(?:)/.exec) as Ops['exec'],
+    slice: call.bind(''.slice) as Ops['slice'],
+    indexOf: call.bind(''.indexOf) as Ops['indexOf'],
+    includes: call.bind(''.includes) as Ops['includes'],
+    startsWith: call.bind(''.startsWith) as Ops['startsWith'],
+    endsWith: call.bind(''.endsWith) as Ops['endsWith'],
+    lower: call.bind(''.toLowerCase) as Ops['lower'],
+    upper: call.bind(''.toUpperCase) as Ops['upper'],
+    repeat: call.bind(''.repeat) as Ops['repeat'],
+    codeAt: call.bind(''.charCodeAt) as Ops['codeAt'],
+    at: call.bind(''.charAt) as Ops['at'],
+    fromCode: String.fromCharCode,
+  });
+}
+
+/** The captured intrinsics, for run-time code outside the run closure (BUILT exists by the time any of it runs). */
+function intrinsics(): Ops {
+  return BUILT.ops;
+}
+
+/** Whether `c` (one character) is a digit, a lower-case or an upper-case ASCII letter, a word character (`\w`), or hex. */
+function isDigit(c: string): boolean {
+  return c >= '0' && c <= '9';
+}
+function isLower(c: string): boolean {
+  return c >= 'a' && c <= 'z';
+}
+function isUpper(c: string): boolean {
+  return c >= 'A' && c <= 'Z';
+}
+function isWordChar(c: string): boolean {
+  return isDigit(c) || isLower(c) || isUpper(c) || c === '_';
+}
+function isHex(c: string): boolean {
+  return isDigit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+}
+/** Whether some character of `s` satisfies `p`. */
+function hasChar(s: string, p: (c: string) => boolean): boolean {
+  for (let i = 0; i < s.length; i++) if (p(s[i]!)) return true;
+  return false;
+}
+/** Whether every character of `s` satisfies `p`. */
+function allChars(s: string, p: (c: string) => boolean): boolean {
+  for (let i = 0; i < s.length; i++) if (!p(s[i]!)) return false;
+  return true;
+}
+/** How many line breaks `s` holds. */
+/**
+ * `s` cut at each `sep` (never empty), as String.prototype.split with a string separator reads it, by a scan: split,
+ * given even a primitive separator, reads `Symbol.split` from it, so from String.prototype and then Object.prototype,
+ * where a property defined after load took over every split (R1258s's S1, R1258t's T1).
+ */
+function pieces(s: string, sep: string, o: Ops): string[] {
+  const out: string[] = [];
+  let from = 0;
+  for (let at = o.indexOf(s, sep, from); at !== -1; at = o.indexOf(s, sep, from)) {
+    out.push(o.slice(s, from, at));
+    from = at + sep.length;
+  }
+  out.push(o.slice(s, from));
+  return out;
+}
+
+/** Whether `c` (one character) is whitespace as `\s` reads it: the ASCII blanks, the no-break and the Unicode spaces, the line and paragraph separators, the BOM. */
+function isSpace(c: string): boolean {
+  return c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\v' || c === '\f' || c === '\u00a0' || c === '\u1680' || (c >= '\u2000' && c <= '\u200a') || c === '\u2028' || c === '\u2029' || c === '\u202f' || c === '\u205f' || c === '\u3000' || c === '\ufeff';
+}
+
+function breaks(s: string): number {
+  const o = intrinsics();
+  let n = 0;
+  for (let at = o.indexOf(s, '\n'); at !== -1; at = o.indexOf(s, '\n', at + 1)) n++;
+  return n;
+}
+
+interface Built {
+  /** The captured intrinsics (capture), for every run-time operation on a regex or a string. */
+  readonly ops: Ops;
+  readonly shapes: readonly Rule[];
+  readonly broad: readonly Rule[];
+  readonly identifiers: readonly Rule[];
+  readonly patterns: readonly RedactionPattern[];
+  readonly run: {
+    /** What every shape finds in `s` (allSpans). */
+    readonly shapes: (s: string) => Span[];
+    /** What every rule of the broad mode finds in `s` (allSpans). */
+    readonly broad: (s: string) => Span[];
+    /** The broad rules read again from each of `cuts` (readAt), the spans found added to `spans`. */
+    readonly broadAt: (s: string, cuts: number[], spans: Span[]) => void;
+    /** The identifier pass over `part`: each rule in turn, the line count kept with `keepLines`. */
+    readonly identifiers: (part: string, keepLines: boolean) => string;
+  };
+}
+
+/** The listing's copies of `rules` (redactionPatterns): each `re` a copy of its own. Load only, from build. */
+function listed(rules: readonly Rule[], group: RedactionPattern['group']): readonly RedactionPattern[] {
+  return rules.map((r) => Object.freeze({ kind: r.kind, re: new RegExp(r.source, r.flags), rep: r.rep, group }));
+}
+
+/**
+ * The regexes that run for `rules`, each built from its snapshot's primitives, with `g` added when `withG`. Load only,
+ * from build. Plain arrays, not frozen: nothing outside build's closure can reach them, and a frozen tuple destructured
+ * on every rule of every call cost a third of the redactor's time (measured, R1258g's G1 round).
+ */
+function compiled(rules: readonly Rule[], withG: boolean): [RegExp, Replacement][] {
+  return rules.map((r) => [new RegExp(r.source, withG && !r.flags.includes('g') ? `${r.flags}g` : r.flags), r.rep] as [RegExp, Replacement]);
+}
+
+/**
+ * The one thing this module computes at load (BUILT): each table read once into its snapshot (snapshot; the table
+ * frozen), the listing's copies (each `re` a copy of its own, R1258e's E1: what an importer does to an exported one,
+ * compile or an own Symbol.replace, changes nothing here), and `run`, the regexes that run and the only operations on
+ * them (E2): built from the snapshots' primitives inside this closure (the glue regex too), held by no module binding,
+ * so nothing outside can name them, and nothing an operation returns is a regex: spans, text and a kind only. What
+ * keeps them as built is that no code runs at load but this function: every top-level statement is a function
+ * declaration, a literal const, this one call or an export (the lint in test/redact-markers.test.ts, R1258k/l), every
+ * table entry is data by the same lint, the module's data is frozen, and every arrow and function in a table, and
+ * this function, is pinned by its source text. The first operation checks once that every run copy still reads as
+ * its snapshot (source, flags, no own property but lastIndex) and throws if not; later calls don't repeat it
+ * (R1258g's G1: a check on every operation was most of the redactor's time, and by the argument above it guards
+ * against nothing a check could see). A built-in patched is met two ways (R1258o/p): the run copies are searched
+ * with the intrinsic exec and apply captured on this function's first line, so a patch made after load changes
+ * nothing they find; and the reference lint (test/redact-markers.test.ts) refuses, by type and by position rather
+ * than by spelling, every way this module's own code could reach a prototype or a global object to make one.
+ */
+function build(patterns: readonly unknown[], broadTable: readonly unknown[], identifierTable: readonly unknown[]): Built {
+  // First, before any table is read: the intrinsics (capture), so every operation on a regex or a string at run time
+  // is one of these and nothing else (R1258o/p, q/r). The reference lint in test/redact-markers.test.ts holds this
+  // statement first in build, and capture to its exact text.
+  const ops = captured();
+  // The written-out tables hold together (#941): BROAD_RULES is PATTERNS then BROAD, the dashboard key leads, the
+  // glued prefixes end with its prefix, the replacer names are REPLACERS'. Fail closed, before any rule is read.
+  const drift = redactTableProblems();
+  if (drift.length > 0) throw new Error(`src/events/redact.ts's data: ${drift.join('; ')}`);
+  const shapes = snapshot(patterns);
+  Object.freeze(patterns);
+  const broadRules = snapshot(broadTable, { broad: true });
+  Object.freeze(broadTable);
+  const identifiers = snapshot(identifierTable, { verbatim: true });
+  Object.freeze(identifierTable);
+  const broad: readonly Rule[] = Object.freeze([...shapes, ...broadRules]);
+  const patternsOut: readonly RedactionPattern[] = Object.freeze([...listed(shapes, 'secret'), ...listed(broadRules, 'broad'), ...listed(identifiers, 'identifier')]);
+  // The span search needs `g`; the identifier pass runs each rule's own flags (String.prototype.replace).
+  const shapeRun = compiled(shapes, true);
+  const broadRun = compiled(broad, true);
+  const identifierRun = compiled(identifiers, false);
+  const glue = new RegExp(GLUE_PARTS.join('|'), 'g');
+  // A plain copy of the frozen list: `some` over a frozen array on every `_` of every call was measurably slow.
+  const gluedPrefixes = [...GLUED_PREFIXES];
+  const copies: readonly (readonly [RegExp, Rule, string])[] = [
+    ...shapeRun.map((c, i) => [c[0], shapes[i]!, c[0].flags] as const),
+    ...broadRun.map((c, i) => [c[0], broad[i]!, c[0].flags] as const),
+    ...identifierRun.map((c, i) => [c[0], identifiers[i]!, c[0].flags] as const),
+  ];
+  let checked = false;
+  /** Once, on the first operation: every run copy still reads as its snapshot, or the redactor stops (fail closed). */
+  const check = () => {
+    if (checked) return;
+    for (const [re, r, flags] of copies) {
+      if (re.source !== r.source || re.flags !== flags || !onlyLastIndex(re)) throw new Error(`src/events/redact.ts: the regex that runs for "${r.kind}" no longer reads as its snapshot (#1257)`);
+    }
+    checked = true;
+  };
+  const run: Built['run'] = Object.freeze({
+    shapes: (s: string): Span[] => (check(), allSpans(s, shapeRun, glue, gluedPrefixes, ops)),
+    broad: (s: string): Span[] => (check(), allSpans(s, broadRun, glue, gluedPrefixes, ops)),
+    broadAt: (s: string, cuts: number[], spans: Span[]): void => (check(), readAt(s, cuts, broadRun, spans, ops)),
+    identifiers: (part: string, keepLines: boolean): string => (check(), identifierRun.reduce((t, [re, rep]) => replaced(t, re, rep, keepLines, ops), part)),
+  });
+  return Object.freeze({ ops, shapes, broad: broadRules, identifiers, patterns: patternsOut, run });
+}
 
 /** What every rule of `rules` finds in `s`: on the text as it was, and again with a boundary at each glue point. */
-function allSpans(s: string, rules: readonly (readonly [RegExp, Replacement])[]): Span[] {
+function allSpans(s: string, rules: readonly (readonly [RegExp, Replacement])[], glue: RegExp, prefixes: readonly string[], ops: Ops): Span[] {
   const spans: Span[] = [];
-  rules.forEach(([re, rep], i) => spansOf(s, re, rep, i, spans));
-  readAt(s, gluePoints(s), rules, spans);
+  rules.forEach(([re, rep], i) => spansOf(s, re, rep, i, spans, ops));
+  readAt(s, gluePoints(s, glue, prefixes, ops), rules, spans, ops);
   return spans;
 }
 
@@ -446,7 +1237,8 @@ function allSpans(s: string, rules: readonly (readonly [RegExp, Replacement])[])
  * spans that only overlap becomes `[REDACTED]`. One pass of replaceUnion. `found` is told the rule of every span.
  */
 function replaceOnce(s: string, keepLines: boolean, found?: (rank: number) => void): string {
-  const spans = allSpans(s, SHAPE_RULES);
+  const o = intrinsics();
+  const spans = BUILT.run.shapes(s);
   if (found) for (const sp of spans) found(sp[3]);
   if (!spans.length) return s;
   spans.sort((x, y) => x[0] - y[0] || y[1] - x[1] || x[3] - y[3]);
@@ -460,11 +1252,11 @@ function replaceOnce(s: string, keepLines: boolean, found?: (rank: number) => vo
     let pick: Span | undefined;
     for (let k = i; k < j; k++) if (spans[k]![0] === a && spans[k]![1] === b && (!pick || spans[k]![3] < pick[3])) pick = spans[k];
     const rep = pick ? pick[2] : '[REDACTED]';
-    out += s.slice(at, a) + rep + (keepLines ? '\n'.repeat(Math.max(0, breaks(s.slice(a, b)) - breaks(rep))) : '');
+    out += o.slice(s, at, a) + rep + (keepLines ? o.repeat('\n', Math.max(0, breaks(o.slice(s, a, b)) - breaks(rep))) : '');
     at = b;
     i = j;
   }
-  return out + s.slice(at);
+  return out + o.slice(s, at);
 }
 
 /** How many passes a mode may take to reach a text no pass changes (fixedPoint). */
@@ -483,7 +1275,7 @@ export function fixedPoint(s: string, pass: (t: string) => string, keepLines = f
     if (again === out) return out;
     out = again;
   }
-  return UNSCANNABLE + (keepLines ? '\n'.repeat(breaks(s)) : '');
+  return UNSCANNABLE + (keepLines ? intrinsics().repeat('\n', breaks(s)) : '');
 }
 
 /** The default mode: replaced again on what each pass gave until nothing changes. A marker can make a boundary a later rule needs, as main's rules, applied in turn, had. */
@@ -503,21 +1295,22 @@ function maskOnce(s: string, mask: string, keepLines: boolean): string {
   // where a span found begins or ends between two word characters (a module's own rules, applied in turn, saw a
   // boundary where an earlier rule's replacement ended: `xoxa-...[here]_db_password=...`). Apart from the glue points,
   // so a boundary of one kind can't break a match the other needs.
-  const spans = allSpans(s, BROAD_RULES);
-  const word = (i: number) => /[A-Za-z0-9_]/.test(s[i] ?? '');
-  readAt(s, [...new Set(spans.flatMap(([a, b]) => [a, b]))].filter((c) => c > 0 && c < s.length && word(c - 1) && word(c)).sort((a, b) => a - b), BROAD_RULES, spans);
+  const o = intrinsics();
+  const spans = BUILT.run.broad(s);
+  const word = (i: number) => isWordChar(o.at(s, i));
+  BUILT.run.broadAt(s, [...new Set(spans.flatMap(([a, b]) => [a, b]))].filter((c) => c > 0 && c < s.length && word(c - 1) && word(c)).sort((a, b) => a - b), spans);
   // What is already a mask stays as it is: a rule that takes in a mask word (`token=[REDACTED]`) adds nothing.
   const masks: [number, number][] = [];
-  if (mask) for (let at = s.indexOf(mask); at !== -1; at = s.indexOf(mask, at + mask.length)) masks.push([at, at + mask.length]);
+  if (mask) for (let at = o.indexOf(s, mask); at !== -1; at = o.indexOf(s, mask, at + mask.length)) masks.push([at, at + mask.length]);
   const kept = outside(merged(spans.map(([a, b]): [number, number] => [a, b])), masks);
   if (!kept.length) return s;
   let out = '';
   let at = 0;
   for (const [a, b] of kept) {
-    out += s.slice(at, a) + mask + (keepLines ? '\n'.repeat(breaks(s.slice(a, b))) : '');
+    out += o.slice(s, at, a) + mask + (keepLines ? o.repeat('\n', breaks(o.slice(s, a, b))) : '');
     at = b;
   }
-  return out + s.slice(at);
+  return out + o.slice(s, at);
 }
 
 /** `spans` sorted and merged: no two overlap or touch. */
@@ -537,14 +1330,15 @@ function merged(spans: [number, number][]): [number, number][] {
  * it is read from its start; the spans found, mapped back, go in `spans`. The boundary is a character no rule takes in
  * (a private-use one the text doesn't hold); when the text holds them all, each piece after a cut is read on its own.
  */
-function readAt(s: string, cuts: number[], rules: readonly (readonly [RegExp, Replacement])[], spans: Span[]) {
+function readAt(s: string, cuts: number[], rules: readonly (readonly [RegExp, Replacement])[], spans: Span[], ops: Ops) {
   if (!cuts.length) return;
   const markChar = freeMark(s);
   if (markChar === null) {
-    for (const [i, c] of cuts.entries()) {
-      const piece = s.slice(c, cuts[i + 1] ?? s.length);
+    for (let i = 0; i < cuts.length; i++) {
+      const c = cuts[i]!;
+      const piece = ops.slice(s, c, i + 1 < cuts.length ? cuts[i + 1]! : s.length);
       const more: Span[] = [];
-      rules.forEach(([re, rep], k) => spansOf(piece, re, rep, k, more));
+      rules.forEach(([re, rep], k) => spansOf(piece, re, rep, k, more, ops));
       for (const [a, b, r, k] of more) spans.push([a + c, b + c, r, k]);
     }
     return;
@@ -552,10 +1346,10 @@ function readAt(s: string, cuts: number[], rules: readonly (readonly [RegExp, Re
   let marked = '';
   let from = 0;
   for (const c of cuts) {
-    marked += s.slice(from, c) + markChar;
+    marked += ops.slice(s, from, c) + markChar;
     from = c;
   }
-  marked += s.slice(from);
+  marked += ops.slice(s, from);
   // A position in the marked text, back to the text: less the marks before it.
   const back = (p: number) => {
     let lo = 0;
@@ -568,8 +1362,8 @@ function readAt(s: string, cuts: number[], rules: readonly (readonly [RegExp, Re
     return p - lo;
   };
   const more: Span[] = [];
-  rules.forEach(([re, rep], k) => spansOf(marked, re, rep, k, more));
-  for (const [a, b, r, k] of more) spans.push([back(a), back(b), r.split(markChar).join(''), k]);
+  rules.forEach(([re, rep], k) => spansOf(marked, re, rep, k, more, ops));
+  for (const [a, b, r, k] of more) spans.push([back(a), back(b), pieces(r, markChar, ops).join(''), k]);
 }
 
 /**
@@ -609,23 +1403,22 @@ export function redactString(s: string, o: RedactTextOptions = {}): string {
   } catch (e) {
     // V8's backtracking stack overflows on one run of millions of characters after a prefix (`RangeError: Maximum
     // call stack size exceeded`): fail closed, with the text's line count kept for redactRecords.
-    if (e instanceof RangeError) return UNSCANNABLE + (o.keepLines ? '\n'.repeat(breaks(s)) : '');
+    if (e instanceof RangeError) return UNSCANNABLE + (o.keepLines ? intrinsics().repeat('\n', breaks(s)) : '');
     throw e;
   }
 }
 
 function redactOrThrow(s: string, o: RedactTextOptions): string {
-  const put = o.keepLines ? applyKeepingLines : apply;
   // Both modes read every rule on the text as it was, so no rule's match hides another's: the broad mode masks the
   // union of what the shapes and the broad rules find (maskUnion); the default mode replaces each run of what the
   // shapes find, with its rule's marker (replaceUnion).
   let out = o.broad ? maskUnion(s, o.mask ?? '[REDACTED]', o.keepLines === true) : replaceUnion(s, o.keepLines === true);
-  if (o.identifiers) out = outsideMachineBlocks(out, (part) => IDENTIFIERS.reduce((t, [re, rep]) => put(t, re, rep), part));
+  if (o.identifiers) out = outsideMachineBlocks(out, (part) => BUILT.run.identifiers(part, o.keepLines === true));
   return out;
 }
 
 /** What a cut site reads past its cut before redacting (#889 round 4): enough for a token, or a key's END line. */
-export const CUT_MARGIN = 16 * 1024;
+export const CUT_MARGIN = 16384;
 
 /**
  * `s` redacted and then cut to `max` characters, reading only the first `max` + CUT_MARGIN of it (#889 round 4): a
@@ -645,7 +1438,7 @@ export function redactClip(s: string, max: number, o: RedactTextOptions = {}): {
   const windowed = s.length > max + CUT_MARGIN;
   const r = redactString(windowed ? readWindow(s, max + CUT_MARGIN) : s, o);
   if (!windowed && r.length <= max) return { text: r, more: 0 };
-  return { text: r.slice(0, max), more: (windowed ? s.length : r.length) - max };
+  return { text: intrinsics().slice(r, 0, max), more: (windowed ? s.length : r.length) - max };
 }
 
 /**
@@ -657,7 +1450,8 @@ export function redactClip(s: string, max: number, o: RedactTextOptions = {}): {
  */
 export function readWindow(s: string, end: number): string {
   if (s.length <= end) return s;
-  for (let i = end - 1; i >= 0; i--) if (/\s/.test(s[i]!)) return s.slice(0, i + 1);
+  const o = intrinsics();
+  for (let i = end - 1; i >= 0; i--) if (isSpace(o.at(s, i))) return o.slice(s, 0, i + 1);
   return '';
 }
 
@@ -667,7 +1461,7 @@ export function readWindow(s: string, end: number): string {
  * each with as many lines as it had (a record inside a secret comes back empty or holding the marker).
  */
 export function redactRecords(records: readonly string[], o: RedactTextOptions = {}): string[] {
-  const lines = redactString(records.join('\n'), { ...o, keepLines: true }).split('\n');
+  const lines = pieces(redactString(records.join('\n'), { ...o, keepLines: true }), '\n', intrinsics());
   const out: string[] = [];
   let at = 0;
   for (const r of records) {
@@ -704,3 +1498,9 @@ function redactKeys(entries: [string, unknown][], o: RedactTextOptions): [string
     return [key, redact(v, o)];
   });
 }
+
+/** The one call this module makes at the top level (build): last, after every data const it reads. */
+const BUILT = build(PATTERNS, BROAD, IDENTIFIERS);
+
+/** Every rule, as copies (the run copies are build's own): the listing other modules and test/check-tables.test.ts read. */
+export const REDACTION_PATTERNS: readonly RedactionPattern[] = BUILT.patterns;

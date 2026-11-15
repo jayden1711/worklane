@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { redact, redactString, REDACTION_PATTERNS, secretKinds, TRACKER } from '../src/events/redact.js';
+import { redact, redactString, redactionPatterns, secretKinds, TRACKER } from '../src/events/redact.js';
 import { FileBacklog } from '../src/backlog/file.js';
 import { GitHubBacklog } from '../src/backlog/github.js';
 import { contractKey, parseContract } from '../src/backlog/types.js';
@@ -286,7 +286,7 @@ test('every pattern runs in linear time on 100 KB of hostile input', () => {
   // None: the URL-password pattern, quadratic on these shapes before, takes a bounded scheme since #889 round 4.
   const KNOWN_SLOW = new Set<string>([]);
   const slow: string[] = [];
-  for (const { kind, re, rep } of REDACTION_PATTERNS) {
+  for (const { kind, re, rep } of redactionPatterns()) {
     if (KNOWN_SLOW.has(kind)) continue;
     for (const [what, s] of HOSTILE) {
       const t0 = performance.now();

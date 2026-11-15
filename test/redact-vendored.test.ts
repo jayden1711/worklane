@@ -9,7 +9,7 @@ import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { BRAND } from '../src/brand.js';
-import { REDACTION_PATTERNS, redactString } from '../src/events/redact.js';
+import { redactionPatterns, redactString } from '../src/events/redact.js';
 import { repoRoot } from './helpers.js';
 import { SHAPES } from './token-standins.js';
 
@@ -30,7 +30,7 @@ test("the updater's redact() masks every shape the shared redactor knows, as the
   for (const s of SHAPES) {
     for (const line of [`deploy failed: ${s.value} (exit 1)`, `GH_TOKEN=${s.value}`, `see https://someone:${s.secret}@git.example.test/x`]) assert.equal(u.redact(line), shared(line), s.what);
   }
-  assert.ok(REDACTION_PATTERNS.length > 0);
+  assert.ok(redactionPatterns().length > 0);
 });
 
 test('the updater stays standalone: it requires only node: modules, and its copy requires nothing', async () => {
