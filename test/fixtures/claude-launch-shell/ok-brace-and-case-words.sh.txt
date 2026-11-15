@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# R1264aa/ab: valid lines the d3ef4824 mask refused: a bare { in ${…}, a case word that is $(…), and $(( in ${…}.
+x="${y//{/}"
+echo "$x"
+x=${y//{/}
+raw=x
+raw=${raw//{/}
+open="${1:-{}"
+echo "$open"
+os="$(
+  case $(uname -s) in
+    Darwin) echo mac ;;
+    *) echo "unsupported, can't continue" >&2 ;;
+  esac
+)"
+echo "$os"
+s=abcdef; i=1
+echo "${s:$((i<<1)):2}"
+echo done

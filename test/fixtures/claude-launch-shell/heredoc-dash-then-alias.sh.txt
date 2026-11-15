@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# R1264u D1 (h3): <<-EOF with an apostrophe, then an alias.
+cat <<-EOF
+	can't
+	EOF
+alias test=echo

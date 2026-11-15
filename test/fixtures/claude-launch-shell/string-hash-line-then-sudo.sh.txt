@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+hdr="
+#!/bin/sh"; sudo() { command sudo -n "$@"; }
+printf '%s\n' "$hdr"

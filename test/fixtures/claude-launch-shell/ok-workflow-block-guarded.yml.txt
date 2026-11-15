@@ -1,0 +1,9 @@
+jobs:
+  a:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: the stand-in claude, signed in
+        run: |
+          source scripts/setup/lib.sh
+          claude_guarded -- '{}' -p hi
+          claude auth status

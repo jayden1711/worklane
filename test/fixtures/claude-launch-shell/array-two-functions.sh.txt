@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# R1264f D3 (f03a): two functions, each with its own ARGS; the unguarded one first.
+probe() {
+  local ARGS=(-p hi --setting-sources user)
+  claude "${ARGS[@]}"
+}
+run() {
+  local ARGS=(-p hi --settings '{}' --setting-sources '' --strict-mcp-config)
+  claude "${ARGS[@]}"
+}

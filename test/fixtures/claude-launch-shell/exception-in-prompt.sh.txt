@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# R1264c D4: the excepted text inside a prompt is no exception.
+claude -p "scripts/setup/credentials.sh probe claude" --dangerously-skip-permissions

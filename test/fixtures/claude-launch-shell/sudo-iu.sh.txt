@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+sudo -iu "$agent" claude -p hi

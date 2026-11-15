@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# R1264w/x D1 (s2): a bare-word here-string.
+bc <<<two
+read() { :; }

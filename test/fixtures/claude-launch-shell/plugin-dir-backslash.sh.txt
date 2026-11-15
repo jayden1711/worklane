@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# R1264g D1 (g01c): a loading flag after a backslash.
+claude -p hi \--plugin-dir ./p --settings '{}' --setting-sources '' --strict-mcp-config

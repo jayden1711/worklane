@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# R1264g D1 (g01f): an array named inside another array.
+A=(--plugin-dir ./p)
+B=("${A[@]}" -p hi --settings '{}' --setting-sources '' --strict-mcp-config)
+claude "${B[@]}"

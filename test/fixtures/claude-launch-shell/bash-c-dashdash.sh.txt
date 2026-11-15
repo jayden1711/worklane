@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# R1264j D3 (j02c): bash -c -- 'command'.
+bash -c -- 'claude -p hi'

@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+env -i PATH=/usr/bin HOME=/tmp/h claude -p hi

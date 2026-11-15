@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# R1264z D2 (q2): a double-quoted quote in a ${…} pattern within "…".
+clean="${raw//"'"/}"
+sudo() { command sudo -n "$@"; }

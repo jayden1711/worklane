@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# R1264q D2: a function named test.
+test() { return 0; }

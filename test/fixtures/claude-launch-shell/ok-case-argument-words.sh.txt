@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# R1264ad: valid lines with case as an argument (a continued line, after then as an argument, an array, a regex
+# group), and an ordinary `if case` in "$(…)".
+f=$1; k=$2
+n="$(grep -c -w \
+  case "$f")"
+m="$(echo then case)"
+m="$(w=(case when); echo "${w[0]}")"
+m="$([[ $k =~ ^(case|switch)$ ]] && echo y)"
+v="$(if case "$f" in *.json) true ;; *) false ;; esac; then echo "j"; fi)"
+echo "$n $m $v"

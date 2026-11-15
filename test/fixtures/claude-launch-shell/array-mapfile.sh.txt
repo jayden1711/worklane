@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# R1264f D3 (f03e): a guarded array, then refilled from a file.
+ARGS=(-p hi --settings '{}' --setting-sources '' --strict-mcp-config)
+mapfile -t ARGS < args.txt
+claude "${ARGS[@]}"
