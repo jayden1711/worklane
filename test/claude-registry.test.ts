@@ -60,7 +60,9 @@ test('R1185as D1: every word that opens a string literal in the binary is a cand
 test('R1185as D1: a word is a command when `claude <word> --help` gives anything but the main usage line; a probe with no answer is unread, never dropped', { skip: !posix }, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'claude-registry-'));
   try {
-    const r = await (await registry()).claudeCommands(standIn(dir), { concurrency: 4, timeoutMs: 3000 });
+    // Each stand-in is a fresh node process: under load one can take over 3 s to answer, and a probe the timeout kills
+    // reads as unread (or --help as no usage line). 15 s is far above a start; the 60 s 'hang' still times out.
+    const r = await (await registry()).claudeCommands(standIn(dir), { concurrency: 4, timeoutMs: 15_000 });
     assert.deepEqual(r.commands, ['apply-project-settings', 'purge', 'remote', 'sync']);
     assert.deepEqual(r.unread, ['hang', 'mute']);
   } finally {
