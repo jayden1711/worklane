@@ -28,8 +28,14 @@
     [
       ".github/workflows/ci-slow.yml",
       "node scripts/ci/setting-sources-probe.mjs \"$cc/bin/claude\"",
-      "#958's real-claude step: it hands the installed claude to scripts/ci/setting-sources-probe.mjs, whose text this pin's digest holds. The probe starts it through src/claude-launch.ts's launch with the runner's argv and, by design, also with sources loaded: its controls rewrite that argv in its shim, and one case spawns a hand-built argv. Every run is in a throwaway HOME, with a dummy key, against a loopback stand-in API (the owner, 2026-11-15, \"1185 pins: b\"; the pin holds the probe: the owner, 2026-11-16, \"1185 pin scope: 1+2\")",
-      "50270da03b8225223b46dafc0fc162995fa430d7ea1689104b999d2ee2bd207f"
+      "#958's real-claude step: it hands the installed claude to scripts/ci/setting-sources-probe.mjs. This pin's digest holds the step, its other keys and the defaults around it, and every repo script the step names with their imports outside src/: the probe, claude-registry.mjs (which gets the binary for its sha256), scripts/lib/git.cjs and the wrappers of the must-fail loop. The probe starts it through src/claude-launch.ts's launch with the runner's argv and, by design, also with sources loaded: its controls rewrite that argv in its shim, and one case spawns a hand-built argv. Every run is in a throwaway HOME, with a dummy key, against a loopback stand-in API (the owner, 2026-11-15, \"1185 pins: b\"; the pin holds the probe: the owner, 2026-11-16, \"1185 pin scope: 1+2\"; and what it hands claude to: the owner, 2026-11-16, \"1185 ay: 1\")",
+      "5a554220251c9ea6b518d10cbc15b03d3d20636a7794d7d8ad251f73d34f5b68"
+    ],
+    [
+      ".github/workflows/ci-slow.yml",
+      "if SETTING_SOURCES_REAL_CLAUDE=\"$cc/bin/claude\" node scripts/ci/setting-sources-probe.mjs \"$f\" > \"$RUNNER_TEMP/must-fail.log\" 2>&1; then cat \"$RUNNER_TEMP/must-fail.log\"; echo \"the probe passed $f, which leaks\" >&2; exit 1; fi",
+      "#958's must-fail loop: it hands the same installed claude, through SETTING_SOURCES_REAL_CLAUDE, to the probe and on to each test/fixtures/setting-sources/wrap-*-leak.cjs, which runs it with the argv and env it builds; the probe must exit 1 naming each wrapper's leak. This pin's digest holds the same scope as the step's first pin (the step, its other keys, the defaults, every script it names). Every run is in the probe's throwaway HOME, with a dummy key, against a loopback stand-in API (the owner, 2026-11-16, \"1185 ay: 1\")",
+      "5a554220251c9ea6b518d10cbc15b03d3d20636a7794d7d8ad251f73d34f5b68"
     ]
   ]
 }
