@@ -800,6 +800,7 @@ const OUTSIDE_THE_HELPER: Record<string, { words: Record<string, number>; why: s
   },
   // scripts/: their own -z parsing, in their own language.
   'scripts/ci/slow-jobs.sh': { words: { 'name-only': 1 }, why: 'CI slow-job selection', must: [/--name-only --no-renames -z/] },
+  'scripts/ci/touches-code.sh': { words: { 'name-only': 1 }, why: "CI: whether a PR touches code, for the VM acceptance job's gate in ci.yml (the owner, 2026-11-14)", must: [/--name-only --no-renames -z/] },
   'scripts/pin-engine.mjs': { words: { 'name-only': 1 }, why: 'the release commit "changes only dist/" check', must: [/'--name-only', '--no-renames', '-z'/, /split\('\\0'\)/] },
   'scripts/machine/worklane-update.cjs': { words: { 'name-only': 1 }, why: 'the updater\'s "changes only dist/" check', must: [/'--name-only', '--no-renames', '-z'/, /split\('\\0'\)/] },
   'scripts/ci/affected.mjs': {
