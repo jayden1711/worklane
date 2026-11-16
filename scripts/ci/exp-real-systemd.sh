@@ -107,7 +107,9 @@ spec() {
     "PREDICT=${4:-[ ! -e \"\$LABELS\" ] && [ ! -e \"\$EVAL_CODE/score.sh\" ] && bash \"\$EVAL_CODE/predict.sh\"}" "SCORE=${5:-bash score.sh}" 'CONFIG={"lr":0.01}' "SEED=1"
 }
 as_coord create ci-job-1 "$sha" < "$t/b" >/dev/null
-spec 5 'bash train.sh' | as_coord job ci-job-1 | tee "$t/job1.log"
+# A job's TRAIN runs in its sandbox's folder: its file is named through $PWD there, so the download lint, which reads
+# `bash <file>` in a file that changes folders as a path from the checkout, doesn't take it for a repo file.
+spec 5 'bash "$PWD/train.sh"' | as_coord job ci-job-1 | tee "$t/job1.log"
 tail -1 "$t/job1.log" | grep -q '"outcome":"scored"' || { sudo sh -c 'tail -n 30 /var/lib/worklane-exp/ci/jobs/ci-job-1/logs/*.log'; fail "job 1 not scored"; }
 tail -1 "$t/job1.log" | grep -q '"score":4.5' || fail "job 1's score isn't the scorer's"
 
@@ -201,7 +203,7 @@ cp "$t/canary.sh" "$r/canary.sh"; git -C "$r" add canary.sh && git -C "$r" -c us
 sha5="$(git -C "$r" rev-parse HEAD)"; git -C "$r" bundle create -q "$t/b5" HEAD main
 as_coord create ci-job-5 "$sha5" < "$t/b5" >/dev/null
 # Its prediction step plants a pickle checkpoint: the gate refuses it, and the scorer never reads it.
-spec 5 'bash canary.sh' score 'cat "$EVAL_INPUTS"/*.txt > "$PRED/p.txt"; printf "\\x80\\x04K\\x01." > "$PRED/model.pt"' | as_coord job ci-job-5 | tee "$t/job5.log"
+spec 5 'bash "$PWD/canary.sh"' score 'cat "$EVAL_INPUTS"/*.txt > "$PRED/p.txt"; printf "\\x80\\x04K\\x01." > "$PRED/model.pt"' | as_coord job ci-job-5 | tee "$t/job5.log"
 tail -1 "$t/job5.log" | grep -q '"outcome":"crashed","step":"pred-format"' || fail "a planted pickle reached the scorer"
 sudo grep -q '^REFUSED model.pt:' /var/lib/worklane-exp/ci/jobs/ci-job-5/logs/gate.log || fail "the gate didn't name the pickle"
 out5="$(sudo cat /var/lib/worklane-exp/ci/jobs/ci-job-5/logs/train.log)"
