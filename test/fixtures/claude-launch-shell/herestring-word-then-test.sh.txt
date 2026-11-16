@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# R1264w D1: a here-string with a word once read as a heredoc, masking the rest.
+tr a b <<< hello
+test() { :; }

@@ -14,6 +14,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readAccountStatus } from '../src/claude-account.js';
 import { repoRoot } from './helpers.js';
+import { guardedTree } from './claude-guarded-tree.js';
 
 const posix = process.platform !== 'win32';
 const setupDir = join(repoRoot, 'scripts', 'setup');
@@ -52,7 +53,8 @@ function machine() {
   for (const d of ['users', 'homes', 'bin', 'units', 'var']) mkdirSync(join(T, d), { recursive: true });
   writeFileSync(
     join(s, 'lib.sh'),
-    `source ${JSON.stringify(join(setupDir, 'lib.sh'))}
+    // The real lib.sh, from a tree of its own whose test marker points claude_guarded's fixed PATH at these stand-ins.
+    `source ${JSON.stringify(guardedTree(join(T, 'real'), `${T}/bin:/usr/bin:/bin`))}
 T=${JSON.stringify(T)}
 PATH="$T/bin:$PATH"
 as_root() { :; }
@@ -108,7 +110,8 @@ esac
   // as the real one does (#341): not the token's. With no account cached, the token's (as if fetched again for it).
   // claude -p (the login's proof, one minimal real call): answered, unless the API refuses the login: refuse-new (the new
   // token, for every user) or refuse-api-<user> exists; then a 401 as claude prints it, with the token on stderr too.
-  exe('claude', `#!/usr/bin/env node
+  // By node's own path: claude_guarded runs it under env -i with a fixed PATH (R1264g/h).
+  exe('claude', `#!${process.execPath}
 const fs = require('node:fs');
 const T = ${JSON.stringify(T)};
 fs.appendFileSync(T + '/claude-calls', process.env.USER + ' ' + process.argv.slice(2).join(' ') + '\\n');
@@ -117,7 +120,22 @@ try { tok = JSON.parse(fs.readFileSync((process.env.CLAUDE_CONFIG_DIR || process
 const ok = /^sk-ant-oat01-/.test(tok) && !fs.existsSync(T + '/fail-auth-' + process.env.USER);
 let cached = null;
 try { cached = JSON.parse(fs.readFileSync((process.env.CLAUDE_CONFIG_DIR || process.env.HOME) + '/.claude.json', 'utf8')).oauthAccount || null; } catch {}
+// An API-key login (api-key-<user>, R1264c D3): signed in by its key, which reaches claude only through apiKeyHelper
+// in the settings it was given (no setting source is loaded): without one naming a readable key, "Not logged in".
+if (fs.existsSync(T + '/api-key-' + process.env.USER)) {
+  if (process.argv[2] !== '-p') { process.stdout.write(JSON.stringify({ loggedIn: true, authMethod: 'api_key' })); process.exit(0); }
+  let s = {};
+  try { s = JSON.parse(process.argv[process.argv.lastIndexOf('--settings') + 1]); } catch {}
+  const m = /^cat -- (\\/\\S+)$/.exec(typeof s.apiKeyHelper === 'string' ? s.apiKeyHelper : '');
+  let key = '';
+  try { key = m ? fs.readFileSync(m[1], 'utf8').trim() : ''; } catch {}
+  if (key.startsWith('sk-ant-api')) { process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'ok', total_cost_usd: 0.01 })); process.exit(0); }
+  process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: true, result: 'Not logged in · Please run /login' }));
+  process.exit(1);
+}
 if (process.argv[2] === '-p') {
+  // Where the proof ran and with what (#1262): its folder, whether that was empty, its auto memory.
+  fs.appendFileSync(T + '/claude-proof-seen', JSON.stringify({ user: process.env.USER, cwd: process.cwd(), empty: fs.readdirSync(process.cwd()).length === 0, memory: process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY ?? null }) + '\\n');
   const refused = !ok || (tok.includes('_new-') && fs.existsSync(T + '/refuse-new')) || fs.existsSync(T + '/refuse-api-' + process.env.USER);
   if (!refused) { process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'ok', total_cost_usd: 0.02 })); process.exit(0); }
   process.stderr.write('request with Authorization: Bearer ' + tok + '\\n');
@@ -326,7 +344,17 @@ test('status names each agent user\'s account, token id and expiry, and fails wh
   // claude auth status, as each user; and the login's proof, one minimal real call as each user (#463).
   const claudeCalls = readFileSync(join(m.T, 'claude-calls'), 'utf8').trim().split('\n');
   assert.deepEqual(claudeCalls.filter((c) => c.includes(' auth status')), AGENTS.map((u) => `${u} auth status --json`));
-  assert.deepEqual(claudeCalls.filter((c) => c.includes(' -p ')), AGENTS.map((u) => `${u} -p Reply with the single word: ok --model haiku --max-turns 1 --max-budget-usd 0.05 --output-format json`));
+  // The proof loads nothing (#1262, #958): the launch's guards last, its auto memory off, in an empty folder of its
+  // own that is gone afterwards.
+  assert.deepEqual(claudeCalls.filter((c) => c.includes(' -p ')), AGENTS.map((u) => `${u} -p Reply with the single word: ok --model haiku --max-turns 1 --max-budget-usd 0.05 --output-format json --settings {} --setting-sources  --strict-mcp-config`));
+  const seen = readFileSync(join(m.T, 'claude-proof-seen'), 'utf8').trim().split('\n').map((l) => JSON.parse(l) as { user: string; cwd: string; empty: boolean; memory: string | null });
+  assert.deepEqual(seen.map((s) => s.user), AGENTS);
+  for (const s of seen) {
+    assert.match(s.cwd, /^(?:\/private)?\/tmp\/login-proof-[A-Za-z0-9]{6}$/, `${s.user}: in a folder of its own, not /`);
+    assert.equal(s.empty, true, `${s.user}: an empty one`);
+    assert.equal(s.memory, '1', `${s.user}: its auto memory off`);
+    assert.equal(existsSync(s.cwd), false, `${s.user}: the folder is gone afterwards`);
+  }
   writeFileSync(join(m.T, 'fail-auth-wl-alpha-eval'), '');
   const j = m.run(['status', '--json']);
   assert.equal(j.status, 1);
@@ -503,3 +531,37 @@ function lstatExists(p: string): boolean {
     return false;
   }
 }
+
+test("R1264c D3: an API-key agent's login proof passes its apiKeyHelper (cat -- <key file>, from its own settings) and nothing else; any other helper isn't taken", { skip: !posix }, () => {
+  const m = machine();
+  const u = 'wl-beta-agent';
+  const cfg = join(m.T, 'homes', u, '.claude');
+  const key = join(m.T, 'beta-api-key');
+  writeFileSync(key, 'sk-ant-api03-STANDIN\n');
+  writeFileSync(join(m.T, `api-key-${u}`), '');
+  const beta = () => {
+    writeFileSync(join(m.T, 'claude-calls'), '');
+    const r = m.run(['status', '--json'], '');
+    const rec = (JSON.parse(r.stdout) as { users: { user: string; api_ok: boolean | null; api_error: string | null }[] }).users.find((x) => x.user === u)!;
+    const proof = readFileSync(join(m.T, 'claude-calls'), 'utf8').trim().split('\n').find((c) => c.startsWith(`${u} -p `))!;
+    return { rec, proof };
+  };
+  // No settings: the proof's own '{}', and the key never reaches claude.
+  let b = beta();
+  assert.equal(b.rec.api_ok, false);
+  assert.match(String(b.rec.api_error), /Not logged in/);
+  assert.match(b.proof, / --settings \{\} --setting-sources  --strict-mcp-config$/);
+  // Its settings name the key file as credentials.sh writes it: that one setting, sources still ''.
+  writeFileSync(join(cfg, 'settings.json'), JSON.stringify({ apiKeyHelper: `cat -- ${key}`, hooks: { SessionStart: [{ hooks: [{ type: 'command', command: 'touch /tmp/planted' }] }] } }));
+  b = beta();
+  assert.equal(b.rec.api_ok, true, `${String(b.rec.api_error)} | ${b.proof}`);
+  assert.ok(b.proof.endsWith(` --settings {"apiKeyHelper":"cat -- ${key}"} --setting-sources  --strict-mcp-config`), b.proof);
+  assert.ok(!b.proof.includes('hooks'), 'only the helper: none of its other settings');
+  // A helper in any other form is not taken: the proof keeps '{}'.
+  for (const h of [`cat -- ${key}; touch /tmp/x`, `sh -c 'cat ${key}'`, `cat -- relative/key`, `cat -- ${key}/../x`]) {
+    writeFileSync(join(cfg, 'settings.json'), JSON.stringify({ apiKeyHelper: h }));
+    b = beta();
+    assert.match(b.proof, / --settings \{\} --setting-sources  --strict-mcp-config$/, h);
+    assert.equal(b.rec.api_ok, false, h);
+  }
+});

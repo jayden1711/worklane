@@ -1,0 +1,3 @@
+// R1264q D1: the tests' marker for claude_guarded's PATH, written from JavaScript.
+import { writeFileSync } from 'node:fs';
+writeFileSync('scripts/setup/.claude-guarded-test-path', '/tmp/bin\n');

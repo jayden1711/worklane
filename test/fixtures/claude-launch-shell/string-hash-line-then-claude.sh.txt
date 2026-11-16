@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+hdr="
+# generated"; claude -p "summarise $hdr"

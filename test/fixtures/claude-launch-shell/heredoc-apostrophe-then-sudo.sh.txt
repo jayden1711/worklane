@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# R1264u/v D1: an apostrophe in a heredoc's text once desynced the mask past EOF.
+usage() {
+  cat <<EOF
+Don't run this as root.
+EOF
+}
+sudo() { command sudo -n "$@"; }

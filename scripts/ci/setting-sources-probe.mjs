@@ -666,7 +666,7 @@ for (const [what, control, noSandbox] of [['control', { sources: 'user,project,l
 // A flag in a list field (R1185aa D1: `pre_approved: ['Bash(npm test:*)', '--setting-sources=user,project,local']`
 // reaches allowedTools): the launch refuses it before anything starts, in every list field.
 for (const field of ['allowedTools', 'disallowedTools', 'pluginDirs']) {
-  const spec = { bin: '/nonexistent/claude', cwd: tmpdir(), env: {}, settings: {}, mode: 'stream', model: 'haiku', maxTurns: 1, maxBudgetUsd: 1, allowedTools: [], [field]: ['Read', '--setting-sources=user,project,local'] };
+  const spec = { bin: '/nonexistent/bin', cwd: tmpdir(), env: {}, settings: {}, mode: 'stream', model: 'haiku', maxTurns: 1, maxBudgetUsd: 1, allowedTools: [], [field]: ['Read', '--setting-sources=user,project,local'] };
   let threw = false;
   try {
     const c = launchClaude(spec);

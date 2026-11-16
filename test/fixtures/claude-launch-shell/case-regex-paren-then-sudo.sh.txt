@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# R1264z D1 (p4): a regex group in a case arm inside "$(…)".
+k="$(case "$f" in *.json) [[ $f =~ (json) ]] && echo j ;; esac)"
+sudo() { command sudo -n "$@"; }

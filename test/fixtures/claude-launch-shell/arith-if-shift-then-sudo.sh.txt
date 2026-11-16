@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# R1264x D1 (a1, a3): shifts in $((…)) and in an if's ((…)).
+bits=$(( 1 << n ))
+if (( x < 1<<n )); then :; fi
+sudo() { command sudo -n "$@"; }

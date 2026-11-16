@@ -12,7 +12,7 @@ import { GuardrailsConfig, TestsConfig } from '../src/config/schema.js';
 import { exampleContext } from '../src/guardrails/check.js';
 import { liveContext } from '../src/guardrails/context.js';
 import { evaluate } from '../src/guardrails/engine.js';
-import { PUSH_GATE_HATCH_ENV, withoutPushGateHatch } from '../src/guardrails/push-hook.js';
+import { COMMIT_MSG_MARKER_ENV, PUSH_GATE_HATCH_ENV, withoutPushGateHatch } from '../src/guardrails/push-hook.js';
 import { runHook } from '../src/hook.js';
 import { childEnv, projectCommand, which } from '../src/os/index.js';
 import { projectEnvProblem, safeProjectEnv } from '../src/project-env.js';
@@ -112,6 +112,36 @@ test('an agent may not set, export or pass the hatch, in any wrapper', () => {
     `rg --pre 'env ${H}=1 git push' x`,
     `grep -rn ${H} docs && git push`,
   ]) assert.deepEqual([bash(c).decision, bash(c).rule], ['deny', 'push-gate-hatch'], c);
+});
+
+test("an agent may not set, export or pass the commit-msg hook's marker: on a push it would ask the gate to take the push for a message (#1260 R1260d D1)", () => {
+  const M = COMMIT_MSG_MARKER_ENV;
+  assert.equal(M, 'PUSH_GATE_COMMIT_MSG');
+  for (const c of [
+    `${M}=/tmp/gitfile git push -- --commit-msg HEAD`,
+    `export ${M}=/tmp/gitfile && git push -- --commit-msg leak`,
+    `env ${M}=/tmp/gitfile git push`,
+    `git -c alias.ship='!${M}=/tmp/gitfile git push -- --commit-msg' ship leak`,
+    `${M.toLowerCase()}=x git push`,
+  ]) assert.deepEqual([bash(c).decision, bash(c).rule], ['deny', 'push-gate-hatch'], c);
+  for (const c of [`grep -rn ${M} scripts`, `cat CONTRIBUTING.md`]) assert.notEqual(bash(c).decision, 'deny', `reading: ${c}`);
+  assert.equal(bash(`${M}=x git push`, false).decision === 'deny', false, "a person's own session: not this guard's");
+  const env: Record<string, string | undefined> = { [M]: '/tmp/x', [M.toLowerCase()]: '/tmp/y', KEEP: '1' };
+  assert.deepEqual(withoutPushGateHatch(env), { KEEP: '1' }, "an agent's environment never carries it");
+});
+
+test("an agent may not push to, add or rename a remote named like an option: the pre-push hook would read its name as one (#1260 R1260f F1)", () => {
+  for (const c of [
+    'git push -- --print-gate-files HEAD',
+    'git push -- --range HEAD',
+    'git push --repo=--range HEAD',
+    'git push --repo --range HEAD',
+    'git remote add -- --range HEAD..HEAD',
+    'git remote add -- --print-gate-files /tmp/x',
+    'git remote rename -- origin --commit-msg',
+    "git -c alias.ship='push -- --print-gate-files' ship HEAD",
+  ]) assert.deepEqual([bash(c).decision, bash(c).rule], ['deny', 'push-hook-bypass'], c);
+  for (const c of ['git push -- origin HEAD', 'git push origin -- HEAD', 'git remote add origin https://example.com/r.git', 'git remote -v', 'git push --repo=origin HEAD']) assert.notEqual(bash(c).decision, 'deny', `kept: ${c}`);
 });
 
 test('an agent may not store the hatch where a later shell or push would read it', () => {

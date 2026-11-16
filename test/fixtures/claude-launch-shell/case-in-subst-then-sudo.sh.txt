@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# R1264x D1 (b1): a case pattern's ) inside $(…) once closed the substitution.
+name="$(case "$f" in *.json) sed 's/"//g' "$f" ;; esac)"
+sudo() { command sudo -n "$@"; }

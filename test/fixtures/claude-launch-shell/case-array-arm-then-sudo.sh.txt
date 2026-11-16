@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# R1264z D1 (p3): an array in a case arm inside "$(…)".
+k="$(case "$f" in *.json) a=(j); echo "${a[0]}" ;; esac)"
+sudo() { command sudo -n "$@"; }

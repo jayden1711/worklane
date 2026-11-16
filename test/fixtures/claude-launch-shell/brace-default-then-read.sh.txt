@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# R1264ab D1 (b3): a lone-brace default, then a multi-line read().
+emit() {
+  local open=${1:-{}  # the JSON opener, it's printed first
+  echo "$open"
+}
+read() {
+  # can't be interactive here
+  builtin read -r "$@"
+}

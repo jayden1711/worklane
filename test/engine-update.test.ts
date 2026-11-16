@@ -2,7 +2,7 @@ import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { machineTool } from './isolate.js';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync, symlinkSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -460,6 +460,26 @@ test('installTree: every package.json bin target is made 0755, and every file is
   const s = builtTree('dist/src/cli.js');
   u.installTree(NEW, s.opt, s.build, s.owner);
   assert.equal(statSync(join(s.dest, 'dist', 'src', 'cli.js')).mode & 0o777, 0o755);
+});
+
+test("R1264o D3: installTree refuses a tree that holds claude_guarded's test PATH marker, and leaves nothing behind", { skip: process.platform === 'win32' && 'POSIX modes' }, () => {
+  const t = builtTree({ worklane: 'dist/src/cli.js' });
+  mkdirSync(join(t.build, 'src', 'scripts', 'setup'), { recursive: true });
+  writeFileSync(join(t.build, 'src', 'scripts', 'setup', '.claude-guarded-test-path'), '/tmp/stand-ins\n');
+  assert.throws(() => u.installTree(NEW, t.opt, t.build, t.owner), /holds scripts\/setup\/\.claude-guarded-test-path .*not installing it/);
+  assert.ok(!existsSync(t.dest), 'nothing installed');
+  assert.deepEqual(readdirSync(t.opt), [], 'no temp tree left');
+});
+
+test('R1264q D3: installTree\'s marker scan follows no symlink out of the tree it installs', { skip: process.platform === 'win32' && 'POSIX modes' }, () => {
+  const t = builtTree({ worklane: 'dist/src/cli.js' });
+  // A folder outside the tree, holding a marker, and a directory symlink to it inside the tree.
+  const outside = join(t.opt, '..', 'outside');
+  mkdirSync(join(outside, 'scripts', 'setup'), { recursive: true });
+  writeFileSync(join(outside, 'scripts', 'setup', '.claude-guarded-test-path'), '/tmp/stand-ins\n');
+  symlinkSync(outside, join(t.build, 'src', 'vendor-link'));
+  u.installTree(NEW, t.opt, t.build, t.owner);
+  assert.ok(existsSync(join(t.dest, 'dist', 'src', 'cli.js')), 'installed: the marker outside the tree is not this tree\'s');
 });
 
 test('installTree refuses a tree whose bin target is missing, and run() switches nothing', { skip: process.platform === 'win32' && 'POSIX modes' }, async () => {

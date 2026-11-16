@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# An API-key login's helper as claude_guarded's settings (it checks the form and the path at run time), and {}.
+source scripts/setup/lib.sh
+claude_guarded --as agent -- "{\"apiKeyHelper\":\"cat -- /home/user/.config/key\"}" -p hi
+claude_guarded --as agent -- '{}' -p hi

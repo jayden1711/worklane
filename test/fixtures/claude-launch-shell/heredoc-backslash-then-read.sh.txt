@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# R1264w/x D1 (h1): a backslash-quoted heredoc delimiter, with an apostrophe in its body.
+cat <<\EOF
+it's
+EOF
+read() { :; }

@@ -1,0 +1,4 @@
+// R1264h D4 (h03c): a concatenation that starts with the binary.
+import { execSync } from 'node:child_process';
+const p = 'hi';
+execSync('claude -p ' + JSON.stringify(p));

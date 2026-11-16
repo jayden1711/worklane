@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# R1264aa N1: in an unquoted ${…}, " #" is text, not a comment, so the quote after it opens: the definition is text.
+msg=${y:- #"
+test() { :; }
+"}
+echo "$msg"

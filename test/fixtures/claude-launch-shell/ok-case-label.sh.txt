@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+case "$what" in
+  claude) echo "the claude login" ;;
+esac

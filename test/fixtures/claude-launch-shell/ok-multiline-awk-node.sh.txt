@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# R1264t D2: helpers named test or read inside multi-line quoted awk and node programs are no shell definitions.
+awk '
+  function test(s) { return s != "" }
+  function read(f) { return f }
+  test($1) { print read($2) }
+' file
+node -e '
+function test(s) { return s.length > 0; }
+function read(s) { return s; }
+console.log(test(read(process.argv[1])));
+' x

@@ -129,7 +129,7 @@ export async function claudeCommands(bin, { concurrency = 6, timeoutMs = 30_000 
       });
     const help = await run(['--help']);
     const main = help.first;
-    if (!/^Usage: claude /.test(main)) throw new Error(`claude --help gave no usage line: ${main}`);
+    if (!/^Usage: claude /.test(main)) throw new Error(`no usage line from the binary's --help: ${main}`);
     const all = [...new Set([...candidates(bin)])].sort();
     const commands = [];
     const unread = [];

@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# R1264ac D1: a case after `if` is a case; inside "$(…)" its pattern ) must not close the substitution.
+os="$(
+  if case $1 in
+    a) echo a ;;
+    *) echo "unsupported, can't continue" >&2 ;;
+  esac; then :; fi
+)"
+sudo() { command sudo -n "$@"; }
+printf '%s\n' "$os"
+# that's the platform

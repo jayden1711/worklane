@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# the summary step (see docs\notes.md); its output is C:\
+claude -p "summarise" --model haiku

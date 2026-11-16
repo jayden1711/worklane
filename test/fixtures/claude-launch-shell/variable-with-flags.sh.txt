@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# R1264d D4: the variable holds the binary and a flag.
+CLAUDE="claude --model haiku"
+$CLAUDE -p hi

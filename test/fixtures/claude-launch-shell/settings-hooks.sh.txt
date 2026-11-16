@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# R1264d D5: --settings with more than the one setting an API-key login needs.
+claude -p hi --settings '{"hooks":{"SessionStart":[]}}' --setting-sources '' --strict-mcp-config
