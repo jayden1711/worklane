@@ -192,11 +192,14 @@ test("ci.yml's systemd-acceptance job: GitHub's VM on each push to main and on a
 // broke it on main unseen (main's runs 43668414496 and the one on 7dfea2a2). Before, the owner's 2026-11-10 choice:
 // push and workflow_dispatch only, never a PR. It never posts a passing skip where it hasn't run, since a skip by its
 // own `if` satisfies a required check: it fails closed on a changes job that didn't succeed (the organizer's addition,
-// 2026-11-14), and a draft or a fork's PR gets a red check from one step that exits 1 (R1309b D2, D3, 2026-11-15). The
-// one skip is a ready same-repo PR that touches no code.
+// 2026-11-14), a draft or a fork's PR gets a red check from one step that exits 1 (R1309b D2, D3, 2026-11-15), and a PR
+// into any branch but main runs it (R1309c D2, R1309d D1: a retarget to main fires only `edited`, no run). The one skip
+// is a ready same-repo PR into main that touches no code.
 
-/** The job's `if`, exactly (the owner's decision, 2026-11-14; R1309b D2/D3, 2026-11-15). */
-const GATE_IF = "${{ !cancelled() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && (github.event.pull_request.draft == true || github.event.pull_request.head.repo.full_name != github.repository || needs.changes.result != 'success' || needs.changes.outputs.code == 'true'))) }}";
+/** The job's `if`, exactly (the owner's decision, 2026-11-14; R1309b D2/D3, 2026-11-15; R1309c D2/R1309d D1, 2026-11-15). */
+const GATE_IF = "${{ !cancelled() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && (github.event.pull_request.base.ref != github.event.repository.default_branch || github.event.pull_request.draft == true || github.event.pull_request.head.repo.full_name != github.repository || needs.changes.result != 'success' || needs.changes.outputs.code == 'true'))) }}";
+/** Round 2's `if` (85ad8dc2): a docs-only PR into another branch skipped it, and a retarget to main kept that skip. */
+const ROUND2_IF = "${{ !cancelled() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && (github.event.pull_request.draft == true || github.event.pull_request.head.repo.full_name != github.repository || needs.changes.result != 'success' || needs.changes.outputs.code == 'true'))) }}";
 /** The job's first step's `if`: a draft's run fails here (R1309b D2). */
 const DRAFT_STEP_IF = "github.event_name == 'pull_request' && github.event.pull_request.draft == true";
 /** The job's second step's `if`: a fork's PR's run fails here (R1309b D3). */
@@ -261,7 +264,7 @@ function evalIf(expr: string, ctx: Ctx): boolean {
 }
 
 const REPO = 'example-org/example-repo';
-const pr = (o: { draft?: boolean; fork?: boolean; gone?: boolean } = {}) => ({ event_name: 'pull_request', repository: REPO, event: { pull_request: { draft: o.draft ?? false, head: { repo: o.gone ? null : { full_name: o.fork ? 'someone/example-repo' : REPO } } } } });
+const pr = (o: { draft?: boolean; fork?: boolean; gone?: boolean; base?: string } = {}) => ({ event_name: 'pull_request', repository: REPO, event: { repository: { default_branch: 'main' }, pull_request: { draft: o.draft ?? false, base: { ref: o.base ?? 'main' }, head: { repo: o.gone ? null : { full_name: o.fork ? 'someone/example-repo' : REPO } } } } });
 const changes = (result: string, code?: string) => ({ changes: { result, outputs: code === undefined ? {} : { code } } });
 type Outcome = 'run' | 'skip' | 'red';
 type Gate = { job: string; draft: string; fork: string };
@@ -279,6 +282,15 @@ const GATE: Gate = { job: GATE_IF, draft: DRAFT_STEP_IF, fork: FORK_STEP_IF };
 /** [what, context, what the job does] for each case the decision names, the fail-closed ones and R1309b's. */
 const GATE_CASES: [string, Ctx, Outcome][] = [
   ['a ready PR touching only docs/', { github: pr(), needs: changes('success', 'false'), cancelled: false }, 'skip'],
+  // R1309c D2, R1309d D1: a PR into another branch runs it whatever it touches, so no skip computed against that branch
+  // stands on the head when the PR is retargeted to main (an `edited` event, no run).
+  ['a ready docs-only PR into another branch (a stacked PR)', { github: pr({ base: 'feature-a' }), needs: changes('success', 'false'), cancelled: false }, 'run'],
+  ['a ready PR touching src/ into another branch', { github: pr({ base: 'feature-a' }), needs: changes('success', 'true'), cancelled: false }, 'run'],
+  // GitHub's != ignores case, so the gate's clause reads a base `Main` as main; the changes job compares exactly and
+  // says code (touches-code.sh's test), so it runs. With a changes job that said no code, it would skip.
+  ['a ready docs-only PR into a branch named Main (the changes job: code)', { github: pr({ base: 'Main' }), needs: changes('success', 'true'), cancelled: false }, 'run'],
+  ['a draft PR into another branch', { github: pr({ draft: true, base: 'feature-a' }), needs: changes('success', 'false'), cancelled: false }, 'red'],
+  ["a fork's PR into another branch", { github: pr({ fork: true, base: 'feature-a' }), needs: changes('success', 'false'), cancelled: false }, 'red'],
   ['a ready PR touching src/', { github: pr(), needs: changes('success', 'true'), cancelled: false }, 'run'],
   ['a push to main (the changes job skipped)', { github: { event_name: 'push', repository: REPO, event: {} }, needs: changes('skipped'), cancelled: false }, 'run'],
   ['a manual run (the changes job skipped)', { github: { event_name: 'workflow_dispatch', repository: REPO, event: {} }, needs: changes('skipped'), cancelled: false }, 'run'],
@@ -301,7 +313,7 @@ const GATE_CASES: [string, Ctx, Outcome][] = [
 /** Each case the gate gets wrong, as "<case>: <what it does> (want <outcome>)". */
 const gateProblems = (g: Gate) => GATE_CASES.flatMap(([what, ctx, want]) => { const got = outcome(g, ctx); return got === want ? [] : [`${what}: ${got} (want ${want})`]; });
 
-test("the systemd acceptance gate (the owner's decision, 2026-11-14; R1309b, 2026-11-15): a ready docs-only PR skips; a ready PR touching src/, a push, a dispatch and a failed changes job run it; a draft and a fork's PR are red, never a skip", () => {
+test("the systemd acceptance gate (the owner's decision, 2026-11-14; R1309b-d, 2026-11-15): a ready docs-only PR into main skips; a ready PR touching src/, a PR into another branch, a push, a dispatch and a failed changes job run it; a draft and a fork's PR are red, never a skip", () => {
   const wf = parse(readFileSync(join(repoRoot, '.github', 'workflows', 'ci.yml'), 'utf8')) as { jobs: Record<string, Job & { needs?: unknown }> };
   const job = wf.jobs['systemd-acceptance']!;
   assert.equal(job.if, GATE_IF);
@@ -310,7 +322,7 @@ test("the systemd acceptance gate (the owner's decision, 2026-11-14; R1309b, 202
   assert.deepEqual(fork, { name: "fork PR: the systemd check doesn't run for forks; a maintainer verifies", if: FORK_STEP_IF, run: 'echo "fork PR: the systemd check doesn\'t run for forks (the job uses sudo on the VM); a maintainer verifies" >&2\nexit 1\n' }, "the second step: a fork's PR fails here, before anything is checked out");
   assert.deepEqual(gateProblems({ job: job.if!, draft: draft!.if!, fork: fork!.if! }), []);
   for (const [what, ctx, want] of GATE_CASES) assert.equal(outcome(GATE, ctx), want, what);
-  // The one skip on a pull request is a ready same-repo PR that touches no code.
+  // The one skip on a pull request is a ready same-repo PR into main that touches no code.
   assert.deepEqual(GATE_CASES.filter(([, ctx, want]) => want === 'skip' && !ctx.cancelled).map(([w]) => w), ['a ready PR touching only docs/']);
 });
 
@@ -322,11 +334,14 @@ test('fail-without: the old ifs, the gate missing any one condition, and either 
   const mutants: [string, Gate][] = [
     ['the 2026-11-10 if (push and dispatch only)', { ...GATE, job: OLD_IF }],
     ["this PR's first round (a draft and a fork's PR skip)", { ...GATE, job: ROUND1_IF }],
+    ["this PR's second round (a docs-only PR into another branch skips)", { ...GATE, job: ROUND2_IF }],
+    ['no base-branch clause', drop('github.event.pull_request.base.ref != github.event.repository.default_branch || ')],
+    ['the base clause against a fixed name, not the default branch', drop('github.event.repository.default_branch', "'trunk'")],
     ['no !cancelled() (GitHub then reads success(): a skipped changes job skips it on main)', drop('!cancelled() && ')],
     ['always() for !cancelled() (a cancelled run starts it)', drop('!cancelled()', 'always()')],
     ['no push', drop("github.event_name == 'push' || ")],
     ['no dispatch', drop("github.event_name == 'workflow_dispatch' || ")],
-    ['no pull_request clause', drop(" || (github.event_name == 'pull_request' && (github.event.pull_request.draft == true || github.event.pull_request.head.repo.full_name != github.repository || needs.changes.result != 'success' || needs.changes.outputs.code == 'true'))")],
+    ['no pull_request clause', drop(" || (github.event_name == 'pull_request' && (github.event.pull_request.base.ref != github.event.repository.default_branch || github.event.pull_request.draft == true || github.event.pull_request.head.repo.full_name != github.repository || needs.changes.result != 'success' || needs.changes.outputs.code == 'true'))")],
     ['a draft skips it (no draft clause)', drop('github.event.pull_request.draft == true || ')],
     ["a fork's PR skips it (no fork clause)", drop('github.event.pull_request.head.repo.full_name != github.repository || ')],
     ['no fail-closed clause', drop("needs.changes.result != 'success' || ")],
@@ -360,16 +375,25 @@ test("ci.yml's triggers, concurrency and the gate's job (the owner's decision, 2
   assert.deepEqual(ch.outputs, { code: '${{ steps.code.outputs.code }}' });
   assert.deepEqual(ch.steps, [
     { uses: 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1', with: { 'fetch-depth': 0 } },
-    { id: 'code', env: { PR_BASE: '${{ github.event.pull_request.base.sha }}', PR_HEAD: '${{ github.event.pull_request.head.sha }}' }, run: 'bash scripts/ci/touches-code.sh' },
+    { id: 'code', env: { PR_HEAD: '${{ github.event.pull_request.head.sha }}', BASE_REF: '${{ github.event.pull_request.base.ref }}', DEFAULT_BRANCH: '${{ github.event.repository.default_branch }}' }, run: 'bash scripts/ci/touches-code.sh' },
   ]);
   // The check's name, once across every workflow: a namesake would stand in for it (or hide it) as a required check.
   const named = readdirSync(dir).filter((f) => /\.ya?ml$/i.test(f)).flatMap((f) => Object.entries((parse(readFileSync(join(dir, f), 'utf8')) as { jobs?: Record<string, { name?: string }> }).jobs ?? {}).filter(([k, j]) => (j?.name ?? k) === 'systemd acceptance (real systemd)').map(([k]) => `${f}:${k}`));
   assert.deepEqual(named, ['ci.yml:systemd-acceptance']);
 });
 
-test('touches-code.sh: every path is code but docs/, changelog.d/, top-level *.md, LICENSE, NOTICE and the GitHub issue and PR templates (R1309b D1): .gitignore, .gitattributes, tsconfig.json and web/ are code; an error writes nothing', { skip: process.platform === 'win32' && 'bash' }, () => {
-  const sh = (cwd: string, base: string, head: string) => spawnSync('bash', [join(repoRoot, 'scripts', 'ci', 'touches-code.sh')], { cwd, encoding: 'utf8', env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '', PR_BASE: base, PR_HEAD: head } });
+test('touches-code.sh: every path is code but docs/, changelog.d/, top-level *.md, LICENSE, NOTICE and the GitHub issue and PR templates (R1309b D1): .gitignore, .gitattributes, tsconfig.json and web/ are code; read on the merge commit, a newline in a name or a criss-cross history hides none (R1309c D1, R1309d D2); an error writes nothing', { skip: process.platform === 'win32' && 'bash' }, () => {
   const g = (cwd: string, ...a: string[]) => spawnSync('git', a, { cwd, encoding: 'utf8' }).stdout.trim();
+  const run = (cwd: string, env: Record<string, string>) => spawnSync('bash', [join(repoRoot, 'scripts', 'ci', 'touches-code.sh')], { cwd, encoding: 'utf8', env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '', ...env } });
+  /** The script as the changes job runs it: in GitHub's merge commit of `head` into `onto` (its first parent), PR_HEAD the head. */
+  const sh = (cwd: string, onto: string, head: string, baseRef = 'main') => {
+    g(cwd, 'checkout', '-q', '--detach', onto);
+    g(cwd, '-c', 'user.email=ci@example.com', '-c', 'user.name=ci', 'merge', '-q', '--no-ff', '--no-edit', head);
+    assert.equal(g(cwd, 'rev-parse', 'HEAD^2'), head, 'the fixture made a merge commit of the head');
+    const r = run(cwd, { PR_HEAD: head, BASE_REF: baseRef, DEFAULT_BRANCH: 'main' });
+    g(cwd, 'checkout', '-q', 'main');
+    return r;
+  };
   const dir = tmp();
   g(dir, 'init', '-q', '-b', 'main');
   g(dir, 'config', 'user.email', 'ci@example.com');
@@ -428,25 +452,83 @@ test('touches-code.sh: every path is code but docs/, changelog.d/, top-level *.m
     // Over a pipe buffer of names after the one code path (sorted first): one grep, no pipe, still says code.
     ['one code path, then 5000 under docs/', { 'a.ts': 'a\n', ...Object.fromEntries(Array.from({ length: 5000 }, (_, i) => [`docs/${String(i).padStart(5, '0')}-${'x'.repeat(40)}.md`, 'd\n'])) }, [], true],
     ['5000 under docs/ alone', Object.fromEntries(Array.from({ length: 5000 }, (_, i) => [`docs/${String(i).padStart(5, '0')}-${'y'.repeat(40)}.md`, 'd\n'])), [], false],
+    // R1309c D1: a newline in a name is part of the name (grep -z), never the start of a not-code path.
+    ['a top-level folder README.md<newline>docs holding a.ts', { 'README.md\ndocs/a.ts': 'a\n' }, [], true],
+    ['a top-level folder x.md<newline>changelog.d holding evil.sh', { 'x.md\nchangelog.d/evil.sh': 'a\n' }, [], true],
+    ['a top-level folder LICENSE<newline>docs holding index.ts', { 'LICENSE\ndocs/index.ts': 'a\n' }, [], true],
+    ['a top-level file README.md<newline>LICENSE', { 'README.md\nLICENSE': 'a\n' }, [], true],
+    ['a newline in a name under docs/ (still under docs/)', { 'docs/a\nsrc/b.ts': 'a\n' }, [], false],
   ];
   for (const [what, files, rm, want] of cases) {
     const r = sh(dir, base, branch(`b${cases.findIndex((c) => c[0] === what)}`, files, rm));
     assert.equal(r.status, 0, `${what}: ${r.stderr}`);
     assert.match(r.stdout, new RegExp(`^code=${want}$`, 'm'), what);
   }
-  // The diff is from the merge base: main moving on (a src/ change there) doesn't make a docs-only PR code.
+  // Read on the merge commit: main moving on (a src/ change there) doesn't make a docs-only PR code.
   const docs = branch('docs-pr', { 'docs/b.md': 'b\n' });
   writeFileSync(join(dir, 'src', 'main-only.ts'), 'm\n');
   g(dir, 'add', '-A');
   g(dir, 'commit', '-q', '-m', 'main moves on');
   assert.match(sh(dir, g(dir, 'rev-parse', 'HEAD'), docs).stdout, /^code=false$/m);
-  // An error (a base that isn't a commit) exits non-zero and writes no code= line: the gate then runs the job.
-  const bad = sh(dir, 'f'.repeat(40), docs);
-  assert.notEqual(bad.status, 0);
-  assert.doesNotMatch(bad.stdout, /code=/);
-  const none = spawnSync('bash', [join(repoRoot, 'scripts', 'ci', 'touches-code.sh')], { cwd: dir, encoding: 'utf8', env: { PATH: process.env.PATH ?? '' } });
-  assert.notEqual(none.status, 0, 'no PR_BASE or PR_HEAD');
-  assert.doesNotMatch(none.stdout, /code=/);
+  // R1309c D2, R1309d D1: a PR into another branch is code whatever it touches, the branch names compared exactly.
+  assert.match(sh(dir, 'main', docs, 'feature-a').stdout, /^code=true$/m, 'a docs-only PR into another branch');
+  assert.match(sh(dir, 'main', docs, 'Main').stdout, /^code=true$/m, 'a docs-only PR into Main (GitHub\'s != would read it as main)');
+  // Errors exit non-zero and write no code= line: the gate then runs the job.
+  const refused = (what: string, r: ReturnType<typeof run>) => {
+    assert.notEqual(r.status, 0, what);
+    assert.doesNotMatch(r.stdout, /code=/, what);
+  };
+  g(dir, 'checkout', '-q', '--detach', docs);
+  const env = { BASE_REF: 'main', DEFAULT_BRANCH: 'main' };
+  refused('HEAD is the PR head itself, not a merge commit', run(dir, { ...env, PR_HEAD: docs }));
+  g(dir, 'checkout', '-q', '--detach', 'main');
+  g(dir, '-c', 'user.email=ci@example.com', '-c', 'user.name=ci', 'merge', '-q', '--no-ff', '--no-edit', branch('other-pr', { 'src/o.ts': 'o\n' }));
+  refused("HEAD merges another commit than PR_HEAD (not this PR's merge)", run(dir, { ...env, PR_HEAD: docs }));
+  refused('PR_HEAD is not a commit', run(dir, { ...env, PR_HEAD: 'f'.repeat(40) }));
+  refused('no PR_HEAD', run(dir, env));
+  refused('no BASE_REF', run(dir, { PR_HEAD: docs, DEFAULT_BRANCH: 'main' }));
+  refused('no DEFAULT_BRANCH', run(dir, { PR_HEAD: docs, BASE_REF: 'main' }));
+  g(dir, 'checkout', '-q', 'main');
+
+  // R1309d D2: criss-cross merges give two merge bases, and the diff from the one git merge-base picks can miss src/.
+  // main merges the branch's B while the branch merges main's A, reverting B's line in that merge (an evil merge).
+  const cc = tmp();
+  g(cc, 'init', '-q', '-b', 'main');
+  g(cc, 'config', 'user.email', 'ci@example.com');
+  g(cc, 'config', 'user.name', 'ci');
+  const lines = (edit: Record<number, string> = {}) => `${[1, 2, 3, 4, 5, 6, 7, 8].map((n) => edit[n] ?? String(n)).join('\n')}\n`;
+  mkdirSync(join(cc, 'src'));
+  mkdirSync(join(cc, 'docs'));
+  writeFileSync(join(cc, 'src', 'p.ts'), lines());
+  writeFileSync(join(cc, 'docs', 'a.md'), 'a\n');
+  g(cc, 'add', '-A');
+  g(cc, 'commit', '-q', '-m', 'o');
+  g(cc, 'checkout', '-q', '-b', 'b');
+  // Dated as R1309d's probe has them, so git merge-base picks the base whose diff hides src/p.ts (round 2's reading).
+  const dated = (date: string, ...a: string[]) => spawnSync('git', a, { cwd: cc, encoding: 'utf8', env: { ...process.env, GIT_COMMITTER_DATE: date, GIT_AUTHOR_DATE: date } });
+  writeFileSync(join(cc, 'src', 'p.ts'), lines({ 2: 'B' }));
+  dated('2026-01-01T00:00:00', 'commit', '-q', '-am', 'B');
+  const B = g(cc, 'rev-parse', 'HEAD');
+  g(cc, 'checkout', '-q', 'main');
+  writeFileSync(join(cc, 'src', 'p.ts'), lines({ 7: 'A' }));
+  dated('2026-01-02T00:00:00', 'commit', '-q', '-am', 'A');
+  const A = g(cc, 'rev-parse', 'HEAD');
+  g(cc, 'merge', '-q', '--no-edit', B, '-m', 'main merges B');
+  const Mm = g(cc, 'rev-parse', 'HEAD');
+  g(cc, 'checkout', '-q', 'b');
+  g(cc, 'merge', '-q', '--no-edit', A, '-m', 'b merges A');
+  writeFileSync(join(cc, 'src', 'p.ts'), lines({ 7: 'A' }));
+  g(cc, 'commit', '-q', '--amend', '-am', "b merges A, reverting B's line");
+  writeFileSync(join(cc, 'docs', 'a.md'), 'a\ne\n');
+  g(cc, 'commit', '-q', '-am', 'pr: docs');
+  const H = g(cc, 'rev-parse', 'HEAD');
+  const bases = g(cc, 'merge-base', '--all', Mm, H).split('\n');
+  assert.equal(bases.length, 2, 'two merge bases');
+  assert.ok(bases.some((b) => !g(cc, 'diff', '--name-only', b, H).split('\n').includes('src/p.ts')), "from one of them, the PR's diff shows no src/ change");
+  assert.ok(!g(cc, 'diff', '--name-only', g(cc, 'merge-base', Mm, H), H).split('\n').includes('src/p.ts'), 'and git merge-base picks that one (round 2 read code=false here)');
+  const crissCross = sh(cc, Mm, H);
+  assert.equal(crissCross.status, 0, crissCross.stderr);
+  assert.match(crissCross.stdout, /^code=true$/m, 'the merge into main changes src/p.ts, and the merge commit says so');
 });
 
 test("a gated test passes only when all of it ran: a subtest that skips, is a todo or fails fails it (R1169d #3); a test here skipped for systemd fails the run (R1169f's floor)", () => {

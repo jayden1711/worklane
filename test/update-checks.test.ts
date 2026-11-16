@@ -77,10 +77,10 @@ const PUSH_ONLY = /^github\.event_name == 'push'(?: \|\| github\.event_name == '
 /**
  * ci.yml's systemd-acceptance gate, exactly (the owner's decision, 2026-11-14; test/systemd-acceptance.test.ts holds its
  * cases): every push to main and a manual run; on a pull request it runs when it is ready, from this repo and touches
- * code (or its changes job didn't succeed), fails on a draft or a fork's (R1309b, 2026-11-15) and skips on a ready
- * docs-only one. Not a check that passes on every PR, so none every PR has.
+ * code (or its changes job didn't succeed) or targets another branch, fails on a draft or a fork's (R1309b, 2026-11-15)
+ * and skips on a ready docs-only one into main. Not a check that passes on every PR, so none every PR has.
  */
-const PUSH_READY_PR = "${{ !cancelled() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && (github.event.pull_request.draft == true || github.event.pull_request.head.repo.full_name != github.repository || needs.changes.result != 'success' || needs.changes.outputs.code == 'true'))) }}";
+const PUSH_READY_PR = "${{ !cancelled() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && (github.event.pull_request.base.ref != github.event.repository.default_branch || github.event.pull_request.draft == true || github.event.pull_request.head.repo.full_name != github.repository || needs.changes.result != 'success' || needs.changes.outputs.code == 'true'))) }}";
 /** ci-slow.yml's jobs: each runs when the scope job (scripts/ci/slow-jobs.sh) lists its own key. */
 const SLOW = /^\$\{\{ !cancelled\(\) && contains\(needs\.scope\.outputs\.run, ' ([a-z0-9-]+) '\) \}\}$/;
 /** A summary job runs whatever its needs did, so a failed, cancelled or skipped need fails it rather than skipping it. */

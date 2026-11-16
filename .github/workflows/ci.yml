@@ -301,8 +301,10 @@ jobs:
   # Whether a pull request touches code, for the systemd acceptance job's gate below (scripts/ci/touches-code.sh).
   # Every path is code but the few that name only prose: docs/, changelog.d/, top-level *.md, LICENSE, NOTICE,
   # .github/ISSUE_TEMPLATE/ and .github/PULL_REQUEST_TEMPLATE.md (R1309b D1: a list of what is code missed what the
-  # job reads, .gitignore, .gitattributes, tsconfig.json, web/). GitHub has no paths filter for one job, so that job
-  # needs this one and reads its output. Pull requests only; a helper, required by nothing.
+  # job reads, .gitignore, .gitattributes, tsconfig.json, web/). The paths are what GitHub's merge commit, the tree the
+  # systemd job tests, changes on its first parent (HEAD^1..HEAD; R1309d D2: not a diff from one of several merge
+  # bases). GitHub has no paths filter for one job, so that job needs this one and reads its output. Pull requests
+  # only; a helper, required by nothing.
   changes:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
@@ -316,8 +318,9 @@ jobs:
           fetch-depth: 0
       - id: code
         env:
-          PR_BASE: ${{ github.event.pull_request.base.sha }}
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: bash scripts/ci/touches-code.sh
 
   # The acceptance tests that need a booted systemd and passwordless sudo (each test gated on systemCi). The
@@ -327,7 +330,11 @@ jobs:
   # review and touches code (the owner's decision, 2026-11-14, after #1184 broke this job on main unseen). On a pull
   # request it runs on GitHub's merge ref, the PR merged into main as main is then, not on the PR's head alone.
   # It never posts a passing skip where it hasn't run, since a skip by its own `if` satisfies a required check:
-  #   - a ready same-repo PR that touches no code skips it (the one skip, and a true one);
+  #   - a ready same-repo PR into main that touches no code skips it (the one skip): the changes job read exactly
+  #     what the PR's merge into main changes;
+  #   - a PR into any other branch runs it (R1309c D2, R1309d D1): a base change fires only `edited`, which starts no
+  #     run here, so a skip computed against another branch would stand once the PR is retargeted to main. The changes
+  #     job compares the branch names exactly too (GitHub's != ignores case; git's names don't);
   #   - a draft gets a red check from one step that exits 1 (R1309b D2): a re-run of a draft-era run keeps its payload,
   #     draft and all, so a skip there could replace a ready run's failure on the same head;
   #   - a fork's PR gets a red check from one step that exits 1 (R1309b D3): the job uses sudo on the VM, so a fork's
@@ -340,7 +347,7 @@ jobs:
   systemd-acceptance:
     name: systemd acceptance (real systemd)
     needs: changes
-    if: ${{ !cancelled() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && (github.event.pull_request.draft == true || github.event.pull_request.head.repo.full_name != github.repository || needs.changes.result != 'success' || needs.changes.outputs.code == 'true'))) }}
+    if: ${{ !cancelled() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && (github.event.pull_request.base.ref != github.event.repository.default_branch || github.event.pull_request.draft == true || github.event.pull_request.head.repo.full_name != github.repository || needs.changes.result != 'success' || needs.changes.outputs.code == 'true'))) }}
     runs-on: ubuntu-24.04
     # A hung test (or apt) fails the job within this, never holds the check pending for GitHub's six hours.
     timeout-minutes: 60
