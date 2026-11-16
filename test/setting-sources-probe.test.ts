@@ -113,6 +113,14 @@ test("#958 (R1185p D3): a pull request touching anything the probe loads runs ad
     return /^run=(.*)$/m.exec(r.stdout)?.[1] ?? `(failed: ${r.stderr})`;
   };
   for (const f of ['src/sandbox.ts', 'src/guardrails/push-hook.ts', 'src/brand.ts']) assert.match(jobs(f), / add-project-real-systemd /, `${f} runs add-project's job`);
+  // R1185au D1 (the owner's choice b, 2026-11-15): the tables file a listed module reads at load (tablesOf), which no
+  // import names, runs it too; slow-jobs.sh maps each listed src/x.ts to src/x.tables.json, and the list stays imports
+  // only. The launch's env allowlist (LAUNCH_ENV_KEEP/PASS) lives in src/claude-launch.tables.json.
+  assert.match(jobs('src/claude-launch.tables.json'), / add-project-real-systemd /, "a change to the launch's env allowlist alone runs add-project's job");
+  const tablesRead = listed.split('\n').filter((l) => /^src\/.*\.ts$/.test(l)).map((f) => f.replace(/\.ts$/, '.tables.json')).filter((t) => existsSync(join(repoRoot, t)));
+  assert.ok(tablesRead.includes('src/claude-launch.tables.json') && tablesRead.length >= 7, `the listed modules' tables files are found (${tablesRead.join(', ')})`);
+  for (const t of tablesRead) assert.match(jobs(t), / add-project-real-systemd /, `${t} (read at load by a listed module) runs add-project's job`);
+  assert.doesNotMatch(jobs('src/nosuch.tables.json'), /add-project-real-systemd/, 'a tables file whose module is not listed does not');
   assert.doesNotMatch(jobs('src/sandbox.ts'), /wizard/, "and not the wizard's walk for that alone");
   assert.doesNotMatch(jobs('docs/x.md'), /add-project-real-systemd/, 'a file outside it does not');
 });
