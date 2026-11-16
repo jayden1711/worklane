@@ -1677,33 +1677,41 @@ const python = process.platform === 'linux' && spawnSync('python3', ['-c', 'impo
  * (`npm test` runs files in parallel in one cgroup, so a single before/after read saw -3.8 MB and 14.8 MB of 16 and 32
  * held, release run 43652797429). Each hold is read against the mean of the levels just before it and just after its
  * release, which cancels a linear drift from the others, not a step: they free and take kernel memory in steps of tens
- * of MB, which can still decide a hold (R1181ay D1). A round is HOLDS holds, passed when most reach their bar; when the
- * first round misses, a second one runs (ROUNDS), and the test passes when either does. A reader that misses the buffer
- * misses it in every hold of every round, so a second round adds next to nothing for it (R1181ay: 0.0% a round over
- * the suite's noise trace) and cuts a healthy reader's refusals under load (measured about 2% a run with one round).
+ * of MB, which can still decide a hold (R1181ay D1). A round is HOLDS holds, passed when most reach their bar. The TCP
+ * test (a 4 MB margin over its bar) gets a second round when the first misses, and passes when either does: R1181ba
+ * measured a healthy TCP reader's refusals at 0.012-0.028% a run that way (1.4-1.9% with one round), and a reader that
+ * misses the buffers at 0.0% a round. The pipe test (a 16 MB margin) reads one round: a healthy pipe reader passed
+ * 100.0% of the suite's noise trace with one (R1181ay), and a second round would let a reader of half the buffer pass
+ * more often than the old single read did (54.5% to 74-77%, R1181ba (b)), a loosening.
  */
 const HOLDS = 5;
-const ROUNDS = 2;
+const PIPE_ROUNDS = 1;
+const TCP_ROUNDS = 2;
 /** One hold's rise over the mean of the levels around it. */
 const holdRise = (before: number, held: number, after: number): number => held - (before + after) / 2;
 /** Whether most holds reached their bar (a reader that misses the buffer misses it in every hold). */
 const mostHoldsReach = (rises: readonly number[], bars: readonly number[]): boolean => rises.filter((r, i) => r >= bars[i]!).length * 2 > rises.length;
 /** Whether any round had most of its holds reach their bar. */
 const someRoundReaches = (rounds: readonly { rises: readonly number[]; bars: readonly number[] }[]): boolean => rounds.some((r) => mostHoldsReach(r.rises, r.bars));
-/** Whether to read another round: only when none passed yet, and at most ROUNDS in all. */
-const nextRound = (rounds: readonly { rises: readonly number[]; bars: readonly number[] }[]): boolean => rounds.length < ROUNDS && !someRoundReaches(rounds);
-/** Reads rounds of `hold` until one passes or ROUNDS ran. Null when a hold is refused. */
-async function heldRounds(hold: () => Promise<{ bar: number; stop: () => Promise<void> } | null>): Promise<{ rises: number[]; bars: number[] }[] | null> {
+/** Whether to read another round: only when none passed yet, and at most `max` in all. */
+const nextRound = (rounds: readonly { rises: readonly number[]; bars: readonly number[] }[], max: number): boolean => rounds.length < max && !someRoundReaches(rounds);
+type Hold = () => Promise<{ bar: number; stop: () => Promise<void> } | null>;
+/**
+ * Reads rounds of `hold` until one passes or `max` ran (`read`, heldRises, reads one round). Null only when a hold of
+ * the first round is refused; a later round refused leaves the rounds already read, to be judged (R1181ba D1: a
+ * completed, failing first round must fail, not turn into a skip).
+ */
+async function heldRounds(hold: Hold, max: number, read: (h: Hold) => Promise<{ rises: number[]; bars: number[] } | null> = heldRises): Promise<{ rises: number[]; bars: number[] }[] | null> {
   const rounds: { rises: number[]; bars: number[] }[] = [];
-  while (nextRound(rounds)) {
-    const r = await heldRises(hold);
-    if (!r) return null;
+  while (nextRound(rounds, max)) {
+    const r = await read(hold);
+    if (!r) return rounds.length ? rounds : null;
     rounds.push(r);
   }
   return rounds;
 }
 /** Reads `hold` HOLDS times: each start and stop around `settle`d reads of the kernel level. Null when a hold is refused. */
-async function heldRises(hold: () => Promise<{ bar: number; stop: () => Promise<void> } | null>): Promise<{ rises: number[]; bars: number[] } | null> {
+async function heldRises(hold: Hold): Promise<{ rises: number[]; bars: number[] } | null> {
   const settle = () => new Promise((r) => setTimeout(r, 2500));
   const rises: number[] = [];
   const bars: number[] = [];
@@ -2170,7 +2178,7 @@ test("soak driver (Linux, R1181t D1, D4): the job's cgroup is read: a process st
   }
 });
 
-test('soak driver (R1181ay): a held buffer is read against the levels around it, most holds of a round must reach the bar, and a second round runs only after a miss', () => {
+test('soak driver (R1181ay): a held buffer is read against the levels around it, most holds of a round must reach the bar, and a second round runs only after a miss', async () => {
   const MB = 2 ** 20;
   const bars = Array(HOLDS).fill(16 * MB);
   // A reader that reads the 32 MB: as in release run 43652797429 (a single read saw -3.8 MB of 16 held), other tests free
@@ -2188,9 +2196,13 @@ test('soak driver (R1181ay): a held buffer is read against the levels around it,
   const round = (rises: number[]) => ({ rises, bars });
   const missed = round(bad);
   const met = round(good);
-  assert.ok(nextRound([]) && nextRound([missed]) && !nextRound([met]) && !nextRound([missed, missed]), 'a first round, a second only after a miss, no third');
+  assert.ok(nextRound([], TCP_ROUNDS) && nextRound([missed], TCP_ROUNDS) && !nextRound([met], TCP_ROUNDS) && !nextRound([missed, missed], TCP_ROUNDS), 'TCP: a first round, a second only after a miss, no third');
+  // The pipe test reads one round: a second would let a half reader pass more often than the old read (R1181ba (b)).
+  assert.ok(nextRound([], PIPE_ROUNDS) && !nextRound([missed], PIPE_ROUNDS), 'pipes: one round, no second after a miss');
   assert.ok(someRoundReaches([missed, met]), 'a step that decided the first round: the second passes');
   assert.ok(!someRoundReaches([missed, missed]), 'a reader that misses the buffers misses every round');
+  // R1181bb L1: holds of different rounds don't add up (each hold's best of two rounds would pass this).
+  assert.ok(!someRoundReaches([round([20 * MB, 20 * MB, 3 * MB, 3 * MB, 3 * MB]), round([3 * MB, 3 * MB, 20 * MB, 3 * MB, 3 * MB])]), "holds of different rounds don't add up");
   // R1181az D1: a reader that never sees a release reads half of each hold (15 of 30): not most. Read over the lower
   // neighbour it would read 30.
   const stuck = [0, 1, 2, 3, 4].map((k) => holdRise((100 + 30 * k) * MB, (130 + 30 * k) * MB, (130 + 30 * k) * MB));
@@ -2200,6 +2212,13 @@ test('soak driver (R1181ay): a held buffer is read against the levels around it,
   // A full read while the others' level climbs 40 MB across the holds still reads 32 (read against the after-level only, 12).
   const rising = [0, 1, 2, 3, 4].map((k) => holdRise((100 + 40 * k) * MB, (152 + 40 * k) * MB, (140 + 40 * k) * MB));
   assert.ok(mostHoldsReach(rising, bars), `a full read in a rising level passes: ${rising.map((x) => x / MB)}`);
+  // R1181ba D1: a round refused after a completed, failing one leaves that round to be judged (it fails), never a skip;
+  // a first round refused is the skip.
+  const reads = [missed, null];
+  const kept = await heldRounds(async () => null, TCP_ROUNDS, async () => reads.shift() ?? null);
+  assert.deepEqual(kept, [missed], 'a refused second round keeps the failing first');
+  assert.ok(!someRoundReaches(kept!), 'and it fails');
+  assert.equal(await heldRounds(async () => null, TCP_ROUNDS, async () => null), null, 'a refused first round is the skip');
 });
 
 test("soak driver (Linux, R1181u C1, C2): the job cgroup's kernel level reads a pipe's buffers in full", linuxOnly, async (t) => {
@@ -2236,7 +2255,7 @@ time.sleep(60)`;
       if (!c) return null;
       held.push(c);
       return { bar: 16 * 2 ** 20, stop: async () => { c.kill(); await exited(c); } };
-    });
+    }, PIPE_ROUNDS);
     if (!r) return t.skip('a 1 MB pipe is refused here (pipe-max-size or the per-user pipe limit)');
     const mb = r.map((x) => x.rises.map((y) => (y / 2 ** 20).toFixed(1)).join(', ')).join(' | then ');
     t.diagnostic(`the kernel level rose ${mb} MB over ${r.length} round(s) of ${HOLDS} holds of 32 MB of pipe buffers`);
@@ -2283,7 +2302,7 @@ time.sleep(60)`;
       sent.push(n);
       // 0.75 of what is held in flight (16 MB when the buffers take it all): `kernel - slab_reclaimable` alone read +0.5 MB of 516 (R1181x).
       return { bar: Math.min(12 * 2 ** 20, n * 0.75), stop: async () => { c.kill(); await exited(c); } };
-    }))!;
+    }, TCP_ROUNDS))!;
     const mb = r.map((x, k) => x.rises.map((y, i) => `${(y / 2 ** 20).toFixed(1)} of ${(sent[k * HOLDS + i]! / 2 ** 20).toFixed(1)}`).join(', ')).join(' | then ');
     t.diagnostic(`the kernel level rose ${mb} MB in flight over ${r.length} round(s) of ${HOLDS} holds`);
     assert.ok(someRoundReaches(r), `the kernel level rose ${mb} MB in flight over ${r.length} round(s) of ${HOLDS} holds: most of a round's must reach 0.75 of it (at most 12 MB)`);
