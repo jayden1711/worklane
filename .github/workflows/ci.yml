@@ -298,12 +298,16 @@ jobs:
           echo "test shard 1..4/4 (ubuntu-latest, 24): $RESULT"
           [ "$RESULT" = success ]
 
-  # Whether a pull request touches code (scripts/ci/touches-code.sh: src/, scripts/, test/, .github/workflows/,
-  # package.json, package-lock.json), for the systemd acceptance job's gate below. GitHub has no paths filter for one
-  # job, so that job needs this one and reads its output. Pull requests only; a helper, required by nothing.
+  # Whether a pull request touches code, for the systemd acceptance job's gate below (scripts/ci/touches-code.sh).
+  # Every path is code but the few that name only prose: docs/, changelog.d/, top-level *.md, LICENSE, NOTICE,
+  # .github/ISSUE_TEMPLATE/ and .github/PULL_REQUEST_TEMPLATE.md (R1309b D1: a list of what is code missed what the
+  # job reads, .gitignore, .gitattributes, tsconfig.json, web/). GitHub has no paths filter for one job, so that job
+  # needs this one and reads its output. Pull requests only; a helper, required by nothing.
   changes:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    # A hung git fails it (and so runs the systemd job) within this, never holds the check pending for six hours.
+    timeout-minutes: 5
     outputs:
       code: ${{ steps.code.outputs.code }}
     steps:
@@ -319,23 +323,38 @@ jobs:
   # The acceptance tests that need a booted systemd and passwordless sudo (each test gated on systemCi). The
   # self-hosted tests runner's container has neither systemd as process 1 nor a host to change, so there they skip
   # (#1165), and the main-only runner has no sudo (docs/ci-runners.md). So they run here, on GitHub's VM, never on a
-  # self-hosted runner: on each push to main, on a manual run, and on a pull request when all of these hold (the
-  # owner's decision, 2026-11-14, after #1184 broke this job on main unseen): it is ready for review (not a draft),
-  # its branch is this repo's (a fork's never runs it: the job uses sudo on the VM), and it touches code (the changes
-  # job above). On a pull request it runs on GitHub's merge ref, the PR merged into main as main is then, not on the
-  # PR's head alone. It fails closed: when the changes job didn't succeed (failed, or was skipped), a ready same-repo
-  # PR runs it. !cancelled(), not always(): the `if` is read even when the changes job failed or was skipped, and a
-  # superseded PR run, cancelled, starts none. scripts/ci/systemd-acceptance.mjs finds the tests by their gate and
-  # fails on a skip, so none runs nowhere. The updater requires this check, as every push's.
-  # test/systemd-acceptance.test.ts holds this shape and the gate.
+  # self-hosted runner: on each push to main, on a manual run, and on a pull request from this repo that is ready for
+  # review and touches code (the owner's decision, 2026-11-14, after #1184 broke this job on main unseen). On a pull
+  # request it runs on GitHub's merge ref, the PR merged into main as main is then, not on the PR's head alone.
+  # It never posts a passing skip where it hasn't run, since a skip by its own `if` satisfies a required check:
+  #   - a ready same-repo PR that touches no code skips it (the one skip, and a true one);
+  #   - a draft gets a red check from one step that exits 1 (R1309b D2): a re-run of a draft-era run keeps its payload,
+  #     draft and all, so a skip there could replace a ready run's failure on the same head;
+  #   - a fork's PR gets a red check from one step that exits 1 (R1309b D3): the job uses sudo on the VM, so a fork's
+  #     code never runs here, and a maintainer verifies it (a branch copy run by hand). Neither step checks anything out;
+  #   - when the changes job didn't succeed (failed, timed out, or was skipped), a ready same-repo PR runs it.
+  # !cancelled(), not always(): the `if` is read even when the changes job failed or was skipped, and a superseded PR
+  # run, cancelled, starts none. scripts/ci/systemd-acceptance.mjs finds the tests by their gate and fails on a skip,
+  # so none runs nowhere. The updater requires this check, as every push's. test/systemd-acceptance.test.ts holds this
+  # shape and the gate.
   systemd-acceptance:
     name: systemd acceptance (real systemd)
     needs: changes
-    if: ${{ !cancelled() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true'))) }}
+    if: ${{ !cancelled() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && (github.event.pull_request.draft == true || github.event.pull_request.head.repo.full_name != github.repository || needs.changes.result != 'success' || needs.changes.outputs.code == 'true'))) }}
     runs-on: ubuntu-24.04
     # A hung test (or apt) fails the job within this, never holds the check pending for GitHub's six hours.
     timeout-minutes: 60
     steps:
+      - name: 'draft: runs when marked ready'
+        if: github.event_name == 'pull_request' && github.event.pull_request.draft == true
+        run: |
+          echo "draft: the systemd acceptance tests run when this pull request is marked ready for review" >&2
+          exit 1
+      - name: "fork PR: the systemd check doesn't run for forks; a maintainer verifies"
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
+        run: |
+          echo "fork PR: the systemd check doesn't run for forks (the job uses sudo on the VM); a maintainer verifies" >&2
+          exit 1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:

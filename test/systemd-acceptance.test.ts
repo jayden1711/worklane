@@ -54,7 +54,7 @@ type Ev = { type: 'test:pass' | 'test:fail'; name: string; nesting: number; file
 /** One of node's results, as the reporter writes it: in `file` (built), at `line`, passed unless `o` says otherwise. */
 const ev = (name: string, line: number, o: Partial<Ev> = {}, file = '/r/dist/test/f.test.js'): Ev => ({ type: 'test:pass', name, nesting: 0, file, line, column: 1, skip: null, todo: null, ...o });
 
-type Step = { run?: string; uses?: string; name?: string; env?: Record<string, string> };
+type Step = { run?: string; uses?: string; name?: string; if?: string; env?: Record<string, string> };
 type Job = { name?: string; if?: string; 'runs-on'?: unknown; container?: unknown; 'continue-on-error'?: unknown; 'timeout-minutes'?: unknown; steps?: Step[] };
 
 test('every test gated on the systemd CI flag is found by its gate, and the 3 from #1165 are among them', () => {
@@ -158,7 +158,7 @@ test("ci.yml's systemd-acceptance job: GitHub's VM on each push to main and on a
   assert.equal(job.name, 'systemd acceptance (real systemd)');
   // The owner's decision, 2026-11-14 (it replaces 2026-11-10's "never a PR"): each push to main, a manual run, and a
   // pull request that is ready, from this repo and touches code, failing closed (the gate's own tests are below).
-  assert.equal(job.if, GATE_IF, 'push, dispatch, or a ready same-repo PR that touches code (or whose changes job did not succeed)');
+  assert.equal(job.if, GATE_IF, 'push, dispatch, or a pull request: run when ready, same-repo and touching code (or its changes job did not succeed), red on a draft or a fork\'s');
   // A literal GitHub image: no expression could route it to a self-hosted runner, and no container (no systemd there).
   assert.equal(job['runs-on'], 'ubuntu-24.04');
   assert.equal(job.container, undefined);
@@ -188,14 +188,21 @@ test("ci.yml's systemd-acceptance job: GitHub's VM on each push to main and on a
 });
 
 // ---- The owner's decision of 2026-11-14 ("systemd: A′"): the job also runs on a pull request, when it is ready for
-// review (not a draft), from this repo (never a fork's: the job uses sudo on the VM) and touches code (src/, scripts/,
-// test/, package.json, package-lock.json, .github/workflows/), after #1184 broke it on main unseen (main's runs
-// 43668414496 and the one on 7dfea2a2). Before, the owner's 2026-11-10 choice: push and workflow_dispatch only, never a
-// PR. It fails closed (the organizer's addition, same day): a ready same-repo PR whose changes job didn't succeed runs
-// it, since a job skipped because a need failed reads as passing a required check.
+// review (not a draft), from this repo (never a fork's: the job uses sudo on the VM) and touches code, after #1184
+// broke it on main unseen (main's runs 43668414496 and the one on 7dfea2a2). Before, the owner's 2026-11-10 choice:
+// push and workflow_dispatch only, never a PR. It never posts a passing skip where it hasn't run, since a skip by its
+// own `if` satisfies a required check: it fails closed on a changes job that didn't succeed (the organizer's addition,
+// 2026-11-14), and a draft or a fork's PR gets a red check from one step that exits 1 (R1309b D2, D3, 2026-11-15). The
+// one skip is a ready same-repo PR that touches no code.
 
-/** The job's `if`, exactly (the owner's decision, 2026-11-14). */
-const GATE_IF = "${{ !cancelled() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true'))) }}";
+/** The job's `if`, exactly (the owner's decision, 2026-11-14; R1309b D2/D3, 2026-11-15). */
+const GATE_IF = "${{ !cancelled() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && (github.event.pull_request.draft == true || github.event.pull_request.head.repo.full_name != github.repository || needs.changes.result != 'success' || needs.changes.outputs.code == 'true'))) }}";
+/** The job's first step's `if`: a draft's run fails here (R1309b D2). */
+const DRAFT_STEP_IF = "github.event_name == 'pull_request' && github.event.pull_request.draft == true";
+/** The job's second step's `if`: a fork's PR's run fails here (R1309b D3). */
+const FORK_STEP_IF = "github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository";
+/** The 2026-11-14 `if` (the first round of this PR): a draft and a fork's PR skipped it, which reads as passing. */
+const ROUND1_IF = "${{ !cancelled() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true'))) }}";
 /** The `if` before it (the owner's 2026-11-10 choice): what each scenario below must tell apart from GATE_IF. */
 const OLD_IF = "github.event_name == 'push' || github.event_name == 'workflow_dispatch'";
 
@@ -254,53 +261,83 @@ function evalIf(expr: string, ctx: Ctx): boolean {
 }
 
 const REPO = 'example-org/example-repo';
-const pr = (o: { draft?: boolean; fork?: boolean } = {}) => ({ event_name: 'pull_request', repository: REPO, event: { pull_request: { draft: o.draft ?? false, head: { repo: { full_name: o.fork ? 'someone/example-repo' : REPO } } } } });
+const pr = (o: { draft?: boolean; fork?: boolean; gone?: boolean } = {}) => ({ event_name: 'pull_request', repository: REPO, event: { pull_request: { draft: o.draft ?? false, head: { repo: o.gone ? null : { full_name: o.fork ? 'someone/example-repo' : REPO } } } } });
 const changes = (result: string, code?: string) => ({ changes: { result, outputs: code === undefined ? {} : { code } } });
-/** [what, context, the job runs] for each case the decision names, and the fail-closed ones. */
-const GATE_CASES: [string, Ctx, boolean][] = [
-  ['a draft PR touching src/', { github: pr({ draft: true }), needs: changes('success', 'true'), cancelled: false }, false],
-  ['a ready PR touching only docs/', { github: pr(), needs: changes('success', 'false'), cancelled: false }, false],
-  ['a ready PR touching src/', { github: pr(), needs: changes('success', 'true'), cancelled: false }, true],
-  ["a fork's ready PR touching src/", { github: pr({ fork: true }), needs: changes('success', 'true'), cancelled: false }, false],
-  ['a push to main (the changes job skipped)', { github: { event_name: 'push', repository: REPO, event: {} }, needs: changes('skipped'), cancelled: false }, true],
-  ['a manual run (the changes job skipped)', { github: { event_name: 'workflow_dispatch', repository: REPO, event: {} }, needs: changes('skipped'), cancelled: false }, true],
-  // Fail closed: a changes job that didn't succeed runs it on a ready same-repo PR, never on a draft or a fork's.
-  ['a ready PR whose changes job failed', { github: pr(), needs: changes('failure'), cancelled: false }, true],
-  ['a ready PR whose changes job was skipped', { github: pr(), needs: changes('skipped'), cancelled: false }, true],
-  ['a draft PR whose changes job failed', { github: pr({ draft: true }), needs: changes('failure'), cancelled: false }, false],
-  ["a fork's ready PR whose changes job failed", { github: pr({ fork: true }), needs: changes('failure'), cancelled: false }, false],
+type Outcome = 'run' | 'skip' | 'red';
+type Gate = { job: string; draft: string; fork: string };
+/**
+ * What the job does in `ctx`: skip (its `if` is false: a skip reads as passing), red (it runs and the draft's or the
+ * fork's step exits 1 before anything else), or run (the tests). A step's `if` names no status function, so GitHub
+ * reads it as `success() && (...)`: it runs only while every step before it passed.
+ */
+function outcome(g: Gate, ctx: Ctx): Outcome {
+  if (!evalIf(g.job, ctx)) return 'skip';
+  const step = { ...ctx, needs: {} };
+  return evalIf(g.draft, step) || evalIf(g.fork, step) ? 'red' : 'run';
+}
+const GATE: Gate = { job: GATE_IF, draft: DRAFT_STEP_IF, fork: FORK_STEP_IF };
+/** [what, context, what the job does] for each case the decision names, the fail-closed ones and R1309b's. */
+const GATE_CASES: [string, Ctx, Outcome][] = [
+  ['a ready PR touching only docs/', { github: pr(), needs: changes('success', 'false'), cancelled: false }, 'skip'],
+  ['a ready PR touching src/', { github: pr(), needs: changes('success', 'true'), cancelled: false }, 'run'],
+  ['a push to main (the changes job skipped)', { github: { event_name: 'push', repository: REPO, event: {} }, needs: changes('skipped'), cancelled: false }, 'run'],
+  ['a manual run (the changes job skipped)', { github: { event_name: 'workflow_dispatch', repository: REPO, event: {} }, needs: changes('skipped'), cancelled: false }, 'run'],
+  // Fail closed: a changes job that didn't succeed runs it on a ready same-repo PR.
+  ['a ready PR whose changes job failed', { github: pr(), needs: changes('failure'), cancelled: false }, 'run'],
+  ['a ready PR whose changes job was skipped', { github: pr(), needs: changes('skipped'), cancelled: false }, 'run'],
+  // R1309b D2: a draft is red, never a skip, whatever it touches; a re-run of a draft-era run keeps draft == true.
+  ['a draft PR touching src/', { github: pr({ draft: true }), needs: changes('success', 'true'), cancelled: false }, 'red'],
+  ['a draft PR touching only docs/', { github: pr({ draft: true }), needs: changes('success', 'false'), cancelled: false }, 'red'],
+  ['a draft PR whose changes job failed', { github: pr({ draft: true }), needs: changes('failure'), cancelled: false }, 'red'],
+  // R1309b D3: a fork's PR is red, never a skip and never the tests (sudo on the VM), whatever it touches.
+  ["a fork's ready PR touching src/", { github: pr({ fork: true }), needs: changes('success', 'true'), cancelled: false }, 'red'],
+  ["a fork's ready PR touching only docs/", { github: pr({ fork: true }), needs: changes('success', 'false'), cancelled: false }, 'red'],
+  ["a fork's ready PR whose changes job failed", { github: pr({ fork: true }), needs: changes('failure'), cancelled: false }, 'red'],
+  ["a ready PR whose fork was deleted (head.repo null)", { github: pr({ gone: true }), needs: changes('success', 'true'), cancelled: false }, 'red'],
+  ["a fork's draft PR", { github: pr({ draft: true, fork: true }), needs: changes('success', 'true'), cancelled: false }, 'red'],
   // A superseded PR run, cancelled by the concurrency group: it starts nothing (always() would start it).
-  ['a ready PR touching src/, its run cancelled', { github: pr(), needs: changes('success', 'true'), cancelled: true }, false],
+  ['a ready PR touching src/, its run cancelled', { github: pr(), needs: changes('success', 'true'), cancelled: true }, 'skip'],
 ];
-/** Each case the `if` gets wrong, as "<case>: runs" or "<case>: skips". */
-const gateProblems = (expr: string) => GATE_CASES.filter(([, ctx, want]) => evalIf(expr, ctx) !== want).map(([what, , want]) => `${what}: ${want ? 'skips' : 'runs'}`);
+/** Each case the gate gets wrong, as "<case>: <what it does> (want <outcome>)". */
+const gateProblems = (g: Gate) => GATE_CASES.flatMap(([what, ctx, want]) => { const got = outcome(g, ctx); return got === want ? [] : [`${what}: ${got} (want ${want})`]; });
 
-test("the systemd acceptance gate (the owner's decision, 2026-11-14): a draft, a docs-only PR and a fork's PR skip; a ready PR touching src/, a push and a dispatch run; a failed changes job runs it", () => {
+test("the systemd acceptance gate (the owner's decision, 2026-11-14; R1309b, 2026-11-15): a ready docs-only PR skips; a ready PR touching src/, a push, a dispatch and a failed changes job run it; a draft and a fork's PR are red, never a skip", () => {
   const wf = parse(readFileSync(join(repoRoot, '.github', 'workflows', 'ci.yml'), 'utf8')) as { jobs: Record<string, Job & { needs?: unknown }> };
-  assert.equal(wf.jobs['systemd-acceptance']!.if, GATE_IF);
-  assert.deepEqual(gateProblems(wf.jobs['systemd-acceptance']!.if!), []);
-  for (const [what, ctx, want] of GATE_CASES) assert.equal(evalIf(GATE_IF, ctx), want, what);
+  const job = wf.jobs['systemd-acceptance']!;
+  assert.equal(job.if, GATE_IF);
+  const [draft, fork] = job.steps ?? [];
+  assert.deepEqual(draft, { name: 'draft: runs when marked ready', if: DRAFT_STEP_IF, run: 'echo "draft: the systemd acceptance tests run when this pull request is marked ready for review" >&2\nexit 1\n' }, 'the first step: a draft fails here, before anything is checked out');
+  assert.deepEqual(fork, { name: "fork PR: the systemd check doesn't run for forks; a maintainer verifies", if: FORK_STEP_IF, run: 'echo "fork PR: the systemd check doesn\'t run for forks (the job uses sudo on the VM); a maintainer verifies" >&2\nexit 1\n' }, "the second step: a fork's PR fails here, before anything is checked out");
+  assert.deepEqual(gateProblems({ job: job.if!, draft: draft!.if!, fork: fork!.if! }), []);
+  for (const [what, ctx, want] of GATE_CASES) assert.equal(outcome(GATE, ctx), want, what);
+  // The one skip on a pull request is a ready same-repo PR that touches no code.
+  assert.deepEqual(GATE_CASES.filter(([, ctx, want]) => want === 'skip' && !ctx.cancelled).map(([w]) => w), ['a ready PR touching only docs/']);
 });
 
-test('fail-without: the old if, and the gate missing any one condition, each get a case wrong', () => {
+test('fail-without: the old ifs, the gate missing any one condition, and either red step dropped or turned, each get a case wrong', () => {
   const drop = (part: string, by = '') => {
     assert.ok(GATE_IF.includes(part), part);
-    return GATE_IF.replace(part, by);
+    return { ...GATE, job: GATE_IF.replace(part, by) };
   };
-  const mutants: [string, string][] = [
-    ['the old if (push and dispatch only)', OLD_IF],
+  const mutants: [string, Gate][] = [
+    ['the 2026-11-10 if (push and dispatch only)', { ...GATE, job: OLD_IF }],
+    ["this PR's first round (a draft and a fork's PR skip)", { ...GATE, job: ROUND1_IF }],
     ['no !cancelled() (GitHub then reads success(): a skipped changes job skips it on main)', drop('!cancelled() && ')],
     ['always() for !cancelled() (a cancelled run starts it)', drop('!cancelled()', 'always()')],
     ['no push', drop("github.event_name == 'push' || ")],
     ['no dispatch', drop("github.event_name == 'workflow_dispatch' || ")],
-    ['no pull_request clause', drop(" || (github.event_name == 'pull_request' && github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true'))")],
-    ['no draft check', drop(' && github.event.pull_request.draft == false')],
-    ['no fork check', drop(' && github.event.pull_request.head.repo.full_name == github.repository')],
-    ['no touches-code check', drop(" && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true')")],
-    ['not fail-closed (code only)', drop("(needs.changes.result != 'success' || needs.changes.outputs.code == 'true')", "needs.changes.outputs.code == 'true'")],
-    ['fail-open (a failed changes job skips it)', drop("(needs.changes.result != 'success' || needs.changes.outputs.code == 'true')", "(needs.changes.result == 'success' && needs.changes.outputs.code == 'true')")],
+    ['no pull_request clause', drop(" || (github.event_name == 'pull_request' && (github.event.pull_request.draft == true || github.event.pull_request.head.repo.full_name != github.repository || needs.changes.result != 'success' || needs.changes.outputs.code == 'true'))")],
+    ['a draft skips it (no draft clause)', drop('github.event.pull_request.draft == true || ')],
+    ["a fork's PR skips it (no fork clause)", drop('github.event.pull_request.head.repo.full_name != github.repository || ')],
+    ['no fail-closed clause', drop("needs.changes.result != 'success' || ")],
+    ['no touches-code clause (every ready PR runs it)', drop(" || needs.changes.outputs.code == 'true'", " || true")],
+    ['no draft step (a draft runs the tests)', { ...GATE, draft: 'false' }],
+    ["no fork step (a fork's code runs with sudo)", { ...GATE, fork: 'false' }],
+    ['the draft step on ready PRs', { ...GATE, draft: "github.event_name == 'pull_request' && github.event.pull_request.draft == false" }],
+    ["the fork step on this repo's PRs", { ...GATE, fork: "github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository" }],
+    ['the fork step on a push too', { ...GATE, fork: 'github.event.pull_request.head.repo.full_name != github.repository' }],
   ];
-  for (const [what, expr] of mutants) assert.notDeepEqual(gateProblems(expr), [], what);
+  for (const [what, g] of mutants) assert.notDeepEqual(gateProblems(g), [], what);
   // The evaluator itself: GitHub's implicit success() when no status function is named.
   assert.equal(evalIf("github.event_name == 'push'", { github: { event_name: 'push' }, needs: changes('skipped'), cancelled: false }), false);
   assert.equal(evalIf("github.event_name == 'push'", { github: { event_name: 'push' }, needs: {}, cancelled: false }), true);
@@ -319,6 +356,7 @@ test("ci.yml's triggers, concurrency and the gate's job (the owner's decision, 2
   const ch = wf.jobs.changes!;
   assert.equal(ch.if, "github.event_name == 'pull_request'");
   assert.equal(ch['runs-on'], 'ubuntu-latest');
+  assert.equal(ch['timeout-minutes'], 5, 'a hung git fails it, and so runs the systemd job, within minutes (R1309a)');
   assert.deepEqual(ch.outputs, { code: '${{ steps.code.outputs.code }}' });
   assert.deepEqual(ch.steps, [
     { uses: 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1', with: { 'fetch-depth': 0 } },
@@ -329,7 +367,7 @@ test("ci.yml's triggers, concurrency and the gate's job (the owner's decision, 2
   assert.deepEqual(named, ['ci.yml:systemd-acceptance']);
 });
 
-test('touches-code.sh: src/, scripts/, test/, .github/workflows/, package.json and package-lock.json are code; docs/ and the rest are not; an error writes nothing', { skip: process.platform === 'win32' && 'bash' }, () => {
+test('touches-code.sh: every path is code but docs/, changelog.d/, top-level *.md, LICENSE, NOTICE and the GitHub issue and PR templates (R1309b D1): .gitignore, .gitattributes, tsconfig.json and web/ are code; an error writes nothing', { skip: process.platform === 'win32' && 'bash' }, () => {
   const sh = (cwd: string, base: string, head: string) => spawnSync('bash', [join(repoRoot, 'scripts', 'ci', 'touches-code.sh')], { cwd, encoding: 'utf8', env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '', PR_BASE: base, PR_HEAD: head } });
   const g = (cwd: string, ...a: string[]) => spawnSync('git', a, { cwd, encoding: 'utf8' }).stdout.trim();
   const dir = tmp();
@@ -352,9 +390,25 @@ test('touches-code.sh: src/, scripts/, test/, .github/workflows/, package.json a
     g(dir, 'checkout', '-q', 'main');
     return head;
   };
+  // The paths that are not code, the owner's to adjust (scripts/ci/touches-code.sh's NOT_CODE); every other path is.
   const cases: [string, Record<string, string>, string[], boolean][] = [
     ['docs only', { 'docs/a.md': 'a\n' }, [], false],
     ['README and changelog.d', { 'README.md': '# y\n', 'changelog.d/x.md': 'x\n' }, [], false],
+    ['any file under docs/', { 'docs/deep/x.ts': 'a\n', 'docs/a.package.json': '{}\n' }, [], false],
+    ['a top-level markdown file, a non-ASCII name too (-z)', { 'CONTRIBUTING.md': 'a\n', 'naïve.md': 'a\n' }, [], false],
+    ['LICENSE and NOTICE', { LICENSE: 'a\n', NOTICE: 'a\n' }, [], false],
+    ['the GitHub issue and PR templates', { '.github/ISSUE_TEMPLATE/bug.md': 'a\n', '.github/PULL_REQUEST_TEMPLATE.md': 'a\n' }, [], false],
+    ['no files', {}, [], false],
+    // R1309b D1: what the job reads that a list of code missed. Each alone is code.
+    ['.gitignore (the DynamicUser build copies the tree with git add -A)', { '.gitignore': '*.tables.json\n' }, [], true],
+    ['.gitattributes (export-ignore shapes git archive)', { '.gitattributes': 'package-lock.json export-ignore\n' }, [], true],
+    ['tsconfig.json (the job builds with it; the script scans its roots)', { 'tsconfig.json': '{}\n' }, [], true],
+    ['web/ (the DynamicUser build runs build:web)', { 'web/src/x.tsx': 'a\n' }, [], true],
+    ['templates/', { 'templates/x.yaml': 'a\n' }, [], true],
+    ['.npmrc', { '.npmrc': 'a\n' }, [], true],
+    ['a new top-level folder (a build root tsconfig.json could add)', { 'tools/x.ts': 'a\n' }, [], true],
+    ['.worklane/', { '.worklane/review.yaml': 'a\n' }, [], true],
+    ['.github/ outside the two templates', { '.github/CODEOWNERS': 'a\n' }, [], true],
     ['src/', { 'src/a.ts': 'a\n' }, [], true],
     ['scripts/', { 'scripts/a.sh': 'a\n' }, [], true],
     ['test/', { 'test/a.test.ts': 'a\n' }, [], true],
@@ -362,10 +416,18 @@ test('touches-code.sh: src/, scripts/, test/, .github/workflows/, package.json a
     ['package.json', { 'package.json': '{}\n' }, [], true],
     ['package-lock.json', { 'package-lock.json': '{}\n' }, [], true],
     ['docs and src/', { 'docs/a.md': 'a\n', 'src/b.ts': 'b\n' }, [], true],
+    ['markdown below the top level', { 'src/README.md': 'a\n' }, [], true],
+    ['look-alikes of the exclusions: docsx/, a top-level file named docs, LICENSE.txt, changelog.dx/', { 'docsx/a.md': 'a\n', docs: 'a\n', 'LICENSE.txt': 'a\n', 'changelog.dx/a.md': 'a\n' }, [], true],
+    ['one look-alike alone: LICENSE.txt', { 'LICENSE.txt': 'a\n' }, [], true],
+    ['one look-alike alone: docsx/', { 'docsx/a.md': 'a\n' }, [], true],
+    ['one look-alike alone: a top-level file named docs', { docs: 'a\n' }, [], true],
+    ['one look-alike alone: changelog.dx/', { 'changelog.dx/a.md': 'a\n' }, [], true],
+    ['one look-alike alone: NOTICE.txt', { 'NOTICE.txt': 'a\n' }, [], true],
     ['a file moved out of src/ (--no-renames: its old path is code)', { 'docs/moved.ts': 'x\n' }, ['src/moved.ts'], true],
     ['a name with a non-ASCII letter under src/ (-z)', { 'src/naïve.ts': 'a\n' }, [], true],
-    ['look-alikes: srcx/, a.package.json, .github/other/', { 'srcx/a.ts': 'a\n', 'docs/a.package.json': '{}\n', '.github/other/x.yml': 'a\n', 'package.json.bak': 'x\n' }, [], false],
-    ['no files', {}, [], false],
+    // Over a pipe buffer of names after the one code path (sorted first): one grep, no pipe, still says code.
+    ['one code path, then 5000 under docs/', { 'a.ts': 'a\n', ...Object.fromEntries(Array.from({ length: 5000 }, (_, i) => [`docs/${String(i).padStart(5, '0')}-${'x'.repeat(40)}.md`, 'd\n'])) }, [], true],
+    ['5000 under docs/ alone', Object.fromEntries(Array.from({ length: 5000 }, (_, i) => [`docs/${String(i).padStart(5, '0')}-${'y'.repeat(40)}.md`, 'd\n'])), [], false],
   ];
   for (const [what, files, rm, want] of cases) {
     const r = sh(dir, base, branch(`b${cases.findIndex((c) => c[0] === what)}`, files, rm));
