@@ -53,7 +53,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { parse } from 'yaml';
@@ -722,10 +722,18 @@ function closeBrace(t: string, from: number): number {
  * (`name() {…}`, `function name {…}`), or all of `text` when the call is top-level, and with it every line, anywhere in
  * `text`, that assigns a variable the call's logical line reads (`NAME=`, `NAME+=`, `NAME[i]=`, `local`/`export`/
  * `declare NAME`, `read`/`mapfile`/`readarray … NAME`, `for NAME in`, `unset NAME`). Positional parameters (`$1`, `$@`)
- * aren't followed outside a workflow step: a named limit.
+ * aren't followed outside a workflow step: a named limit. A workflow pin whose line runs a repo script (`node <path> …`)
+ * holds that script's text too (R1185aw D2, the owner's "1185 pin scope: 1+2", 2026-11-16): the script starts the claude the step hands it, so an edit to its spawns is
+ * a pin change in review, as an edit to a spike is. A script that isn't there is held as missing.
  */
 export function pinScope(path: string, text: string, line: number): string {
-  if (path.startsWith('.github/')) return text;
+  if (path.startsWith('.github/')) {
+    const call = logicalLines(text).find((l) => l.line <= line && line <= l.end)?.text ?? '';
+    const script = /^\s*node\s+((?:scripts|src|test)\/[\w./-]+\.[cm]?js)\b/.exec(call)?.[1];
+    if (!script) return text;
+    const file = join(repoRoot, script);
+    return [text, `# text of ${script}`, existsSync(file) ? readFileSync(file, 'utf8') : '(missing)'].join('\n');
+  }
   const at = text.split('\n').slice(0, line - 1).reduce((a, l) => a + l.length + 1, 0);
   let best: [number, number] | null = null;
   for (const m of text.matchAll(/(^|\n)[ \t]*(?:function[ \t]+[A-Za-z_][\w-]*(?:[ \t]*\([ \t]*\))?|[A-Za-z_][\w-]*[ \t]*\([ \t]*\))[ \t]*\{/g)) {
@@ -1138,8 +1146,21 @@ const asPath = (as: string | undefined) => (as === undefined ? undefined : /^<pi
 test('#1262: the pinned exceptions are the owner\'s one, by its exact file, line and reason (a new or moved pin is a change to this test)', () => {
   // R1264c D1, R1264d D2: the whole list by its digest (no spike path named here, #673): its file, its exact line and
   // its reason. Moving, widening or adding a pin changes the digest, so the change shows in this test in review.
-  assert.equal(createHash('sha256').update(JSON.stringify(SHELL_PINS)).digest('hex'), '9e09cae0b143b95123d3059a29d45f188ce2f7cb8447d4fce5cc953df9e76cb1');
-  assert.deepEqual(SHELL_PINS.map(([f, , why]) => [f.split('/').at(-1), why]), [['worktree-commit.sh', 'a sandbox probe whose project-settings load is the point (the owner, 2026-11-11, "spikes: b")'], ['agent-messaging.sh', 'a spike that needs stream-json input (a second message mid-turn, an interrupt), which claude_guarded refuses (R1264j D1): its guards end the argv, and its stdin\'s printfs are in the file its digest holds (the owner\'s "spikes: b")'], ['agent-messaging.sh', 'a spike that needs stream-json input (a second message mid-turn, an interrupt), which claude_guarded refuses (R1264j D1): its guards end the argv, and its stdin\'s printfs are in the file its digest holds (the owner\'s "spikes: b")'], ['agent-messaging.sh', 'a spike that needs stream-json input (a second message mid-turn, an interrupt), which claude_guarded refuses (R1264j D1): its guards end the argv, and its stdin\'s printfs are in the file its digest holds (the owner\'s "spikes: b")'], ['ci-slow.yml', '#958\'s real-claude step: it hands the installed claude to the setting-sources probe, which starts it only through src/claude-launch.ts\'s launch with the runner\'s own argv. That launch is what the probe proves, so claude_guarded can\'t stand in for it (the owner, 2026-11-15, "1185 pins: b")']]);
+  assert.equal(createHash('sha256').update(JSON.stringify(SHELL_PINS)).digest('hex'), '9746234f1f007d8fd3833b281ed903e87e27c1a397b85d708cf9924202a845fd');
+  assert.deepEqual(SHELL_PINS.map(([f, , why]) => [f.split('/').at(-1), why]), [['worktree-commit.sh', 'a sandbox probe whose project-settings load is the point (the owner, 2026-11-11, "spikes: b")'], ['agent-messaging.sh', 'a spike that needs stream-json input (a second message mid-turn, an interrupt), which claude_guarded refuses (R1264j D1): its guards end the argv, and its stdin\'s printfs are in the file its digest holds (the owner\'s "spikes: b")'], ['agent-messaging.sh', 'a spike that needs stream-json input (a second message mid-turn, an interrupt), which claude_guarded refuses (R1264j D1): its guards end the argv, and its stdin\'s printfs are in the file its digest holds (the owner\'s "spikes: b")'], ['agent-messaging.sh', 'a spike that needs stream-json input (a second message mid-turn, an interrupt), which claude_guarded refuses (R1264j D1): its guards end the argv, and its stdin\'s printfs are in the file its digest holds (the owner\'s "spikes: b")'], ['ci-slow.yml', '#958\'s real-claude step: it hands the installed claude to scripts/ci/setting-sources-probe.mjs, whose text this pin\'s digest holds. The probe starts it through src/claude-launch.ts\'s launch with the runner\'s argv and, by design, also with sources loaded: its controls rewrite that argv in its shim, and one case spawns a hand-built argv. Every run is in a throwaway HOME, with a dummy key, against a loopback stand-in API (the owner, 2026-11-15, "1185 pins: b"; the pin holds the probe: the owner, 2026-11-16, "1185 pin scope: 1+2")']]);
+});
+
+test('#1262 (R1185aw D2): a workflow pin on `node <script> …` holds the script it runs, so an edit to its spawns breaks the pin', () => {
+  const pin = SHELL_PINS.find(([f]) => f === '.github/workflows/ci-slow.yml');
+  assert.ok(pin, "the #958 step's pin");
+  const probe = readFileSync(join(repoRoot, 'scripts', 'ci', 'setting-sources-probe.mjs'), 'utf8');
+  const step = `v=1\n${pin[1]}\n`;
+  const scope = pinScope(pin[0], step, 2);
+  assert.ok(scope.startsWith(step) && scope.endsWith(probe), 'the step and then the probe, whole');
+  // The control: a step line that runs no repo script holds the step alone.
+  assert.equal(pinScope(pin[0], 'v=1\n"$cc/bin/claude" --version\n', 2), 'v=1\n"$cc/bin/claude" --version\n');
+  // A script that isn't there is held as missing, never as nothing.
+  assert.match(pinScope(pin[0], 'node scripts/ci/nosuch.mjs "$cc/bin/claude"\n', 1), /# text of scripts\/ci\/nosuch\.mjs\n\(missing\)$/);
 });
 
 test('#1262: every way a script can start claude other than through claude_guarded is refused (fixtures), and the controls pass', () => {

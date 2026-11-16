@@ -28,8 +28,8 @@
     [
       ".github/workflows/ci-slow.yml",
       "node scripts/ci/setting-sources-probe.mjs \"$cc/bin/claude\"",
-      "#958's real-claude step: it hands the installed claude to the setting-sources probe, which starts it only through src/claude-launch.ts's launch with the runner's own argv. That launch is what the probe proves, so claude_guarded can't stand in for it (the owner, 2026-11-15, \"1185 pins: b\")",
-      "afd5484933f6c30f50129915a53f6bda882a29304acdd85c404a90745ea9134d"
+      "#958's real-claude step: it hands the installed claude to scripts/ci/setting-sources-probe.mjs, whose text this pin's digest holds. The probe starts it through src/claude-launch.ts's launch with the runner's argv and, by design, also with sources loaded: its controls rewrite that argv in its shim, and one case spawns a hand-built argv. Every run is in a throwaway HOME, with a dummy key, against a loopback stand-in API (the owner, 2026-11-15, \"1185 pins: b\"; the pin holds the probe: the owner, 2026-11-16, \"1185 pin scope: 1+2\")",
+      "50270da03b8225223b46dafc0fc162995fa430d7ea1689104b999d2ee2bd207f"
     ]
   ]
 }
