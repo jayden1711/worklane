@@ -18,6 +18,7 @@
     "dist/src",
     "!dist/src/**/*.map",
     "!dist/src/**/*.d.ts",
+    "!dist/src/soak.*",
     "dist/web",
     "scripts/setup/app-permissions.mjs",
     "examples/basic",
