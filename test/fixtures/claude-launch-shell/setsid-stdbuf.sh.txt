@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+setsid stdbuf -oL claude -p hi

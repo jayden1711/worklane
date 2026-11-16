@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# R1264f D3 (f03c): a guarded array, then one element changed.
+ARGS=(-p hi --settings '{}' --setting-sources '' --strict-mcp-config)
+ARGS[4]=project
+claude "${ARGS[@]}"

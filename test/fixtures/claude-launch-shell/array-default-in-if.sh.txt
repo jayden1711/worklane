@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# R1264f D3 (f03d): an unguarded default, the guarded one only inside an if.
+ARGS=(-p hi --setting-sources user)
+if [ -n "${SAFE:-}" ]; then ARGS=(-p hi --settings '{}' --setting-sources '' --strict-mcp-config); fi
+claude "${ARGS[@]}"

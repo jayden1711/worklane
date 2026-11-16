@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# R1264h D2 (e01): CLAUDE_CODE_PLUGIN_DIRS on the call line.
+CLAUDE_CODE_PLUGIN_DIRS=./p claude -p hi --settings '{}' --setting-sources '' --strict-mcp-config

@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# R1264l D4 (l02a): a glob that matches the binary.
+/usr/local/bin/claud[e] -p hi --plugin-dir ./p

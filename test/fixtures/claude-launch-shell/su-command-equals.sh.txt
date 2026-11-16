@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# R1264j D3 (j02b): su --command=.
+su -l wl-agent --command='claude -p hi'

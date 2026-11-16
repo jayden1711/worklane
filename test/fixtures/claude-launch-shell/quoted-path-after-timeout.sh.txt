@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# R1264d D3
+timeout 120 "$HOME/.local/bin/claude" -p hi

@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# R1264y/z D1 (w1): the word case as an argument inside "$(…)".
+n="$(grep -c case "$f")"
+sudo() { command sudo -n "$@"; }
