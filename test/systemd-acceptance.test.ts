@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { parse } from 'yaml';
 import { repoRoot } from './helpers.js';
+import { withFreezes } from './table-freeze.js';
 
 // The acceptance tests that need a booted systemd run in one place, ci.yml's systemd-acceptance job on GitHub's VM
 // (#1165's follow-up): the self-hosted tests runner's container skips them, and the main-only runner has no sudo.
@@ -29,9 +30,10 @@ type Script = {
   signUseList: (ts: unknown, path: string, text: string) => { at: string; pin: string }[];
   signProblems: (ts: unknown, texts: Map<string, string>, allow?: Allow) => string[];
   planProblems: (ts: unknown, path: string, text: string, gates: { name: string; line: number; column: number }[]) => string[];
-  mustRun: (ts: unknown, path: string, text: string, line: number, column: number) => { ends: { line: number; pos: number; calls?: number; what: string }[]; subtests: Point[]; sign: Point[]; refused: string | null } | null;
+  mustRun: (ts: unknown, path: string, text: string, line: number, column: number) => { ends: { line: number; pos: number; calls?: number; what: string }[]; subtests: Point[]; sign: Point[]; refused: string | null; length: number } | null;
   blockCoverage: (dir: string, url: string) => Range[][] | null;
   countAt: (ranges: Range[], pos: number) => number;
+  textAsRun: (text: string, url: string, freezes: (source: string, url: string) => string | null) => string;
 };
 type Point = { line: number; pos: number };
 type Range = { startOffset: number; endOffset: number; count: number };
@@ -1756,7 +1758,7 @@ test("R1169ab D2: a gate opens with node's own count; a sign test's own function
   assert.equal(sa.mustRun(ts, file, `import { test } from 'node:test';\ntest('s', () => { ${unit}; });\n`, 2, 1)!.refused, null, 'a space before the brace: read');
   // problems(): judged on the run's block coverage of the file (one process), each point by the innermost range around it.
   const at = (line: number) => ({ line, pos: line * 100 + 5 });
-  const t = { name: 's', line: 2, column: 1, label: "'s'", subtests: true, mustRun: { ends: [{ ...at(7), what: 'its function' }, { ...at(3), what: 'the subtest at line 3' }], subtests: [at(3), at(4)], sign: [at(6)], refused: null } };
+  const t = { name: 's', line: 2, column: 1, label: "'s'", subtests: true, mustRun: { ends: [{ ...at(7), what: 'its function' }, { ...at(3), what: 'the subtest at line 3' }], subtests: [at(3), at(4)], sign: [at(6)], refused: null, length: 1000 } };
   const ev = (name: string, line: number, nesting = 0) => ({ type: 'test:pass', name, nesting, file: '/r/dist/test/g.test.js', line, column: 1, skip: null, todo: null });
   const events = [ev('a', 3, 1), ev('b', 4, 1), ev('s', 2)];
   const run = (coverage: Range[][] | null, excused: string[] = []) => sa.problems([{ file: 'g.test.ts', gates: [], events, signTests: [t], excused: new Set(excused), coverage } as never]);
@@ -1771,6 +1773,9 @@ test("R1169ab D2: a gate opens with node's own count; a sign test's own function
   assert.deepEqual(run([[{ startOffset: 0, endOffset: 1000, count: 1 }, { startOffset: 606, endOffset: 650, count: 0 }]]), [], "a block on the sign's line that doesn't hold it");
   assert.match(run([[{ startOffset: 0, endOffset: 1000, count: 1 }, { startOffset: 600, endOffset: 610, count: 0 }]]).join('\n'), /line 6, holding systemd's sign, never ran/, 'the innermost range around the sign, however short');
   assert.match(run(null).join('\n'), /no coverage of its file came back/, 'no coverage is never a pass');
+  // R1308a D1: the coverage is of a text of another length than the one its points were read on: refused, never judged.
+  for (const end of [999, 1001]) assert.match(run([[{ startOffset: 0, endOffset: end, count: 1 }]]).join('\n'), new RegExp(`a text of ${end} characters, and what of it must run was read on one of 1000: the coverage is of a text other than the one judged`), `a module range of ${end}`);
+  assert.match(run([[{ startOffset: 5, endOffset: 1000, count: 1 }]]).join('\n'), /the coverage is of a text other than the one judged/, "a first range that isn't the module's");
   // R1169ap F3: a zero range that starts where an earlier statement ends is the continuation after a jump there.
   const f3 = (start: number) => sa.problems([{ file: 'g.test.ts', gates: [], events, signTests: [{ ...t, mustRun: { ...t.mustRun, sign: [{ ...at(6), after: [550] }] } }], excused: new Set(), coverage: [[{ startOffset: 0, endOffset: 1000, count: 1 }, { startOffset: start, endOffset: 580, count: 0 }]] } as never]);
   assert.match(f3(550).join('\n'), /line 6, holding systemd's sign, never ran/, 'a zero range from the end of an earlier statement: the sign after it never ran, though V8 ended the range before it');
@@ -1792,4 +1797,102 @@ test("R1169ab D2: a gate opens with node's own count; a sign test's own function
   writeFileSync(join(dir, 'notes.txt'), 'not coverage');
   assert.deepEqual(sa.blockCoverage(dir, 'file:///r/dist/test/g.test.js'), [[{ startOffset: 0, endOffset: 100, count: 1 }, { startOffset: 10, endOffset: 20, count: 0 }], [{ startOffset: 0, endOffset: 100, count: 4 }]]);
   assert.equal(sa.blockCoverage(dir, 'file:///r/dist/test/missing.test.js'), null, 'a file no process loaded: null, never a pass');
+});
+
+test('a sign test after a registered table is judged on the text that ran, which the preload hook adds to (#1184 on main)', () => {
+  // The test preload's hook (test/table-freeze.ts) adds a freeze call after each registered table, on its line: every
+  // offset after it moves. On main the job read the coverage's offsets on the file as built, so 6 tests that ran to
+  // their end read as returned early. A real run, as the job makes one: the preload, V8's block coverage.
+  const dir = tmp();
+  mkdirSync(join(dir, 'dist', 'test'), { recursive: true });
+  const file = join(dir, 'dist', 'test', 'f.test.js');
+  const mark = `// check${'-'}table: never-shrink`;
+  const text = [
+    "import { test } from 'node:test';",
+    mark,
+    "const NAMES = ['a', 'b'];",
+    "test('ends', () => {",
+    '  if (NAMES.length === 0) return;',
+    '  NAMES.join();',
+    '});',
+    "test('returns', () => {",
+    '  if (NAMES.length === 2) return;',
+    '  NAMES.join();',
+    '});',
+    '',
+  ].join('\n');
+  writeFileSync(file, text);
+  const url = pathToFileURL(file).href;
+  const cov = join(dir, 'cov');
+  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'NODE_TEST_CONTEXT' && k !== 'NODE_OPTIONS' && k !== 'NODE_V8_COVERAGE'));
+  const r = spawnSync(process.execPath, ['--import', './dist/test/isolate.js', '--test', '--test-reporter=tap', file], { cwd: repoRoot, env: { ...env, NODE_V8_COVERAGE: cov }, encoding: 'utf8' });
+  assert.equal(r.status, 0, `${r.stdout}${r.stderr}`);
+  const coverage = sa.blockCoverage(cov, url);
+  assert.equal(coverage?.length, 1, 'one process ran the file');
+  const ran = sa.textAsRun(text, url, withFreezes);
+  assert.notEqual(ran, text, 'the hook added a freeze call');
+  assert.equal(coverage![0]![0]!.endOffset, ran.length, "the module's range spans the text that ran");
+  assert.notEqual(coverage![0]![0]!.endOffset, text.length, 'which is not the file as built');
+  const judge = (t: string, name: string, line: number) => sa.problems([{ file: 'f.test.ts', gates: [], events: [ev(name, line, {}, file)], signTests: [{ name, line, column: 1, label: `'${name}'`, subtests: false, mustRun: sa.mustRun(ts, 'test/f.test.ts', t, line, 1) }], excused: new Set(), coverage } as never]);
+  assert.deepEqual(judge(ran, 'ends', 4), [], 'ran to its end: read so on the text that ran');
+  assert.match(judge(ran, 'returns', 8).join('\n'), /its function's last statement \(line 10\) never ran: it returned early/, 'a control: a real early return still reads as one');
+  // Read on the file as built (main's reading), whatever the path's length: refused, as neither ended nor not.
+  for (const [name, line] of [['ends', 4], ['returns', 8]] as const) assert.match(judge(text, name, line).join('\n'), /the coverage is of a text other than the one judged/, `${name}, read on the built text`);
+  // textAsRun: a file the hook leaves alone is its own text; a rewrite that moved a line is refused.
+  assert.equal(sa.textAsRun('a\n', url, () => null), 'a\n');
+  assert.throws(() => sa.textAsRun('a\n', url, () => 'a\n\nb'), /moved its lines/);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('end to end, the script reads a sign test on the text its preload hook hands V8 (R1308a D1): one that ran all of it passes, one whose sign never ran fails', { timeout: 120_000 }, () => {
+  // A scratch root whose preload registers a hook of its own (dist/test/table-freeze.js, as the repo's): it adds text
+  // on a line before the tests, so their lines hold and their offsets move, as the repo's freeze calls do. The script
+  // reads the hook from the build, as in the repo: read on the file as built, it refuses the run (main's reading). A
+  // return in a sign test is refused statically, so the control is the other point judged by position: the sign.
+  const hook = [
+    "export function withFreezes(source) { return source.includes('const PAD = 0;') ? source.replace('const PAD = 0;', `const PAD = 0; void '${'x'.repeat(300)}';`) : null; }",
+    'export async function load(url, context, next) {',
+    '  const out = await next(url, context);',
+    "  if (!/\\/dist\\/test\\/.*\\.js$/.test(new URL(url).pathname) || out.source == null) return out;",
+    "  const w = withFreezes(typeof out.source === 'string' ? out.source : Buffer.from(out.source).toString('utf8'), url);",
+    '  return w === null ? out : { ...out, source: w };',
+    '}',
+    '',
+  ].join('\n');
+  const run = (cond: string) => {
+    const r = tmp();
+    mkdirSync(join(r, 'scripts', 'ci'), { recursive: true });
+    mkdirSync(join(r, 'test'));
+    mkdirSync(join(r, 'dist', 'test'), { recursive: true });
+    for (const f of ['systemd-acceptance.mjs', 'systemd-acceptance-reporter.mjs']) writeFileSync(join(r, 'scripts', 'ci', f), readFileSync(join(repoRoot, 'scripts', 'ci', f)));
+    writeFileSync(join(r, 'package.json'), '{"type":"module"}\n');
+    modules(r);
+    writeFileSync(join(r, 'dist', 'test', 'isolate.js'), "import { register } from 'node:module';\nregister('./table-freeze.js', import.meta.url);\n");
+    writeFileSync(join(r, 'dist', 'test', 'table-freeze.js'), hook);
+    const text = [
+      "import { test } from 'node:test';",
+      `const ${flag} = true;`,
+      'const PAD = 0;',
+      `test('acceptance: ok', { ${gate()} && 'x' }, (t) => { t.plan(1); t.assert.ok(PAD === 0); });`,
+      "test('s', () => {",
+      "  let unit = '';",
+      `  if (${cond}) unit = String('${'system'}ctl');`,
+      '  void unit;',
+      '});',
+      '',
+    ].join('\n');
+    writeFileSync(join(r, 'test', 'x.test.ts'), text);
+    writeFileSync(join(r, 'dist', 'test', 'x.test.js'), text);
+    const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'NODE_TEST_CONTEXT' && k !== 'NODE_OPTIONS' && k !== 'NODE_V8_COVERAGE'));
+    const p = spawnSync(process.execPath, ['scripts/ci/systemd-acceptance.mjs'], { cwd: r, encoding: 'utf8', env });
+    rmSync(r, { recursive: true, force: true });
+    return { status: p.status, out: `${p.stdout}`, err: p.stderr, why: `exit ${p.status}\nstderr:\n${p.stderr}\nstdout (tail):\n${(p.stdout ?? '').split('\n').slice(-15).join('\n')}` };
+  };
+  const all = run('PAD === 0');
+  assert.equal(all.status, 0, `ran all of it: ${all.why}`);
+  assert.match(all.out, /all 1 gate\(s\) and 1 sign test\(s\) ran and passed/);
+  const never = run('PAD !== 0');
+  assert.equal(never.status, 1, `its sign never ran: ${never.why}`);
+  assert.match(never.err, /test\/x\.test\.ts: s: line 7, holding systemd's sign, never ran/, never.why);
+  assert.doesNotMatch(never.err, /a text other than the one judged/, never.why);
 });
