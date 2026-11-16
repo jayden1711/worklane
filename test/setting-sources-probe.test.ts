@@ -121,6 +121,10 @@ test("#958 (R1185p D3): a pull request touching anything the probe loads runs ad
   assert.ok(tablesRead.includes('src/claude-launch.tables.json') && tablesRead.length >= 7, `the listed modules' tables files are found (${tablesRead.join(', ')})`);
   for (const t of tablesRead) assert.match(jobs(t), / add-project-real-systemd /, `${t} (read at load by a listed module) runs add-project's job`);
   assert.doesNotMatch(jobs('src/nosuch.tables.json'), /add-project-real-systemd/, 'a tables file whose module is not listed does not');
+  // R1185aw D1: the probe's install() scaffolds templates/project/ into a checkout with no .worklane/, and every guarded
+  // run's --settings (pre_approved, network.allow, credential_stores) and the guard's rules come from that copy.
+  for (const f of ['templates/project/guardrails.yaml', 'templates/project/config.yaml']) assert.match(jobs(f), / add-project-real-systemd /, `${f} (scaffolded by the probe's install()) runs add-project's job`);
+  assert.doesNotMatch(jobs('templates/evals/stage-labels.json'), /add-project-real-systemd/, 'another templates folder does not');
   assert.doesNotMatch(jobs('src/sandbox.ts'), /wizard/, "and not the wizard's walk for that alone");
   assert.doesNotMatch(jobs('docs/x.md'), /add-project-real-systemd/, 'a file outside it does not');
 });

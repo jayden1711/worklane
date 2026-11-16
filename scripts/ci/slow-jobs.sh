@@ -52,7 +52,9 @@ case "${EVENT:-}" in
       if [ -f scripts/ci/setting-sources-probe.files ] && grep -qxFf <(sed -e p -e 's/\.ts$/.tables.json/' scripts/ci/setting-sources-probe.files) <<< "$files" && [[ " $run " != *" add-project-real-systemd "* ]]; then run="$run add-project-real-systemd"; fi
       # WHY: add-project's plugins and MCP broker steps fetch and run test/fixtures/plugins (the escape fixture only
       # there, in the broker's sandbox), and no other slow job reads them: a fixture change needed full-ci before.
-      if grep -qE '^test/fixtures/plugins/' <<< "$files" && [[ " $run " != *" add-project-real-systemd "* ]]; then run="$run add-project-real-systemd"; fi
+      # And templates/project/ (R1185aw D1): the probe's install() scaffolds it into a checkout with no .worklane/, and
+      # the instance agent settings every guarded run gets as --settings come from that copy (a runtime read, not an import).
+      if grep -qE '^(test/fixtures/plugins/|templates/project/)' <<< "$files" && [[ " $run " != *" add-project-real-systemd "* ]]; then run="$run add-project-real-systemd"; fi
     fi
     ;;
   *)
