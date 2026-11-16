@@ -620,7 +620,8 @@ function transfersOutput(words0: readonly string[], slots = true, raw = ''): 'fi
     // R1228bz D1, R1228cb D3: the runner pastes a GitHub expression's value into the script before bash runs, so
     // double-quoted it is one word, one URL slot; unquoted, bash splits the value like an unquoted variable's, so it
     // takes none, as `$VAR` (the owner's option (a), "1228 round 4: a"): a stated limit, in the Limits.
-    else if (slots && oneWord.has(tok)) urls++;
+    // R1228cc D1: an option word is no URL, however its glued value is quoted (`-m"$T"`, `-H"Auth: $TOKEN"`).
+    else if (slots && !tok.startsWith('-') && oneWord.has(tok)) urls++;
     // An unquoted expression glued to other text (`${{ env.BASE }}/t.tgz`) is one word, as `$BASE/t.tgz` is: one slot.
     else if (slots && /^\$\{\{/.test(tok) && !/^\$\{\{[^}]*\}\}$/.test(tok)) urls++;
     else if (slots && (/\[[@*]\]\}?$/.test(tok) || /^\$[@*]$/.test(tok) || /^\$\{[^}]*[^A-Za-z0-9_}][^}]*\}?/.test(tok) || (/^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$/.test(tok) && !quoted.has(tok.replace(/[${}]/g, ''))))) continue;
@@ -2561,6 +2562,12 @@ test('R1228cb D1-D4: an ANSI-C string and a nested $(…) with its own quotes hi
   }
   for (const text of ['curl -fsSL -o /dev/null "${{ env.PROBE_URL }}" "${{ env.PKG_URL }}" > t.tgz', 'curl -fsSL -o /dev/null "${{ inputs.health_url }}" "https://example.com/t.tgz" > t.tgz']) {
     assert.ok(runProblems(`${text}\n`).length > 0, `refused in a run: ${text}`);
+  }
+  // R1228cc D1: a short option with a glued, double-quoted value is an option, not a URL slot (real curl: 1 GET,
+  // nothing kept: attacks-1228cc/cc/realcurl.out K1-K4, K11), as with a blank or unquoted.
+  for (const text of [`code=$(curl -s -m"$TIMEOUT" -o /dev/null -w '%{http_code}' "$URL")`, `code=$(curl -s -H"Authorization: Bearer $TOKEN" -o /dev/null -w '%{http_code}' "$URL")`, `code=$(curl -s -A"worklane-ci/$VERSION" -o /dev/null -w '%{http_code}' "$URL")`, `code=$(curl -s -u"$USER:$PASS" -o /dev/null -w '%{http_code}' "$URL")`, `code=$(curl -s -w"%{http_code} $SUFFIX" -o /dev/null "$URL")`, `code=$(curl -s -m "$TIMEOUT" -o /dev/null -w '%{http_code}' "$URL")`, `code=$(curl -s -m$TIMEOUT -o /dev/null -w '%{http_code}' "$URL")`]) {
+    assert.deepEqual(kept(`${text}\n`), [], `kept: ${text}`);
+    assert.deepEqual(runProblems(`${text}\n`), [], `kept in a run: ${text}`);
   }
   // A list expansion inside the quotes takes no slot (stated): "${URLS[@]:1:1}" (cb G8).
   assert.deepEqual(kept('curl -fsSL -o /dev/null "$PROBE" "${URLS[@]:1:1}" > t.tgz\n'), [], 'stated: a list expansion in quotes');
