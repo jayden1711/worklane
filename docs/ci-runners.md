@@ -178,3 +178,5 @@ CI runs all of this for real on a GitHub-hosted Ubuntu 24.04 (`.github/workflows
    ```
 
    It stops and removes the units, the firewall table, the registration, the runner user and its files, and the ACL entries. If no other CI runner is left, it also removes the slice, the AppArmor profile, `/opt/worklane-ci` and the hooks. The distribution packages it installed stay (`uidmap`, `slirp4netns`, `nftables`, `zstd`, `acl`, the runner's libraries).
+
+<!-- proof for #1309: a docs-only PR stacked on another branch; closed unmerged -->
