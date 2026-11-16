@@ -437,6 +437,42 @@ export function words(cmd: string): string[] {
   return out;
 }
 
+/**
+ * The words of `cmd`, as words() splits them, whose every `$` sits inside double quotes and that expand no list
+ * (`[@]`, `[*]`, `$@`, `$*`): each is exactly one word to bash, whatever its `${…}` holds or is glued to inside the
+ * quotes (`"${BASE%/}/t.tgz"`, `"${URL:-"…"}"`, `"${URL:-${DEF}}"`, `"${{ env.BASE }}/t.tgz"`: R1228ca D2, R1228cb D4).
+ */
+export function quotedWords(cmd: string): Set<string> {
+  const out = new Set<string>();
+  let cur: string | null = null;
+  let all = true;
+  let dollars = 0;
+  let q: string | null = null;
+  const end = () => {
+    if (cur !== null && dollars > 0 && all && !/\[[@*]\]|\$[@*]/.test(cur)) out.add(cur);
+    cur = null;
+    all = true;
+    dollars = 0;
+  };
+  for (let i = 0; i < cmd.length; i++) {
+    const c = cmd[i]!;
+    if (q) {
+      if (c === q) q = null;
+      else {
+        if (c === '$') { dollars++; if (q !== '"') all = false; }
+        cur = (cur ?? '') + c;
+      }
+      continue;
+    }
+    if (c === "'" || c === '"') { q = c; cur ??= ''; continue; }
+    if (/\s/.test(c)) { end(); continue; }
+    if (c === '$') { dollars++; all = false; }
+    cur = (cur ?? '') + c;
+  }
+  end();
+  return out;
+}
+
 /** Whether a command runs curl (not a word in, say, an apt-get list): curl first, or after $( ` then do if ! exec env sudo nohup time timeout N or assignments. */
 export const runsCurl = (cmd: string) => /(?:^|\$\(|`|\b(?:then|do|if|exec|command|sudo|env|nohup|time)\s+|[!{(]\s*|\btimeout\s+\S+\s+|^(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)+)curl(?:\s|$)/.test(cmd);
 
@@ -555,9 +591,9 @@ function transfersOutput(words0: readonly string[], slots = true, raw = ''): 'fi
   let head = false;
   // R1228bv2 D2 option (a): a name written double-quoted (`"$X"`, `"${X}"`) is one word, one URL slot.
   const quoted = new Set([...raw.matchAll(/"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?"/g)].map((m) => m[1]!));
-  // R1228by D2: so is any `${…}` written double-quoted (`"${URLS[1]}"`, `"${URL:-…}"`, `"${URL%/}"`), but an array
-  // expansion (`"${A[@]}"`) and one holding a quote of its own (`"$P"${URL:+ "$URL"}`) stay without one.
-  const quotedExp = new Set([...raw.matchAll(/"(\$\{[^}"]*\})"/g)].map((m) => m[1]!).filter((x) => !/\[[@*]\]\}$/.test(x)));
+  // R1228by D2, R1228ca D2, R1228cb D3/D4: any word whose expansions all sit inside double quotes is one word, one slot
+  // (`"${URLS[1]}"`, `"${BASE%/}/t.tgz"`, `"${{ inputs.url }}"`); a list expansion is not.
+  const oneWord = quotedWords(raw);
   const end = () => {
     if (!head && (!named || (slots && !all && urls > outs))) stdout = true;
     named = all = head = false;
@@ -581,8 +617,12 @@ function transfersOutput(words0: readonly string[], slots = true, raw = ''): 'fi
     // takes no URL slot: an array expansion (`"${A[@]}"`), `"$@"`, an unquoted variable (`$CURL_OPTS`) or a `${…}` with
     // an operator (`${PROXY:+-x "$PROXY"}`). A double-quoted scalar (`"$X"`) is exactly one word: one slot. So URLs
     // passed those ways aren't counted: a stated limit (`$HEALTH $URL`).
-    // R1228bz D1: a GitHub expression is replaced by its value before bash runs: one literal word, one URL slot.
-    else if (slots && (/^\$\{\{/.test(tok) || quotedExp.has(tok))) urls++;
+    // R1228bz D1, R1228cb D3: the runner pastes a GitHub expression's value into the script before bash runs, so
+    // double-quoted it is one word, one URL slot; unquoted, bash splits the value like an unquoted variable's, so it
+    // takes none, as `$VAR` (the owner's option (a), "1228 round 4: a"): a stated limit, in the Limits.
+    else if (slots && oneWord.has(tok)) urls++;
+    // An unquoted expression glued to other text (`${{ env.BASE }}/t.tgz`) is one word, as `$BASE/t.tgz` is: one slot.
+    else if (slots && /^\$\{\{/.test(tok) && !/^\$\{\{[^}]*\}\}$/.test(tok)) urls++;
     else if (slots && (/\[[@*]\]\}?$/.test(tok) || /^\$[@*]$/.test(tok) || /^\$\{[^}]*[^A-Za-z0-9_}][^}]*\}?/.test(tok) || (/^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$/.test(tok) && !quoted.has(tok.replace(/[${}]/g, ''))))) continue;
     else if (!tok.startsWith('-')) urls++;
     else if (/^-[a-zA-Z0-9#:]/.test(tok)) {
@@ -611,22 +651,39 @@ function transfersOutput(words0: readonly string[], slots = true, raw = ''): 'fi
 const captured = (c: string): boolean => /(?:\$\(|`)\s*\S*curl\b/.test(shellText(c));
 /**
  * The line with what bash reads as text taken out (R1228bz D2, D4): a single-quoted span outside double quotes (an
- * apostrophe inside double quotes is no quote: `"Bob's notes: $(curl …)"` still captures), and a backslash-escaped
- * character (`\``, an escaped backquote, starts no capture).
+ * apostrophe inside double quotes is no quote: `"Bob's notes: $(curl …)"` still captures), an ANSI-C `$'…'` (`\'`
+ * inside it ends nothing: R1228cb D1), and a backslash-escaped character (`\``, an escaped backquote, starts no
+ * capture). A `$(…)` inside double quotes is read in its own quoting context, so its own quotes and apostrophes
+ * (`"$(printf "%s's notes")"`) hide nothing after it (R1228cb D2). An apostrophe that never closes keeps the rest.
  */
 const shellText = (c: string): string => {
   let out = '';
   let dq = false;
+  // R1228cb D2: a `$(` starts a fresh quoting context, inside double quotes too; each level's `dq` waits here.
+  const outer: boolean[] = [];
   for (let i = 0; i < c.length; i++) {
     const ch = c[i]!;
     if (ch === '\\') { i++; continue; }
-    if (!dq && ch === "'") {
-      const end = c.indexOf("'", i + 1);
+    // R1228cb D1: `$'…'` as ansiC reads it, a backslash escaping the next character (`\'` included).
+    if (!dq && ansiC(c, i)) {
+      let j = i + 2;
+      while (j < c.length && c[j] !== "'") j += c[j] === '\\' ? 2 : 1;
       out += "''";
-      i = end < 0 ? c.length : end;
+      i = j;
       continue;
     }
-    if (ch === '"') dq = !dq;
+    if (!dq && ch === "'") {
+      const end = c.indexOf("'", i + 1);
+      // An apostrophe with no closing quote drops nothing: the rest is kept, so the scanner fails closed.
+      if (end < 0) { out += c.slice(i); break; }
+      out += "''";
+      i = end;
+      continue;
+    }
+    if (ch === '$' && c[i + 1] === '(') { outer.push(dq); dq = false; out += '$('; i++; continue; }
+    if (ch === '(' && !dq && outer.length) outer.push(false);
+    else if (ch === ')' && !dq && outer.length) dq = outer.pop()!;
+    else if (ch === '"') dq = !dq;
     out += ch;
   }
   return out;
@@ -2451,7 +2508,8 @@ test('R1228by D1, D2, R1228bz D1-D4: -I is per transfer; a double-quoted ${…} 
     assert.ok(kept(`${text}\n`).some((p) => /retry/.test(p)), `refused: ${text}`);
   }
   // bz D1: a ${{ }} expression is one literal word by the time bash runs (real curl: 2 GETs, t.tgz the second body).
-  for (const text of ['curl -fsSL -o /dev/null "${{ inputs.health_url }}" "https://example.com/t.tgz" > t.tgz', 'curl -fsSL -o /dev/null https://example.com/health ${{ env.PKG_URL }} > t.tgz']) {
+  // (R1228cb D3: only the double-quoted one is one word; the unquoted form is a stated row in the R1228cb test.)
+  for (const text of ['curl -fsSL -o /dev/null "${{ inputs.health_url }}" "https://example.com/t.tgz" > t.tgz', 'curl -fsSL -o /dev/null "https://example.com/health" "${{ env.PKG_URL }}" > t.tgz']) {
     assert.ok(runProblems(`${text}\n`).length > 0, `refused in a run: ${text}`);
   }
   assert.deepEqual(runProblems(`code=$(curl -s -o /dev/null -w '%{http_code}' \${{ env.HEALTH_URL }})\n`), [], 'kept in a run: one expression, -o /dev/null (A5)');
@@ -2464,6 +2522,48 @@ test('R1228by D1, D2, R1228bz D1-D4: -I is per transfer; a double-quoted ${…} 
   for (const text of ['echo \'Run: $(curl -fsSL "$URL")\'', 'echo "Install it first: \\`curl -fsSL \\"\\$URL\\" | sh\\`" >&2']) {
     assert.deepEqual(kept(`${text}\n`), [], `kept: ${text}`);
   }
+});
+
+test('R1228cb D1-D4: an ANSI-C string and a nested $(…) with its own quotes hide no capture; an unquoted ${{ }} is read as $VAR; which double-quoted ${…} take a slot', () => {
+  const kept = (text: string) => fileDownloadProblems('scripts/ci/zz-get.sh', text).problems;
+  // D1, D2: real curl makes 1 GET, no retry, the body kept (attacks-1228cb/cb/realcurl.out E1-E3, N1-N3).
+  for (const text of ['printf $\'it\\\'s: %s\\n\' "$(curl -fsSL "$URL")"', 'msg=$\'Bob\\\'s build\' body=$(curl -fsSL "$URL")', 'echo $\'don\\\'t cache\' "$(curl -fsSL "$URL")" > notes.txt', 'notes="$(printf "%s\'s notes" "$USER"): $(curl -fsSL "$URL")"', 'echo "$(git log -1 --format="%an\'s commit") $(curl -fsSL "$URL")" > notes.txt', 'v="$(echo "it\'s") `curl -fsSL "$URL"`"']) {
+    assert.ok(kept(`${text}\n`).some((p) => /retry/.test(p)), `refused: ${text}`);
+    assert.ok(runProblems(`${text}\n`).length > 0, `refused in a run: ${text}`);
+  }
+  // An apostrophe that never closes keeps the rest of the line: the capture after it is still seen.
+  assert.ok(kept('echo it\\\'s "$(curl -fsSL "$URL")"\n').some((p) => /retry/.test(p)), 'refused: an escaped apostrophe, then a capture');
+  // An ANSI-C string, then really single-quoted text: bash prints it, 0 requests.
+  assert.deepEqual(kept('echo $\'it\\\'s\' \'$(curl -fsSL "$URL")\'\n'), [], 'kept: an ANSI-C string, then a single-quoted $(curl)');
+  // A here-document line runs its $(curl …) (bash: RAN), apostrophe and all: an unclosed one drops nothing.
+  assert.ok(kept('cat <<EOT > notes.txt\nIt\'s done: $(curl -fsSL "$URL")\nEOT\n').some((p) => /retry/.test(p)), 'refused: a heredoc line with an apostrophe');
+  // A subshell inside the double-quoted $(…) closes only itself (bash runs the curl).
+  assert.ok(kept('v="$( (echo hi) ; echo "it\'s" ) $(curl -fsSL "$URL") it\'s"\n').some((p) => /retry/.test(p)), 'refused: a subshell, then apostrophes');
+  // D6 (fixed by the same scanner): single-quoted backquotes inside a double-quoted $(…) are text (0 requests).
+  assert.deepEqual(kept('echo "$(printf \'%s\' \'`curl -fsSL "$URL"`\')"\n'), [], 'kept: L3');
+  // cb D4 / ca D2: a word whose expansions all sit inside double quotes is one word, one slot, whatever its ${…} holds
+  // or is glued to inside the quotes (real curl: 2 GETs, the second body kept: cb realcurl.out G1-G5, ca G1-G3, Q1, N1).
+  for (const text of ['curl -fsSL -o /dev/null "${BASE%/}/health" "${BASE%/}/t.tgz" > t.tgz', 'curl -fsSL -o /dev/null "$PROBE" "${BASE:-https://example.com}/t.tgz" > t.tgz', 'curl -fsSL -o /dev/null "$PROBE" "${URL:-"https://example.com/t.tgz"}" > t.tgz', 'curl -fsSL -o /dev/null "$PROBE" "${BASES[1]}/t.tgz" > t.tgz', 'curl -fsSL -o /dev/null "$PROBE" "${BASE:-https://example.com}/t.tgz" | tar xz', 'curl -fsSL -o /dev/null "$PROBE" "${URL:-${FALLBACK}}" > t.tgz']) {
+    assert.ok(kept(`${text}\n`).some((p) => /retry/.test(p)), `refused: ${text}`);
+  }
+  // ... and so is an expression glued to text, quoted or not (cb X1, X2, X4, X5; the runner pastes one word there).
+  for (const text of ['curl -fsSL -o /dev/null "$PROBE" "${{ env.BASE }}/t.tgz" > t.tgz', 'curl -fsSL -o /dev/null "$PROBE" ${{ env.BASE }}/t.tgz > t.tgz', 'curl -fsSL -o /dev/null "$PROBE" ${{ format(\'{0}/t.tgz\', env.BASE) }} > t.tgz', 'curl -fsSL -o /dev/null "${{ env.P }}""${{ env.Q }}" "$URL" > t.tgz']) {
+    assert.ok(runProblems(`${text}\n`).length > 0, `refused in a run: ${text}`);
+  }
+
+  assert.ok(kept('curl -fsSL -o /dev/null "$PROBE" "${URL%/}" > t.tgz\n').some((p) => /retry/.test(p)), 'refused: a whole quoted ${…} takes a slot (G4c)');
+  // D3, option (a) (owner, "1228 round 4: a"): an unquoted ${{ }} is read like an unquoted $VAR, no slot. So one holding
+  // options passes a status probe, as $CURL_FLAGS does (XF; real curl: 1 GET, no file), and one or two holding URLs
+  // are a stated limit (XU, A1, A2, A6; real curl: 2 GETs). A double-quoted "${{ }}" keeps its slot (A2b, A4).
+  for (const text of [`code=$(curl -s \${{ env.CURL_FLAGS }} -o /dev/null -w '%{http_code}' "$URL")`, `code=$(curl -s $CURL_FLAGS -o /dev/null -w '%{http_code}' "$URL")`]) assert.deepEqual(runProblems(`${text}\n`), [], `kept: ${text}`);
+  for (const text of ['curl -fsSL -o /dev/null ${{ env.URLS }} > t.tgz', 'curl -fsSL -o /dev/null ${{ env.PROBE_URL }} ${{ env.PKG_URL }} > t.tgz', 'curl -fsSL -o /dev/null https://example.com/health ${{ env.PKG_URL }} > t.tgz', 'curl -fsSL -o /dev/null ${{ matrix.probe }} ${{ matrix.url }} | tar xz']) {
+    assert.deepEqual(runProblems(`${text}\n`), [], `stated: ${text}`);
+  }
+  for (const text of ['curl -fsSL -o /dev/null "${{ env.PROBE_URL }}" "${{ env.PKG_URL }}" > t.tgz', 'curl -fsSL -o /dev/null "${{ inputs.health_url }}" "https://example.com/t.tgz" > t.tgz']) {
+    assert.ok(runProblems(`${text}\n`).length > 0, `refused in a run: ${text}`);
+  }
+  // A list expansion inside the quotes takes no slot (stated): "${URLS[@]:1:1}" (cb G8).
+  assert.deepEqual(kept('curl -fsSL -o /dev/null "$PROBE" "${URLS[@]:1:1}" > t.tgz\n'), [], 'stated: a list expansion in quotes');
 });
 
 // Limits (owner decision (c): stated, not closed; the helper's digest check holds for each download it handles):
@@ -2538,9 +2638,14 @@ test('R1228by D1, D2, R1228bz D1-D4: -I is per transfer; a double-quoted ${…} 
 //   unquoted `${…}` with an operator, glued to another word or not (`"$PROBE"${URL:+ "$URL"}`, refused before option
 //   (a)) (none of those take a slot: the owner's option (a)), a brace expansion
 //   (`https://example.com/{a,t.tgz}`), or URLs fed by xargs. So a second URL given one of those ways after
-//   `-o /dev/null` writes its body to stdout unseen. A double-quoted `"$X"` or `${…}` (`"${URLS[1]}"`, `"${URL:-…}"`;
-//   not `"${A[@]}"`) is one word and one slot, and so is a `${{ }}` expression, replaced before bash runs (R1228by D2,
-//   R1228bz D1). Pinned as stated
+//   `-o /dev/null` writes its body to stdout unseen. A word whose every `$` sits inside double quotes is one word and one
+//   slot, whatever its `${…}` holds or is glued to inside the quotes (`"$X"`, `"${URLS[1]}"`, `"${BASE%/}/t.tgz"`,
+//   `"${URL:-"…"}"`, `"${URL:-${DEF}}"`; R1228by D2, R1228ca D2, R1228cb D4), unless it expands a list (`"${A[@]}"`,
+//   `"${URLS[@]:1:1}"`, `"$@"`), which takes none. The runner pastes a `${{ }}`
+//   expression's value into the script before bash runs: double-quoted it is one word and one slot (R1228bz D1);
+//   unquoted, bash splits it like an unquoted variable's value, so it takes none, as `$VAR` (R1228cb D3, the owner's
+//   option (a)): one or two holding URLs after `-o /dev/null` aren't counted; glued to other text it is one word, one
+//   slot. Pinned as stated
 //   rows in the R1228bv2/bw2 test.
 // - A download that never names a URL the lint knows (DOWNLOAD), through a tool it doesn't know (python, node, perl, a
 //   compiled binary, an action not in USES_ALLOWED once allowed: a node or Python file's own download), or built from
