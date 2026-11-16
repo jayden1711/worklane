@@ -1,0 +1,5 @@
+// as src/new-module.ts
+// R1185ap D1 Q11: claude ?.md
+import { execSync, spawn } from 'node:child_process';
+const S = 'claude ?.md';
+execSync(S);

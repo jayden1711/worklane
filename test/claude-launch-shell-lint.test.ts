@@ -47,13 +47,14 @@
 // (`echo 'claude -p hi' | bash`, `bash <<<'claude -p hi'`, R1264f D5 f06); in JavaScript, a string that starts
 // with the binary and then a plain word (`run('claude doctor')` through a promisified exec), outside exec and '-c';
 // for a pin outside a workflow step, the positional parameters its call reads (`$1`, `$@`); and a glob that also
-// matches another name (`*e`, `c*`). src/'s own launches are held by the AST
-// lint, test/claude-launch-lint.test.ts.
+// matches another name (`*e`, `c*`); and, for a pinned workflow step, what an earlier step writes to $GITHUB_ENV or
+// $GITHUB_PATH (a NODE_OPTIONS or PATH that reaches it from outside its text: R1185ay D2). src/'s own launches are
+// held by the AST lint, test/claude-launch-lint.test.ts.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { parse } from 'yaml';
@@ -120,19 +121,19 @@ export const SHELL_EXCEPTIONS: Pin[] = [
     '.github/workflows/ci-slow.yml',
     "init() { echo hi | sudo -u wl-ci-agent env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=\"$h\" CLAUDE_CONFIG_DIR=\"$h/.claude\" ANTHROPIC_API_KEY=sk-ant-not-a-key sh -c 'cd \"$HOME\" && { \"$0\"/bin/claude -p --output-format stream-json --verbose --max-turns 1 --setting-sources project --strict-mcp-config --mcp-config \"$HOME/mcp.json\" --settings \"$1\" || true; }' \"$cc\" \"$1\" 2>/dev/null | jq -c 'select(.type == \"system\" and .subtype == \"init\") | .mcp_servers'; }",
     "a CI probe of Claude Code's own MCP policy (managed allowedMcpServers): the real CLI in a throwaway HOME with a stand-in key, its project source on purpose; no session gets past its init event",
-    '7f73f39275d975b81aea6e1a339256bd6aba2f3f15102f233152912391c797e7',
+    '4e5a38fcc1953e519eb54afb5dee75e9328cc10b5ecd9773d455d04d670fb254',
   ],
   [
     '.github/workflows/ci-slow.yml',
     "if printf '%s\\n' \"$bad\" | sudo bash scripts/setup/credentials.sh probe claude > \"$RUNNER_TEMP/bad.out\" 2>&1; then echo \"a bad token was accepted\"; exit 1; fi",
     "credentials.sh's `probe claude` names the login to check: the script, not claude, runs (a bad token)",
-    '1c80be8764dd95ae19a1d3d918ebe6bf367abed22b2cf74f3506babf9ea417c8',
+    '1fea427d6d5979b75cc7aeeb2fcc546f41fd602859153281836988add0bccede',
   ],
   [
     '.github/workflows/ci-slow.yml',
     "printf '%s\\n' \"$t\" | sudo bash scripts/setup/credentials.sh probe claude > \"$RUNNER_TEMP/good.out\" 2>&1",
     "credentials.sh's `probe claude` names the login to check: the script, not claude, runs (a good token)",
-    '1c80be8764dd95ae19a1d3d918ebe6bf367abed22b2cf74f3506babf9ea417c8',
+    '1fea427d6d5979b75cc7aeeb2fcc546f41fd602859153281836988add0bccede',
   ],
   [
     'scripts/lib/claude-guarded.sh',
@@ -717,15 +718,86 @@ function closeBrace(t: string, from: number): number {
 }
 
 /**
+ * A workflow's steps (each object with `run` or `uses`, wherever it sits), each with its context: the step's own keys
+ * other than `run` (`working-directory`, `env`, `shell`, `if`, its name) and the `defaults` and `env` of every level
+ * around it (the job's and the workflow's), as JSON. A pinned step's context is in its scope (R1185ay D2):
+ * `working-directory:` changes which script a relative path runs, and an `env:` at any level (`NODE_OPTIONS`) can
+ * preload code into it.
+ */
+export function workflowSteps(text: string): { step: Record<string, unknown>; context: string }[] {
+  const out: { step: Record<string, unknown>; context: string }[] = [];
+  const walk = (x: unknown, defaults: unknown[]) => {
+    if (Array.isArray(x)) x.forEach((v) => walk(v, defaults));
+    else if (x && typeof x === 'object') {
+      const o = x as Record<string, unknown>;
+      const d = 'defaults' in o || ('env' in o && !('run' in o || 'uses' in o)) ? [...defaults, { defaults: o.defaults, env: o.env }] : defaults;
+      if ('run' in o || 'uses' in o) {
+        const { run: _run, ...keys } = o;
+        out.push({ step: o, context: JSON.stringify({ step: keys, defaults: d }) });
+      }
+      Object.values(o).forEach((v) => walk(v, d));
+    }
+  };
+  walk(parse(text) as unknown, []);
+  return out;
+}
+
+/**
+ * The repo scripts a workflow step's text names (`scripts/…`, `src/…`, `test/…` ending .js/.mjs/.cjs), a `${…}` or
+ * `$NAME` part read as `*` (`test/fixtures/setting-sources/wrap-${w%%:*}-leak.cjs` names every wrapper it can be),
+ * and, from each, the relative imports outside src/ (src/ is the AST lint's), at any depth; sorted. A name that matches
+ * nothing is kept, held as missing.
+ */
+function stepScripts(text: string): string[] {
+  const found = new Set<string>();
+  for (const m of text.matchAll(/(?:^|[\s"'=(])((?:scripts|src|test)\/[^\s"'`;|&<>()]+?\.[cm]?js)(?=[\s"'`;|&<>()]|$)/gm)) {
+    const name = m[1]!.replace(/\$\{[^}]*\}|\$[A-Za-z_]\w*/g, '*');
+    const slash = name.lastIndexOf('/');
+    const [dir, base] = [name.slice(0, slash), name.slice(slash + 1)];
+    if (!/[*?[]/.test(base) || /[*?[]/.test(dir)) found.add(name);
+    else {
+      const hits = existsSync(join(repoRoot, dir)) ? readdirSync(join(repoRoot, dir)).filter((f) => globMatches(base, f)).map((f) => `${dir}/${f}`) : [];
+      if (hits.length) hits.forEach((h) => found.add(h));
+      else found.add(name);
+    }
+  }
+  const todo = [...found];
+  while (todo.length) {
+    const f = todo.pop()!;
+    if (!existsSync(join(repoRoot, f))) continue;
+    for (const m of readFileSync(join(repoRoot, f), 'utf8').matchAll(/(?:\bfrom\s*|\bimport\s*\(\s*|\brequire\s*\(\s*|^\s*import\s+)['"](\.{1,2}\/[^'"]+)['"]/gm)) {
+      const parts = f.split('/').slice(0, -1);
+      for (const x of m[1]!.split('/')) {
+        if (x === '..') parts.pop();
+        else if (x !== '.') parts.push(x);
+      }
+      const dep = parts.join('/');
+      if (/^(?:src|dist)\//.test(dep) || found.has(dep)) continue;
+      found.add(dep);
+      todo.push(dep);
+    }
+  }
+  return [...found].sort();
+}
+
+/**
  * The text a pin's digest holds (R1264e D1, R1264f D4, R1264h D1): for a workflow step, the whole step (its callers,
  * and the folders they fill, are in it); else the innermost shell function around physical line `line` of `text`
  * (`name() {…}`, `function name {…}`), or all of `text` when the call is top-level, and with it every line, anywhere in
  * `text`, that assigns a variable the call's logical line reads (`NAME=`, `NAME+=`, `NAME[i]=`, `local`/`export`/
  * `declare NAME`, `read`/`mapfile`/`readarray … NAME`, `for NAME in`, `unset NAME`). Positional parameters (`$1`, `$@`)
- * aren't followed outside a workflow step: a named limit.
+ * aren't followed outside a workflow step: a named limit. A workflow pin also holds its step's context (its other keys
+ * and the defaults around it, workflowSteps: R1185ay D2) and the text of every repo script the step names, with their
+ * imports outside src/ (stepScripts: R1185aw D2, the owner's "1185 pin scope: 1+2", 2026-11-16; R1185ax/ay D1): the
+ * scripts start, or are handed, the claude the step installs, so an edit to any of them is a pin change in review, as an
+ * edit to a spike is. A script that isn't there is held as missing.
  */
-export function pinScope(path: string, text: string, line: number): string {
-  if (path.startsWith('.github/')) return text;
+export function pinScope(path: string, text: string, line: number, context = ''): string {
+  if (path.startsWith('.github/')) {
+    const parts = context ? [text, `# step ${context}`] : [text];
+    for (const f of stepScripts(text)) parts.push(`# text of ${f}`, existsSync(join(repoRoot, f)) ? readFileSync(join(repoRoot, f), 'utf8') : '(missing)');
+    return parts.join('\n');
+  }
   const at = text.split('\n').slice(0, line - 1).reduce((a, l) => a + l.length + 1, 0);
   let best: [number, number] | null = null;
   for (const m of text.matchAll(/(^|\n)[ \t]*(?:function[ \t]+[A-Za-z_][\w-]*(?:[ \t]*\([ \t]*\))?|[A-Za-z_][\w-]*[ \t]*\([ \t]*\))[ \t]*\{/g)) {
@@ -742,10 +814,10 @@ export function pinScope(path: string, text: string, line: number): string {
   );
   return [scope, ...sets].join('\n');
 }
-export const scopeDigest = (path: string, text: string, line: number) => createHash('sha256').update(pinScope(path, text, line)).digest('hex');
+export const scopeDigest = (path: string, text: string, line: number, context = '') => createHash('sha256').update(pinScope(path, text, line, context)).digest('hex');
 
 /** Each claude call a shell text starts other than through claude_guarded, unpinned, as `<path>:<line>: <why>`. */
-export function shellLaunchProblems(path: string, text: string, pinned = new Map<Pin, number>()): string[] {
+export function shellLaunchProblems(path: string, text: string, pinned = new Map<Pin, number>(), context = ''): string[] {
   const lines = logicalLines(text);
   // Variables this file sets to claude.
   const vars = new Set<string>();
@@ -847,10 +919,18 @@ export function shellLaunchProblems(path: string, text: string, pinned = new Map
     // A known non-launcher anywhere before a claude word (`sudo rm -f …/claude`, `[ "$c" != …/claude ]`) makes it
     // data; `command` is one only as `command -v`/`-V`.
     const dataFrom = (i: number) => words.slice(k, i).some((w, j, a) => !w.quoted && (NON_LAUNCHERS.has(w.text) ? w.text !== 'command' || /^-[vV]$/.test(a[j + 1]?.text ?? '') : false));
-    for (let i = k; i < words.length; i++) {
-      if (!isClaude(words[i]!) || dataFrom(i)) continue;
-      // Its argument words, trailing redirections and `&` dropped.
-      const args = words.slice(i + 1).map((w) => w.text);
+    // R1185ax/ay D1: an assignment before the command whose value names the binary (`REAL="$cc/bin/claude" node x.mjs`)
+    // hands it to that command, which the process environment carries: a hand-off, like an argument word. Not when
+    // the command is a known non-launcher (`X=…/claude test -x "$X"`).
+    const prefixed = words.slice(0, k).some((w) => {
+      const v = /^[A-Za-z_]\w*\+?=(.+)$/s.exec(w.text)?.[1];
+      return v !== undefined && isClaude({ ...w, text: v, quoted: w.quoted || /["']/.test(v) });
+    });
+    for (let i = prefixed && !dataFrom(k + 1) ? k - 1 : k; i < words.length; i++) {
+      const handOff = i === k - 1;
+      if (!handOff && (!isClaude(words[i]!) || dataFrom(i))) continue;
+      // Its argument words, trailing redirections and `&` dropped (for a hand-off, the whole command's).
+      const args = words.slice(handOff ? k : i + 1).map((w) => w.text);
       for (;;) {
         if (args.length && /^(?:\d*[<>]+&?\S+|&|\\;|;|\+)$/.test(args.at(-1)!)) args.pop();
         else if (args.length >= 2 && /^\d*[<>]{1,2}&?$/.test(args.at(-2)!)) args.splice(-2);
@@ -858,16 +938,16 @@ export function shellLaunchProblems(path: string, text: string, pinned = new Map
       }
       const plain = args.map(unquote);
       const joined = plain.join(' ');
-      if (EXEMPT_ARGV.test(joined)) return;
+      if (!handOff && EXEMPT_ARGV.test(joined)) return;
       // A pin (the spike's, or an exception) covers exactly one call (R1264c D2, R1264d D1): a second call on its
       // line, on the lines continued into it, or a copy of the line anywhere in the file, is refused. And only while
       // its scope (pinScope) is the one pinned, by digest (R1264e D1, R1264f D4, R1264h D1): no edit to a line it is
       // continued from, a wrapper, or the assignment of a variable it reads moves or widens it unseen.
       const onLine = [...SHELL_PINS, ...SHELL_EXCEPTIONS].flatMap((p) => (p[0] === path ? phys.filter((n) => raw[n - 1]?.trim() === p[1]).map((n) => [p, n] as const) : []));
-      const pin = onLine.find(([p, n]) => scopeDigest(path, text, n) === p[3])?.[0];
+      const pin = onLine.find(([p, n]) => scopeDigest(path, text, n, context) === p[3])?.[0];
       if (!pin && onLine.length) {
         const [p, n] = onLine[0]!;
-        out.push(`${path}:${line}: a pinned line (\`${p[1].slice(0, 80)}\`) whose scope changed: its digest is now ${scopeDigest(path, text, n)}, the pin holds ${p[3]}; a changed pin is a change to the test`);
+        out.push(`${path}:${line}: a pinned line (\`${p[1].slice(0, 80)}\`) whose scope changed: its digest is now ${scopeDigest(path, text, n, context)}, the pin holds ${p[3]}; a changed pin is a change to the test`);
         return;
       }
       if (pin) {
@@ -876,7 +956,7 @@ export function shellLaunchProblems(path: string, text: string, pinned = new Map
         if (n > 1) out.push(`${path}:${line}: a second claude call under a pinned line (\`${pin[1].slice(0, 100)}\`): a pin covers one call; start it through claude_guarded`);
         return;
       }
-      out.push(`${path}:${line}: starts claude (\`${cmd.slice(0, 140)}\`) directly: start it through claude_guarded (scripts/setup/lib.sh: an empty environment, only safe flags, the launch's guards last), or pin it`);
+      out.push(`${path}:${line}: ${handOff ? 'hands claude to a command through an assignment before it' : 'starts claude'} (\`${cmd.slice(0, 140)}\`) directly: start it through claude_guarded (scripts/setup/lib.sh: an empty environment, only safe flags, the launch's guards last), or pin it`);
       return;
     }
   };
@@ -893,22 +973,12 @@ export function shellLaunchProblems(path: string, text: string, pinned = new Map
 /** A workflow's or composite action's `run:` steps as shell, and any `uses:` of a claude action. */
 export function workflowLaunchProblems(path: string, text: string): string[] {
   const out: string[] = [];
-  const steps: Record<string, unknown>[] = [];
-  const walk = (x: unknown) => {
-    if (Array.isArray(x)) x.forEach(walk);
-    else if (x && typeof x === 'object') {
-      const o = x as Record<string, unknown>;
-      if ('run' in o || 'uses' in o) steps.push(o);
-      Object.values(o).forEach(walk);
-    }
-  };
-  walk(parse(text) as unknown);
   // One count of each pin's calls for the whole file, across its steps (a pin covers one call).
   const pinned = new Map<Pin, number>();
-  for (const s of steps) {
+  for (const { step: s, context } of workflowSteps(text)) {
     const where = `${path} (step ${typeof s.name === 'string' ? JSON.stringify(s.name.slice(0, 60)) : '(unnamed)'})`;
     if (typeof s.uses === 'string' && /claude/i.test(s.uses)) out.push(`${where}: uses ${s.uses}, which starts claude with the repo's own settings: not allowed`);
-    if (typeof s.run === 'string') out.push(...shellLaunchProblems(path, s.run, pinned).map((p) => p.replace(`${path}:`, `${where}:`)));
+    if (typeof s.run === 'string') out.push(...shellLaunchProblems(path, s.run, pinned, context).map((p) => p.replace(`${path}:`, `${where}:`)));
   }
   return out;
 }
@@ -1033,20 +1103,14 @@ test("#1262 (R1264g/h): every claude a script starts goes through claude_guarded
 });
 
 /** Each pin with the shell text it is linted in (a workflow's step, or the file) and its physical line there. */
-function pinSites(): { pin: (typeof SHELL_PINS)[number]; text: string; line: number }[] {
+function pinSites(): { pin: (typeof SHELL_PINS)[number]; text: string; line: number; context: string }[] {
   return [...SHELL_PINS, ...SHELL_EXCEPTIONS].map((pin) => {
     const file = readFileSync(join(repoRoot, pin[0]), 'utf8');
-    const texts: string[] = [];
-    if (pin[0].startsWith('.github/')) {
-      const walk = (x: unknown) => {
-        if (Array.isArray(x)) x.forEach(walk);
-        else if (x && typeof x === 'object') for (const [k, v] of Object.entries(x as Record<string, unknown>)) (k === 'run' && typeof v === 'string' ? texts.push(v) : walk(v));
-      };
-      walk(parse(file) as unknown);
-    } else texts.push(file);
-    const text = texts.find((t) => t.split('\n').some((l) => l.trim() === pin[1]))!;
-    assert.ok(text, `${pin[0]}: its pinned line is there: ${pin[1].slice(0, 80)}`);
-    return { pin, text, line: text.split('\n').findIndex((l) => l.trim() === pin[1]) + 1 };
+    // A workflow's steps with their context (workflowSteps), as the lint reads them; a script is its whole text.
+    const texts = pin[0].startsWith('.github/') ? workflowSteps(file).flatMap(({ step, context }) => (typeof step.run === 'string' ? [{ text: step.run, context }] : [])) : [{ text: file, context: '' }];
+    const site = texts.find((t) => t.text.split('\n').some((l) => l.trim() === pin[1]))!;
+    assert.ok(site, `${pin[0]}: its pinned line is there: ${pin[1].slice(0, 80)}`);
+    return { pin, text: site.text, context: site.context, line: site.text.split('\n').findIndex((l) => l.trim() === pin[1]) + 1 };
   });
 }
 
@@ -1063,14 +1127,14 @@ test('#1262 (R1264h D1): a pin\'s scope holds the assignments of the variables i
 });
 
 test('#1262 (R1264e D1, R1264f D4): a pin holds its scope by digest: an edit to its function (or its top-level script) breaks it', () => {
-  for (const { pin, text, line } of pinSites()) {
-    assert.equal(scopeDigest(pin[0], text, line), pin[3], `${pin[0]}: the pin's digest is its scope's: ${pin[1].slice(0, 60)}`);
-    const scope = pinScope(pin[0], text, line);
+  for (const { pin, text, line, context } of pinSites()) {
+    assert.equal(scopeDigest(pin[0], text, line, context), pin[3], `${pin[0]}: the pin's digest is its scope's: ${pin[1].slice(0, 60)}`);
+    const scope = pinScope(pin[0], text, line, context);
     assert.ok(scope.includes('\n'), `${pin[0]}: a pin's scope is more than its own line (a workflow pin holds its whole step)`);
     // A line added inside the scope (after its first line), as a wrapper or an assignment edit would be.
     const at = text.indexOf(scope.split('\n')[0]!) + scope.indexOf('\n') + 1;
     const edited = `${text.slice(0, at)}: edited\n${text.slice(at)}`;
-    assert.ok(shellLaunchProblems(pin[0], edited).some((p) => /whose scope changed/.test(p)), `${pin[0]}: an edit inside its scope breaks the pin`);
+    assert.ok(shellLaunchProblems(pin[0], edited, undefined, context).some((p) => /whose scope changed/.test(p)), `${pin[0]}: an edit inside its scope breaks the pin`);
   }
   // R1264e D1's attack on the spike: the line continued into the pinned one starts its own call and makes the pinned
   // one an echo's data.
@@ -1138,8 +1202,58 @@ const asPath = (as: string | undefined) => (as === undefined ? undefined : /^<pi
 test('#1262: the pinned exceptions are the owner\'s one, by its exact file, line and reason (a new or moved pin is a change to this test)', () => {
   // R1264c D1, R1264d D2: the whole list by its digest (no spike path named here, #673): its file, its exact line and
   // its reason. Moving, widening or adding a pin changes the digest, so the change shows in this test in review.
-  assert.equal(createHash('sha256').update(JSON.stringify(SHELL_PINS)).digest('hex'), '7484a560900494d4afa1fb4b08958095a8cd5c938392879c1959a15787c3db3b');
-  assert.deepEqual(SHELL_PINS.map(([f, , why]) => [f.split('/').at(-1), why]), [['worktree-commit.sh', 'a sandbox probe whose project-settings load is the point (the owner, 2026-11-11, "spikes: b")'], ['agent-messaging.sh', 'a spike that needs stream-json input (a second message mid-turn, an interrupt), which claude_guarded refuses (R1264j D1): its guards end the argv, and its stdin\'s printfs are in the file its digest holds (the owner\'s "spikes: b")'], ['agent-messaging.sh', 'a spike that needs stream-json input (a second message mid-turn, an interrupt), which claude_guarded refuses (R1264j D1): its guards end the argv, and its stdin\'s printfs are in the file its digest holds (the owner\'s "spikes: b")'], ['agent-messaging.sh', 'a spike that needs stream-json input (a second message mid-turn, an interrupt), which claude_guarded refuses (R1264j D1): its guards end the argv, and its stdin\'s printfs are in the file its digest holds (the owner\'s "spikes: b")']]);
+  assert.equal(createHash('sha256').update(JSON.stringify(SHELL_PINS)).digest('hex'), '74915fe8c29d92ef707f2f0f89cfeafe96c41d5cd5e514e7e1de4ec8019ef655');
+  assert.deepEqual(SHELL_PINS.map(([f, , why]) => [f.split('/').at(-1), why]), [['worktree-commit.sh', 'a sandbox probe whose project-settings load is the point (the owner, 2026-11-11, "spikes: b")'], ['agent-messaging.sh', 'a spike that needs stream-json input (a second message mid-turn, an interrupt), which claude_guarded refuses (R1264j D1): its guards end the argv, and its stdin\'s printfs are in the file its digest holds (the owner\'s "spikes: b")'], ['agent-messaging.sh', 'a spike that needs stream-json input (a second message mid-turn, an interrupt), which claude_guarded refuses (R1264j D1): its guards end the argv, and its stdin\'s printfs are in the file its digest holds (the owner\'s "spikes: b")'], ['agent-messaging.sh', 'a spike that needs stream-json input (a second message mid-turn, an interrupt), which claude_guarded refuses (R1264j D1): its guards end the argv, and its stdin\'s printfs are in the file its digest holds (the owner\'s "spikes: b")'], ['ci-slow.yml', '#958\'s real-claude step: it hands the installed claude to scripts/ci/setting-sources-probe.mjs. This pin\'s digest holds the step, its other keys and the defaults around it, and every repo script the step names with their imports outside src/: the probe, claude-registry.mjs (which gets the binary for its sha256), scripts/lib/git.cjs and the wrappers of the must-fail loop. The probe starts it through src/claude-launch.ts\'s launch with the runner\'s argv and, by design, also with sources loaded: its controls rewrite that argv in its shim, and one case spawns a hand-built argv. Every run is in a throwaway HOME, with a dummy key, against a loopback stand-in API (the owner, 2026-11-15, "1185 pins: b"; the pin holds the probe: the owner, 2026-11-16, "1185 pin scope: 1+2"; and what it hands claude to: the owner, 2026-11-16, "1185 ay: 1")'], ['ci-slow.yml', '#958\'s must-fail loop: it hands the same installed claude, through SETTING_SOURCES_REAL_CLAUDE, to the probe and on to each test/fixtures/setting-sources/wrap-*-leak.cjs, which runs it with the argv and env it builds; the probe must exit 1 naming each wrapper\'s leak. This pin\'s digest holds the same scope as the step\'s first pin (the step, its other keys, the defaults, every script it names). Every run is in the probe\'s throwaway HOME, with a dummy key, against a loopback stand-in API (the owner, 2026-11-16, "1185 ay: 1")']]);
+});
+
+test('#1262 (R1185aw D2, R1185ax/ay D1): a workflow pin holds its step, the step\'s context, and every script the step names with their imports outside src/, so an edit to any breaks the pin', () => {
+  const sites = pinSites().filter(({ pin }) => pin[0] === '.github/workflows/ci-slow.yml' && pin[1].includes('node scripts/ci/setting-sources-probe.mjs'));
+  assert.equal(sites.length, 2, "the #958 step's two pins: the probe's line and the must-fail loop's");
+  const read = (f: string) => readFileSync(join(repoRoot, f), 'utf8');
+  const wrappers = readdirSync(join(repoRoot, 'test', 'fixtures', 'setting-sources')).filter((f) => /^wrap-.*-leak\.cjs$/.test(f)).map((f) => `test/fixtures/setting-sources/${f}`);
+  assert.equal(wrappers.length, 27, 'the 27 must-fail wrappers');
+  for (const { pin, text, line, context } of sites) {
+    const scope = pinScope(pin[0], text, line, context);
+    assert.ok(scope.startsWith(`${text}\n# step ${context}\n`), `${pin[1].slice(0, 40)}: the step, then its context`);
+    // The probe, the scripts it imports (claude-registry.mjs gets the binary for its sha256; git.cjs) and each wrapper
+    // the loop hands the binary to, whole.
+    for (const f of ['scripts/ci/setting-sources-probe.mjs', 'scripts/ci/claude-registry.mjs', 'scripts/lib/git.cjs', ...wrappers]) assert.ok(scope.includes(`# text of ${f}\n${read(f)}`), `${pin[1].slice(0, 40)}: holds ${f}`);
+    assert.ok(JSON.parse(context).defaults.length > 0, "the job's defaults and env are in its context");
+  }
+  // The controls: a step that names no repo script holds the step (and its context) alone; a script that isn't there is
+  // held as missing, never as nothing.
+  assert.equal(pinScope('.github/workflows/w.yml', 'v=1\n"$cc/bin/claude" --version\n', 2), 'v=1\n"$cc/bin/claude" --version\n');
+  assert.equal(pinScope('.github/workflows/w.yml', 'v=1\n', 1, '{"step":{}}'), 'v=1\n\n# step {"step":{}}');
+  assert.match(pinScope('.github/workflows/w.yml', 'node scripts/ci/nosuch.mjs "$cc/bin/claude"\n', 1), /# text of scripts\/ci\/nosuch\.mjs\n\(missing\)$/);
+});
+
+test("#1262 (R1185ay D2, R1185ax/ay D1): the pinned step's other keys and the job's defaults and env are in its scope, and an assignment that hands claude to a command is a call", () => {
+  const path = '.github/workflows/ci-slow.yml';
+  const yml = readFileSync(join(repoRoot, path), 'utf8');
+  const name = `      - name: "#958: a guarded run's real claude`;
+  assert.ok(yml.includes(name), 'the pinned step');
+  const ours = (t: string) => workflowLaunchProblems(path, t).filter((p) => p.includes('#958: a guarded run'));
+  assert.deepEqual(ours(yml), [], 'the control: the head workflow');
+  const stepLine = yml.split('\n').find((l) => l.startsWith(name))!;
+  // An edit to the pinned step's own job: the last match before the step (another job has the same lines).
+  const inJob = (from: string, to: string) => {
+    const at = yml.lastIndexOf(from, yml.indexOf(stepLine));
+    return at < 0 ? yml : yml.slice(0, at) + to + yml.slice(at + from.length);
+  };
+  for (const [what, edited] of [
+    ['working-directory added to the step', yml.replace(stepLine, `${stepLine}\n        working-directory: test/fixtures/r1185ay`)],
+    ['env NODE_OPTIONS added to the step', yml.replace(stepLine, `${stepLine}\n        env:\n          NODE_OPTIONS: --import=./scripts/ci/preload.mjs`)],
+    ['shell added to the step', yml.replace(stepLine, `${stepLine}\n        shell: bash -e {0}`)],
+    ["the job's defaults.run changed", inJob('        shell: bash\n    env:\n      GH_FAKE:', '        shell: bash\n        working-directory: test/fixtures/r1185ay\n    env:\n      GH_FAKE:')],
+    ["NODE_OPTIONS added to the job's env", inJob('    env:\n      GH_FAKE: http://127.0.0.1:8999\n', '    env:\n      GH_FAKE: http://127.0.0.1:8999\n      NODE_OPTIONS: --import=./scripts/ci/preload.mjs\n')],
+  ] as const) {
+    assert.notEqual(edited, yml, `${what}: the edit applies`);
+    assert.ok(ours(edited).some((p) => /whose scope changed/.test(p)), `${what}: breaks the pin`);
+  }
+  // The env-prefix hand-off (R1185ax/ay D1): refused unpinned, in a new step; plain assignments and a non-launcher aren't calls.
+  const step = (run: string) => `jobs:\n  j:\n    runs-on: x\n    steps:\n      - run: |\n          ${run}\n`;
+  for (const run of ['SETTING_SOURCES_REAL_CLAUDE="$cc/bin/claude" node scripts/ci/setting-sources-probe.mjs x.cjs', 'REAL=/usr/local/bin/claude node x.mjs']) assert.ok(workflowLaunchProblems('.github/workflows/w.yml', step(run)).some((p) => /hands claude to a command/.test(p)), `refused: ${run}`);
+  for (const run of ['X=1 node scripts/x.mjs', 'C=/usr/local/bin/claude test -x "$C"']) assert.deepEqual(workflowLaunchProblems('.github/workflows/w.yml', step(run)), [], `not a call: ${run}`);
 });
 
 test('#1262: every way a script can start claude other than through claude_guarded is refused (fixtures), and the controls pass', () => {

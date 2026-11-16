@@ -21,7 +21,7 @@ test('tests.yaml env takes a project variable such as a fixed test worker count'
 });
 
 test('tests.yaml env refuses harness and system variables, secret-looking names and multi-line values', () => {
-  for (const name of ['PATH', 'HOME', 'GIT_CONFIG_COUNT', 'GIT_AUTHOR_NAME', 'GH_TOKEN', 'CLAUDE_CONFIG_DIR', 'ANTHROPIC_API_KEY', `${BRAND.envPrefix}_AGENT`, 'LD_PRELOAD', 'NODE_OPTIONS', 'BASH_ENV', 'https_proxy', 'HTTPS_PROXY', 'SSL_CERT_FILE', 'XDG_RUNTIME_DIR', 'SUDO_USER']) {
+  for (const name of ['PATH', 'HOME', 'GIT_CONFIG_COUNT', 'GIT_AUTHOR_NAME', 'GH_TOKEN', 'CLAUDE_CONFIG_DIR', 'ANTHROPIC_API_KEY', `${BRAND.envPrefix}_AGENT`, 'LD_PRELOAD', 'NODE_OPTIONS', 'BUN_OPTIONS', 'bun_options', 'BUN_INSPECT_PRELOAD', 'BUNFIG_PRELOAD', 'JSC_useJIT', 'BASH_ENV', 'https_proxy', 'HTTPS_PROXY', 'SSL_CERT_FILE', 'XDG_RUNTIME_DIR', 'SUDO_USER']) {
     assert.match(projectEnvProblem(name) ?? '', /harness or the system/, name);
     assert.equal(tests({ [name]: 'x' }).success, false, name);
   }
@@ -52,11 +52,12 @@ console.log(JSON.stringify({ type: 'result', subtype: 'success', result: 'done',
 `,
   );
   chmodSync(bin, 0o755);
-  const req = { prompt: 'p', model: 'm', cwd: '.', allowedTools: [], maxTurns: 1, maxBudgetUsd: 1, stallMs: 60_000, timeoutMs: 60_000, role: 'worker', env: { PYTEST_XDIST_AUTO_NUM_WORKERS: '6', GIT_CONFIG_COUNT: '0', [`${BRAND.envPrefix}_AGENT`]: '0' } };
+  const req = { prompt: 'p', model: 'm', cwd: '.', allowedTools: [], maxTurns: 1, maxBudgetUsd: 1, stallMs: 60_000, timeoutMs: 60_000, role: 'worker', env: { PYTEST_XDIST_AUTO_NUM_WORKERS: '6', GIT_CONFIG_COUNT: '0', [`${BRAND.envPrefix}_AGENT`]: '0', BUN_OPTIONS: '--preload ./.ci/warm.js' } };
   const r = await new CliRunner('cli', process.env, bin).run(req);
   assert.equal(r.reason, 'succeeded', r.detail);
   const env = JSON.parse(readFileSync(log, 'utf8')) as Record<string, string>;
   assert.equal(env.PYTEST_XDIST_AUTO_NUM_WORKERS, '6');
   assert.equal(env.GIT_CONFIG_COUNT, '1', 'the no-credential-helper setup stays');
   assert.equal(env[`${BRAND.envPrefix}_AGENT`], '1');
+  assert.equal(env.BUN_OPTIONS, undefined, "R1185ae D2: a committed tests.yaml's BUN_OPTIONS never reaches claude");
 });

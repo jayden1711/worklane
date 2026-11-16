@@ -1,0 +1,6 @@
+// as src/new-module.ts
+import { execSync, spawn } from 'node:child_process';
+declare const lane: string;
+// R1185as D1: daemon, which probing every word in 2.1.296's bytes found too (the review's parse didn't)
+const S = 'claude daemon';
+execSync(S, { cwd: lane });

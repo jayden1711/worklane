@@ -10,7 +10,7 @@ import { BRAND } from '../src/brand.js';
 import { classicChecks, protectionAdvice, rulesetChecksRule } from '../src/branch-protection.js';
 import { ConfigInvalid, loadConfig } from '../src/config/load.js';
 import { initCommand, localInitFile, readInitState, type InitIo } from '../src/init.js';
-import { exampleProject, repoRoot } from './helpers.js';
+import { exampleProject, repoRoot, claudeByRun } from './helpers.js';
 
 process.env[`${BRAND.envPrefix}_STATE_DIR`] ??= mkdtempSync(join(tmpdir(), 'bp-state-'));
 
@@ -54,7 +54,7 @@ test('the template documents protection.strict, off', () => {
 async function protectionDetail(dir: string): Promise<string> {
   execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/example-org/example-shop.git'], { cwd: dir });
   const said: string[] = [];
-  const io: InitIo = {
+  const io: InitIo = { claude(spec, o) { return claudeByRun(this, spec, o); },
     which: (c) => `/stand-in/${c}`,
     serviceManagerEnv: () => ({ env: {} }),
     run: (cmd, args, o = {}) => {

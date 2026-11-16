@@ -1,0 +1,8 @@
+// as src/new-module.ts
+// R1185ap D1 Q6: multi-line: exec claude # comment
+import { execSync, spawn } from 'node:child_process';
+const S = `
+cd "$1"
+exec claude # hand over
+`;
+spawn('bash', ['-c', S, 'sh']);

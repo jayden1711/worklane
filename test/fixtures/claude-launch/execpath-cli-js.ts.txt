@@ -1,0 +1,4 @@
+// as src/x.ts
+import { spawn } from './os/child-process.js';
+import { join } from 'node:path';
+spawn(process.execPath, [join('/opt/x', 'node_modules/@anthropic-ai/claude-code/cli.js'), '-p']);

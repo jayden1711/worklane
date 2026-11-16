@@ -1,0 +1,6 @@
+// as src/new-module.ts
+import { exec, execSync, spawn, spawnSync } from 'node:child_process';
+declare const args: string[], lane: string, env: NodeJS.ProcessEnv, repo: string, exportPath: string;
+// R1185aq D1 Q3 claude sandbox status (reads the effective settings)
+const SANDBOX_STATUS = 'claude sandbox status';
+const posture = JSON.parse(execSync(SANDBOX_STATUS, { cwd: lane, encoding: 'utf8' }));

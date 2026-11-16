@@ -1,0 +1,7 @@
+// as src/new-module.ts
+import { exec, execFile, execSync, spawn } from 'node:child_process';
+import { join } from 'node:path';
+declare const args: string[], argv: string[], cwd: string, dir: string, flags: string[], prompt: string, npmPrefix: string, cb: () => void;
+declare function shq(s: string): string;
+// R1185ai M9.
+spawn('sh', ['-c', 'npx --no-install claude "$@"', 'sh', '-p', prompt]);

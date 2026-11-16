@@ -17,7 +17,7 @@ import { GIT_HOOK_MARKER, install } from '../src/install.js';
 import { ACTIONS, isActionId, type ActionPlan } from '../src/setup-actions.js';
 import { SETUP_STEPS, type SetupProbe, type SetupView } from '../src/setup-steps.js';
 import type { Download, ToolInstall } from '../src/tool-install.js';
-import { asPerson, exampleProject, exampleRoles } from './helpers.js';
+import { asPerson, exampleProject, exampleRoles, claudeByRun } from './helpers.js';
 
 process.env[`${BRAND.envPrefix}_STATE_DIR`] = mkdtempSync(join(tmpdir(), 'setup-actions-state-'));
 
@@ -42,7 +42,7 @@ function fixture() {
 }
 
 function probe(tools: Set<string>): SetupProbe {
-  return {
+  return { claude(spec, o) { return claudeByRun(this, spec, o); },
     which: (c) => (tools.has(c) ? `/stand-in/${c}` : null),
     serviceManagerEnv: () => ({ env: {} }),
     run: (cmd, args, o = {}) => {

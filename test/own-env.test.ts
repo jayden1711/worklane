@@ -15,7 +15,7 @@ import { ownEnv, OwnEnv, type EnvSource } from '../src/os/own-env.js';
 import { agentAuthEnv, agentBase, agentEnv } from '../src/runner.js';
 import { localServiceEnv } from '../src/service.js';
 import { detectClaudeLogin, probeEnv, type SetupProbe } from '../src/setup-steps.js';
-import { repoRoot } from './helpers.js';
+import { repoRoot, claudeByRun } from './helpers.js';
 
 /** Runs `f` with `vars` on Object.prototype, as a polluting dependency would set them, and takes them off after. */
 function polluted<T>(vars: Record<string, string>, f: () => T): T {
@@ -172,7 +172,8 @@ test('after #819 (#786): agentAuthEnv on Windows (modelled): a name in any case 
 
 test("after #819 (#786): the Claude step's environment and its login's cache key see only variables that are set", () => {
   const ids: string[] = [];
-  const probe: Pick<SetupProbe, 'which' | 'run' | 'serviceManagerEnv'> = {
+  const probe: Pick<SetupProbe, 'which' | 'run' | 'claude' | 'serviceManagerEnv'> = {
+  claude(spec, o) { return claudeByRun(this, spec, o); },
     which: () => '/stand-in/claude',
     serviceManagerEnv: () => ({ env: {} }),
     // Stand-ins: `claude auth status` signed in on claude.ai, and the proof call answered. Nothing is run.

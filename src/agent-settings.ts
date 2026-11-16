@@ -182,7 +182,8 @@ const PROJECT_PERMISSION_KEYS = new Set(['allow', 'deny', 'ask']);
  * Why an agent run in `cwd` must not start because of the checkout's .claude/settings.json, or null. Deny and ask
  * rules only tighten and hooks only add, so they're fine; an allow rule our settings don't have would widen what
  * the agent may do, and any other key (env, sandbox, additionalDirectories, defaultMode, ...) could loosen the run.
- * .claude/settings.local.json isn't checked: the runner loads project settings only (--setting-sources project).
+ * Every run now loads no setting source at all (--setting-sources '', src/claude-launch.ts, #958), so this refusal
+ * is a second line: a checkout's settings would loosen a run only if that guard were lost.
  */
 export function projectSettingsRefusal(cwd: string, ours: Settings): string | null {
   const file = join(cwd, '.claude', 'settings.json');

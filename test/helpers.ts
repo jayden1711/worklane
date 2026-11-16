@@ -4,6 +4,8 @@ import { homedir, tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { agentSettingsPath } from '../src/agent-settings.js';
+import { claudeArgv } from '../src/claude-launch.js';
+import type { LoginProofSpec, ProbeRunOptions, RunResult, SetupProbe } from '../src/setup-steps.js';
 import type { CommitCheck } from '../src/backlog/types.js';
 import { PinnedChecks, type JudgedChecks } from '../src/check-source.js';
 import { agentSettings } from '../src/install.js';
@@ -158,4 +160,13 @@ export function loopbackGitHub(api: string): Record<string, string> {
   const u = new URL(api);
   if (u.hostname !== '127.0.0.1') throw new Error(`a fake GitHub on 127.0.0.1, not ${u.hostname}`);
   return { NODE_OPTIONS: `--import=${pathToFileURL(join(repoRoot, 'scripts', 'ci', 'loopback-github.mjs')).href}`, CI_LOOPBACK_GITHUB_PORT: u.port };
+}
+
+/**
+ * A stand-in probe's login proof (SetupProbe.claude): the launch's own argv (src/claude-launch.ts claudeArgv) handed to
+ * the probe's `run` as `claude <argv>`, so a fake that answers `claude -p ...` answers it as before (#958, R1185z D1).
+ */
+export function claudeByRun(p: Pick<SetupProbe, 'run'>, spec: LoginProofSpec, o?: ProbeRunOptions): RunResult {
+  const { prompt: _prompt, ...launch } = spec;
+  return p.run('claude', claudeArgv(launch), o);
 }

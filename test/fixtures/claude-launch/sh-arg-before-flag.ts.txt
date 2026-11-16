@@ -1,0 +1,4 @@
+// as src/new-module.ts
+import { execFile, spawn } from 'node:child_process';
+// R1185ag L2: an argument before the flag.
+export const run = (cwd: string, prompt: string) => execFile('sh', ['-c', 'cd "$0" && claude "$1" -p --output-format json', cwd, prompt]);

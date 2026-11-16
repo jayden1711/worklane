@@ -1,0 +1,4 @@
+// as src/new-module.ts
+import { execFile, spawn } from 'node:child_process';
+// R1185ag L4: a lookup, quoted.
+export const run = (env: NodeJS.ProcessEnv, prompt: string) => spawn('bash', ['-lc', '"$(command -v claude)" -p "$P"'], { env: { ...env, P: prompt } });

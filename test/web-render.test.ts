@@ -1,6 +1,7 @@
 // Render checks for the web UI: every page, rendered on the server from the
 // state a real dashboard serves for the seeded demo project, still shows its
 // data; decisions are still answerable only where the server says so.
+import type { LoginProofSpec, ProbeRunOptions } from '../src/setup-steps.js';
 import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { appendFileSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -16,7 +17,7 @@ import { writeLive } from '../src/console.js';
 import { EventLog } from '../src/events/log.js';
 import { tryAgentSlot } from '../src/slots.js';
 import { tryTestSlot } from '../src/testrun/slots.js';
-import { asDevicePerson, asPerson, exampleProject, exampleRoles, ownerRequester, machineOwnersFile, marksOf, MARKS, repoRoot, seedInstanceItems, type InstanceMarks } from './helpers.js';
+import { asDevicePerson, asPerson, exampleProject, exampleRoles, ownerRequester, machineOwnersFile, marksOf, MARKS, repoRoot, seedInstanceItems, type InstanceMarks, claudeByRun } from './helpers.js';
 import { addProjectView } from '../src/console/add-project.js';
 import { addProjectNameOk, addProjectRepoOk } from '../src/machine.js';
 import { asks } from '../src/console/asks.js';
@@ -1490,6 +1491,7 @@ test('waiting on you: every owner-held state grouped in the digest\'s order, eac
 /** The first-run view as the server makes it: init's record (src/init.ts firstRunView), the steps checked live with stand-ins, and Start. */
 function firstRun(file: string, o: { root: string; repo: string; instance: string | null; start?: unknown; canStart?: boolean }) {
   const probe = {
+    claude(spec: LoginProofSpec, o?: ProbeRunOptions) { return claudeByRun(this, spec, o); },
     which: (c: string) => (['git', 'gitleaks', 'claude', 'gh'].includes(c) ? `/stand-in/${c}` : null),
     run: () => ({ status: 1, stdout: '{"loggedIn": false}', stderr: 'stand-in' }),
     serviceRunning: () => false,

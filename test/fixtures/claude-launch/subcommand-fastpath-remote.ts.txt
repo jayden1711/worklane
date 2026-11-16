@@ -1,0 +1,6 @@
+// as src/new-module.ts
+import { execSync, spawn } from 'node:child_process';
+declare const lane: string;
+// R1185as D1 S1: remote, an argv fast path the registry's parse missed
+const REMOTE = 'claude remote';
+spawn('sh', ['-c', REMOTE], { cwd: lane });

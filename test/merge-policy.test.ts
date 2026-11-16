@@ -1161,7 +1161,7 @@ test('weakening backstop (#941): src/ and scripts/ register no table by a mark (
   const marked = engineFiles.filter((f) => /^(?:src|scripts)\//.test(f) && markable(f) && marksOf(readFileSync(join(repoRoot, f), 'utf8')).tables.length);
   assert.deepEqual(marked, [], 'move the table to the module\'s <module>.tables.json (src/check-tables.ts)');
   const files = engineFiles.filter((f) => TABLES_FILE.test(f));
-  assert.equal(files.length, 16, `${files.length} tables files`);
+  assert.equal(files.length, 18, `${files.length} tables files`);
   const problems: string[] = [];
   for (const f of files) {
     try {
@@ -1173,7 +1173,9 @@ test('weakening backstop (#941): src/ and scripts/ register no table by a mark (
   assert.deepEqual(problems, []);
   // The 43 registered tables of src/ and scripts/ before #941: 35 here, and the root updater's 8, which were its
   // generated copy of src/events/redact.ts's and still are (scripts/lib/redact-vendor.mjs).
-  assert.equal(dataTables().length, 35, 'the 35 tables files entries of src/ and scripts/ (#941), each with its module');
+  // #1185: src/claude-launch.ts's LAUNCH_ENV_KEEP and LAUNCH_ENV_PASS, and scripts/ci/claude-commands.mjs's
+  // DARWIN_ARM64_COMMANDS, moved to data when main's #941 merged in; LINUX_X64_COMMANDS, the owner's Linux probe.
+  assert.equal(dataTables().length, 39, 'the 39 tables files entries of src/ and scripts/ (#941), each with its module');
   assert.deepEqual(dataTables().filter((d) => d.module.endsWith('(no module)')).map((d) => d.file), []);
   // A tables file is locked with its module: the same self-modification part, or neither locked.
   const part = (path: string) => SELF_MODIFICATION_PARTS.find((p) => p.globs.some((g) => globToRegExp(g).test(path)))?.what ?? 'not locked';

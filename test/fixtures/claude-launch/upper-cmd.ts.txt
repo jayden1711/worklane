@@ -1,0 +1,6 @@
+// as src/new-module.ts
+import { exec, execSync, spawn } from 'node:child_process';
+declare const args: string[], name: string, url: string;
+// R1185an/ao: CLAUDE.CMD, any case
+const LINE = 'call CLAUDE.CMD %*';
+spawn('cmd.exe', ['/d', '/s', '/c', LINE, ...args]);

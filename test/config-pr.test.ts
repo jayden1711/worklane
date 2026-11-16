@@ -18,7 +18,7 @@ import { startDashboard } from '../src/dashboard.js';
 import { EventLog } from '../src/events/log.js';
 import { projectStateDir } from '../src/guardrails/context.js';
 import type { RunResult, SetupProbe } from '../src/setup-steps.js';
-import { asPerson, exampleProject, exampleRoles } from './helpers.js';
+import { asPerson, exampleProject, exampleRoles, claudeByRun } from './helpers.js';
 
 process.env[`${BRAND.envPrefix}_STATE_DIR`] = mkdtempSync(join(tmpdir(), 'config-pr-state-'));
 const REPO = 'example-org/example-shop';
@@ -126,7 +126,7 @@ test('#468 merged, but this checkout diverged: nothing touched, by how many comm
   assert.equal(git(f.dir, 'rev-parse', 'HEAD'), mine);
 });
 
-const probe: SetupProbe = { which: (c) => `/stand-in/${c}`, run: () => ({ status: 1, stdout: '', stderr: 'stand-in' }), serviceRunning: () => false, systemUnitActive: () => false, linger: () => null, serviceManagerEnv: () => ({ env: {} }) };
+const probe: SetupProbe = { claude(spec, o) { return claudeByRun(this, spec, o); }, which: (c) => `/stand-in/${c}`, run: () => ({ status: 1, stdout: '', stderr: 'stand-in' }), serviceRunning: () => false, systemUnitActive: () => false, linger: () => null, serviceManagerEnv: () => ({ env: {} }) };
 
 async function dashboard(dir: string, gh: (args: string[]) => RunResult, user = 'example-owner') {
   const stateDir = projectStateDir(dir);

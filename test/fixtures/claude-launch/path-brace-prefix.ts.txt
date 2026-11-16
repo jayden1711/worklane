@@ -1,0 +1,6 @@
+// as src/new-module.ts
+import { execSync, spawn } from 'node:child_process';
+declare const lane: string;
+// R1185as D2 B3: ${PREFIX}/bin/claude
+const S = '${CLAUDE_PREFIX}/bin/claude plugin list';
+execSync(S, { cwd: lane });

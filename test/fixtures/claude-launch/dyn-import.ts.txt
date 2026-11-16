@@ -1,0 +1,4 @@
+// as src/x.ts
+const { spawn } = await import('./os/child-process.js');
+const bin = 'claude';
+spawn(bin, ['-p', 'hi']);

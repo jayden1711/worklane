@@ -1,0 +1,6 @@
+// as src/new-module.ts
+import { execSync, spawn } from 'node:child_process';
+declare const lane: string;
+// R1185as D2 B7: a $(…) path then a redirect
+const S = '$(npm prefix -g)/bin/claude < task.md';
+execSync(S, { cwd: lane });

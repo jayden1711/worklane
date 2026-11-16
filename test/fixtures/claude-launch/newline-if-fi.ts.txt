@@ -1,0 +1,10 @@
+// as src/new-module.ts
+// R1185ap D1 Q1: multi-line: if/then claude newline fi (const)
+import { execSync, spawn } from 'node:child_process';
+const S = `
+if [ -n "$1" ]; then
+  cd "$1"
+  claude
+fi
+`;
+spawn('bash', ['-c', S, 'sh']);

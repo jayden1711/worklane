@@ -1,0 +1,4 @@
+// as src/x.ts
+import { spawn } from 'node:child_process';
+const run = spawn;
+run('sh', ['-c', 'claude -p hi']);

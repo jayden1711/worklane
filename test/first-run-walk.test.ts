@@ -21,13 +21,13 @@ import { install } from '../src/install.js';
 import { setupModeConfig } from '../src/setup-mode.js';
 import type { RunResult, SetupProbe } from '../src/setup-steps.js';
 import { launchTestChrome, oneChromeAtATime, pressSteady, REAL_CHROME_TIMEOUT, realChromeTests, STEADY_PX, webUiSkip } from './browser-helpers.js';
-import { exampleProject } from './helpers.js';
+import { exampleProject, claudeByRun } from './helpers.js';
 
 realChromeTests();
 const chrome = findChrome(process.env.CHROME);
 
 /** The machine as the checks see it: every tool there, Claude and gh signed out, no service; git for real. */
-const probe: SetupProbe = {
+const probe: SetupProbe = { claude(spec, o) { return claudeByRun(this, spec, o); },
   which: (c) => `/stand-in/${c}`,
   serviceManagerEnv: () => ({ env: {} }),
   run: (cmd, args, o = {}) => {

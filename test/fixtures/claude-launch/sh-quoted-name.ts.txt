@@ -1,0 +1,4 @@
+// as src/new-module.ts
+import { execFile, spawn } from 'node:child_process';
+// R1185ag L5: a quoted name.
+export const run = (prompt: string) => spawn('sh', ['-c', 'exec "claude" -p "$1"', 'sh', prompt]);

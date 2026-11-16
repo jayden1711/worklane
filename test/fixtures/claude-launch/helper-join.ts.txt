@@ -1,0 +1,5 @@
+// as src/x.ts
+import { join } from 'node:path';
+import { commandSpawnSync } from './os/git.js';
+import { toolBin } from './tool-path.js';
+commandSpawnSync(join(toolBin(), 'claude'), ['-p', 'hi']);

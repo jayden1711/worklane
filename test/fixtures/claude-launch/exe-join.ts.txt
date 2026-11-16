@@ -1,0 +1,4 @@
+// as src/x.ts
+import { join } from 'node:path';
+import { spawn } from './os/child-process.js';
+spawn(join(dir, 'claude.exe'), ['-p', 'hi']);

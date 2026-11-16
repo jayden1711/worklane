@@ -1,0 +1,9 @@
+// as src/new-module.ts
+// R1185ap D1 Q2: multi-line: claude newline echo $?
+import { execSync, spawn } from 'node:child_process';
+const S = `
+cd "$1"
+setsid claude
+echo "exit $?"
+`;
+spawn('bash', ['-c', S, 'sh']);

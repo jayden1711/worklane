@@ -8,7 +8,7 @@ import { dirname, join } from 'node:path';
 import { BRAND } from '../src/brand.js';
 import { projectStateDir } from '../src/guardrails/context.js';
 import { checkSetup, type InstanceFacts, type MachinePaths, type SetupContext, type SetupProbe, type SetupView } from '../src/setup-steps.js';
-import { engineCli, exampleProject, repoRoot } from './helpers.js';
+import { engineCli, exampleProject, repoRoot, claudeByRun } from './helpers.js';
 
 export const posix = process.platform !== 'win32';
 /** A directory mode 000 hides what is in it from this user, unless this user is root. */
@@ -211,7 +211,7 @@ export function coordinatorView(record: object | null, o: { key?: (agentHome: st
   const key = o.key ? o.key(agentHome) : installed;
   const facts: InstanceFacts = { home, credentials: { github: { kind: 'app', key_path: join(home, 'app.pem') }, agent_api_key: key }, ...(o.agentHome === false ? {} : { agentHome }) };
   const ctx: SetupContext = { mode: 'server', root: dir, repo: 'example-org/example-shop', instance: 'shop', stateDir: projectStateDir(dir), policyFile: join(home, 'policy.yaml'), openQuestions: 0, setupPr: null, machine: machinePaths, instanceFacts: () => facts };
-  const probe: SetupProbe = {
+  const probe: SetupProbe = { claude(spec, o) { return claudeByRun(this, spec, o); },
     which: (c) => `/stand-in/${c}`,
     serviceManagerEnv: () => ({ env: {} }),
     run: () => ({ status: 1, stdout: '', stderr: 'no stand-in' }),

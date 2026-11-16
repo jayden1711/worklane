@@ -1,0 +1,6 @@
+// as src/new-module.ts
+import { execSync, spawn } from 'node:child_process';
+declare const lane: string;
+// R1185as D2 B1: a path built from ${VAR}
+const DOCTOR = '${HOME}/.local/bin/claude doctor';
+execSync(DOCTOR, { cwd: lane, encoding: 'utf8' });

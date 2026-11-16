@@ -1,0 +1,4 @@
+// as src/x.ts
+import * as cp from 'node:child_process';
+const { spawn: s } = cp;
+s('sh', ['-c', 'claude -p hi']);

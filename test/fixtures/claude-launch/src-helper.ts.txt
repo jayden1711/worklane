@@ -1,0 +1,4 @@
+// as src/setup-x.ts
+import { commandSpawnSync } from './os/git.js';
+const LOGIN = ['-p', 'Reply with: ok'];
+export const prove = () => commandSpawnSync('claude', LOGIN);

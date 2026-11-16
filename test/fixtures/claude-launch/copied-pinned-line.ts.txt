@@ -1,0 +1,7 @@
+// as src/claude-signin.ts
+import { spawn } from './os/child-process.js';
+const c = spawn('claude', ['auth', 'login'], { env, stdio: 'ignore' });
+export function again() {
+  const c = spawn('claude', ['auth', 'login'], { env, stdio: 'ignore' });
+  return c;
+}

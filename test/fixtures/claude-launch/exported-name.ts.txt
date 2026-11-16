@@ -1,0 +1,2 @@
+// as src/names.ts
+export const CLAUDE_BIN = 'claude';

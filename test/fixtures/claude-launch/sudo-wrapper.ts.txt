@@ -1,0 +1,3 @@
+// as src/x.ts
+import { spawn } from './os/child-process.js';
+spawn('sudo', ['-n', '-u', 'agent', 'claude', '-p']);

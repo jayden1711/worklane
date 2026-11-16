@@ -1,0 +1,4 @@
+// as src/x.ts
+import { promisify } from 'node:util';
+import { exec } from './os/child-process.js';
+await promisify(exec)('claude -p hi');

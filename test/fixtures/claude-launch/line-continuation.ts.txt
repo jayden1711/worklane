@@ -1,0 +1,9 @@
+// as src/new-module.ts
+import { exec, execSync, spawn } from 'node:child_process';
+declare const args: string[], name: string, url: string;
+// R1185an/ao: a line continuation after the name
+const SCRIPT = `
+setsid claude \\
+  "$@"
+`;
+spawn('bash', ['-c', SCRIPT, 'bash', ...args]);

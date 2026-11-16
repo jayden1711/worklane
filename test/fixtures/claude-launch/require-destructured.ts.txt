@@ -1,0 +1,3 @@
+// as src/x.ts
+const { spawn } = require('node:child_process');
+spawn('claude', ['-p']);

@@ -8,7 +8,7 @@
 // cases, run against the instructions at the base and at the head, with a cost cap, compared
 // case by case. The agent under test only ever sees the instructions and the situation (never
 // the rubric), in a neutrally named directory, and a judge on a different model grades it.
-import { spawn } from './os/child-process.js';
+import { launchClaude, NO_TOOLS } from './claude-launch.js';
 import { createHash } from 'node:crypto';
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -192,14 +192,13 @@ export function failedCost(e: unknown): number {
   return typeof usd === 'number' && Number.isFinite(usd) && usd > 0 ? usd : 0;
 }
 
-const NO_TOOLS = ['Bash', 'Edit', 'Write', 'MultiEdit', 'Read', 'Glob', 'Grep', 'WebFetch', 'WebSearch', 'NotebookEdit', 'Task'];
 
 /** Ask through the installed `claude` CLI on its own login (API keys stripped: never per-token billing). */
 export const cliAsk: Ask = (req) =>
   new Promise((resolve, reject) => {
-    const args = ['-p', '--model', req.model, '--output-format', 'json', '--max-turns', '3', '--max-budget-usd', String(req.maxBudgetUsd), '--setting-sources', '', '--strict-mcp-config', '--json-schema', JSON.stringify(req.schema), '--disallowedTools', ...NO_TOOLS];
-    if (req.system) args.push('--append-system-prompt', req.system);
-    const child = spawn('claude', args, { cwd: req.cwd, env: agentEnv(ownEnv(), 'cli'), stdio: ['pipe', 'pipe', 'pipe'] });
+    // Through the one launch function (src/claude-launch.ts): no setting source, strict MCP, its settings only from
+    // --settings (none of its own: an empty set), the auto memory off.
+    const child = launchClaude({ bin: 'claude', cwd: req.cwd, env: agentEnv(ownEnv(), 'cli'), settings: {}, mode: 'json', model: req.model, maxTurns: 3, maxBudgetUsd: req.maxBudgetUsd, allowedTools: [], disallowedTools: NO_TOOLS, jsonSchema: req.schema, ...(req.system ? { appendSystemPrompt: req.system } : {}) });
     let out = '';
     let err = '';
     child.stdout.on('data', (d: Buffer) => (out += d.toString()));

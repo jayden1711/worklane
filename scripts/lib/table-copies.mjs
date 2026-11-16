@@ -25,6 +25,8 @@ export const COPIES = [
   { script: 'scripts/setup/app-permissions.mjs', exported: ['ALLOWED_UP_TO'] },
   { script: 'scripts/ci/check-pins.mjs', exported: ['ALLOWED_PACKAGE_JSON'] },
   { script: 'scripts/lib/changelog.mjs', exported: [] },
+  // The pinned claude CLI's commands (#1185): claude-registry.mjs writes the data and this copy together.
+  { script: 'scripts/ci/claude-commands.mjs', exported: [] },
   // The machine helper's file name is the product's (`<cli>-machine.cjs`): found by its ending, as the updater is.
   { script: 'scripts/machine/*-machine.cjs', exported: [] },
 ];

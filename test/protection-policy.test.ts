@@ -17,7 +17,7 @@ import { setPolicyRootUid } from '../src/policy-gate.js';
 import { ownPolicy } from '../src/policy-root.js';
 import { protectionBody, type ActionPlan } from '../src/setup-actions.js';
 import type { RunResult, SetupProbe, SetupView } from '../src/setup-steps.js';
-import { asPerson, exampleProject, exampleRoles } from './helpers.js';
+import { asPerson, exampleProject, exampleRoles, claudeByRun } from './helpers.js';
 
 process.env[`${BRAND.envPrefix}_STATE_DIR`] = mkdtempSync(join(tmpdir(), 'protection-policy-state-'));
 
@@ -32,7 +32,7 @@ function fixture(checks = true) {
   return { dir };
 }
 
-const probe = (protectedNow: () => boolean): SetupProbe => ({
+const probe = (protectedNow: () => boolean): SetupProbe => ({ claude(spec, o) { return claudeByRun(this, spec, o); },
   which: (c) => `/stand-in/${c}`,
   serviceManagerEnv: () => ({ env: {} }),
   run: (cmd, args) => (cmd === 'gh' && args.join(' ').endsWith('/protection --silent') ? (protectedNow() ? { status: 0, stdout: '', stderr: '' } : { status: 1, stdout: '', stderr: 'gh: Branch not protected (HTTP 404)' }) : { status: 1, stdout: '', stderr: 'no stand-in' }),

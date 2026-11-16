@@ -92,7 +92,8 @@ test("the R1184g-j write shapes, against real loaded tables, each throw (#941)",
 test('the two loaders give the same tables, deep-frozen, for every tables file in the repo (#941)', () => {
   const fill = (s: string) => s.split('{configDir}').join(BRAND.configDir).split('{cli}').join(BRAND.cli);
   const shape = (v: unknown): unknown => (v instanceof Object && Symbol.iterator in v && !Array.isArray(v) ? { set: [...(v as Iterable<unknown>)].map(shape) } : Array.isArray(v) ? v.map(shape) : v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, shape(x)])) : v);
-  assert.equal(files.length, 16, `${files.length} tables files`);
+  // #1185 adds src/claude-launch.tables.json and scripts/ci/claude-commands.tables.json.
+  assert.equal(files.length, 18, `${files.length} tables files`);
   for (const f of files) {
     const text = readFileSync(join(repoRoot, f), 'utf8');
     const [a, b] = [tablesFrom(text, f), scripts.tablesFrom(text, f, fill)];

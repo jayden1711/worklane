@@ -1,0 +1,4 @@
+// as src/new-module.ts
+import { execFile, spawn } from 'node:child_process';
+// R1185ag L6: a pipe into it, no flag.
+export const run = () => spawn('sh', ['-c', 'printf %s "$P" | claude $CLAUDE_ARGS']);

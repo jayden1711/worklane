@@ -1,0 +1,61 @@
+{
+  "//": "src/claude-launch.ts's tables (#941): the names a launch passes on to claude from a caller's environment. Loaded by its module (src/check-tables.ts); the weakening hold compares them parsed.",
+  "LAUNCH_ENV_KEEP": {
+    "//": "The only CLAUDE_* and ANTHROPIC_* variables a launch passes on (R1185ac D1): the login, a provider's endpoint and Windows' git bash. A name added here reaches claude: never-grow.",
+    "kind": "never-grow",
+    "value": [
+      "CLAUDE_CONFIG_DIR",
+      "ANTHROPIC_API_KEY",
+      "ANTHROPIC_AUTH_TOKEN",
+      "CLAUDE_CODE_OAUTH_TOKEN",
+      "ANTHROPIC_BASE_URL",
+      "CLAUDE_CODE_GIT_BASH_PATH"
+    ]
+  },
+  "LAUNCH_ENV_PASS": {
+    "//": "Every other name a launch passes on (R1185ae D1: an allowlist, not a prefix denylist). A name added here reaches claude: never-grow.",
+    "kind": "never-grow",
+    "value": [
+      "PATH",
+      "HOME",
+      "USER",
+      "LOGNAME",
+      "SHELL",
+      "LANG",
+      "LC_ALL",
+      "TERM",
+      "TMPDIR",
+      "TZ",
+      "XDG_RUNTIME_DIR",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_CACHE_HOME",
+      "XDG_STATE_HOME",
+      "SystemRoot",
+      "ComSpec",
+      "PATHEXT",
+      "APPDATA",
+      "LOCALAPPDATA",
+      "USERPROFILE",
+      "ProgramData",
+      "ProgramFiles",
+      "HTTPS_PROXY",
+      "HTTP_PROXY",
+      "NO_PROXY",
+      "NODE_EXTRA_CA_CERTS",
+      "SSL_CERT_FILE",
+      "GIT_SSL_CAINFO",
+      "GIT_TERMINAL_PROMPT",
+      "GIT_ASKPASS",
+      "GIT_CONFIG_COUNT",
+      "GIT_CONFIG_GLOBAL",
+      "GIT_CONFIG_SYSTEM",
+      "GIT_CONFIG_NOSYSTEM",
+      "GIT_AUTHOR_NAME",
+      "GIT_AUTHOR_EMAIL",
+      "GIT_COMMITTER_NAME",
+      "GIT_COMMITTER_EMAIL",
+      "GH_CONFIG_DIR"
+    ]
+  }
+}

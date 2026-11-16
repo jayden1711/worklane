@@ -20,7 +20,7 @@ import { localInitFile, newState, serverInitFile, STEPS, writeInitState } from '
 import { checkSetup, checkSetupOffThread, GROUPS, SETUP_STEPS, type InstanceFacts, type MachinePaths, type Mode, type RunResult, type SetupContext, type SetupProbe, type SetupView } from '../src/setup-steps.js';
 import { serviceChange, type ServiceSpec } from '../src/os/index.js';
 import { localServiceSpec } from '../src/service.js';
-import { asPerson, exampleProject, exampleRoles, repoRoot } from './helpers.js';
+import { asPerson, exampleProject, exampleRoles, repoRoot, claudeByRun } from './helpers.js';
 
 process.env[`${BRAND.envPrefix}_STATE_DIR`] = mkdtempSync(join(tmpdir(), 'setup-steps-state-'));
 process.env[`${BRAND.envPrefix}_MACHINE_INIT_DIR`] = mkdtempSync(join(tmpdir(), 'setup-steps-machine-init-'));
@@ -61,7 +61,7 @@ interface World {
 const calls: string[] = [];
 
 function probeFor(w: World): SetupProbe {
-  return {
+  return { claude(spec, o) { return claudeByRun(this, spec, o); },
     which: (c) => (w.tools.has(c) ? `/stand-in/${c}` : null),
     serviceManagerEnv: () => ({ env: {} }),
     run: (cmd, args, o = {}): RunResult => {
@@ -373,7 +373,9 @@ test("issue #463: 'Signed in to Claude' proves the login with one minimal real c
   assert.match(refused.detail, /signed in \(claude\.ai\), per `claude auth status`, but the API refused it: claude's login was refused \(HTTP 401\): Invalid API key · Please run \/login/);
   assert.doesNotMatch(refused.detail, /sk-ant-oat01-A/, 'no token, even one claude printed');
   assert.equal(calls.length, 1, 'one call');
-  assert.match(calls[0]!, /^-p Reply with the single word: ok --model haiku --max-turns 1 --max-budget-usd 0\.05 --output-format json$/);
+  // Through the one launch (R1185z D1): the cheap model, one turn, the budget cap, every tool disallowed, the prompt on
+  // stdin (never the command line), and the launch's guards last.
+  assert.match(calls[0]!, /^-p --model haiku --output-format json --max-turns 1 --max-budget-usd 0\.05 --disallowedTools Bash Edit Write MultiEdit Read Glob Grep WebFetch WebSearch NotebookEdit Task --settings \{\} --setting-sources {2}--strict-mcp-config$/);
   w.claudeApi = 'ok';
   const works = stepIn(checkSetup(f.ctx('local'), probeFor(w)), 'claude-login')!;
   assert.equal(works.done, true);

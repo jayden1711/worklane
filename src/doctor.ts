@@ -418,7 +418,7 @@ export function setupChecks(root: string, opts: { instance?: string; mode?: Mode
   const mode = opts.mode ?? state?.mode;
   if (!mode) return [{ name: 'setup', level: 'warn', detail: `no guided setup recorded for this checkout: \`${BRAND.cli} init --mode local|server\` walks the checklist (tools, Claude login, GitHub, repo config, protection)` }];
   // #738: the manager's reading comes from initIo too, never from the real probe behind a stand-in io.
-  const probe: SetupProbe = opts.probe ?? { ...systemProbe(), ...(opts.initIo ? { which: opts.initIo.which, run: opts.initIo.run, serviceManagerEnv: opts.initIo.serviceManagerEnv } : {}) };
+  const probe: SetupProbe = opts.probe ?? { ...systemProbe(), ...(opts.initIo ? { which: opts.initIo.which, run: opts.initIo.run, claude: opts.initIo.claude, serviceManagerEnv: opts.initIo.serviceManagerEnv } : {}) };
   const s = state?.mode === mode ? state : null;
   // A server instance's own clone, state and policy; a checkout's own state.
   let site = { root, stateDir: projectStateDir(root), policyFile: null as string | null };

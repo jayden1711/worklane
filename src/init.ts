@@ -30,7 +30,7 @@ import { findTool, withToolPath } from './tool-path.js';
 import { detectOs, fileAccess, isRoot, serviceManagerEnv, stateDir, which, writeGroupReadable, writeOwnerOnly } from './os/index.js';
 import { coordinatorUser } from './setup/app-manifest.js';
 import { instanceNameProblem } from './instance-name.js';
-import { agentRuntimeOf, checkSetup, checkSetupOffThread, detectClaudeLogin, detectGithubLogin, detectRepoConfig, detectTailscale, detectTools, GROUPS, MAIN_WATCH_GUARDS, MANAGER_LOGIN_VARS, MODES, probeEnv, protectionAnswer, RUNTIME_CHOICE_LABEL, type DetectCache, type Detected, type ManagerEnv, type Mode, type ProbeRunOptions, type RunResult, type RuntimeChoice, type SetupContext, type SetupProbe, type SetupView } from './setup-steps.js';
+import { agentRuntimeOf, checkSetup, claudeProbeRun, checkSetupOffThread, detectClaudeLogin, detectGithubLogin, detectRepoConfig, detectTailscale, detectTools, GROUPS, MAIN_WATCH_GUARDS, MANAGER_LOGIN_VARS, MODES, probeEnv, protectionAnswer, RUNTIME_CHOICE_LABEL, type DetectCache, type Detected, type ManagerEnv, type Mode, type ProbeRunOptions, type RunResult, type RuntimeChoice, type SetupContext, type SetupProbe, type SetupView } from './setup-steps.js';
 import { apiKeyHelperCommand, type RuntimeKind } from './runner.js';
 import { redactString } from './events/redact.js';
 import { describeInstall, httpDownload, INSTALLABLE, installPlan, installTool, type Download, type InstallableTool, type ToolInstall } from './tool-install.js';
@@ -153,6 +153,8 @@ export function unavailableIn(mode: Mode, has: (cmd: string) => boolean = (c) =>
 export interface InitIo {
   which(cmd: string): string | null;
   run(cmd: string, args: string[], o?: ProbeRunOptions): RunResult;
+  /** The login proof's one-shot answer, through src/claude-launch.ts (SetupProbe's). */
+  claude: SetupProbe['claude'];
   serviceManagerEnv(): ManagerEnv;
   /** Run a command on the person's terminal (a login): its exit status. */
   interactive(cmd: string, args: string[]): Promise<number>;
@@ -657,6 +659,7 @@ export function systemIo(o: { interactive: boolean }): InitIo {
       const r = commandSpawnSync(cmd, args, { encoding: 'utf8', timeout: 60_000, env: probeEnv(opt), ...(opt.cwd ? { cwd: opt.cwd } : {}) });
       return { status: r.error ? null : r.status, stdout: r.stdout ?? '', stderr: r.error ? r.error.message : (r.stderr ?? '') };
     },
+    claude: (spec, opt = {}) => claudeProbeRun(spec, probeEnv(opt), 60_000),
     serviceManagerEnv: () => serviceManagerEnv(MANAGER_LOGIN_VARS),
     interactive: (cmd, args) =>
       new Promise((done) => {

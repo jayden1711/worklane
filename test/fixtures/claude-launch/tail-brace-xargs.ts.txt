@@ -1,0 +1,6 @@
+// as src/new-module.ts
+import { exec, execSync, spawn, spawnSync } from 'node:child_process';
+declare const args: string[], lane: string, env: NodeJS.ProcessEnv, repo: string, exportPath: string;
+// R1185aq D1 Q15 xargs -I{} claude {}
+const EACH = 'ls tasks/*.md | xargs -I{} claude {}';
+execSync(EACH, { cwd: lane });

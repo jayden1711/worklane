@@ -10,6 +10,8 @@ const RESERVED_NAMES = [
   'TMPDIR', 'TMP', 'TEMP', 'XDG_.*',
   // Code that runs before any project command: shell startup, loaders, Node.
   'ENV', 'BASH_ENV', 'BASH_FUNC_.*', 'PS4', 'PROMPT_COMMAND', 'LD_.*', 'DYLD_.*', 'NODE_OPTIONS', 'NODE_PATH',
+  // Bun's (the claude binary is Bun-built: BUN_OPTIONS=--preload runs a file inside it, R1185ae D2) and its engine's.
+  'BUN_.*', 'BUNFIG_.*', 'JSC_.*',
   // glibc's unsafe-environment list (what it ignores for a setuid program: its loader, gconv, locales, malloc,
   // resolver and time zones) and libmount's own: a test run's sandbox steps that hold capabilities never get a
   // project variable, and these are refused besides.
