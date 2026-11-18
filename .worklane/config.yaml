@@ -27,6 +27,18 @@ required_checks:
   - dco
   - scan
   - new-deps
+# #727: each required check pinned to the workflow file that posts it (doctor's block, read 2026-10-19 against
+# main's tip 0b294b53): a same-name check from any other App or workflow counts as missing.
+required_check_sources:
+  "test (ubuntu-latest, 22)": { workflow: ".github/workflows/ci.yml" }  # confirmed: its run on main's tip 0b294b53 is from .github/workflows/ci.yml
+  "test (ubuntu-latest, 24)": { workflow: ".github/workflows/ci.yml" }  # confirmed: its run on main's tip 0b294b53 is from .github/workflows/ci.yml
+  "desktop": { workflow: ".github/workflows/ci.yml" }  # confirmed: its run on main's tip 0b294b53 is from .github/workflows/ci.yml
+  "agentshield": { workflow: ".github/workflows/ci.yml" }  # confirmed: its run on main's tip 0b294b53 is from .github/workflows/ci.yml
+  "push-gate": { workflow: ".github/workflows/ci.yml" }  # confirmed: its run on main's tip 0b294b53 is from .github/workflows/ci.yml
+  "denylist": { workflow: ".github/workflows/ci.yml" }  # confirmed: its run on main's tip 0b294b53 is from .github/workflows/ci.yml
+  "dco": { workflow: ".github/workflows/ci.yml" }  # confirmed: its run on main's tip 0b294b53 is from .github/workflows/ci.yml
+  "scan": { workflow: ".github/workflows/gitleaks.yml" }  # confirmed: its run on main's tip 0b294b53 is from .github/workflows/gitleaks.yml
+  "new-deps": { workflow: ".github/workflows/new-deps.yml" }  # from the workflow files only: main's tip 0b294b53 has no run of it
 os: auto
 owners:
   default: jayden1711
